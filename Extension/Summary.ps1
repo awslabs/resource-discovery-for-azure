@@ -140,17 +140,12 @@ if(!$RunLite)
         $Item.Hyperlink = $Link
     }
 
-    $Draw = $WS.Drawings.AddShape('ARI', 'Rect')
+    $Draw = $WS.Drawings.AddShape('Inventory', 'Rect')
     $Draw.SetSize(445, 240)
     $Draw.SetPosition(1, 0, 2, 5)
 
-    $txt = $Draw.RichText.Add('AriPlus Version ' + $Version + "`n")
+    $txt = $Draw.RichText.Add('Version ' + $Version + "`n")
     $txt.Size = 14
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add('https://github.com/stefoy/AriPlus' + "`n" + "`n")
-    $txt.Size = 11
     $txt.ComplexFont = $Font
     $txt.LatinFont = $Font
 

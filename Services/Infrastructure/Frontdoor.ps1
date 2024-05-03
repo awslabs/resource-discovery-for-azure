@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
 
 if ($Task -eq 'Processing') 
 {
@@ -20,8 +20,6 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
-                'FriendlyName'              = $data.friendlyName;
-                'cName'                     = $data.cName;
                 'State'                     = $data.enabledState;
                 'WebApplicationFirewall'    = [string]$WAF;
             }
@@ -46,8 +44,6 @@ else
         $Exc.Add('ResourceGroup')
         $Exc.Add('Name')
         $Exc.Add('Location')
-        $Exc.Add('FriendlyName')
-        $Exc.Add('cName')
         $Exc.Add('State')
         $Exc.Add('WebApplicationFirewall')
 

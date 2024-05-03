@@ -3,15 +3,12 @@ param ($TenantID,
         $SubscriptionID,
         $Secret, 
         $ResourceGroup, 
-        [switch]$Online, 
         [switch]$Debug, 
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
-        [switch]$Help,
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
         $ConcurrencyLimit = 6,
-        $AzureEnvironment,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
 
@@ -41,7 +38,8 @@ Function Write-Log([string]$Message, [string]$Severity)
     }
 }
 
-function GetLocalVersion() {
+function GetLocalVersion() 
+{
     $versionJsonPath = "./Version.json"
     if (Test-Path $versionJsonPath) 
     {
@@ -67,44 +65,17 @@ function Variables
     $Global:Logging | Add-Member -MemberType NoteProperty -Name Logs -Value NotSet
     $Global:Logging.Logs = [System.Collections.Generic.List[object]]::new()
 
-    if ($Online.IsPresent) { $Global:RunOnline = $true }else { $Global:RunOnline = $false }
 
-    $Global:Repo = 'https://api.github.com/repos/stefoy/AriPlus/git/trees/main?recursive=1'
-    $Global:RawRepo = 'https://raw.githubusercontent.com/stefoy/AriPlus/main'
-
+    $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
-
-    Write-Debug ('Checking if -Online parameter will have to be forced.')
-
-    if(!$Online.IsPresent)
-    {
-        if($PSScriptRoot -like '*\*')
-        {
-            $LocalFilesValidation = New-Object System.IO.StreamReader($PSScriptRoot + '\Extension\Metrics.ps1')
-        }
-        else
-        {
-            $LocalFilesValidation = New-Object System.IO.StreamReader($PSScriptRoot + '/Extension/Metrics.ps1')
-        } 
-
-        if([string]::IsNullOrEmpty($LocalFilesValidation))
-        {
-            Write-Debug ('[Info] - Using -Online by force.')
-            $Global:RunOnline = $true
-        }
-        else
-        {
-            $Global:RunOnline = $false
-        }
-    }
 }
 
 Function RunInventorySetup()
 {
-    function CheckAriVersion()
+    function CheckVersion()
     {
-        Write-Log -Message ('Checking ARI Plus Version') -Severity 'Info'
-        Write-Log -Message ('ARI Plus Version: {0}' -f $Global:Version) -Severity 'Info'
+        Write-Log -Message ('Checking Version') -Severity 'Info'
+        Write-Log -Message ('Version: {0}' -f $Global:Version) -Severity 'Info'
         
         $versionJson = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Version.json') | ConvertFrom-Json
         $versionNumber = ('{0}.{1}.{2}' -f $versionJson.MajorVersion, $versionJson.MinorVersion, $versionJson.BuildVersion)
@@ -112,7 +83,7 @@ Function RunInventorySetup()
         if($versionNumber -ne $Global:Version)
         {
             Write-Log -Message ('New Version Available: {0}.{1}.{2}' -f $versionJson.MajorVersion, $versionJson.MinorVersion, $versionJson.BuildVersion) -Severity 'Warning'
-            Write-Log -Message ('Download or Clone the latest version and run again: https://github.com/stefoy/AriPlus/tree/main') -Severity 'Error'
+            Write-Log -Message ('Download or Clone the latest version and run again: https://github.com/awslabs/resource-discovery-for-azure') -Severity 'Error'
             Exit
         }
     }
@@ -205,26 +176,26 @@ Function RunInventorySetup()
         {
             Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'
             $Global:PlatformOS = 'Azure CloudShell'
-            $defaultOutputDir = "$HOME/AriPlusReports/" + $Global:FolderName + "/"
+            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
         }
         elseif ($PSVersionTable.Platform -eq 'Unix') 
         {
             Write-Log -Message ('Identified Environment as PowerShell Unix') -Severity 'Success'
             $Global:PlatformOS = 'PowerShell Unix'
-            $defaultOutputDir = "$HOME/AriPlusReports/" + $Global:FolderName + "/"
+            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
         }
         else 
         {
             Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
             $Global:PlatformOS= 'PowerShell Desktop'
-            $defaultOutputDir = "C:\AriPlusReports\" + $Global:FolderName + "\"
+            $defaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
 
             $psVersion = $PSVersionTable.PSVersion.Major
             Write-Log -Message ("PowerShell Version {0}" -f $psVersion) -Severity 'Info'
         
             if ($PSVersionTable.PSVersion.Major -lt 7) 
             {
-                Write-Log -Message ("You must use Powershell 7 to run the AriPlus.") -Severity 'Error'
+                Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
                 Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
                 Exit
             }
@@ -256,12 +227,7 @@ Function RunInventorySetup()
     }
     
   function LoginSession() 
-    {    
-        if(![string]::IsNullOrEmpty($AzureEnvironment))
-        {
-            az cloud set --name $AzureEnvironment
-        }
-    
+    {        
         $CloudEnv = az cloud list | ConvertFrom-Json
         Write-Host "Azure Cloud Environment: " -NoNewline
     
@@ -501,7 +467,7 @@ Function RunInventorySetup()
         } 
     }
 
-    CheckAriVersion
+    CheckVersion
     CheckCliRequirements
     CheckPowerShell
     GetSubscriptionsData
@@ -534,33 +500,6 @@ function ExecuteInventoryProcessing()
         if (!$SkipMetrics.IsPresent) 
         {
             Write-Log -Message ('Running Metrics Jobs') -Severity 'Success'
-
-            If ($RunOnline -eq $true) 
-            {
-                Write-Log -Message ('Looking for the following file: '+ $RawRepo + '/Extension/Metrics.ps1') -Severity 'Info'
-                $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extension/Metrics.ps1')
-
-                Write-Log -Message ($PSScriptRoot + '\Extension\Metrics.ps1') -Severity 'Info'
-
-                if($PSScriptRoot -like '*\*')
-                {
-                    if (!(Test-Path -Path ($PSScriptRoot + '\Extension\')))
-                    {
-                        New-Item -Path ($PSScriptRoot + '\Extension\') -ItemType Directory
-                    }
-                    
-                    $ModuSeq | Out-File ($PSScriptRoot + '\Extension\Metrics.ps1') 
-                }
-                else
-                {
-                    if (!(Test-Path -Path ($PSScriptRoot + '/Extension/')))
-                    {
-                        New-Item -Path ($PSScriptRoot + '/Extension/') -ItemType Directory
-                    }
-                    
-                    $ModuSeq | Out-File ($PSScriptRoot + '/Extension/Metrics.ps1')
-                }
-            }
 
             if($PSScriptRoot -like '*\*')
             {
@@ -640,62 +579,6 @@ function ExecuteInventoryProcessing()
 
         Write-Log -Message ('Starting Service Processing Jobs.') -Severity 'Info'
         
-
-        If ($RunOnline -eq $true) 
-        {
-            Write-Log -Message ('Running Online Checking for Services Modules at: ' + $RawRepo) -Severity 'Info'
-
-            $OnlineRepo = Invoke-WebRequest -Uri $Repo
-            $RepoContent = $OnlineRepo | ConvertFrom-Json
-            $ModuleUrls = ($RepoContent.tree | Where-Object {$_.path -like '*.ps1' -and $_.path -notlike 'Extension/*' -and $_.path -ne 'ResourceInventory.ps1'}).path      
-
-            if($PSScriptRoot -like '*\*')
-            {
-                if (!(Test-Path -Path ($PSScriptRoot + '\Services\')))
-                {
-                    New-Item -Path ($PSScriptRoot + '\Services\') -ItemType Directory
-                }
-            }
-            else
-            {
-                if (!(Test-Path -Path ($PSScriptRoot + '/Services/')))
-                {
-                    New-Item -Path ($PSScriptRoot + '/Services/') -ItemType Directory
-                }
-            }
-
-            foreach ($moduleUrl in $moduleUrls)
-            {
-                $ModuleContent = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/' + $moduleUrl)
-                $ModuleFileName = [System.IO.Path]::GetFileName($moduleUrl)
-
-                $servicePath = GetServiceName($moduleUrl)
-
-                if($PSScriptRoot -like '*\*')
-                {
-                    if (!(Test-Path -Path ($PSScriptRoot + '\Services\' + $servicePath + '\')))
-                    {
-                        New-Item -Path ($PSScriptRoot + '\Services\' + $servicePath + '\') -ItemType Directory
-                    }
-                }
-                else
-                {
-                    if (!(Test-Path -Path ($PSScriptRoot + '/Services/' + $servicePath + '/')))
-                    {
-                        New-Item -Path ($PSScriptRoot + '/Services/' + $servicePath + '/') -ItemType Directory
-                    }
-                }
-
-                if($PSScriptRoot -like '*\*')
-                {
-                    $ModuleContent | Out-File ($PSScriptRoot + '\Services\' + $servicePath + '\' + $ModuleFileName) 
-                }
-                else
-                {
-                    $ModuleContent | Out-File ($PSScriptRoot + '/Services/'+ $servicePath + '/' + $ModuleFileName) 
-                }
-            }
-        }
 
         if($PSScriptRoot -like '*\*')
         {
@@ -996,23 +879,6 @@ function FinalizeOutputs
     {
         Write-Log -Message ('Creating Summary Report') -Severity 'Info'
         Write-Log -Message ('Starting Summary Report Processing Job.') -Severity 'Info'
-
-        If ($RunOnline -eq $true) 
-        {
-            Write-Log -Message ('Looking for the following file: '+$RawRepo + '/Extension/Summary.ps1') -Severity 'Info'
-            $ModuSeq = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Extension/Summary.ps1')
-
-            Write-Log -Message ($PSScriptRoot + '\Extension\Summary.ps1') -Severity 'Info'
-
-            if($PSScriptRoot -like '*\*')
-            {
-                $ModuSeq | Out-File ($PSScriptRoot + '\Extension\Summary.ps1') 
-            }
-            else
-            {
-                $ModuSeq | Out-File ($PSScriptRoot + '/Extension/Summary.ps1')
-            }
-        }
 
         if($PSScriptRoot -like '*\*')
         {

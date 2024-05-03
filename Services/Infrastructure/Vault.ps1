@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
 
 if ($Task -eq 'Processing')
 {
@@ -22,11 +22,6 @@ if ($Task -eq 'Processing')
                 'Location'                      = $1.LOCATION;
                 'SKUFamily'                     = $data.sku.family;
                 'SKU'                           = $data.sku.name;
-                'EnableRBAC'                    = $data.enableRbacAuthorization;
-                'EnableSoftDelete'              = $Soft;
-                'EnableEncryption'              = $data.enabledForDiskEncryption;
-                'EnableTemplateDeploy'          = $data.enabledForTemplateDeployment;
-                'SoftDeleteRetentionDays'       = $data.softDeleteRetentionInDays;
             }
 
             $tmp += $obj           
@@ -52,11 +47,6 @@ else
         $Exc.Add('Location')
         $Exc.Add('SKUFamily')
         $Exc.Add('SKU')
-        $Exc.Add('EnableRBAC')
-        $Exc.Add('EnableSoftDelete')
-        $Exc.Add('EnableEncryption')
-        $Exc.Add('EnableTemplateDeploy')
-        $Exc.Add('SoftDeleteRetentionDays')
 
         $ExcelVar = $SmaResources.Vault 
 

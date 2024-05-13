@@ -59,7 +59,7 @@ If ($Task -eq 'Processing')
 
             $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }    
 
-            $tags = if(![string]::IsNullOrEmpty($1.tags.psobject.properties)){$1.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+            $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
 
             $obj = @{
                 'ID'                            = $vm.id;

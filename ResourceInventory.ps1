@@ -868,8 +868,8 @@ function ExecuteInventoryProcessing()
 
     if(!$SkipConsumption.IsPresent)
     {
-       #GetResorceConsumption
-       ProcessResourceConsumption
+       GetResorceConsumption
+       #ProcessResourceConsumption
     }
 }
 

@@ -32,14 +32,6 @@ Can be executed in both Azure Cloudshell and PowerShell Desktop environments.
 - Monitoring reader Role
 - Cost Management Reader Role
 
-### Dependencies
-
-Install the required PowerShell module:
-
-```powershell
-Install-Module ImportExcel
-```
-
 ## Installation
 
 1. Clone the repository by running the following command

@@ -799,6 +799,8 @@ function ExecuteInventoryProcessing()
 
     function GetResorceConsumption()
     {
+        $DebugPreference = "SilentlyContinue"
+        
         #Force the culture here...
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US"; 
         [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
@@ -838,26 +840,28 @@ function ExecuteInventoryProcessing()
                 $params.ContinuationToken = $usageData.ContinuationToken
     
                 $usageData = Get-UsageAggregates @params
-                $usageData = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+                $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
-                Write-Log -Message ("Records found: $($usageData.Count)...") -Severity 'Info'
+                Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
 
-                for($item = 0; $item -lt $usageData.Count; $item++) 
+                for($item = 0; $item -lt $usageDataExport.Count; $item++) 
                 {
-                    $instanceInfo = ($usageData[$item].InstanceData.tolower() | ConvertFrom-Json)
+                    $instanceInfo = ($usageDataExport[$item].InstanceData.tolower() | ConvertFrom-Json)
+                    
+                    $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ResourceId -Value NotSet
+                    $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ResourceLocation -Value NotSet
         
-                    $usageData[$item] | Add-Member -MemberType NoteProperty -Name ResourceId -Value NotSet
-                    $usageData[$item] | Add-Member -MemberType NoteProperty -Name ResourceLocation -Value NotSet
-        
-                    $usageData[$item].ResourceId = $instanceInfo.'Microsoft.Resources'.resourceUri
-                    $usageData[$item].ResourceLocation = $instanceInfo.'Microsoft.Resources'.location
+                    $usageDataExport[$item].ResourceId = $instanceInfo.'Microsoft.Resources'.resourceUri
+                    $usageDataExport[$item].ResourceLocation = $instanceInfo.'Microsoft.Resources'.location
                 }
 
-                $usageData | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
-                #$usageData | ConvertTo-Json -depth 10 | Out-File $Global:ConsumptionFile
+                $usageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
+                #$usageDataExport | ConvertTo-Json -depth 10 | Out-File $Global:ConsumptionFile
                 
             } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
         }
+
+        $DebugPreference = "Continue"
     }
 
     InitializeInventoryProcessing
@@ -868,8 +872,8 @@ function ExecuteInventoryProcessing()
 
     if(!$SkipConsumption.IsPresent)
     {
-       #GetResorceConsumption
-       ProcessResourceConsumption
+       GetResorceConsumption
+       #ProcessResourceConsumption
     }
 }
 

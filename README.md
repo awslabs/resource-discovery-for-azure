@@ -16,8 +16,7 @@ By leveraging this script, you can effortlessly generate Excel/JSON exports that
 
 ## Prerequisites
 
-Can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments.
-
+Can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments.  
 For additional information on Azure CloudShell, please review this [article](https://learn.microsoft.com/en-us/azure/cloud-shell/get-started/classic?tabs=azurecli)
 
 ### Requirements
@@ -56,6 +55,11 @@ cd resource-discovery-for-azure
 ```powershell
 ./ResourceInventory.ps1 -ConcurrencyLimit 8
 ```
+
+When running the script from CloudShell - the output should be similar to this screenshot -  
+For item 1 in the screenshot, it should state Bash as this means you are running in PowerShell
+
+![CloudShell](./docs/cloudshell.png)
 
 ## Script Output/Reports
 3. When the script has completed, a zip file of the report will be saved in the folder **_InventoryReports._**

@@ -1,6 +1,6 @@
 # Resource Discovery for Azure
 
-This is a robust PowerShell script provided by AWS that generates an inventory report including detailed metrics of an Azure environment to which you have read access. 
+This is a PowerShell script provided by AWS that generates an inventory report including detailed metrics of an Azure environment to which you have read access for the previous 30 days.
 
 This repository is focusing solely on read-only integrations with Azure APIs and Azure Monitor. Our goal is to deliver a 
 reliable and efficient solution for Azure environment reporting, empowering you with comprehensive insights into your cloud resources and their utilization.
@@ -12,21 +12,18 @@ By leveraging this script, you can effortlessly generate Excel/JSON exports that
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Running the Script](#running-the-script)
-- [Acknowledgments](#acknowledgments)
 
 ## Prerequisites
-
-Can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments.  
-For additional information on Azure CloudShell, please review this [article](https://learn.microsoft.com/en-us/azure/cloud-shell/get-started/classic?tabs=azurecli)
-
-### Requirements
-> **Note:** By default, script will attempt to install the necessary PowerShell modules and Azure CLI components, but you need **administrator** privileges during the script execution.
-
 - PowerShell 7 or Azure CloudShell PowerShell
 - Azure CLI
 - Azure CLI Account Extension
 - Azure CLI Resource-Graph Extension
+  
+The script can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments.  
+For additional information on Azure CloudShell, please review this [article](https://learn.microsoft.com/en-us/azure/cloud-shell/get-started/classic?tabs=azurecli)
 
+### Requirements
+> **Note:** By default, script will attempt to install the necessary PowerShell modules and Azure CLI components, but you need **administrator** privileges during the script execution.
 > You can also assign the following Roles in Azure to a user to execute the script:
 - Reader Role
 - Billing Reader Role
@@ -96,6 +93,6 @@ The following table lists the parameters that can be used with the script:
 
 - **Important:** Script will not upgrade the current version of the Powershell modules.
   
-- **Important:** If you're running the script inside Azure CloudShell, the final Excel will not have auto-fit columns, and you will see warnings during the script execution. This is an issue with the Import-Excel module but it does not affect the inventory which will remain accurate.
+- **Important:** If you're running the script inside Azure CloudShell, the final Excel will not have auto-fit columns, and you will see warnings during the script execution. This is an expected issue with the Import-Excel module but it does **not** affect the inventory which will remain accurate.
 
 ---

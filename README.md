@@ -16,7 +16,9 @@ By leveraging this script, you can effortlessly generate Excel/JSON exports that
 
 ## Prerequisites
 
-Can be executed in both Azure Cloudshell and PowerShell Desktop environments. 
+Can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments.
+
+For additional information on Azure CloudShell, please review this [article](https://learn.microsoft.com/en-us/azure/cloud-shell/get-started/classic?tabs=azurecli)
 
 ### Requirements
 > **Note:** By default, script will attempt to install the necessary PowerShell modules and Azure CLI components, but you need **administrator** privileges during the script execution.
@@ -44,7 +46,7 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 
 The script uses concurrency to execute commands in parallel, especially when gathering metrics. By default, the concurrency limit is set to 6. To change this, use the `-ConcurrencyLimit` option. 
 
-2. If you are in Azure CloudShell, you're already authenticated. In PowerShell Desktop, you will be redirected to the Azure sign-in page.
+2. If you are in Azure CloudShell please ensure you select PowerShell , you're already authenticated. In PowerShell Desktop, you will be redirected to the Azure sign-in page.
 3. Change directory to the location where repository was cloned
 ```powershell
 cd resource-discovery-for-azure

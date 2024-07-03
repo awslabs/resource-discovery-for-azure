@@ -23,7 +23,7 @@ For additional information on Azure CloudShell, please review this [article](htt
 ### Requirements
 > **Note:** By default, script will attempt to install the necessary PowerShell modules and Azure CLI components, but you need **administrator** privileges during the script execution.
 
-- PowerShell 7 or Azure CloudShell
+- PowerShell 7 or Azure CloudShell PowerShell
 - Azure CLI
 - Azure CLI Account Extension
 - Azure CLI Resource-Graph Extension

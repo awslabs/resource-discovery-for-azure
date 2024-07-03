@@ -69,6 +69,12 @@ For item 1 in the screenshot, it should state Bash as this means you are running
      - The files are zipped up automatically and the zip
          - ResourcesReport_(date).zip
 
+
+### Files fail to Zip
+If the files fail to zip automatically please run the following command from the **_InventoryReports_** folder
+```powershell
+zip -r inventoryreport.zip foldername (this is the folder that the files are located)
+```
 ---
 
 ## Parameters

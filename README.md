@@ -59,9 +59,13 @@ For item 1 in the screenshot, it should state Bash as this means you are running
 ![CloudShell](./docs/cloudshell.png)
 
 ## Downloading the ZIP File from GitHub
-1. In this repo - Click on the green **Code** button.  
-2. Select **Download ZIP** from the dropdown menu.  
-3. Extract the downloaded ZIP file to your desired directory.  
+If you don't have Git installed, you can download the ZIP file of the repository:
+
+1. In this repo at the top of the page - Click on the green **Code** button - Item 1 in screenshot  
+2. Select **Download ZIP** from the dropdown menu - Item 2 in screenshot
+3. Extract the downloaded ZIP file to your desired directory on your local computer
+
+![Zip](./docs/zip_download.png)
 
 
 ## Script Output/Reports

@@ -58,6 +58,12 @@ For item 1 in the screenshot, it should state Bash as this means you are running
 
 ![CloudShell](./docs/cloudshell.png)
 
+## Downloading the ZIP File from GitHub
+1. In this repo - Click on the green **Code** button.  
+2. Select **Download ZIP** from the dropdown menu.  
+3. Extract the downloaded ZIP file to your desired directory.  
+
+
 ## Script Output/Reports
 3. When the script has completed, a zip file of the report will be saved in the folder **_InventoryReports._**
      - Script will create multiple files and one zip 

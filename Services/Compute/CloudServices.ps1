@@ -2,8 +2,7 @@ param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metr
 
 if ($Task -eq 'Processing') 
 {
-    #$CloudServices0 = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/cloudservices' }
-    $CloudServices = $Resources | Where-Object { $_.TYPE -eq 'microsoft.classiccompute/domainnames' }
+    $CloudServices = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/cloudservices' }
 
     if($CloudServices)
     {
@@ -14,15 +13,29 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
+            $roles = $data.roleProfile
+
             $obj = @{
                 'ID'                   = $1.id;
                 'Subscription'         = $sub1.Name;
                 'ResourceGroup'        = $1.RESOURCEGROUP;
                 'Name'                 = $1.name;
                 'Location'             = $1.location;
-                'Status'               = $data.status;
-                'Label'                = $data.label;
-                'Hostname'             = $data.hostname;    
+            }
+
+            $obj | Add-Member -MemberType NoteProperty -Name Roles -Value NotSet
+            $obj.Roles = [System.Collections.Generic.List[object]]::new()
+
+            foreach ($roleProfile in $roles) 
+            {
+                $roleProfileObj = @{
+                    'NodePoolName'        = $roleProfile.name;
+                    'PoolProfileType'     = $roleProfile.sku.name;
+                    'PoolProfileType'     = $roleProfile.sku.tier;
+                    'PoolProfileType'     = $roleProfile.sku.capacity;
+                }
+
+                $obj.Roles.Add($roleProfileObj) 
             }
 
             $tmp += $obj
@@ -42,10 +55,7 @@ else
         $Exc.Add('Subscription')
         $Exc.Add('ResourceGroup')
         $Exc.Add('Name')         
-        $Exc.Add('Location')             
-        $Exc.Add('Status')          
-        $Exc.Add('Label')           
-        $Exc.Add('Hostname')      
+        $Exc.Add('Location')                 
 
         $ExcelVar = $SmaResources.CloudServices
 

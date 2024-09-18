@@ -29,10 +29,10 @@ if ($Task -eq 'Processing')
             foreach ($roleProfile in $roles) 
             {
                 $roleProfileObj = @{
-                    'NodePoolName'        = $roleProfile.name;
-                    'PoolProfileType'     = $roleProfile.sku.name;
-                    'PoolProfileType'     = $roleProfile.sku.tier;
-                    'PoolProfileType'     = $roleProfile.sku.capacity;
+                    'RoleName'        = $roleProfile.name;
+                    'SkuName'     = $roleProfile.sku.name;
+                    'SkuTier'     = $roleProfile.sku.tier;
+                    'SkuCapacity'     = $roleProfile.sku.capacity;
                 }
 
                 $obj.Roles.Add($roleProfileObj) 

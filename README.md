@@ -52,7 +52,7 @@ cd resource-discovery-for-azure
 5. Use the following command to run the script but update **CustomerName** to your company name
 
 ```powershell
-./ResourceInventory.ps1 -ConcurrencyLimit 8 -ReportName CustomerName
+./ResourceInventory.ps1 -ConcurrencyLimit 8 -ReportName UpdateCustomerName
 ```
 
 When running the script from CloudShell - the output should be similar to this screenshot -  

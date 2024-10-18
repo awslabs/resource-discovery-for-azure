@@ -81,7 +81,7 @@ If you don't have Git installed, you can download the ZIP file of the repository
      - The files are zipped up automatically and the zip
          - ResourcesReport_(date).zip
 
-After you download the ResourcesReport_(date).zip file, please rename it to include your customer name (e.g., CustomerNameResourcesReport_(date).zip) and send the renamed ZIP file back to the AWS team for further analysis.
+After you download the ResourcesReport_(date).zip file, please ensure that has your customer name (e.g., CustomerNameResourcesReport_(date).zip) and send the renamed ZIP file back to the AWS team for further analysis.
 
 ### Files fail to Zip
 If the files fail to zip automatically please run the following command from the **_InventoryReports_** folder

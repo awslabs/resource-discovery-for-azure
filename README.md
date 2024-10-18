@@ -49,10 +49,10 @@ The script uses concurrency to execute commands in parallel, especially when gat
 ```powershell
 cd resource-discovery-for-azure
 ```
-5. Use the following command to run the script
+5. Use the following command to run the script but update **CustomerName** to your company name
 
 ```powershell
-./ResourceInventory.ps1 -ConcurrencyLimit 8
+./ResourceInventory.ps1 -ConcurrencyLimit 8 -ReportName CustomerName.zip
 ```
 
 When running the script from CloudShell - the output should be similar to this screenshot -  
@@ -96,6 +96,7 @@ The following table lists the parameters that can be used with the script:
 
 | Parameter         | Type     | Description                                                                                                     |
 |-------------------|----------|-----------------------------------------------------------------------------------------------------------------|
+| `$ReportName`     | String   | Specifies the customer name for the file                                                                                       |
 | `$TenantID`       | String   | Specifies the Tenant ID you want to create a Resource Inventory                                                                                       |
 | `$Appid`          | String   | Service Principal Authentication ID.                                                                                   |
 | `$SubscriptionID` | String   | Specifies the Subscription which will be run for Inventory.                                                                                  |

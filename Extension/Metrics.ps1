@@ -221,7 +221,7 @@ if ($Task -eq 'Processing')
         {
             $subscription = $Subscriptions | Where-Object { $_.id -eq $registry.subscriptionId }
 
-            $metricDefs.Add([PSCustomObject]@{ MetricIndex = $metricCountId++; MetricName = 'StorageUsed'; StartTime = $metricTimeOneDay;  EndTime = $metricEndTime; Interval = '01:00:00';  Aggregation = 'Average'; Measure = 'Largest'; Id = $registry.Id; SubName = $subscription.Name; ResourceGroup = $registry.ResourceGroup; Name = $registry.Name; Location = $registry.Location; Service = 'ContainerRegistry'; Series = 'false' })
+            $metricDefs.Add([PSCustomObject]@{ MetricIndex = $metricCountId++; MetricName = 'StorageUsed'; StartTime = $metricTimeOneDay;  EndTime = $metricEndTime; Interval = '01:00:00';  Aggregation = 'Maximum'; Measure = 'Largest'; Id = $registry.Id; SubName = $subscription.Name; ResourceGroup = $registry.ResourceGroup; Name = $registry.Name; Location = $registry.Location; Service = 'ContainerRegistry'; Series = 'false' })
         }
     }
     

@@ -2,7 +2,6 @@ param ($TenantID,
         $Appid,
         $SubscriptionID,
         $Secret, 
-        $ResourceGroup, 
         [switch]$Debug, 
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
@@ -352,41 +351,7 @@ Function RunInventorySetup()
     
     function ResourceInventoryLoop()
     {
-        if(![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
-        {
-            Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
-            Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            Exit
-        }
-
-        if(![string]::IsNullOrEmpty($ResourceGroup) -and ![string]::IsNullOrEmpty($SubscriptionID))
-        {
-            Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID + '. And from Resource Group: ' + $ResourceGroup) -Severity 'Success'
-
-            $Subscri = $SubscriptionID
-
-            $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and strlen(properties.definition.actions) < 123000 | summarize count()"
-            $EnvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
-            $EnvSizeNum = $EnvSize.data.'count_'
-
-            if ($EnvSizeNum -ge 1) {
-                $Loop = $EnvSizeNum / 1000
-                $Loop = [math]::ceiling($Loop)
-                $Looper = 0
-                $Limit = 0
-
-                while ($Looper -lt $Loop) {
-                    $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
-
-                    $Global:Resources += $Resource.data
-                    Start-Sleep 2
-                    $Looper ++
-                    $Limit = $Limit + 1000
-                }
-            }
-        }
-        elseif([string]::IsNullOrEmpty($ResourceGroup) -and ![string]::IsNullOrEmpty($SubscriptionID))
+        if(![string]::IsNullOrEmpty($SubscriptionID))
         {
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
@@ -813,11 +778,6 @@ function ExecuteInventoryProcessing()
             # Check if SubscriptionId is not null, not empty, and matches $sub.id
             if (![string]::IsNullOrEmpty($SubscriptionID))
             {
-                if (![string]::IsNullOrEmpty($ResourceGroup))
-                {
-                    Write-Log -Message ("Cannot filter consumption by resource group." -f $sub.Name) -Severity 'Info'
-                }
-
                 if($SubscriptionID -ne $sub.Id)
                 {
                     Write-Log -Message ("Skipping: {0}" -f $sub.Name) -Severity 'Info'

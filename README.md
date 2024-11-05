@@ -101,7 +101,6 @@ The following table lists the parameters that can be used with the script:
 | `$Appid`          | String   | Service Principal Authentication ID.                                                                                   |
 | `$SubscriptionID` | String   | Specifies the Subscription which will be run for Inventory.                                                                                  |
 | `$Secret`         | String   | Client Secret of the Service Principal key.                                                                                       |
-| `$ResourceGroup`  | String   | Specifies the Resource Group.                                                                                   |
 | `$Debug`          | Switch   | Enable Debug Mode                                                                                  |
 | `$SkipConsumption`| Switch   | A switch to indicate if consumption metrics should be gathered.                                                |
 | `$DeviceLogin`    | Switch   | A switch to trigger device login.                                                                               |

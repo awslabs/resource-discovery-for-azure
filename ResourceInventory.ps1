@@ -359,6 +359,11 @@ Function RunInventorySetup()
             Exit
         }
 
+        if(![string]::IsNullOrEmpty($ResourceGroup))
+        {
+           $ResourceGroup = $ResourceGroup.ToLower()
+        }
+
         if(![string]::IsNullOrEmpty($ResourceGroup) -and ![string]::IsNullOrEmpty($SubscriptionID))
         {
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID + '. And from Resource Group: ' + $ResourceGroup) -Severity 'Success'

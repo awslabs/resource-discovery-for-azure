@@ -251,7 +251,7 @@ if ($Task -eq 'Processing')
     
                 #$metricQuery = (az monitor metrics list --resource $_.Id --metric $_.MetricName --start-time $_.StartTime  --end-time $_.EndTime --interval $_.Interval --aggregation $_.Aggregation | ConvertFrom-Json)
     
-                $metricError = 'None'
+                $metricError = $false
                 $metricName = $_.MetricName
                 $metricId = $_.Id
                 $metricService = $_.Service
@@ -324,7 +324,7 @@ if ($Task -eq 'Processing')
                     $metricPercentileIndex = 0
                     $metricPercentile = 0
     
-                    $metricError = $_.Exception.Message
+                    $metricError = $true
                     #Write-Error $metricError
                     Write-Error ("Error collecting Metric: {0}-{1}-{2}" -f $metricId, $metricService, $metricName)
                 }

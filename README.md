@@ -94,17 +94,18 @@ zip -r inventoryreport.zip foldername (this is the folder that the files are loc
 
 The following table lists the parameters that can be used with the script:
 
-| Parameter         | Type     | Description                                                                                                     |
-|-------------------|----------|-----------------------------------------------------------------------------------------------------------------|
-| `$ReportName`     | String   | Specifies the customer name for the file                                                                                       |
-| `$TenantID`       | String   | Specifies the Tenant ID you want to create a Resource Inventory                                                                                       |
-| `$Appid`          | String   | Service Principal Authentication ID.                                                                                   |
-| `$SubscriptionID` | String   | Specifies the Subscription which will be run for Inventory.                                                                                  |
-| `$Secret`         | String   | Client Secret of the Service Principal key.                                                                                       |
-| `$Debug`          | Switch   | Enable Debug Mode                                                                                  |
-| `$SkipConsumption`| Switch   | A switch to indicate if consumption metrics should be gathered.                                                |
-| `$DeviceLogin`    | Switch   | A switch to trigger device login.                                                                               |
-| `$ConcurrencyLimit` | Integer | Specifies the concurrency limit for parallel command execution. Default value is `6`.                            |
+| Parameter              | Description                                                                                                 |                               |
+|------------------------|-------------------------------------------------------------------------------------------------------------|-------------------------------|
+| ReportName             | Specifies the customer name for the file                                                                    | `-ReportName <NAME>`          |
+| TenantID               | Specify the tenant ID you want to create a Resource Inventory.                                              | `-TenantID <ID>`              |
+| SubscriptionID         | Specifies Subscription(s) to be inventoried.                                                                | `-SubscriptionID <ID>`        |
+| ResourceGroup          | Specifies one unique Resource Group to be inventoried                                                       | `-ResourceGroup <NAME>`       |
+| Debug                  | Run in a Debug mode.                                                                                        | `-Debug`                      |
+| ConcurrencyLimit       | Specifies the concurrency limit for parallel command execution. Default value is `6`.                       | `-ConcurrencyLimit <Integer>` |
+| SkipConsumption        | A switch to indicate if consumption metrics should be gathered.                                             | `-SkipConsumption`            |
+| Appid                  | Service Principal Authentication ID.                                                                        | `-Appid <String>`             | 
+| Secret                 | Client Secret of the Service Principal key.                                                                 | `-Secret <String>`            |
+| DeviceLogin            | A switch to trigger device login.                                                                           | `-DeviceLogin`                |
 
 ---
 

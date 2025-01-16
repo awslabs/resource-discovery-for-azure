@@ -22,7 +22,6 @@ The following items are will be needed if you run the script locally.
 - Azure CLI Account Extension
 - Azure CLI Resource-Graph Extension (_This is installed automatically by the script_)
   
-The script can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments.  
 For additional information on Azure CloudShell, please review this [article](https://learn.microsoft.com/en-us/azure/cloud-shell/get-started/classic?tabs=azurecli)
 
 ### Requirements
@@ -55,7 +54,7 @@ cd resource-discovery-for-azure
 5. Use the following command to run the script but update **CustomerName** to your company name
 
 ```powershell
-./ResourceInventory.ps1 -ConcurrencyLimit 8 -ReportName UpdateCustomerName
+./ResourceInventory.ps1 -ConcurrencyLimit 6 -ReportName UpdateCustomerName
 ```
 
 When running the script from CloudShell - the output should be similar to this screenshot -  

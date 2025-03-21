@@ -14,22 +14,27 @@ By leveraging this script, you can effortlessly generate Excel/JSON exports that
 - [Running the Script](#running-the-script)
 
 ## Prerequisites
-The script can be executed in both Azure Cloudshell PowerShell and PowerShell Desktop environments. We recommend running the script in Azure CloudShell at https://shell.azure.com, as this will ensure you are already authenticated with Azure.
+The script can be executed in both Azure Cloudshell PowerShell **(Preferred)** and PowerShell Desktop environments.  
+We recommend running the script in Azure CloudShell at https://shell.azure.com and you can start at Installation, Step 1 below once you have assigned the roles
 
-The following items are will be needed if you run the script locally on your laptop.
-- PowerShell 7 or Azure CloudShell PowerShell
-- Azure CLI
-- Azure CLI Account Extension
-- Azure CLI Resource-Graph Extension (_This is installed automatically by the script_)
-  
-For additional information on Azure CloudShell, please review this [article](https://learn.microsoft.com/en-us/azure/cloud-shell/get-started/classic?tabs=azurecli)
 
-### Requirements
+### Role Requirements
 > You will need to assign the following Roles in Azure to a user to execute the script:
 - Reader Role
 - Billing Reader Role
 - Monitoring reader Role
 - Cost Management Reader Role
+
+
+
+### Local Laptop 
+The following items are will be needed if you run the script locally
+- PowerShell 7 or Azure CloudShell PowerShell
+- Azure CLI
+- Azure CLI Account Extension
+- Azure CLI Resource-Graph Extension (_This is installed automatically by the script_)
+  
+
 
 ## Installation
 

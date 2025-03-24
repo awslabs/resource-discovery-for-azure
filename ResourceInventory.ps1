@@ -651,157 +651,6 @@ function ExecuteInventoryProcessing()
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
     }
 
-    function Get-AzureUsage 
-    {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory)]
-            [ValidateNotNullOrEmpty()]
-            [datetime]$FromTime,
-     
-            [Parameter(Mandatory)]
-            [ValidateNotNullOrEmpty()]
-            [datetime]$ToTime,
-     
-            [Parameter()]
-            [ValidateNotNullOrEmpty()]
-            [ValidateSet('Hourly', 'Daily')]
-            [string]$Interval = 'Daily'
-        )
-        
-        Write-Log -Message ("Querying usage data [$($FromTime) - $($ToTime)]...") -Severity 'Info'
-
-        $usageData = $null
-
-        foreach($sub in $Global:Subscriptions)
-        {
-            # Check if SubscriptionId is not null, not empty, and matches $sub.id
-            if (![string]::IsNullOrEmpty($SubscriptionID))
-            {
-                if($SubscriptionID -ne $sub.Id)
-                {
-                    Write-Log -Message ("Skipping: {0}" -f $sub.Name) -Severity 'Info'
-                    continue
-                }
-            }
-        
-            Set-AzContext -Subscription $sub.id | Out-Null
-            Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
-
-            do 
-            {    
-                $params = @{
-                    ReportedStartTime      = $FromTime
-                    ReportedEndTime        = $ToTime
-                    AggregationGranularity = $Interval
-                    ShowDetails            = $true
-                }
-    
-                if ((Get-Variable -Name usageData -ErrorAction Ignore) -and $usageData) 
-                {
-                    Write-Log -Message ("Querying Next Page") -Severity 'Info'
-                    $params.ContinuationToken = $usageData.ContinuationToken
-                }
-    
-                $usageData = Get-UsageAggregates @params
-                $usageData.UsageAggregations | Select-Object -ExpandProperty Properties
-
-                Write-Log -Message ("Records found: $($usageData.UsageAggregations.Count)...") -Severity 'Info'
-                
-            } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
-        }
-    }
-
-    function ProcessResourceConsumption()
-    {
-        $DebugPreference = "SilentlyContinue"
-
-        #Force the culture here...
-        [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US"; 
-        [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
-
-        $reportedStartTime = (Get-Date).AddDays(-30).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
-        $reportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
-
-        $consumptionData = Get-AzureUsage -FromTime $reportedStartTime -ToTime $reportedEndTime -Interval Daily -Verbose
-
-        for($item = 0; $item -lt $consumptionData.Count; $item++) 
-        {
-            $instanceInfo = ($consumptionData[$item].InstanceData.tolower() | ConvertFrom-Json)
-
-            $consumptionData[$item] | Add-Member -MemberType NoteProperty -Name ResourceId -Value NotSet
-            $consumptionData[$item] | Add-Member -MemberType NoteProperty -Name ResourceLocation -Value NotSet
-
-            $consumptionData[$item].ResourceId = $instanceInfo.'Microsoft.Resources'.resourceUri
-            $consumptionData[$item].ResourceLocation = $instanceInfo.'Microsoft.Resources'.location
-        }
-
-        $consumptionData | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8
-
-        Write-Log -Message ("Consumption Entries: {0}" -f $consumptionData.Count) -Severity 'Info'
-
-        $aggregatedResult = @()
-
-        # Group by ResourceId
-        $groupedDataByResource = $consumptionData | Group-Object ResourceId
-
-        foreach ($resourceGroup in $groupedDataByResource) 
-        {
-            $resourceId = $resourceGroup.Name
-            $resourceItems = $resourceGroup.Group
-
-            $tmpMeters = [System.Collections.Generic.List[psobject]]::new()
-
-            $aggregatedMeters = $resourceItems | Group-Object MeterId | ForEach-Object {
-                $meterId = $_.Name
-                $usageAggregates = $_.Group | Measure-Object -Property Quantity -Sum
-                $unit = $_.Group[0].Unit
-                $meterCategory = $_.Group[0].MeterCategory
-                $meterName = $_.Group[0].MeterName
-                $meterRegion = $_.Group[0].MeterRegion
-                $meterSubCategory = $_.Group[0].MeterSubCategory
-                $meterInstance = ($_.Group[0].InstanceData | ConvertFrom-Json -depth 100)
-                $additionalInfo = $meterInstance.'Microsoft.Resources'.additionalInfo
-                $meterInfo = $meterInstance.'Microsoft.Resources'.meterInfo
-                $meterCount = $_.Group.Count
-
-                $MeterObject =[PSCustomObject]@{
-                    MeterId = $meterId
-                    TotalUsage = $usageAggregates.Sum.ToString("0.#########")
-                    MeterCategory = $meterCategory
-                    Unit = $unit
-                    MeterName = $meterName
-                    MeterRegion = $meterRegion
-                    MeterSubCategory = $meterSubCategory
-                    InstanceInfo = $meterInstance
-                    AdditionalInfo = $additionalInfo
-                    MeterInfo = $meterInfo
-                    MeterCount = $meterCount
-                }
-
-                $tmpMeters.Add($MeterObject)
-            }
-
-            $aggregatedResult += [PSCustomObject]@{
-                ResourceId = $resourceId
-                Meters = $tmpMeters
-            }    
-        }
-
-        $ConsumptionOutput = New-Object PSObject
-        $ConsumptionOutput | Add-Member -MemberType NoteProperty -Name StartDate -Value NotSet
-        $ConsumptionOutput | Add-Member -MemberType NoteProperty -Name EndDate -Value NotSet
-        $ConsumptionOutput | Add-Member -MemberType NoteProperty -Name Resources -Value NotSet
-
-        $ConsumptionOutput.StartDate = $reportedStartTime
-        $ConsumptionOutput.EndDate = $reportedEndTime
-        $ConsumptionOutput.Resources = $aggregatedResult
-
-        $ConsumptionOutput | ConvertTo-Json -depth 100 -compress | Out-File $Global:ConsumptionFile
-
-        $DebugPreference = "Continue"  
-    }
-
     function GetResorceConsumption()
     {
         $DebugPreference = "SilentlyContinue"
@@ -810,7 +659,7 @@ function ExecuteInventoryProcessing()
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US"; 
         [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
 
-        $reportedStartTime = (Get-Date).AddDays(-30).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
+        $reportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $reportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
 
         foreach($sub in $Global:Subscriptions)
@@ -865,15 +714,25 @@ function ExecuteInventoryProcessing()
                     
                     $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ResourceId -Value NotSet
                     $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ResourceLocation -Value NotSet
+
+                    $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ConsumptionMeter -Value NotSet
+                    $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ReservationId -Value NotSet
+                    $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ReservationOrderId -Value NotSet
         
                     $usageDataExport[$item].ResourceId = $instanceInfo.'Microsoft.Resources'.resourceUri
                     $usageDataExport[$item].ResourceLocation = $instanceInfo.'Microsoft.Resources'.location
+                    $usageDataExport[$item].ConsumptionMeter = $instanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter
+                    $usageDataExport[$item].ReservationId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationId
+                    $usageDataExport[$item].ReservationOrderId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationOrderId
+
 
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
                 }
 
-                $newUsageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
-                #$usageDataExport | ConvertTo-Json -depth 10 | Out-File $Global:ConsumptionFile
+                #$newUsageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
+
+                $newUsageDataExport | Select-Object MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId
+                  | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
             } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
         }

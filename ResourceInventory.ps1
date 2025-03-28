@@ -729,7 +729,7 @@ function ExecuteInventoryProcessing()
 
                     $instanceObject = [PSCustomObject]@{}
 
-                    $resources = [PSCustomObject]@{
+                    $additionalInfoInstance = [PSCustomObject]@{
                         ResourceUri = $instanceInfo.'Microsoft.Resources'.resourceUri
                         Location = $instanceInfo.'Microsoft.Resources'.location
                         additionalInfo = [PSCustomObject]@{
@@ -741,7 +741,7 @@ function ExecuteInventoryProcessing()
                         }
                     }
                     
-                    $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $resources
+                    $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $additionalInfoInstance
 
                     $usageDataExport[$item].InstanceData = $instanceObject | ConvertTo-Json -Compress
 

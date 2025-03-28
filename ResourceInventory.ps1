@@ -718,20 +718,39 @@ function ExecuteInventoryProcessing()
                     $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ConsumptionMeter -Value NotSet
                     $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ReservationId -Value NotSet
                     $usageDataExport[$item] | Add-Member -MemberType NoteProperty -Name ReservationOrderId -Value NotSet
+
         
                     $usageDataExport[$item].ResourceId = $instanceInfo.'Microsoft.Resources'.resourceUri
                     $usageDataExport[$item].ResourceLocation = $instanceInfo.'Microsoft.Resources'.location
                     $usageDataExport[$item].ConsumptionMeter = $instanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter
                     $usageDataExport[$item].ReservationId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationId
                     $usageDataExport[$item].ReservationOrderId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationOrderId
+                    
 
+                    $instanceObject = [PSCustomObject]@{}
+
+                    $resources = [PSCustomObject]@{
+                        ResourceUri = $instanceInfo.'Microsoft.Resources'.resourceUri
+                        Location = $instanceInfo.'Microsoft.Resources'.location
+                        additionalInfo = [PSCustomObject]@{
+                            ConsumptionMeter = if ($null -eq $instanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter) { "" } else { $instanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter }
+                            vCores = 0
+                            VCPUs = 0
+                            ServiceType = ""
+                            ResourceCategory = ""
+                        }
+                    }
+                    
+                    $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $resources
+
+                    $usageDataExport[$item].InstanceData = $instanceObject | ConvertTo-Json -Compress
 
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
                 }
 
                 #$newUsageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
 
-                $newUsageDataExport | Select-Object MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId
+                $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId
                   | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
             } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)

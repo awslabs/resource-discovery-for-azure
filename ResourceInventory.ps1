@@ -706,7 +706,7 @@ function ExecuteInventoryProcessing()
 
                     if (![string]::IsNullOrEmpty($ResourceGroup))
                     {
-                        if(!$instanceInfo.'Microsoft.Resources'.resourceUri.toLower().Contains("/" + $ResourceGroup + "/"))
+                        if(!$instanceInfo.'Microsoft.Resources'.resourceUri.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
                         {
                             continue;
                         }

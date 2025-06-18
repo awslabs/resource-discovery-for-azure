@@ -104,7 +104,7 @@ The following table lists the parameters that can be used with the script:
 |------------------------|-------------------------------------------------------------------------------------------------------------|-------------------------------|
 | ReportName             | Specifies the customer name for the file                                                                    | `-ReportName <NAME>`          |
 | TenantID               | Specify the tenant ID you want to create a Resource Inventory.                                              | `-TenantID <ID>`              |
-| SubscriptionID         | Specifies Subscription to be inventoried.                                                                   | `-SubscriptionID <ID>`        |
+| SubscriptionID         | Specifies a single Subscription to be inventoried. Only one subscription ID can be specified.                                                                  | `-SubscriptionID <ID>`        |
 | ResourceGroup          | Specifies one unique Resource Group to be inventoried                                                       | `-ResourceGroup <NAME>`       |
 | Debug                  | Run in a Debug mode.                                                                                        | `-Debug`                      |
 | ConcurrencyLimit       | Specifies the concurrency limit for parallel command execution. Default value is `6`.                       | `-ConcurrencyLimit <Integer>` |

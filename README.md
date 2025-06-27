@@ -1,6 +1,6 @@
 # Resource Discovery for Azure
 
-This is a PowerShell script provided by AWS that generates an inventory report including detailed metrics of an Azure environment to which you have read access for the previous 30 days.
+This is a PowerShell script provided by AWS that generates an inventory report including detailed metrics of an Azure environment to which you have read access for the previous 31 days.
 
 This repository is focusing solely on read-only integrations with Azure APIs and Azure Monitor. Our goal is to deliver a 
 reliable and efficient solution for Azure environment reporting, empowering you with comprehensive insights into your cloud resources and their utilization.

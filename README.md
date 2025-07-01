@@ -15,7 +15,7 @@ By leveraging this script, you can effortlessly generate Excel/JSON exports that
 
 ## Prerequisites
 The script can be executed in both Azure Cloudshell PowerShell **(Preferred)** and PowerShell Desktop environments.  
-We recommend running the script in Azure CloudShell at https://shell.azure.com and you can start at Installation, Step 1 below once you have assigned the roles
+We recommend running the script in [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell") and you can start at Installation, Step 1 below once you have assigned the roles
 
 
 ### Role Requirements

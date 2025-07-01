@@ -37,7 +37,7 @@ The following items are will be needed if you run the script locally
 
 
 ## Installation
-When running the script from CloudShell - the output should be similar to this screenshot -  
+When running the script from [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell") - the output should be similar to this screenshot -  
 For item 1 in the screenshot, it should state Bash as this means you are running in PowerShell
 
 ![CloudShell](./docs/cloudshell.png)
@@ -54,7 +54,7 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 
 The script uses concurrency to execute commands in parallel, especially when gathering metrics. By default, the concurrency limit is set to 6. To change this, use the `-ConcurrencyLimit` option. 
 
-2. If you are in Azure CloudShell please ensure you select PowerShell , you're already authenticated.
+2. If you are in [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell"), you're already authenticated.
 3. In PowerShell Desktop, you will be redirected to the Azure sign-in page.
 > You might get more than one authentication request due to different collector processes running in parallel, so make sure that you successfully complete it.
 4. Change directory to the location where repository was cloned

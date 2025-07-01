@@ -37,6 +37,12 @@ The following items are will be needed if you run the script locally
 
 
 ## Installation
+When running the script from CloudShell - the output should be similar to this screenshot -  
+For item 1 in the screenshot, it should state Bash as this means you are running in PowerShell
+
+![CloudShell](./docs/cloudshell.png)
+
+
 
 1. Clone the repository by running the following command
 
@@ -60,11 +66,6 @@ cd resource-discovery-for-azure
 ```powershell
 ./ResourceInventory.ps1 -ConcurrencyLimit 4 -ReportName UpdateCustomerName
 ```
-
-When running the script from CloudShell - the output should be similar to this screenshot -  
-For item 1 in the screenshot, it should state Bash as this means you are running in PowerShell
-
-![CloudShell](./docs/cloudshell.png)
 
 ## Downloading the ZIP File from GitHub
 If you don't have Git installed, you can download the ZIP file of the repository:

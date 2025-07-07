@@ -98,7 +98,12 @@ else
 {
     if($SmaResources.VirtualMachines)
     {
-        $TableName = ('VMTable_'+($SmaResources.VirtualMachines.id | Select-Object -Unique).count)
+        $TableName = 'VMTable_' + ($SmaResources.VirtualMachines |
+            Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' } |
+            Select-Object -ExpandProperty ID -Unique |
+            Measure-Object |
+            Select-Object -ExpandProperty Count)
+
         $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0' -VerticalAlignment Center
 
         $Exc = New-Object System.Collections.Generic.List[System.Object]
@@ -123,7 +128,8 @@ else
         $Exc.Add('AvailabilitySet')
         $Exc.Add('CreatedTime')     
 
-        $ExcelVar = $SmaResources.VirtualMachines
+         # Filter: only include VMs that are not SQLVMs
+        $ExcelVar = $SmaResources.VirtualMachines | Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' }
                     
         $ExcelVar | 
         ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 

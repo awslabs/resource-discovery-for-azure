@@ -169,7 +169,7 @@ Function RunInventorySetup()
         $Global:PlatformOS = 'PowerShell Desktop'
         $cloudShell = try{Get-CloudDrive}catch{}
 
-        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmm")
+        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmss")
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
         
         if ($cloudShell) 

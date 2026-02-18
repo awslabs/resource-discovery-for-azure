@@ -184,6 +184,12 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 
 ### Common Issues
 
+**Downloaded ZIP File:**
+- If you download the ZIP file, Windows may mark the files as blocked for security reasons which is a known issue from GitHub
+- Run the following PowerShell command to unblock all files in Resource Discovery in Azure folder  
+   `Get-ChildItem -Path . -Recurse | Unblock-File`
+- After unblocking, you can execute the script from the folder
+
 **Authentication Errors:**
 - Ensure you have the required Azure roles assigned
 - For local environments, run `az login` before executing the script

@@ -169,7 +169,7 @@ Function RunInventorySetup()
         $Global:PlatformOS = 'PowerShell Desktop'
         $cloudShell = try{Get-CloudDrive}catch{}
 
-        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmss")
+        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmm")
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
         
         if ($cloudShell) 
@@ -319,10 +319,13 @@ Function RunInventorySetup()
                     Connect-AzAccount -Tenant $TenantID | Out-Null
                 }
             }
-            elseif ($Appid -and $Secret -and $tenantid) 
+            elseif ($Appid -and $Secret -and $tenantid)
             {
                 Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
                 az login --service-principal -u $appid -p $secret -t $TenantID | Out-Null
+                $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
+                Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
             }
             else
             {

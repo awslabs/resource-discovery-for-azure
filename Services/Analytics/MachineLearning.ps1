@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing') 
 {
@@ -44,9 +44,9 @@ If ($Task -eq 'Processing')
 }
 else 
 {
-    if ($SmaResources.AzureML) 
+    if ($SmaResources.MachineLearning) 
     {
-        $TableName = ('AzureMLTable_'+($SmaResources.AzureML.id | Select-Object -Unique).count)
+        $TableName = ('AzureMLTable_'+($SmaResources.MachineLearning.id | Select-Object -Unique).count)
         $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
 
         $condtxt = @()
@@ -66,7 +66,7 @@ else
         $Exc.Add('ApplicationInsight')
         $Exc.Add('CreatedTime')  
 
-        $ExcelVar = $SmaResources.AzureML
+        $ExcelVar = $SmaResources.MachineLearning
 
         $ExcelVar | 
         ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 

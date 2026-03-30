@@ -1,4 +1,4 @@
-param($Subscriptions, $Resources, $Task ,$File, $Metrics, $TableStyle, $ConcurrencyLimit, $FilePath)
+param($Subscriptions, $Resources, $Task ,$File, $Metrics, $TableStyle, $ConcurrencyLimit, $FilePath, $ResourceIdDictionary, $ResourceNameDictionary, $ResourceSubDictionary, $ResourceGroupDictionary, $Obfuscate)
 
 if ($Task -eq 'Processing')
 {
@@ -365,6 +365,22 @@ if ($Task -eq 'Processing')
             } -ThrottleLimit $ConcurrencyLimit
 
             $defs.Clear()
+
+            if($Obfuscate)
+            {
+                foreach ($metric in $tmp.Metrics) 
+                {
+                    $obfuscatedID = $ResourceIdDictionary[$metric.ID]
+                    $obfuscatedName = $ResourceNameDictionary[$metric.ID]
+                    $obfuscatedSubscription = $ResourceSubDictionary[$metric.ID]
+                    $obfuscatedResourceGroup = $ResourceGroupDictionary[$metric.ID]
+
+                    $metric.ID = $obfuscatedID
+                    $metric.Name = $obfuscatedName
+                    $metric.Subscription = $obfuscatedSubscription
+                    $metric.ResourceGroup = $obfuscatedResourceGroup
+                }
+            }
 
             $outputPath = $FilePath + "_" + $rangeIdx + ".json"
             $tmp | ConvertTo-Json -depth 5 -compress | Out-File $outputPath -Encoding utf8

@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -66,7 +66,6 @@ else
         $Exc.Add('StorageGB')
         $Exc.Add('StorageAccountType')
         $Exc.Add('State')
-        $Exc.Add('vCores')
         $Exc.Add('ManagedInstanceCreateMode')
         $Exc.Add('ZoneRedundant')
         $Exc.Add('Databases')

@@ -8,7 +8,10 @@ param ($TenantID,
         [switch]$SkipConsumption, 
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
+        [switch]$Obfuscate,
+        [switch]$AutoAuth,
         $ConcurrencyLimit = 6,
+        $CollectionDays = 31,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
 
@@ -17,7 +20,7 @@ if ($Debug.IsPresent) {$DebugPreference = 'Continue'}
 
 if ($Debug.IsPresent) {$ErrorActionPreference = "Continue" }Else {$ErrorActionPreference = "silentlycontinue" }
 
-Write-Debug ('Debbuging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
+Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
 
 Function Write-Log([string]$Message, [string]$Severity)
 {
@@ -65,6 +68,10 @@ function Variables
     $Global:Logging | Add-Member -MemberType NoteProperty -Name Logs -Value NotSet
     $Global:Logging.Logs = [System.Collections.Generic.List[object]]::new()
 
+    $Global:resourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $Global:resourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $Global:resourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $Global:resourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
@@ -94,13 +101,14 @@ Function RunInventorySetup()
 
         $azCliVersion = az --version
 
-        Write-Log -Message ('CLI Version: {0}' -f $azCliVersion[0]) -Severity 'Success'
-    
         if ($null -eq $azCliVersion) 
         {
-            Read-Host "Azure CLI Not Found. Please install to and run the script again, press <Enter> to exit." -ForegroundColor Red
+            Write-Log -Message ("Azure CLI Not Found. Please install and run the script again.") -Severity 'Error'
+            Read-Host "Press <Enter> to exit"
             Exit
         }
+
+        Write-Log -Message ('CLI Version: {0}' -f $azCliVersion[0]) -Severity 'Success'
 
         Write-Log -Message ('Verifying Azure CLI Extension...') -Severity 'Info'
 
@@ -109,7 +117,7 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Current Resource-Graph Extension Version: {0}' -f $azCliExtension.Version) -Severity 'Success'
         
-        $azCliExtensionVersion = $azcliExt | Where-Object {$_.name -eq 'resource-graph'}
+        $azCliExtensionVersion = $azCliExtension | Where-Object {$_.name -eq 'resource-graph'}
     
         if (!$azCliExtensionVersion) 
         {
@@ -120,21 +128,22 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $VarAzPs = Get-InstalledModule -Name Az -ErrorAction silentlycontinue
+        $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
 
-        Write-Log -Message ('Azure PowerShell Module Version: {0}.{1}.{2}' -f [string]$VarAzPs.Version.Major,  [string]$VarAzPs.Version.Minor, [string]$VarAzPs.Version.Build) -Severity 'Success'
-
-        IF($null -eq $VarAzPs)
+        if ($null -ne $VarAzPs)
         {
-            Write-Log -Message ('Trying to install Azure PowerShell Module...') -Severity 'Warning'
-            Install-Module -Name Az -Repository PSGallery -Force
+            Write-Log -Message ('Azure PowerShell Module Version: {0}' -f $VarAzPs.Version) -Severity 'Success'
         }
-
-        $VarAzPs = Get-InstalledModule -Name Az -ErrorAction silentlycontinue
+        else
+        {
+            Write-Log -Message ('Azure PowerShell Module not found. Trying to install...') -Severity 'Warning'
+            Install-Module -Name Az -Repository PSGallery -Force -Scope CurrentUser
+            $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
 
         if ($null -eq $VarAzPs) 
         {
-            Write-Log -Message ('Admininstrator rights required to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
+            Write-Log -Message ('Failed to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
             Read-Host ''
             Exit
         }
@@ -142,21 +151,22 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Checking ImportExcel Module...') -Severity 'Info'
     
-        $VarExcel = Get-InstalledModule -Name ImportExcel -ErrorAction silentlycontinue
+        $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
     
-        Write-Log -Message ('ImportExcel Module Version: {0}.{1}.{2}' -f [string]$VarExcel.Version.Major,  [string]$VarExcel.Version.Minor, [string]$VarExcel.Version.Build) -Severity 'Success'
-    
-        if ($null -eq $VarExcel) 
+        if ($null -ne $VarExcel)
         {
-            Write-Log -Message ('Trying to install ImportExcel Module...') -Severity 'Warning'
-            Install-Module -Name ImportExcel -Force
+            Write-Log -Message ('ImportExcel Module Version: {0}' -f $VarExcel.Version) -Severity 'Success'
+        }
+        else
+        {
+            Write-Log -Message ('ImportExcel Module not found. Trying to install...') -Severity 'Warning'
+            Install-Module -Name ImportExcel -Force -Scope CurrentUser
+            $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
         }
     
-        $VarExcel = Get-InstalledModule -Name ImportExcel -ErrorAction silentlycontinue
-    
         if ($null -eq $VarExcel) 
         {
-            Write-Log -Message ('Admininstrator rights required to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
+            Write-Log -Message ('Failed to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
             Read-Host ''
             Exit
         }
@@ -233,6 +243,27 @@ Function RunInventorySetup()
     
         $CurrentCloudEnvName = $CloudEnv | Where-Object {$_.isActive -eq 'True'}
         Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+
+        # Check if already authenticated
+        if ($AutoAuth.IsPresent)
+        {
+            $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
+            if ($null -ne $existingAccount)
+            {
+                Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+
+                if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
+                {
+                    $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+                    if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
+                    return
+                }
+                else
+                {
+                    Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $existingAccount.tenantId, $TenantID) -Severity 'Warning'
+                }
+            }
+        }
     
         if (!$TenantID) 
         {
@@ -253,7 +284,7 @@ Function RunInventorySetup()
             }
             else 
             {
-                Write-Log -Message ('Using device login') -Severity 'Info'
+                Write-Log -Message ('Using browser login') -Severity 'Info'
                 az login --only-show-errors | Out-Null
                 Connect-AzAccount | Out-Null
             }
@@ -481,6 +512,32 @@ Function RunInventorySetup()
     GetSubscriptionsData
     ResourceInventoryLoop
     ResourceInventoryAvd
+
+    if($Obfuscate.IsPresent)
+    {
+        foreach ($resourceItem in $Global:Resources) 
+        {
+            if ($resourceItem.name -match "dev|test|qa|tst|development|non-prod|uat|nonprod") 
+            {
+                $obfuscatedID = "nonprod_" + [guid]::NewGuid().ToString()
+                $obfuscatedName = "nonprod_" + [guid]::NewGuid().ToString()
+                $obfuscatedSubscription = "nonprod_" + [guid]::NewGuid().ToString()
+                $obfuscatedResourceGroup = "nonprod_" + [guid]::NewGuid().ToString()
+            }
+            else
+            {
+                $obfuscatedID = "prod_" + [guid]::NewGuid().ToString()
+                $obfuscatedName = "prod_" + [guid]::NewGuid().ToString()
+                $obfuscatedSubscription = "prod_" + [guid]::NewGuid().ToString()
+                $obfuscatedResourceGroup = "prod_" + [guid]::NewGuid().ToString()
+            }          
+
+            $resourceIdDictionary.Add($resourceItem.ID, $obfuscatedID)
+            $resourceNameDictionary.Add($resourceItem.ID, $obfuscatedName)
+            $resourceSubscriptionDictionary.Add($resourceItem.ID, $obfuscatedSubscription)
+            $resourceResourceGroupDictionary.Add($resourceItem.ID, $obfuscatedResourceGroup)
+        }
+    }
 }
 
 function ExecuteInventoryProcessing()
@@ -522,7 +579,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $resourceIdDictionary -ResourceNameDictionary $resourceNameDictionary -ResourceSubDictionary $resourceSubscriptionDictionary -ResourceGroupDictionary $resourceResourceGroupDictionary -Obfuscate $Obfuscate.IsPresent
         }
     }
 
@@ -606,7 +663,24 @@ function ExecuteInventoryProcessing()
             
             Write-Log -Message ("Service Processing: {0}" -f $ModName) -Severity 'Success'
 
-            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics
+            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics -ResourceIdDictionary $resourceIdDictionary
+
+            if($Obfuscate.IsPresent)
+            {
+                foreach ($resourceItem in $result) 
+                {
+                    $obfuscatedID = $resourceIdDictionary[$resourceItem.ID]
+                    $obfuscatedName = $resourceNameDictionary[$resourceItem.ID]
+                    $obfuscatedSubscription = $resourceSubscriptionDictionary[$resourceItem.ID]
+                    $obfuscatedResourceGroup = $resourceResourceGroupDictionary[$resourceItem.ID]
+                
+                    $resourceItem.ID = $obfuscatedID
+                    $resourceItem.Name = $obfuscatedName
+                    $resourceItem.Subscription = $obfuscatedSubscription
+                    $resourceItem.ResourceGroup = $obfuscatedResourceGroup
+                }
+            }
+
             $Global:SmaResources | Add-Member -MemberType NoteProperty -Name $ModName -Value NotSet
             $Global:SmaResources.$ModName = $result
 
@@ -640,7 +714,7 @@ function ExecuteInventoryProcessing()
             $c = [math]::Round($c)
             
             Write-Log -Message ("Running Services: $Service") -Severity 'Info'
-            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null
+            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $resourceIdDictionary
 
             $ReportCounter++
         }
@@ -746,6 +820,23 @@ function ExecuteInventoryProcessing()
                     
                     $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $additionalInfoInstance
 
+                    if($Obfuscate.IsPresent)
+                    {
+                        if (-not $resourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
+                        {
+                            $obfuscatedID = "prod_" + [guid]::NewGuid().ToString()
+                            $resourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
+                            $usageDataExport[$item].ResourceId = $obfuscatedID
+                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
+                        } 
+                        else 
+                        {
+                            $obfuscatedID = $ResourceIdDictionary[$usageDataExport[$item].ResourceId]
+                            $usageDataExport[$item].ResourceId = $obfuscatedID
+                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
+                        }
+                    }
+
                     $usageDataExport[$item].InstanceData = $instanceObject | ConvertTo-Json -Compress
 
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
@@ -824,22 +915,34 @@ if($EnableLogs.IsPresent)
 
 if($SkipMetrics.IsPresent)
 {
-    "Metrics Not Gathered" | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile 
+    @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
 }
 
 $consumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
 
 if($SkipConsumption.IsPresent -or !$consumptionCreated)
 {
-    Out-File $Global:ConsumptionFileCsv
+    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }
 
 $jsonWildCard = $DefaultPath + "*.json"
 
-$compressionOutput = @{
-    Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
-    CompressionLevel = 'Fastest'
-    DestinationPath = $Global:ZipOutputFile
+if($Obfuscate.IsPresent)
+{
+    $compressionOutput = @{
+        Path = $Global:File, $Global:ConsumptionFileCsv, $jsonWildCard
+        CompressionLevel = 'Fastest'
+        DestinationPath = $Global:ZipOutputFile
+    }
+    Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
+}
+else
+{
+    $compressionOutput = @{
+        Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
+        CompressionLevel = 'Fastest'
+        DestinationPath = $Global:ZipOutputFile
+    }
 }
 
 try 

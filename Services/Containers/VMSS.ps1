@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -11,11 +11,19 @@ if ($Task -eq 'Processing')
 
     foreach($location in ($vmss | Select-Object -ExpandProperty location -Unique))
     {
-        foreach ($vmsize in (az vm list-sizes -l $location | ConvertFrom-Json))
+        $DebugPreference = 'SilentlyContinue'
+        $skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        $DebugPreference = 'Continue'
+
+        foreach ($vmsize in $skus)
         {
-            $vmsizemap[$vmsize.name] = @{
-                CPU = $vmSize.numberOfCores
-                RAM = [math]::Max($vmSize.memoryInMB / 1024, 0) 
+            $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
+            $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
+            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name)) {
+                $vmsizemap[$vmsize.Name] = @{
+                    CPU = [int]$cpuCap
+                    RAM = [math]::Max([decimal]$memCap, 0)
+                }
             }
         }
     }

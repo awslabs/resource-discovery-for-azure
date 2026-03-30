@@ -126,11 +126,6 @@ You might get more than one authentication request due to different collector pr
 ./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
 ```
 
-**Obfuscated report with session reuse (skip re-authentication):**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012" -Obfuscate -AutoAuth
-```
-
 ## Output Files
 
 Upon completion, the script generates reports in the `InventoryReports` folder:
@@ -166,7 +161,7 @@ Resources with names matching dev/test/qa patterns get a `nonprod_` prefix; all 
 
 **What is preserved:** Location, SKU, VM size, OS type, disk type, metrics values, consumption quantities, and all technical configuration data needed for analysis.
 
-**What is excluded:** When obfuscation is enabled, the transcript log (which contains raw console output with emails and paths) is excluded from the ZIP file. It remains on disk locally for debugging.
+**What is excluded:** When obfuscation is enabled, the transcript log is excluded from the ZIP file. The transcript contains raw console output including email addresses, subscription IDs, and file paths that cannot be reliably masked after the fact. It remains on disk locally for debugging but is not included in the deliverable package.
 
 ### Manual Compression (If Needed)
 
@@ -200,7 +195,6 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
 | `Obfuscate` | Switch | Replace resource IDs, names, subscriptions, and resource groups with masked values. Reports can be safely shared externally without exposing sensitive Azure environment details. | `-Obfuscate` |
-| `AutoAuth` | Switch | Reuse existing Azure CLI session instead of forcing re-authentication. Useful for repeated runs during testing. | `-AutoAuth` |
 
 ### Authentication Parameters
 

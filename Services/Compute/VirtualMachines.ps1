@@ -93,7 +93,7 @@ If ($Task -eq 'Processing')
                 'PowerState'                    = $powerState;
                 'Zones'                         = $vm.zones.count;
                 'CreatedTime'                   = $timecreated;
-                'Tags'                          = $tags;
+                'Tags'                          = if ($null -ne $ResourceIdDictionary) { $null } else { $tags };
             }
 
             $tmp += $obj

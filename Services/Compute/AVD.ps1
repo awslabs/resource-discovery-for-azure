@@ -43,8 +43,8 @@ if ($Task -eq 'Processing')
                     'AVDAgentVersion'    = $2.properties.agentVersion;
                     'AllowNewSession'    = $2.properties.allowNewSession;
                     'UpdateStatus'       = $2.properties.updateState;
-                    'HostId'             = $vmsessionhosts.Id;
-                    'Hostname'           = $vmsessionhosts.name;
+                    'HostId'             = if (![string]::IsNullOrEmpty($vmsessionhosts.Id)) { $ResourceIdDictionary[$vmsessionhosts.Id] } else { $null };
+                    'Hostname'           = if (![string]::IsNullOrEmpty($vmsessionhosts.Id)) { $ResourceIdDictionary[$vmsessionhosts.Id] } else { $null };
                     'VMSize'             = $vmsessionhosts.properties.hardwareProfile.vmsize;
                     'OSType'             = $vmsessionhosts.properties.storageProfile.osdisk.ostype;
                     'VMDiskType'         = $vmsessionhosts.properties.storageProfile.osdisk.managedDisk.storageAccountType;

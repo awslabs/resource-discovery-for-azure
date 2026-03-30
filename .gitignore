@@ -489,4 +489,5 @@ $RECYCLE.BIN/
 ResourcesReport_*/
 ResourcesReport_*.zip
 report_output/
+report_v2/
 Tests/*.zip

@@ -1,0 +1,81 @@
+Test Summary - Obfuscation Feature
+===================================
+Environment: Azure Cloud Shell (PowerShell 7.5.4, Az CLI 2.82.0)
+Date: 2026-03-30
+Branch: feature/obfuscate-v2
+
+Test Runs Performed
+-------------------
+
+1. Obfuscate + SkipMetrics + SkipConsumption
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -SkipConsumption -SkipMetrics -Obfuscate -Debug
+   Result: PASS - 48 services processed, zero errors
+   Verified: Inventory JSON has obfuscated IDs/Names/Subscriptions/ResourceGroups
+
+2. Obfuscate + SkipMetrics + SkipConsumption + AutoAuth (AutoAuth was added for me to quickly test without logging in all the time. Easter egg.)
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -SkipConsumption -SkipMetrics -Obfuscate -AutoAuth -Debug
+   Result: PASS - Reused existing session, skipped login prompt
+   Verified: AutoAuth correctly detects existing az session
+
+3. Obfuscate + Full Run (Metrics + Consumption enabled)
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -Obfuscate -AutoAuth -Debug
+   Result: PASS - 57 services processed, 8 metrics collected, 299 consumption records
+   Verified: Metrics and consumption data obfuscated with prod_ prefix
+
+4. Obfuscate + Full Run on feature/obfuscate-v2 (rebased on upstream)
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -SkipConsumption -SkipMetrics -Obfuscate -AutoAuth -Debug
+   Result: PASS - 57 services (including new upstream services), AVD detected (2 resources)
+   Verified: All upstream service scripts work with ResourceIdDictionary parameter
+
+5. PII Leak Regression Test
+   Command: grep -c "<sub-id>|<email>|<username>" across all output files
+   Result: PASS - Zero matches in inventory JSON, metrics JSON, consumption CSV
+   Verified: Transcript log excluded from zip
+
+Parameter Combinations Tested
+-----------------------------
+-Obfuscate                    Obfuscation enabled
+-Obfuscate -SkipMetrics       Metrics skipped, valid empty JSON produced
+-Obfuscate -SkipConsumption   Consumption skipped, valid CSV with headers produced
+-Obfuscate -AutoAuth          Session reuse without re-login
+-Obfuscate -Debug             Debug output verified (no JSON dump from Get-AzComputeResourceSku)
+-Obfuscate (full run)         Metrics + Consumption + Obfuscation all working together
+
+Pester Unit Tests
+-----------------
+File: Tests/Obfuscation.Tests.ps1
+Tests: 18
+Passed: 18
+Failed: 0
+Skipped: 0
+
+Test Cases:
+  1. Transcript excluded from zip
+  2. No email addresses in any output file
+  3. No Unix home directory paths in output
+  4. No Windows user directory paths in output
+  5. No raw Azure subscription ID patterns in inventory JSON
+  6. No raw Azure subscription ID patterns in consumption CSV
+  7. No raw Azure subscription ID patterns in metrics JSON
+  8. All inventory resource IDs match obfuscation pattern
+  9. All inventory resource names match obfuscation pattern
+ 10. All inventory subscription fields match obfuscation pattern
+ 11. All inventory resource group fields match obfuscation pattern
+ 12. All metric IDs and names match obfuscation pattern
+ 13. All consumption ResourceIds match obfuscation pattern
+ 14. All consumption InstanceData ResourceUri match obfuscation pattern
+ 15. All IDs use prod_/nonprod_ prefix (no plain GUIDs)
+ 16. Metrics JSON has valid structure with Metrics array
+ 17. Consumption CSV has correct header columns
+ 18. No Azure tenant ID patterns in output files
+
+Resources Discovered During Testing
+------------------------------------
+- Virtual Machines: 3 (2x Windows 11 client, 1x Ubuntu)
+- AVD Host Pools: 2 (personal type)
+- Log Analytics Workspaces: 1
+- Public IPs: 2
+- Storage Accounts: 2
+- VM Disks: 3
+- Consumption Records: 299 (31-day lookback)
+- Metrics: 8 (VM CPU, VM memory, storage capacity)

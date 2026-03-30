@@ -121,6 +121,16 @@ You might get more than one authentication request due to different collector pr
 ./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
 ```
 
+**Generate obfuscated report (mask sensitive data before sharing):**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+```
+
+**Obfuscated report with session reuse (skip re-authentication):**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012" -Obfuscate -AutoAuth
+```
+
 ## Output Files
 
 Upon completion, the script generates reports in the `InventoryReports` folder:
@@ -140,6 +150,23 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 1. **Locate the output:** Check the `InventoryReports` folder
 2. **Rename the ZIP file:** Include your company name (e.g., `CompanyName_ResourcesReport_2024-01-15.zip`)
 3. **Deliver to AWS team:** Send the renamed ZIP file for analysis
+
+### Obfuscation Mode
+
+When using `-Obfuscate`, the following data is masked in all output files:
+
+| Field | Masked Format | Example |
+|-------|--------------|---------|
+| Resource ID | `prod_<guid>` or `nonprod_<guid>` | `prod_a1b2c3d4-e5f6-7890-abcd-ef1234567890` |
+| Resource Name | `prod_<guid>` or `nonprod_<guid>` | `prod_f9e8d7c6-b5a4-3210-fedc-ba0987654321` |
+| Subscription | `prod_<guid>` or `nonprod_<guid>` | `prod_11223344-5566-7788-99aa-bbccddeeff00` |
+| Resource Group | `prod_<guid>` or `nonprod_<guid>` | `prod_aabbccdd-eeff-0011-2233-445566778899` |
+
+Resources with names matching dev/test/qa patterns get a `nonprod_` prefix; all others get `prod_`. This preserves environment classification without exposing real names.
+
+**What is preserved:** Location, SKU, VM size, OS type, disk type, metrics values, consumption quantities, and all technical configuration data needed for analysis.
+
+**What is excluded:** When obfuscation is enabled, the transcript log (which contains raw console output with emails and paths) is excluded from the ZIP file. It remains on disk locally for debugging.
 
 ### Manual Compression (If Needed)
 
@@ -164,7 +191,16 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
+| `CollectionDays` | Integer | Number of days for consumption lookback | 31 | `-CollectionDays 14` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
+
+### Privacy & Obfuscation Parameters
+
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|----------|
+| `Obfuscate` | Switch | Replace resource IDs, names, subscriptions, and resource groups with masked values. Reports can be safely shared externally without exposing sensitive Azure environment details. | `-Obfuscate` |
+| `AutoAuth` | Switch | Reuse existing Azure CLI session instead of forcing re-authentication. Useful for repeated runs during testing. | `-AutoAuth` |
 
 ### Authentication Parameters
 

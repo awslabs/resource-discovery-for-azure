@@ -28,7 +28,7 @@ if ($Task -eq 'Processing')
                 'OS'                                    = $data.osType;
                 'Incremental'                           = $data.incremental;
                 'CreatedTime'                           = $timecreated;
-                'SourceResourceId'                      = $data.creationData.sourceResourceId;
+                'SourceResourceId'                      = if (![string]::IsNullOrEmpty($data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary) { $ResourceIdDictionary[$data.creationData.sourceResourceId] } else { $data.creationData.sourceResourceId };
             }
 
             $tmp += $obj

@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'         = $disk.RESOURCEGROUP;
                 'Name'                  = $disk.NAME;
                 'State'                 = $data.diskState;
-                'AssociatedResource'    = $disk.MANAGEDBY.split('/')[8];
+                'AssociatedResource'    = if (![string]::IsNullOrEmpty($disk.MANAGEDBY) -and $null -ne $ResourceIdDictionary) { $ResourceIdDictionary[$disk.MANAGEDBY] } else { if(![string]::IsNullOrEmpty($disk.MANAGEDBY)){ $disk.MANAGEDBY.split('/')[8] } else { $null } };
                 'Location'              = $disk.LOCATION;
                 'SKU'                   = $SKU.Name;
                 'Tier'                  = $data.Tier;

@@ -15,6 +15,11 @@ if ($Task -eq 'Processing')
             $DBServer = [string]$1.id.split("/")[8]
 
             if (![string]::IsNullOrEmpty($data.elasticPoolId)) { $PoolId = $data.elasticPoolId.Split("/")[10] } else { $PoolId = "None"}
+
+            if ($null -ne $ResourceIdDictionary) {
+                $DBServer = if ($resourceIdDictionary.ContainsKey($1.id)) { $resourceIdDictionary[$1.id] } else { $DBServer }
+                $PoolId = if ($PoolId -ne "None" -and ![string]::IsNullOrEmpty($data.elasticPoolId) -and $resourceIdDictionary.ContainsKey($data.elasticPoolId)) { $resourceIdDictionary[$data.elasticPoolId] } else { $PoolId }
+            }
             if ($1.kind.Contains("vcore")) { $SqlType = "vcore" } else { $SqlType = "dtu"}
             if ($1.kind.Contains("serverless")) { $ComputeTier = "Serverless" } else { $ComputeTier = "Provisioned"}
 

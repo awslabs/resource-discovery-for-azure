@@ -79,7 +79,7 @@ If ($Task -eq 'Processing')
                 'Size'                          = $data.hardwareProfile.vmSize;
                 'CPU'                           = $cpus;
                 'Memory'                        = $ram;
-                'Set'                           = $data.virtualMachineScaleSet.id;
+                'Set'                           = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id) -and $null -ne $ResourceIdDictionary) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { $data.virtualMachineScaleSet.id };
                 'ImageReference'                = $data.storageProfile.imageReference.publisher;
                 'ImageVersion'                  = $data.storageProfile.imageReference.exactVersion;
                 'ImageSku'                      = $data.storageProfile.imageReference.sku;

@@ -29,7 +29,7 @@ if ($Task -eq 'Processing')
                     'Version'                  = $data.publicIPAddressVersion;
                     'ProvisioningState'        = $data.provisioningState;
                     'Use'                      = $Use;
-                    'AssociatedResource'       = $data.ipConfiguration.id.split('/')[8];
+                    'AssociatedResource'       = if ($null -ne $ResourceIdDictionary) { $ResourceIdDictionary[$data.ipConfiguration.id] } else { $data.ipConfiguration.id.split('/')[8] };
                     'AssociatedResourceType'   = $data.ipConfiguration.id.split('/')[7];
                 }
 

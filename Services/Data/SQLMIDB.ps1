@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;
-                'ManagedInstance'           = $1.id.split("/")[8];
+                'ManagedInstance'           = if ($null -ne $ResourceIdDictionary) { $ResourceIdDictionary[$1.id] } else { $1.id.split("/")[8] };
                 'Name'                      = $1.NAME;
                 'Collation'                 = $data.collation;
                 'CreationDate'              = $data.creationDate;

@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 'SkuCapacity'                   = $1.sku.capacity;
                 'SkuTier'                       = $1.sku.tier;
                 'SkuFamily'                     = $1.sku.family;
-                'InstancePoolName'              = $data.instancePoolId;
+                'InstancePoolName'              = if (![string]::IsNullOrEmpty($data.instancePoolId) -and $null -ne $ResourceIdDictionary) { $ResourceIdDictionary[$data.instancePoolId] } else { $data.instancePoolId };
                 'vCores'                        = $data.vCores;
                 'StorageGB'                     = $data.storageSizeInGB;
                 'StorageAccountType'            = $data.storageAccountType;

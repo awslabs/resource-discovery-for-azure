@@ -908,6 +908,36 @@ FinalizeOutputs
 
 Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
 
+if($Obfuscate.IsPresent)
+{
+    $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
+    
+    $dictionary = @{
+        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        ResourceIdMap = @{}
+        ResourceNameMap = @{}
+        SubscriptionMap = @{}
+        ResourceGroupMap = @{}
+    }
+
+    foreach ($key in $resourceIdDictionary.Keys) {
+        $dictionary.ResourceIdMap[$resourceIdDictionary[$key]] = $key
+    }
+    foreach ($key in $resourceNameDictionary.Keys) {
+        $dictionary.ResourceNameMap[$resourceNameDictionary[$key]] = $key
+    }
+    foreach ($key in $resourceSubscriptionDictionary.Keys) {
+        $dictionary.SubscriptionMap[$resourceSubscriptionDictionary[$key]] = $key
+    }
+    foreach ($key in $resourceResourceGroupDictionary.Keys) {
+        $dictionary.ResourceGroupMap[$resourceResourceGroupDictionary[$key]] = $key
+    }
+
+    $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
+    Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
+    Write-Log -Message ("IMPORTANT: Keep this file secure. It maps obfuscated IDs back to real resource names.") -Severity 'Warning'
+}
+
 if($EnableLogs.IsPresent)
 {
     $Global:Logging | ConvertTo-Json -depth 5 -compress | Out-File $Global:LogFile

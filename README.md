@@ -123,7 +123,12 @@ You might get more than one authentication request due to different collector pr
 
 **Generate obfuscated report (mask sensitive data before sharing):**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+./ResourceInventory.ps1 -ReportName "CompanyName" -ObfuscateData
+```
+
+**Obfuscated report with tags also stripped:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -ObfuscateData -ObfuscateTags
 ```
 
 ## Output Files
@@ -194,7 +199,8 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
-| `Obfuscate` | Switch | Replace resource IDs, names, subscriptions, and resource groups with masked values. Reports can be safely shared externally without exposing sensitive Azure environment details. | `-Obfuscate` |
+| `ObfuscateData` | Switch | Replace resource IDs, names, subscriptions, and resource groups with masked values. Reports can be safely shared externally without exposing sensitive Azure environment details. A reverse-lookup dictionary is saved locally. | `-ObfuscateData` |
+| `ObfuscateTags` | Switch | Used with `-ObfuscateData`. Strips resource tags from the output. Tags can contain sensitive data like resource IDs, cost centers, or internal project names. Without this flag, tags are preserved for analysis. | `-ObfuscateTags` |
 
 ### Authentication Parameters
 

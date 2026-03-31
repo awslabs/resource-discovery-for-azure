@@ -8,10 +8,9 @@ param ($TenantID,
         [switch]$SkipConsumption, 
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
-        [switch]$Obfuscate,
-        [switch]$AutoAuth,
+        [switch]$ObfuscateData,
+        [switch]$ObfuscateTags,
         $ConcurrencyLimit = 6,
-        $CollectionDays = 31,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
 
@@ -245,23 +244,20 @@ Function RunInventorySetup()
         Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
 
         # Check if already authenticated
-        if ($AutoAuth.IsPresent)
+        $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
+        if ($null -ne $existingAccount)
         {
-            $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
-            if ($null -ne $existingAccount)
-            {
-                Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+            Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
 
-                if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
-                {
-                    $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-                    if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
-                    return
-                }
-                else
-                {
-                    Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $existingAccount.tenantId, $TenantID) -Severity 'Warning'
-                }
+            if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
+            {
+                $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
+                return
+            }
+            else
+            {
+                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $existingAccount.tenantId, $TenantID) -Severity 'Warning'
             }
         }
     
@@ -513,7 +509,7 @@ Function RunInventorySetup()
     ResourceInventoryLoop
     ResourceInventoryAvd
 
-    if($Obfuscate.IsPresent)
+    if($ObfuscateData.IsPresent)
     {
         foreach ($resourceItem in $Global:Resources) 
         {
@@ -579,7 +575,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $resourceIdDictionary -ResourceNameDictionary $resourceNameDictionary -ResourceSubDictionary $resourceSubscriptionDictionary -ResourceGroupDictionary $resourceResourceGroupDictionary -Obfuscate $Obfuscate.IsPresent
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $resourceIdDictionary -ResourceNameDictionary $resourceNameDictionary -ResourceSubDictionary $resourceSubscriptionDictionary -ResourceGroupDictionary $resourceResourceGroupDictionary -Obfuscate $ObfuscateData.IsPresent
         }
     }
 
@@ -665,7 +661,7 @@ function ExecuteInventoryProcessing()
 
             $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics -ResourceIdDictionary $resourceIdDictionary
 
-            if($Obfuscate.IsPresent)
+            if($ObfuscateData.IsPresent)
             {
                 foreach ($resourceItem in $result) 
                 {
@@ -678,6 +674,11 @@ function ExecuteInventoryProcessing()
                     $resourceItem.Name = $obfuscatedName
                     $resourceItem.Subscription = $obfuscatedSubscription
                     $resourceItem.ResourceGroup = $obfuscatedResourceGroup
+
+                    if($ObfuscateTags.IsPresent -and $resourceItem.ContainsKey('Tags'))
+                    {
+                        $resourceItem.Tags = $null
+                    }
                 }
             }
 
@@ -820,11 +821,12 @@ function ExecuteInventoryProcessing()
                     
                     $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $additionalInfoInstance
 
-                    if($Obfuscate.IsPresent)
+                    if($ObfuscateData.IsPresent)
                     {
                         if (-not $resourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
                         {
-                            $obfuscatedID = "prod_" + [guid]::NewGuid().ToString()
+                            $prefix = if ($usageDataExport[$item].ResourceId -match "dev|test|qa|tst|development|non-prod|uat|nonprod") { "nonprod_" } else { "prod_" }
+                            $obfuscatedID = $prefix + [guid]::NewGuid().ToString()
                             $resourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
                             $usageDataExport[$item].ResourceId = $obfuscatedID
                             $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
@@ -908,7 +910,7 @@ FinalizeOutputs
 
 Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
 
-if($Obfuscate.IsPresent)
+if($ObfuscateData.IsPresent)
 {
     $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
     
@@ -935,7 +937,15 @@ if($Obfuscate.IsPresent)
 
     $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
     Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
-    Write-Log -Message ("IMPORTANT: Keep this file secure. It maps obfuscated IDs back to real resource names.") -Severity 'Warning'
+    Write-Log -Message ("") -Severity 'Info'
+    Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
+    Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
+    Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
+    Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
+    Write-Log -Message ("") -Severity 'Info'
+    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
+    Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
 }
 
 if($EnableLogs.IsPresent)
@@ -957,7 +967,7 @@ if($SkipConsumption.IsPresent -or !$consumptionCreated)
 
 $jsonWildCard = $DefaultPath + "*.json"
 
-if($Obfuscate.IsPresent)
+if($ObfuscateData.IsPresent)
 {
     $compressionOutput = @{
         Path = $Global:File, $Global:ConsumptionFileCsv, $jsonWildCard

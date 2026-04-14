@@ -483,3 +483,14 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+
+# Resource Discovery output
+.DS_Store
+ResourcesReport_*/
+ResourcesReport_*.zip
+report_output/
+report_v2/
+Tests/*.zip
+
+Transcript_Log_*
+ObfuscationDictionary_*

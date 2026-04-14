@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing') 
 {
@@ -18,6 +18,14 @@ If ($Task -eq 'Processing')
             $KeyVault = $data.keyVault.split('/')[8]
             $Insight = $data.applicationInsights.split('/')[8]
             $containerRegistry = $data.containerRegistry.split('/')[8]
+
+            # Obfuscate cross-reference names when dictionary is present
+            if ($null -ne $ResourceIdDictionary) {
+                $StorageAcc = if (![string]::IsNullOrEmpty($data.storageAccount) -and $ResourceIdDictionary.ContainsKey($data.storageAccount)) { $ResourceIdDictionary[$data.storageAccount] } else { 'obfuscated' }
+                $KeyVault = if (![string]::IsNullOrEmpty($data.keyVault) -and $ResourceIdDictionary.ContainsKey($data.keyVault)) { $ResourceIdDictionary[$data.keyVault] } else { 'obfuscated' }
+                $Insight = if (![string]::IsNullOrEmpty($data.applicationInsights) -and $ResourceIdDictionary.ContainsKey($data.applicationInsights)) { $ResourceIdDictionary[$data.applicationInsights] } else { 'obfuscated' }
+                $containerRegistry = if (![string]::IsNullOrEmpty($data.containerRegistry) -and $ResourceIdDictionary.ContainsKey($data.containerRegistry)) { $ResourceIdDictionary[$data.containerRegistry] } else { 'obfuscated' }
+            }
 
             $obj = @{
                 'ID'                        = $1.id;
@@ -44,9 +52,9 @@ If ($Task -eq 'Processing')
 }
 else 
 {
-    if ($SmaResources.AzureML) 
+    if ($SmaResources.MachineLearning) 
     {
-        $TableName = ('AzureMLTable_'+($SmaResources.AzureML.id | Select-Object -Unique).count)
+        $TableName = ('AzureMLTable_'+($SmaResources.MachineLearning.id | Select-Object -Unique).count)
         $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
 
         $condtxt = @()
@@ -66,7 +74,7 @@ else
         $Exc.Add('ApplicationInsight')
         $Exc.Add('CreatedTime')  
 
-        $ExcelVar = $SmaResources.AzureML
+        $ExcelVar = $SmaResources.MachineLearning
 
         $ExcelVar | 
         ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 

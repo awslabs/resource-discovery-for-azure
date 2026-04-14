@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 'SkuCapacity'                   = $1.sku.capacity;
                 'SkuTier'                       = $1.sku.tier;
                 'SkuFamily'                     = $1.sku.family;
-                'InstancePoolName'              = $data.instancePoolId;
+                'InstancePoolName'              = if (![string]::IsNullOrEmpty($data.instancePoolId) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.instancePoolId)) { $ResourceIdDictionary[$data.instancePoolId] } else { 'obfuscated' } } else { $data.instancePoolId };
                 'vCores'                        = $data.vCores;
                 'StorageGB'                     = $data.storageSizeInGB;
                 'StorageAccountType'            = $data.storageAccountType;
@@ -66,7 +66,6 @@ else
         $Exc.Add('StorageGB')
         $Exc.Add('StorageAccountType')
         $Exc.Add('State')
-        $Exc.Add('vCores')
         $Exc.Add('ManagedInstanceCreateMode')
         $Exc.Add('ZoneRedundant')
         $Exc.Add('Databases')

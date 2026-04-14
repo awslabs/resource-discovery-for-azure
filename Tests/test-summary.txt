@@ -1,0 +1,125 @@
+Test Summary - Obfuscation Feature
+===================================
+Environment: macOS (PowerShell 7.6.0, Az CLI 2.83.0) + Azure Cloud Shell (PowerShell 7.5.4)
+Date: 2026-04-14
+Branch: feature/obfuscate-v2
+
+Test Runs Performed
+-------------------
+
+1. No obfuscation (backward compatibility)
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -SkipConsumption -SkipMetrics -Debug -DeviceLogin
+   Result: PASS - 57 services processed, zero errors
+   Verified: Script runs identically to upstream when obfuscation is off
+
+2. Obfuscate (tags stripped, all fields masked)
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -SkipConsumption -SkipMetrics -Obfuscate -Debug
+   Result: PASS - All IDs/Names/Subscriptions/ResourceGroups obfuscated, tags null
+
+3. Full run with metrics + consumption + obfuscation
+   Command: pwsh ./ResourceInventory.ps1 -SubscriptionID <sub-id> -Obfuscate -Debug
+   Result: PASS - 57 services, 8 metrics, 306 consumption records, all obfuscated
+   Verified: Consumption CSV 144KB with obfuscated ResourceIds
+
+4. Session auto-detect with PowerShell Az context
+   Result: PASS - Detects existing az CLI session, sets PowerShell Az context if needed
+   Verified: Consumption data flows correctly (was broken before Az context fix)
+
+Parameter Combinations Tested
+-----------------------------
+-Obfuscate                          Data obfuscated, tags stripped
+-Obfuscate -SkipMetrics             Valid empty metrics JSON produced
+-Obfuscate -SkipConsumption         Valid CSV with headers produced
+-Obfuscate (full run)               Metrics + Consumption + Obfuscation all working
+No flags (backward compat)          Script runs identically to upstream
+
+Pester Unit Tests
+-----------------
+Total: 73 tests across 5 files
+Passed: 73
+Failed: 0
+Skipped: 0
+
+Test Files:
+  Obfuscation.Tests.ps1 (44 tests)
+    - Transcript exclusion from zip
+    - Email address detection (regex scan across all output files)
+    - Home directory path detection (Unix + Windows)
+    - Azure subscription ID pattern detection (inventory, consumption, metrics)
+    - All inventory fields obfuscated (ID, Name, Subscription, ResourceGroup)
+    - Metrics obfuscation (ID, Name, Subscription, ResourceGroup)
+    - Consumption ResourceId + InstanceData ResourceUri obfuscation
+    - Consumption ReservationId obfuscation
+    - Consumption ReservationOrderId obfuscation
+    - Prefix consistency (prod_/nonprod_, no plain GUIDs)
+    - Valid metrics JSON structure
+    - Valid consumption CSV headers
+    - Tenant ID pattern detection
+    - Cross-reference fields (21 tests): ServerFarmId, Set, Tags, CreatedBy,
+      DatabaseServer, ElasticPoolID, InstancePoolName, ManagedInstance,
+      AssociatedResource (PublicIP + VMDisk), SourceResourceId, HostId, Hostname,
+      Hostname differs from HostId, MachineLearning StorageAccount/KeyVault,
+      Databricks ManagedResourceGroup/StorageAccount, Purview FriendlyName,
+      Frontdoor WebApplicationFirewall
+    - Dictionary file exclusion from zip
+
+  ReferentialIntegrity.Tests.ps1 (7 tests)
+    - VM disk AssociatedResource matches VM ID
+    - AVD HostId matches VM ID
+    - All obfuscated IDs are unique
+    - Consumption ResourceIds match inventory IDs
+    - ResourceGroup grouping consistency
+    - Subscription determinism (same real sub = same obfuscated value)
+    - ResourceGroup determinism (same real RG = same obfuscated value)
+
+  DictionaryValidation.Tests.ps1 (6 tests)
+    - Dictionary has all four maps (ResourceId, ResourceName, Subscription, ResourceGroup)
+    - Dictionary has GeneratedAt timestamp
+    - Dictionary keys are obfuscated values
+    - Dictionary values are real Azure resource IDs
+    - Every inventory ID has a dictionary entry
+    - No double-obfuscation (real IDs don't look obfuscated)
+
+  OutputCompleteness.Tests.ps1 (12 tests)
+    - Zip contains xlsx, json, csv files
+    - No unexpected file types in zip
+    - No dictionary or transcript in zip
+    - Inventory has Version field
+    - At least one resource type has data
+    - Every resource has ID, Name, Location
+    - Metrics files have Metrics array
+    - Metric entries have Service, Metric, MetricValue
+    - Non-sensitive fields preserved (Location, Size, OS, SKU not obfuscated)
+
+  ProdNonprodPrefix.Tests.ps1 (4 tests)
+    - Same prefix across all fields per resource
+    - Valid prefix format (prod_ or nonprod_ + GUID)
+    - No bare underscore prefixes
+    - Consumption ResourceIds have correct prefix
+
+Fixes Validated in This Run
+---------------------------
+P0 - Deterministic subscription/RG obfuscation (same real value = same obfuscated value)
+P0 - AVD Hostname distinct from HostId
+P0 - SQLMIDB ManagedInstance extracts parent MI ID (not database ID)
+P0 - SQLDB DatabaseServer extracts parent server ID (not database ID)
+P1 - MachineLearning cross-refs obfuscated (StorageAccount, KeyVault, AppInsight, ContainerRegistry)
+P1 - Databricks cross-refs obfuscated (ManagedResourceGroup, StorageAccount)
+P1 - AvSet VirtualMachines cross-ref obfuscated
+P1 - Frontdoor WebApplicationFirewall cross-ref obfuscated
+P1 - Purview FriendlyName obfuscated
+P2 - Word-boundary regex prevents false prefix matches (e.g. 'contest' no longer matches 'test')
+P2 - Short naming convention prefix detection (d-/t-/s- patterns)
+P2 - Fallback to 'obfuscated' when cross-ref resource not in dictionary (SQLMIDB, SQLDB, AvSet)
+P2 - ReservationId and ReservationOrderId obfuscated in consumption output
+
+Resources Discovered During Testing
+------------------------------------
+- Virtual Machines: 3 (2x Windows 11 client, 1x Ubuntu)
+- AVD Host Pools: 2 (personal type, with session hosts)
+- Log Analytics Workspaces: 1
+- Public IPs: 2
+- Storage Accounts: 2
+- VM Disks: 3
+- Consumption Records: 306 (31-day lookback)
+- Metrics: 8 (VM CPU, VM memory, storage capacity)

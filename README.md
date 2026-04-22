@@ -96,7 +96,7 @@ You might get more than one authentication request due to different collector pr
 
 2. **Run the script with your organization name:**
    ```powershell
-   ./ResourceInventory.ps1 -ReportName "YourCompanyName" -ConcurrencyLimit 4
+   ./ResourceInventory.ps1 -ReportName "YourCompanyName" -ConcurrencyLimit 6
    ```
 
 ### Advanced Usage Examples

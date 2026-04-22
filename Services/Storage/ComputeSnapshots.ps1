@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task, $File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task, $File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -28,7 +28,7 @@ if ($Task -eq 'Processing')
                 'OS'                                    = $data.osType;
                 'Incremental'                           = $data.incremental;
                 'CreatedTime'                           = $timecreated;
-                'SourceResourceId'                      = $data.creationData.sourceResourceId;
+                'SourceResourceId'                      = if (![string]::IsNullOrEmpty($data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.creationData.sourceResourceId)) { $ResourceIdDictionary[$data.creationData.sourceResourceId] } else { 'obfuscated' } } else { $data.creationData.sourceResourceId };
             }
 
             $tmp += $obj

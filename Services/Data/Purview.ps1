@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -24,8 +24,8 @@ if ($Task -eq 'Processing')
                 'Location'            = $1.LOCATION;
                 'SKU'                 = $data.sku.name;
                 'Capacity'            = $data.sku.capacity;
-                'FriendlyName'        = $data.friendlyName;
-                'CreatedBy'           = $data.createdBy;      
+                'FriendlyName'        = if ($null -ne $ResourceIdDictionary) { 'obfuscated' } else { $data.friendlyName };
+                'CreatedBy'           = if ($null -ne $ResourceIdDictionary) { 'obfuscated' } else { $data.createdBy };      
                 'CreatedTime'         = $timecreated;                      
             }
 

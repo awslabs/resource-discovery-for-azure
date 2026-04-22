@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -20,8 +20,6 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'     = $1.RESOURCEGROUP;
                 'Name'              = $1.NAME;
                 'Location'          = $1.LOCATION;
-                'Currency'          = $Cost.Currency;
-                'DailyCost'         = '{0:C}' -f $Cost.Cost;
                 'SKU'               = $data.sku.name;
                 'RetentionDays'     = $data.retentionInDays;
                 'DailyQuotaGB'      = [decimal]$data.workspaceCapping.dailyQuotaGb;

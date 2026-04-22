@@ -121,6 +121,11 @@ You might get more than one authentication request due to different collector pr
 ./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
 ```
 
+**Generate obfuscated report (mask sensitive data before sharing):**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+```
+
 ## Output Files
 
 Upon completion, the script generates reports in the `InventoryReports` folder:
@@ -140,6 +145,33 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 1. **Locate the output:** Check the `InventoryReports` folder
 2. **Rename the ZIP file:** Include your company name (e.g., `CompanyName_ResourcesReport_2024-01-15.zip`)
 3. **Deliver to AWS team:** Send the renamed ZIP file for analysis
+
+### Obfuscation Mode
+
+When using `-Obfuscate`, the following data is masked in all output files:
+
+| Category | What is masked | Masked Format |
+|----------|---------------|---------------|
+| Resource ID | All resource IDs across inventory, metrics, and consumption | `prod_<guid>` or `nonprod_<guid>` |
+| Resource Name | All resource names | `prod_<guid>` or `nonprod_<guid>` |
+| Subscription | Subscription names (deterministic — same real sub always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
+| Resource Group | Resource group names (deterministic — same real RG always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
+| Tags | All resource tags stripped | `null` |
+| Cross-references | Fields that reference other resources by name or ID (e.g. DatabaseServer, ManagedInstance, HostId, StorageAccount, KeyVault, WAF policy) | Dictionary lookup or `obfuscated` |
+| Consumption IDs | ReservationId and ReservationOrderId in billing data | `obfuscated` |
+| User identity | Fields containing user emails or identity (e.g. Purview CreatedBy) | `obfuscated` |
+
+Resources with names matching dev/test/qa patterns (including short prefixes like `d-`, `t-`, `s-`) get a `nonprod_` prefix; all others get `prod_`. This preserves environment classification without exposing real names.
+
+**Deterministic mapping:** The same real subscription or resource group always maps to the same obfuscated value within a run. This means pivot tables, grouping, and cross-referencing all work correctly in the obfuscated output.
+
+**Reverse-lookup dictionary:** A local `ObfuscationDictionary_*.json` file maps every obfuscated value back to the real resource. This file stays with the customer and is never included in the ZIP. When the receiving party asks about a specific obfuscated name, the customer looks it up in the dictionary and responds.
+
+**What is preserved:** Location, SKU, VM size, OS type, disk type, metrics values, consumption quantities, and all technical configuration data needed for analysis.
+
+**What is excluded from the ZIP:**
+- Transcript log (contains raw console output with emails, subscription IDs, file paths)
+- Obfuscation dictionary (contains the real-to-obfuscated mapping)
 
 ### Manual Compression (If Needed)
 
@@ -164,7 +196,15 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
+| `CollectionDays` | Integer | Number of days for consumption lookback | 31 | `-CollectionDays 14` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
+
+### Privacy & Obfuscation Parameters
+
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|----------|
+| `Obfuscate` | Switch | Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. A reverse-lookup dictionary is saved locally. Reports can be safely shared externally without exposing sensitive Azure environment details. | `-Obfuscate` |
 
 ### Authentication Parameters
 

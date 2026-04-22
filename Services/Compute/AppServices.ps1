@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
@@ -26,7 +26,7 @@ If ($Task -eq 'Processing')
                 'AvailabilityState'             = $data.availabilityState;
                 'SiteProperties'                = $data.siteProperties;          
                 'ContainerSize'                 = $data.containerSize;
-                'ServerFarmId'                  = $data.serverFarmId;
+                'ServerFarmId'                  = if (![string]::IsNullOrEmpty($data.serverFarmId) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.serverFarmId)) { $ResourceIdDictionary[$data.serverFarmId] } else { 'obfuscated' } } else { $data.serverFarmId };
             }
 
             $tmp += $obj

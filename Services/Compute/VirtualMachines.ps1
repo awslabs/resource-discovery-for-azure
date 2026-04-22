@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
@@ -9,11 +9,20 @@ If ($Task -eq 'Processing')
 
     foreach($location in ($virtualMachines | Select-Object -ExpandProperty location -Unique))
     {
-        foreach ($vmsize in ( az vm list-sizes -l $location | ConvertFrom-Json))
+        $savedDebugPref = $DebugPreference
+        $DebugPreference = 'SilentlyContinue'
+        $skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        $DebugPreference = $savedDebugPref
+
+        foreach ($vmsize in $skus)
         {
-            $vmsizemap[$vmsize.name] = @{
-                CPU = $vmSize.numberOfCores
-                RAM = [math]::Max($vmSize.memoryInMB / 1024, 0) 
+            $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
+            $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
+            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name)) {
+                $vmsizemap[$vmsize.Name] = @{
+                    CPU = [int]$cpuCap
+                    RAM = [math]::Max([decimal]$memCap, 0)
+                }
             }
         }
     }
@@ -59,7 +68,7 @@ If ($Task -eq 'Processing')
 
             $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }    
 
-            $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+            $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){@($vm.tags.psobject.properties | Select-Object Name, Value) } else{ $null }
 
             $obj = @{
                 'ID'                            = $vm.id;
@@ -71,7 +80,7 @@ If ($Task -eq 'Processing')
                 'Size'                          = $data.hardwareProfile.vmSize;
                 'CPU'                           = $cpus;
                 'Memory'                        = $ram;
-                'Set'                           = $data.virtualMachineScaleSet.id;
+                'Set'                           = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id };
                 'ImageReference'                = $data.storageProfile.imageReference.publisher;
                 'ImageVersion'                  = $data.storageProfile.imageReference.exactVersion;
                 'ImageSku'                      = $data.storageProfile.imageReference.sku;

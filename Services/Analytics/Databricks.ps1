@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if($Task -eq 'Processing') 
 {
@@ -24,8 +24,8 @@ if($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'PricingTier'               = $sku.name;
-                'ManagedResourceGroup'      = $data.managedResourceGroupId.split('/')[4];
-                'StorageAccount'            = $data.parameters.storageAccountName.value;
+                'ManagedResourceGroup'      = if ($null -ne $ResourceIdDictionary) { 'obfuscated' } else { $data.managedResourceGroupId.split('/')[4] };
+                'StorageAccount'            = if ($null -ne $ResourceIdDictionary) { 'obfuscated' } else { $data.parameters.storageAccountName.value };
                 'StorageAccountSKU'         = $data.parameters.storageAccountSkuName.value;
                 'CreatedTime'               = $timecreated;
             }

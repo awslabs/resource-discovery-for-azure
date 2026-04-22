@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -15,7 +15,7 @@ if ($Task -eq 'Processing')
             
             foreach ($vmid in $data.virtualMachines.id) 
             {
-                $vmIds = $vmid.split('/')[8]
+                $vmIds = if ($null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($vmid)) { $ResourceIdDictionary[$vmid] } else { 'obfuscated' } } else { $vmid.split('/')[8] }
                 
                 $obj = @{
                     'ID'               = $1.id;

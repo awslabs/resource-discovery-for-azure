@@ -1,4 +1,4 @@
-param($Subscriptions, $Resources, $Task ,$File, $Metrics, $TableStyle, $ConcurrencyLimit, $FilePath)
+param($Subscriptions, $Resources, $Task ,$File, $Metrics, $TableStyle, $ConcurrencyLimit, $FilePath, $ResourceIdDictionary, $ResourceNameDictionary, $ResourceSubscriptionDictionary, $ResourceResourceGroupDictionary, $Obfuscate)
 
 if ($Task -eq 'Processing')
 {
@@ -365,6 +365,34 @@ if ($Task -eq 'Processing')
             } -ThrottleLimit $ConcurrencyLimit
 
             $defs.Clear()
+
+            if($Obfuscate)
+            {
+                foreach ($metric in $tmp.Metrics) 
+                {
+                    $origMetricID = $metric.ID
+                    if ($ResourceIdDictionary.ContainsKey($origMetricID)) {
+                        $metric.Name = $ResourceNameDictionary[$origMetricID]
+                        $metric.Subscription = $ResourceSubscriptionDictionary[$origMetricID]
+                        $metric.ResourceGroup = $ResourceResourceGroupDictionary[$origMetricID]
+                        $metric.ID = $ResourceIdDictionary[$origMetricID]
+                    } else {
+                        $prefix = if ($origMetricID -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $origMetricID -match '(^|/|-)([dts])-') { "nonprod_" } else { "prod_" }
+                        $obfId = $prefix + [guid]::NewGuid().ToString()
+                        $obfName = $prefix + [guid]::NewGuid().ToString()
+                        $obfSub = $prefix + [guid]::NewGuid().ToString()
+                        $obfRG = $prefix + [guid]::NewGuid().ToString()
+                        $ResourceIdDictionary[$origMetricID] = $obfId
+                        $ResourceNameDictionary[$origMetricID] = $obfName
+                        $ResourceSubscriptionDictionary[$origMetricID] = $obfSub
+                        $ResourceResourceGroupDictionary[$origMetricID] = $obfRG
+                        $metric.ID = $obfId
+                        $metric.Name = $obfName
+                        $metric.Subscription = $obfSub
+                        $metric.ResourceGroup = $obfRG
+                    }
+                }
+            }
 
             $outputPath = $FilePath + "_" + $rangeIdx + ".json"
             $tmp | ConvertTo-Json -depth 5 -compress | Out-File $outputPath -Encoding utf8

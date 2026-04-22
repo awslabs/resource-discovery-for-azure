@@ -8,6 +8,7 @@ param ($TenantID,
         [switch]$SkipConsumption, 
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
+        [switch]$Obfuscate,
         $ConcurrencyLimit = 6,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
@@ -17,7 +18,7 @@ if ($Debug.IsPresent) {$DebugPreference = 'Continue'}
 
 if ($Debug.IsPresent) {$ErrorActionPreference = "Continue" }Else {$ErrorActionPreference = "silentlycontinue" }
 
-Write-Debug ('Debbuging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
+Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
 
 Function Write-Log([string]$Message, [string]$Severity)
 {
@@ -65,6 +66,17 @@ function Variables
     $Global:Logging | Add-Member -MemberType NoteProperty -Name Logs -Value NotSet
     $Global:Logging.Logs = [System.Collections.Generic.List[object]]::new()
 
+    $Global:ResourceIdDictionary = $null
+    $Global:ResourceNameDictionary = $null
+    $Global:ResourceSubscriptionDictionary = $null
+    $Global:ResourceResourceGroupDictionary = $null
+
+    if ($Obfuscate.IsPresent) {
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    }
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
@@ -94,13 +106,14 @@ Function RunInventorySetup()
 
         $azCliVersion = az --version
 
-        Write-Log -Message ('CLI Version: {0}' -f $azCliVersion[0]) -Severity 'Success'
-    
         if ($null -eq $azCliVersion) 
         {
-            Read-Host "Azure CLI Not Found. Please install to and run the script again, press <Enter> to exit." -ForegroundColor Red
+            Write-Log -Message ("Azure CLI Not Found. Please install and run the script again.") -Severity 'Error'
+            Read-Host "Press <Enter> to exit"
             Exit
         }
+
+        Write-Log -Message ('CLI Version: {0}' -f $azCliVersion[0]) -Severity 'Success'
 
         Write-Log -Message ('Verifying Azure CLI Extension...') -Severity 'Info'
 
@@ -109,7 +122,7 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Current Resource-Graph Extension Version: {0}' -f $azCliExtension.Version) -Severity 'Success'
         
-        $azCliExtensionVersion = $azcliExt | Where-Object {$_.name -eq 'resource-graph'}
+        $azCliExtensionVersion = $azCliExtension | Where-Object {$_.name -eq 'resource-graph'}
     
         if (!$azCliExtensionVersion) 
         {
@@ -120,21 +133,22 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $VarAzPs = Get-InstalledModule -Name Az -ErrorAction silentlycontinue
+        $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
 
-        Write-Log -Message ('Azure PowerShell Module Version: {0}.{1}.{2}' -f [string]$VarAzPs.Version.Major,  [string]$VarAzPs.Version.Minor, [string]$VarAzPs.Version.Build) -Severity 'Success'
-
-        IF($null -eq $VarAzPs)
+        if ($null -ne $VarAzPs)
         {
-            Write-Log -Message ('Trying to install Azure PowerShell Module...') -Severity 'Warning'
-            Install-Module -Name Az -Repository PSGallery -Force
+            Write-Log -Message ('Azure PowerShell Module Version: {0}' -f $VarAzPs.Version) -Severity 'Success'
         }
-
-        $VarAzPs = Get-InstalledModule -Name Az -ErrorAction silentlycontinue
+        else
+        {
+            Write-Log -Message ('Azure PowerShell Module not found. Trying to install...') -Severity 'Warning'
+            Install-Module -Name Az -Repository PSGallery -Force -Scope CurrentUser
+            $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
 
         if ($null -eq $VarAzPs) 
         {
-            Write-Log -Message ('Admininstrator rights required to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
+            Write-Log -Message ('Failed to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
             Read-Host ''
             Exit
         }
@@ -142,21 +156,22 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Checking ImportExcel Module...') -Severity 'Info'
     
-        $VarExcel = Get-InstalledModule -Name ImportExcel -ErrorAction silentlycontinue
+        $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
     
-        Write-Log -Message ('ImportExcel Module Version: {0}.{1}.{2}' -f [string]$VarExcel.Version.Major,  [string]$VarExcel.Version.Minor, [string]$VarExcel.Version.Build) -Severity 'Success'
-    
-        if ($null -eq $VarExcel) 
+        if ($null -ne $VarExcel)
         {
-            Write-Log -Message ('Trying to install ImportExcel Module...') -Severity 'Warning'
-            Install-Module -Name ImportExcel -Force
+            Write-Log -Message ('ImportExcel Module Version: {0}' -f $VarExcel.Version) -Severity 'Success'
+        }
+        else
+        {
+            Write-Log -Message ('ImportExcel Module not found. Trying to install...') -Severity 'Warning'
+            Install-Module -Name ImportExcel -Force -Scope CurrentUser
+            $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
         }
     
-        $VarExcel = Get-InstalledModule -Name ImportExcel -ErrorAction silentlycontinue
-    
         if ($null -eq $VarExcel) 
         {
-            Write-Log -Message ('Admininstrator rights required to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
+            Write-Log -Message ('Failed to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
             Read-Host ''
             Exit
         }
@@ -233,6 +248,39 @@ Function RunInventorySetup()
     
         $CurrentCloudEnvName = $CloudEnv | Where-Object {$_.isActive -eq 'True'}
         Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+
+        # Check if already authenticated
+        $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
+        if ($null -ne $existingAccount)
+        {
+            Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+
+            if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
+            {
+                # Ensure PowerShell Az context is also set
+                $azContext = Get-AzContext -ErrorAction SilentlyContinue
+                if ($null -eq $azContext -or $azContext.Subscription.Id -ne $existingAccount.id)
+                {
+                    Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
+                    if($DeviceLogin.IsPresent)
+                    {
+                        Connect-AzAccount -UseDeviceAuthentication -Tenant $existingAccount.tenantId | Out-Null
+                    }
+                    else
+                    {
+                        Connect-AzAccount -Tenant $existingAccount.tenantId | Out-Null
+                    }
+                }
+
+                $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
+                return
+            }
+            else
+            {
+                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $existingAccount.tenantId, $TenantID) -Severity 'Warning'
+            }
+        }
     
         if (!$TenantID) 
         {
@@ -253,7 +301,7 @@ Function RunInventorySetup()
             }
             else 
             {
-                Write-Log -Message ('Using device login') -Severity 'Info'
+                Write-Log -Message ('Using browser login') -Severity 'Info'
                 az login --only-show-errors | Out-Null
                 Connect-AzAccount | Out-Null
             }
@@ -481,6 +529,46 @@ Function RunInventorySetup()
     GetSubscriptionsData
     ResourceInventoryLoop
     ResourceInventoryAvd
+
+    if($Obfuscate.IsPresent)
+    {
+        # Lookup tables keyed by real subscription name / real RG name so the same
+        # real value always maps to the same obfuscated value across resources.
+        $subLookup = @{}
+        $rgLookup  = @{}
+
+        foreach ($resourceItem in $Global:Resources) 
+        {
+            $isNonProd = $resourceItem.name -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $resourceItem.name -match '(^|-)([dts])-'
+            $prefix = if ($isNonProd) { "nonprod_" } else { "prod_" }
+
+            $obfuscatedID   = $prefix + [guid]::NewGuid().ToString()
+            $obfuscatedName = $prefix + [guid]::NewGuid().ToString()
+
+            # Deterministic subscription obfuscation: derive prefix from sub name, not resource name
+            $realSub = ($Global:Subscriptions | Where-Object { $_.id -eq $resourceItem.subscriptionId }).Name
+            if ([string]::IsNullOrEmpty($realSub)) { $realSub = $resourceItem.subscriptionId }
+            if (-not $subLookup.ContainsKey($realSub)) {
+                $subPrefix = if ($realSub -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realSub -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
+                $subLookup[$realSub] = $subPrefix + [guid]::NewGuid().ToString()
+            }
+            $obfuscatedSubscription = $subLookup[$realSub]
+
+            # Deterministic RG obfuscation: derive prefix from RG name, not resource name
+            $realRG = $resourceItem.resourceGroup
+            if ([string]::IsNullOrEmpty($realRG)) { $realRG = '__none__' }
+            if (-not $rgLookup.ContainsKey($realRG)) {
+                $rgPrefix = if ($realRG -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realRG -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
+                $rgLookup[$realRG] = $rgPrefix + [guid]::NewGuid().ToString()
+            }
+            $obfuscatedResourceGroup = $rgLookup[$realRG]
+
+            $ResourceIdDictionary.Add($resourceItem.ID, $obfuscatedID)
+            $ResourceNameDictionary.Add($resourceItem.ID, $obfuscatedName)
+            $ResourceSubscriptionDictionary.Add($resourceItem.ID, $obfuscatedSubscription)
+            $ResourceResourceGroupDictionary.Add($resourceItem.ID, $obfuscatedResourceGroup)
+        }
+    }
 }
 
 function ExecuteInventoryProcessing()
@@ -522,7 +610,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubscriptionDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent
         }
     }
 
@@ -606,7 +694,56 @@ function ExecuteInventoryProcessing()
             
             Write-Log -Message ("Service Processing: {0}" -f $ModName) -Severity 'Success'
 
-            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics
+            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+
+            if($Obfuscate.IsPresent)
+            {
+                foreach ($resourceItem in $result) 
+                {
+                    $origID = $resourceItem.ID
+
+                    if ($ResourceIdDictionary.ContainsKey($origID)) {
+                        $resourceItem.ID = $ResourceIdDictionary[$origID]
+                    } else {
+                        $prefix = if ($origID -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $origID -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
+                        $fallback = $prefix + [guid]::NewGuid().ToString()
+                        $ResourceIdDictionary.Add($origID, $fallback)
+                        $resourceItem.ID = $fallback
+                    }
+
+                    $prefix = $resourceItem.ID.Split('_')[0] + '_'
+
+                    if ($ResourceNameDictionary.ContainsKey($origID)) {
+                        $resourceItem.Name = $ResourceNameDictionary[$origID]
+                    } else {
+                        $fbName = $prefix + [guid]::NewGuid().ToString()
+                        $ResourceNameDictionary[$origID] = $fbName
+                        $resourceItem.Name = $fbName
+                    }
+
+                    if ($ResourceSubscriptionDictionary.ContainsKey($origID)) {
+                        $resourceItem.Subscription = $ResourceSubscriptionDictionary[$origID]
+                    } else {
+                        $fbSub = $prefix + [guid]::NewGuid().ToString()
+                        $ResourceSubscriptionDictionary[$origID] = $fbSub
+                        $resourceItem.Subscription = $fbSub
+                    }
+
+                    if ($ResourceResourceGroupDictionary.ContainsKey($origID)) {
+                        $resourceItem.ResourceGroup = $ResourceResourceGroupDictionary[$origID]
+                    } else {
+                        $fbRG = $prefix + [guid]::NewGuid().ToString()
+                        $ResourceResourceGroupDictionary[$origID] = $fbRG
+                        $resourceItem.ResourceGroup = $fbRG
+                    }
+
+                    if($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
+                    {
+                        $resourceItem.Tags = $null
+                    }
+                }
+            }
+
             $Global:SmaResources | Add-Member -MemberType NoteProperty -Name $ModName -Value NotSet
             $Global:SmaResources.$ModName = $result
 
@@ -640,7 +777,7 @@ function ExecuteInventoryProcessing()
             $c = [math]::Round($c)
             
             Write-Log -Message ("Running Services: $Service") -Severity 'Info'
-            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null
+            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
 
             $ReportCounter++
         }
@@ -746,6 +883,32 @@ function ExecuteInventoryProcessing()
                     
                     $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $additionalInfoInstance
 
+                    if($Obfuscate.IsPresent)
+                    {
+                        if (-not $ResourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
+                        {
+                            $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { "nonprod_" } else { "prod_" }
+                            $obfuscatedID = $prefix + [guid]::NewGuid().ToString()
+                            $ResourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
+                            $usageDataExport[$item].ResourceId = $obfuscatedID
+                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
+                        } 
+                        else 
+                        {
+                            $obfuscatedID = $ResourceIdDictionary[$usageDataExport[$item].ResourceId]
+                            $usageDataExport[$item].ResourceId = $obfuscatedID
+                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
+                        }
+
+                        # Obfuscate reservation identifiers (customer purchasing fingerprints)
+                        if (![string]::IsNullOrEmpty($usageDataExport[$item].ReservationId)) {
+                            $usageDataExport[$item].ReservationId = 'obfuscated'
+                        }
+                        if (![string]::IsNullOrEmpty($usageDataExport[$item].ReservationOrderId)) {
+                            $usageDataExport[$item].ReservationOrderId = 'obfuscated'
+                        }
+                    }
+
                     $usageDataExport[$item].InstanceData = $instanceObject | ConvertTo-Json -Compress
 
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
@@ -817,6 +980,44 @@ FinalizeOutputs
 
 Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
 
+if($Obfuscate.IsPresent)
+{
+    $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
+    
+    $dictionary = @{
+        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        ResourceIdMap = @{}
+        ResourceNameMap = @{}
+        SubscriptionMap = @{}
+        ResourceGroupMap = @{}
+    }
+
+    foreach ($key in $ResourceIdDictionary.Keys) {
+        $dictionary.ResourceIdMap[$ResourceIdDictionary[$key]] = $key
+    }
+    foreach ($key in $ResourceNameDictionary.Keys) {
+        $dictionary.ResourceNameMap[$ResourceNameDictionary[$key]] = $key
+    }
+    foreach ($key in $ResourceSubscriptionDictionary.Keys) {
+        $dictionary.SubscriptionMap[$ResourceSubscriptionDictionary[$key]] = $key
+    }
+    foreach ($key in $ResourceResourceGroupDictionary.Keys) {
+        $dictionary.ResourceGroupMap[$ResourceResourceGroupDictionary[$key]] = $key
+    }
+
+    $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
+    Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
+    Write-Log -Message ("") -Severity 'Info'
+    Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
+    Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
+    Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
+    Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
+    Write-Log -Message ("") -Severity 'Info'
+    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
+    Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
+}
+
 if($EnableLogs.IsPresent)
 {
     $Global:Logging | ConvertTo-Json -depth 5 -compress | Out-File $Global:LogFile
@@ -824,22 +1025,36 @@ if($EnableLogs.IsPresent)
 
 if($SkipMetrics.IsPresent)
 {
-    "Metrics Not Gathered" | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile 
+    @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
 }
 
 $consumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
 
 if($SkipConsumption.IsPresent -or !$consumptionCreated)
 {
-    Out-File $Global:ConsumptionFileCsv
+    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }
 
 $jsonWildCard = $DefaultPath + "*.json"
 
-$compressionOutput = @{
-    Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
-    CompressionLevel = 'Fastest'
-    DestinationPath = $Global:ZipOutputFile
+if($Obfuscate.IsPresent)
+{
+    # Exclude dictionary and transcript from zip - use specific json files only
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
+    $compressionOutput = @{
+        Path = @($Global:File, $Global:ConsumptionFileCsv) + $jsonFiles
+        CompressionLevel = 'Fastest'
+        DestinationPath = $Global:ZipOutputFile
+    }
+    Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
+}
+else
+{
+    $compressionOutput = @{
+        Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
+        CompressionLevel = 'Fastest'
+        DestinationPath = $Global:ZipOutputFile
+    }
 }
 
 try 

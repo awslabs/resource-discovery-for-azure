@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -29,7 +29,7 @@ if ($Task -eq 'Processing')
                     'Version'                  = $data.publicIPAddressVersion;
                     'ProvisioningState'        = $data.provisioningState;
                     'Use'                      = $Use;
-                    'AssociatedResource'       = $data.ipConfiguration.id.split('/')[8];
+                    'AssociatedResource'       = if ($null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.ipConfiguration.id)) { $ResourceIdDictionary[$data.ipConfiguration.id] } else { 'obfuscated' } } else { $data.ipConfiguration.id.split('/')[8] };
                     'AssociatedResourceType'   = $data.ipConfiguration.id.split('/')[7];
                 }
 

@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -30,6 +30,25 @@ if ($Task -eq 'Processing')
             {
                 $vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId}
 
+                # Resolve HostId and Hostname
+                $hostIdValue = $null
+                $hostnameValue = $null
+                if (![string]::IsNullOrEmpty($vmsessionhosts.Id)) {
+                    if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.ContainsKey($vmsessionhosts.Id)) {
+                        $hostIdValue = $ResourceIdDictionary[$vmsessionhosts.Id]
+                        # Deterministic hostname: derive from VM ID hash so same input = same output
+                        $hnPrefix = $hostIdValue.Split('_')[0]
+                        $sha = [System.Security.Cryptography.SHA256]::Create()
+                        try {
+                            $hnHash = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($vmsessionhosts.Id + '_hostname'))).Replace('-','').Substring(0,32).ToLower()
+                        } finally { $sha.Dispose() }
+                        $hostnameValue = $hnPrefix + '_' + $hnHash.Substring(0,8) + '-' + $hnHash.Substring(8,4) + '-' + $hnHash.Substring(12,4) + '-' + $hnHash.Substring(16,4) + '-' + $hnHash.Substring(20,12)
+                    } else {
+                        $hostIdValue = $vmsessionhosts.Id
+                        $hostnameValue = $vmsessionhosts.Name
+                    }
+                }
+
                 $obj = @{
                     'ID'                 = $1.id;
                     'Subscription'       = $sub1.Name;
@@ -43,8 +62,8 @@ if ($Task -eq 'Processing')
                     'AVDAgentVersion'    = $2.properties.agentVersion;
                     'AllowNewSession'    = $2.properties.allowNewSession;
                     'UpdateStatus'       = $2.properties.updateState;
-                    'HostId'             = $vmsessionhosts.Id;
-                    'Hostname'           = $vmsessionhosts.name;
+                    'HostId'             = $hostIdValue;
+                    'Hostname'           = $hostnameValue;
                     'VMSize'             = $vmsessionhosts.properties.hardwareProfile.vmsize;
                     'OSType'             = $vmsessionhosts.properties.storageProfile.osdisk.ostype;
                     'VMDiskType'         = $vmsessionhosts.properties.storageProfile.osdisk.managedDisk.storageAccountType;

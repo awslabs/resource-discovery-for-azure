@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -12,7 +12,10 @@ if ($Task -eq 'Processing')
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            if([string]::IsNullOrEmpty($data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id)){$WAF = $false} else {$WAF = $data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id.split('/')[8]}
+            if([string]::IsNullOrEmpty($data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id)){$WAF = $false} else {
+                $wafId = $data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id
+                $WAF = if ($null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($wafId)) { $ResourceIdDictionary[$wafId] } else { 'obfuscated' } } else { $wafId.split('/')[8] }
+            }
             
             $obj = @{
                 'ID'                        = $1.id;

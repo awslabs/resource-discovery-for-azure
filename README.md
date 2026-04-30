@@ -138,6 +138,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).xlsx` | Consolidated Excel report |
+| `Transcript_Log(date).xlsx` | Transcript log of script activity during the run |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery

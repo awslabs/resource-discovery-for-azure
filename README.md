@@ -116,9 +116,14 @@ You might get more than one authentication request due to different collector pr
 ./ResourceInventory.ps1 -ReportName "CompanyName" -ConcurrencyLimit 8
 ```
 
-**Skip consumption metrics:**
+**Skip consumption:**
 ```powershell
 ./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
+```
+
+**Skip metrics:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -SkipMetrics
 ```
 
 **Generate obfuscated report (mask sensitive data before sharing):**

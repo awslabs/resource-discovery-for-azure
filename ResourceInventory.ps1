@@ -9,7 +9,9 @@ param ($TenantID,
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
         [switch]$Obfuscate,
+        [switch]$AutoAuth,
         $ConcurrencyLimit = 6,
+        $CollectionDays = 31,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
 
@@ -66,17 +68,11 @@ function Variables
     $Global:Logging | Add-Member -MemberType NoteProperty -Name Logs -Value NotSet
     $Global:Logging.Logs = [System.Collections.Generic.List[object]]::new()
 
-    $Global:ResourceIdDictionary = $null
-    $Global:ResourceNameDictionary = $null
-    $Global:ResourceSubscriptionDictionary = $null
-    $Global:ResourceResourceGroupDictionary = $null
+    $Global:resourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $Global:resourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $Global:resourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $Global:resourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
 
-    if ($Obfuscate.IsPresent) {
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-    }
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
@@ -184,7 +180,7 @@ Function RunInventorySetup()
         $Global:PlatformOS = 'PowerShell Desktop'
         $cloudShell = try{Get-CloudDrive}catch{}
 
-        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmss")
+        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmm")
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
         
         if ($cloudShell) 
@@ -220,7 +216,7 @@ Function RunInventorySetup()
         {
             try 
             {
-                $OutputDirectory = Join-Path (Resolve-Path $OutputDirectory -ErrorAction Stop) ('/' -or '\')
+                $OutputDirectory = (Resolve-Path $OutputDirectory -ErrorAction Stop).Path + [IO.Path]::DirectorySeparatorChar
             }
             catch 
             {
@@ -250,35 +246,23 @@ Function RunInventorySetup()
         Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
 
         # Check if already authenticated
-        $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
-        if ($null -ne $existingAccount)
+        if ($AutoAuth.IsPresent)
         {
-            Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
-
-            if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
+            $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
+            if ($null -ne $existingAccount)
             {
-                # Ensure PowerShell Az context is also set
-                $azContext = Get-AzContext -ErrorAction SilentlyContinue
-                if ($null -eq $azContext -or $azContext.Subscription.Id -ne $existingAccount.id)
+                Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+
+                if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
                 {
-                    Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
-                    if($DeviceLogin.IsPresent)
-                    {
-                        Connect-AzAccount -UseDeviceAuthentication -Tenant $existingAccount.tenantId | Out-Null
-                    }
-                    else
-                    {
-                        Connect-AzAccount -Tenant $existingAccount.tenantId | Out-Null
-                    }
+                    $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+                    if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
+                    return
                 }
-
-                $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
-                return
-            }
-            else
-            {
-                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $existingAccount.tenantId, $TenantID) -Severity 'Warning'
+                else
+                {
+                    Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $existingAccount.tenantId, $TenantID) -Severity 'Warning'
+                }
             }
         }
     
@@ -367,13 +351,10 @@ Function RunInventorySetup()
                     Connect-AzAccount -Tenant $TenantID | Out-Null
                 }
             }
-            elseif ($Appid -and $Secret -and $tenantid)
+            elseif ($Appid -and $Secret -and $tenantid) 
             {
                 Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
                 az login --service-principal -u $appid -p $secret -t $TenantID | Out-Null
-                $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
-                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
-                Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
             }
             else
             {
@@ -421,7 +402,7 @@ Function RunInventorySetup()
 
             $Subscri = $SubscriptionID
 
-            $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and strlen(properties.definition.actions) < 123000 | summarize count()"
+            $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
             $EnvSizeNum = $EnvSize.data.'count_'
 
@@ -432,7 +413,7 @@ Function RunInventorySetup()
                 $Limit = 0
 
                 while ($Looper -lt $Loop) {
-                    $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+                    $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
                     $Resource = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
                     $Global:Resources += $Resource.data
@@ -446,7 +427,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
-            $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | summarize count()"
+            $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = az graph query -q $GraphQuery  --output json --subscriptions $SubscriptionID --only-show-errors | ConvertFrom-Json
             $EnvSizeNum = $EnvSize.data.'count_'
 
@@ -457,7 +438,7 @@ Function RunInventorySetup()
                 $Limit = 0
 
                 while ($Looper -lt $Loop) {
-                    $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+                    $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
                     $Resource = (az graph query -q $GraphQuery --subscriptions $SubscriptionID --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
                     $Global:Resources += $Resource.data
@@ -466,10 +447,10 @@ Function RunInventorySetup()
                     $Limit = $Limit + 1000
                 }
             }
-        } 
+        }
         else 
         {
-            $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | summarize count()"
+            $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = az graph query -q  $GraphQuery --output json --only-show-errors | ConvertFrom-Json
             $EnvSizeCount = $EnvSize.Data.'count_'
             
@@ -484,7 +465,7 @@ Function RunInventorySetup()
             
                 while ($Looper -lt $Loop) 
                 {
-                    $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+                    $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
                     $Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
                     
                     $Global:Resources += $Resource.Data
@@ -494,33 +475,44 @@ Function RunInventorySetup()
                 }
             }
         }
-    }
-    
-    function ResourceInventoryAvd()
-    {    
-        $AVDSize = az graph query -q "desktopvirtualizationresources | summarize count()" --output json --only-show-errors | ConvertFrom-Json
-        $AVDSizeCount = $AVDSize.data.'count_'
-    
-        Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
-    
-        if ($AVDSizeCount -ge 1) 
+
+        if($Obfuscate.IsPresent)
         {
-            $Loop = $AVDSizeCount / 1000
-            $Loop = [math]::ceiling($Loop)
-            $Looper = 0
-            $Limit = 0
-    
-            while ($Looper -lt $Loop) 
+            foreach ($resourceItem in $Global:Resources) 
             {
-                $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
-    
-                $Global:Resources += $AVD.data
-                Start-Sleep 2
-                $Looper++
-                $Limit = $Limit + 1000
+                if ($resourceItem.name -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') 
+                {
+                    $prefix = 'nonprod_'
+                }
+                else
+                {
+                    $prefix = 'prod_'
+                }
+
+                $obfuscatedID = $prefix + [guid]::NewGuid().ToString()
+                $obfuscatedName = $prefix + [guid]::NewGuid().ToString()
+
+                $realSub = $resourceItem.subscriptionId
+                if (-not $Global:resourceSubscriptionDictionary.ContainsKey($realSub)) {
+                    $Global:resourceSubscriptionDictionary[$realSub] = $prefix + [guid]::NewGuid().ToString()
+                }
+                $obfuscatedSubscription = $Global:resourceSubscriptionDictionary[$realSub]
+
+                $realRg = $resourceItem.resourceGroup
+                if (-not $Global:resourceResourceGroupDictionary.ContainsKey($realRg)) {
+                    $Global:resourceResourceGroupDictionary[$realRg] = $prefix + [guid]::NewGuid().ToString()
+                }
+                $obfuscatedResourceGroup = $Global:resourceResourceGroupDictionary[$realRg]
+
+                if ($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
+                if ($resourceItem.ContainsKey('Tags')) { $resourceItem.Tags = $null }
+
+                $resourceIdDictionary.Add($resourceItem.ID, $obfuscatedID)
+                $resourceNameDictionary.Add($resourceItem.ID, $obfuscatedName)
+                $resourceSubscriptionDictionary.Add($resourceItem.ID, $obfuscatedSubscription)
+                $resourceResourceGroupDictionary.Add($resourceItem.ID, $obfuscatedResourceGroup)
             }
-        } 
+        }
     }
 
     CheckVersion
@@ -528,47 +520,7 @@ Function RunInventorySetup()
     CheckPowerShell
     GetSubscriptionsData
     ResourceInventoryLoop
-    ResourceInventoryAvd
-
-    if($Obfuscate.IsPresent)
-    {
-        # Lookup tables keyed by real subscription name / real RG name so the same
-        # real value always maps to the same obfuscated value across resources.
-        $subLookup = @{}
-        $rgLookup  = @{}
-
-        foreach ($resourceItem in $Global:Resources) 
-        {
-            $isNonProd = $resourceItem.name -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $resourceItem.name -match '(^|-)([dts])-'
-            $prefix = if ($isNonProd) { "nonprod_" } else { "prod_" }
-
-            $obfuscatedID   = $prefix + [guid]::NewGuid().ToString()
-            $obfuscatedName = $prefix + [guid]::NewGuid().ToString()
-
-            # Deterministic subscription obfuscation: derive prefix from sub name, not resource name
-            $realSub = ($Global:Subscriptions | Where-Object { $_.id -eq $resourceItem.subscriptionId }).Name
-            if ([string]::IsNullOrEmpty($realSub)) { $realSub = $resourceItem.subscriptionId }
-            if (-not $subLookup.ContainsKey($realSub)) {
-                $subPrefix = if ($realSub -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realSub -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                $subLookup[$realSub] = $subPrefix + [guid]::NewGuid().ToString()
-            }
-            $obfuscatedSubscription = $subLookup[$realSub]
-
-            # Deterministic RG obfuscation: derive prefix from RG name, not resource name
-            $realRG = $resourceItem.resourceGroup
-            if ([string]::IsNullOrEmpty($realRG)) { $realRG = '__none__' }
-            if (-not $rgLookup.ContainsKey($realRG)) {
-                $rgPrefix = if ($realRG -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realRG -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                $rgLookup[$realRG] = $rgPrefix + [guid]::NewGuid().ToString()
-            }
-            $obfuscatedResourceGroup = $rgLookup[$realRG]
-
-            $ResourceIdDictionary.Add($resourceItem.ID, $obfuscatedID)
-            $ResourceNameDictionary.Add($resourceItem.ID, $obfuscatedName)
-            $ResourceSubscriptionDictionary.Add($resourceItem.ID, $obfuscatedSubscription)
-            $ResourceResourceGroupDictionary.Add($resourceItem.ID, $obfuscatedResourceGroup)
-        }
-    }
+    #ResourceInventoryAvd
 }
 
 function ExecuteInventoryProcessing()
@@ -610,7 +562,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubscriptionDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $resourceIdDictionary -ResourceNameDictionary $resourceNameDictionary -ResourceSubDictionary $resourceSubscriptionDictionary -ResourceGroupDictionary $resourceResourceGroupDictionary -Obfuscate $Obfuscate.IsPresent
         }
     }
 
@@ -685,8 +637,7 @@ function ExecuteInventoryProcessing()
             $Modules = Get-ChildItem -Path ($PSScriptRoot +  '/Services/*.ps1') -Recurse
         }
 
-        $Resource = $Resources | Select-Object -First $Resources.count
-        #$Resource = ($Resource | ConvertTo-Json -Depth 50)
+        $Resource = $Resources
 
         foreach ($Module in $Modules) 
         {
@@ -694,53 +645,21 @@ function ExecuteInventoryProcessing()
             
             Write-Log -Message ("Service Processing: {0}" -f $ModName) -Severity 'Success'
 
-            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource  -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics -ResourceIdDictionary $resourceIdDictionary
 
             if($Obfuscate.IsPresent)
             {
                 foreach ($resourceItem in $result) 
                 {
-                    $origID = $resourceItem.ID
-
-                    if ($ResourceIdDictionary.ContainsKey($origID)) {
-                        $resourceItem.ID = $ResourceIdDictionary[$origID]
-                    } else {
-                        $prefix = if ($origID -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $origID -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                        $fallback = $prefix + [guid]::NewGuid().ToString()
-                        $ResourceIdDictionary.Add($origID, $fallback)
-                        $resourceItem.ID = $fallback
-                    }
-
-                    $prefix = $resourceItem.ID.Split('_')[0] + '_'
-
-                    if ($ResourceNameDictionary.ContainsKey($origID)) {
-                        $resourceItem.Name = $ResourceNameDictionary[$origID]
-                    } else {
-                        $fbName = $prefix + [guid]::NewGuid().ToString()
-                        $ResourceNameDictionary[$origID] = $fbName
-                        $resourceItem.Name = $fbName
-                    }
-
-                    if ($ResourceSubscriptionDictionary.ContainsKey($origID)) {
-                        $resourceItem.Subscription = $ResourceSubscriptionDictionary[$origID]
-                    } else {
-                        $fbSub = $prefix + [guid]::NewGuid().ToString()
-                        $ResourceSubscriptionDictionary[$origID] = $fbSub
-                        $resourceItem.Subscription = $fbSub
-                    }
-
-                    if ($ResourceResourceGroupDictionary.ContainsKey($origID)) {
-                        $resourceItem.ResourceGroup = $ResourceResourceGroupDictionary[$origID]
-                    } else {
-                        $fbRG = $prefix + [guid]::NewGuid().ToString()
-                        $ResourceResourceGroupDictionary[$origID] = $fbRG
-                        $resourceItem.ResourceGroup = $fbRG
-                    }
-
-                    if($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
-                    {
-                        $resourceItem.Tags = $null
-                    }
+                    $obfuscatedID = $resourceIdDictionary[$resourceItem.ID]
+                    $obfuscatedName = $resourceNameDictionary[$resourceItem.ID]
+                    $obfuscatedSubscription = $resourceSubscriptionDictionary[$resourceItem.ID]
+                    $obfuscatedResourceGroup = $resourceResourceGroupDictionary[$resourceItem.ID]
+                
+                    $resourceItem.ID = $obfuscatedID
+                    $resourceItem.Name = $obfuscatedName
+                    $resourceItem.Subscription = $obfuscatedSubscription
+                    $resourceItem.ResourceGroup = $obfuscatedResourceGroup
                 }
             }
 
@@ -777,7 +696,7 @@ function ExecuteInventoryProcessing()
             $c = [math]::Round($c)
             
             Write-Log -Message ("Running Services: $Service") -Severity 'Info'
-            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $resourceIdDictionary
 
             $ReportCounter++
         }
@@ -791,7 +710,7 @@ function ExecuteInventoryProcessing()
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
     }
 
-    function GetResorceConsumption()
+    function GetResourceConsumption()
     {
         $DebugPreference = "SilentlyContinue"
         
@@ -799,7 +718,10 @@ function ExecuteInventoryProcessing()
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US"; 
         [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
 
-        $reportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
+        # Adjust the number of days to factor in -1 on End Time
+        $ConsumptionCollectionDays = $CollectionDays - 1
+        
+        $reportedStartTime = (Get-Date).AddDays(-$ConsumptionCollectionDays).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $reportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
 
         foreach($sub in $Global:Subscriptions)
@@ -863,13 +785,18 @@ function ExecuteInventoryProcessing()
                     $usageDataExport[$item].ResourceId = $instanceInfo.'Microsoft.Resources'.resourceUri
                     $usageDataExport[$item].ResourceLocation = $instanceInfo.'Microsoft.Resources'.location
                     $usageDataExport[$item].ConsumptionMeter = $instanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter
-                    $usageDataExport[$item].ReservationId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationId
-                    $usageDataExport[$item].ReservationOrderId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationOrderId
+                    if ($Obfuscate) {
+                        $usageDataExport[$item].ReservationId = 'obfuscated'
+                        $usageDataExport[$item].ReservationOrderId = 'obfuscated'
+                    } else {
+                        $usageDataExport[$item].ReservationId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationId
+                        $usageDataExport[$item].ReservationOrderId = $instanceInfo.'Microsoft.Resources'.additionalInfo.ReservationOrderId
+                    }
                     
 
                     $instanceObject = [PSCustomObject]@{}
 
-                    $additionalInfoInstance = [PSCustomObject]@{
+                    $resources = [PSCustomObject]@{
                         ResourceUri = $instanceInfo.'Microsoft.Resources'.resourceUri
                         Location = $instanceInfo.'Microsoft.Resources'.location
                         additionalInfo = [PSCustomObject]@{
@@ -881,15 +808,14 @@ function ExecuteInventoryProcessing()
                         }
                     }
                     
-                    $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $additionalInfoInstance
+                    $instanceObject | Add-Member -MemberType NoteProperty -Name "Microsoft.Resources" -Value $resources
 
                     if($Obfuscate.IsPresent)
                     {
-                        if (-not $ResourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
+                        if (-not $resourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
                         {
-                            $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { "nonprod_" } else { "prod_" }
-                            $obfuscatedID = $prefix + [guid]::NewGuid().ToString()
-                            $ResourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
+                            $obfuscatedID = "prod_" + [guid]::NewGuid().ToString()
+                            $resourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
                             $usageDataExport[$item].ResourceId = $obfuscatedID
                             $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
                         } 
@@ -899,24 +825,14 @@ function ExecuteInventoryProcessing()
                             $usageDataExport[$item].ResourceId = $obfuscatedID
                             $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
                         }
-
-                        # Obfuscate reservation identifiers (customer purchasing fingerprints)
-                        if (![string]::IsNullOrEmpty($usageDataExport[$item].ReservationId)) {
-                            $usageDataExport[$item].ReservationId = 'obfuscated'
-                        }
-                        if (![string]::IsNullOrEmpty($usageDataExport[$item].ReservationOrderId)) {
-                            $usageDataExport[$item].ReservationOrderId = 'obfuscated'
-                        }
                     }
 
                     $usageDataExport[$item].InstanceData = $instanceObject | ConvertTo-Json -Compress
-
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
                 }
 
-                #$newUsageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
-
-                $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId |
+                  Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
             } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
         }
@@ -932,8 +848,7 @@ function ExecuteInventoryProcessing()
 
     if(!$SkipConsumption.IsPresent)
     {
-       GetResorceConsumption
-       #ProcessResourceConsumption
+       GetResourceConsumption
     }
 }
 
@@ -980,44 +895,6 @@ FinalizeOutputs
 
 Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
 
-if($Obfuscate.IsPresent)
-{
-    $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
-    
-    $dictionary = @{
-        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        ResourceIdMap = @{}
-        ResourceNameMap = @{}
-        SubscriptionMap = @{}
-        ResourceGroupMap = @{}
-    }
-
-    foreach ($key in $ResourceIdDictionary.Keys) {
-        $dictionary.ResourceIdMap[$ResourceIdDictionary[$key]] = $key
-    }
-    foreach ($key in $ResourceNameDictionary.Keys) {
-        $dictionary.ResourceNameMap[$ResourceNameDictionary[$key]] = $key
-    }
-    foreach ($key in $ResourceSubscriptionDictionary.Keys) {
-        $dictionary.SubscriptionMap[$ResourceSubscriptionDictionary[$key]] = $key
-    }
-    foreach ($key in $ResourceResourceGroupDictionary.Keys) {
-        $dictionary.ResourceGroupMap[$ResourceResourceGroupDictionary[$key]] = $key
-    }
-
-    $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
-    Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
-    Write-Log -Message ("") -Severity 'Info'
-    Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
-    Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
-    Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
-    Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
-    Write-Log -Message ("") -Severity 'Info'
-    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
-    Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
-    Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
-}
-
 if($EnableLogs.IsPresent)
 {
     $Global:Logging | ConvertTo-Json -depth 5 -compress | Out-File $Global:LogFile
@@ -1039,10 +916,8 @@ $jsonWildCard = $DefaultPath + "*.json"
 
 if($Obfuscate.IsPresent)
 {
-    # Exclude dictionary and transcript from zip - use specific json files only
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
-        Path = @($Global:File, $Global:ConsumptionFileCsv) + $jsonFiles
+        Path = $Global:File, $Global:ConsumptionFileCsv, $jsonWildCard
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }

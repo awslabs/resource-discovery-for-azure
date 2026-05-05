@@ -59,7 +59,6 @@ if ($Task -eq 'Processing')
                 'ID'                            = $1.id;
                 'Subscription'                  = $sub1.Name;
                 'ResourceGroup'                 = $1.RESOURCEGROUP;
-                'AKS'                           = $Related;
                 'Name'                          = $1.NAME;
                 'Location'                      = $1.LOCATION;
                 'SKUTier'                       = $1.sku.tier;
@@ -95,7 +94,6 @@ else
         $Exc = New-Object System.Collections.Generic.List[System.Object]
         $Exc.Add('Subscription')
         $Exc.Add('ResourceGroup')
-        $Exc.Add('AKS')
         $Exc.Add('Name')
         $Exc.Add('Location')
         $Exc.Add('SKUTier')

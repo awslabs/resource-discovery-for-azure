@@ -68,7 +68,9 @@ If ($Task -eq 'Processing')
 
             $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }    
 
-            $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){@($vm.tags.psobject.properties | Select-Object Name, Value) } else{ $null }
+            $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+
+            $obfuscatedId = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { $data.virtualMachineScaleSet.id } } else { $null }
 
             $obj = @{
                 'ID'                            = $vm.id;
@@ -80,7 +82,7 @@ If ($Task -eq 'Processing')
                 'Size'                          = $data.hardwareProfile.vmSize;
                 'CPU'                           = $cpus;
                 'Memory'                        = $ram;
-                'Set'                           = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id };
+                'Set'                           = $obfuscatedId;
                 'ImageReference'                = $data.storageProfile.imageReference.publisher;
                 'ImageVersion'                  = $data.storageProfile.imageReference.exactVersion;
                 'ImageSku'                      = $data.storageProfile.imageReference.sku;
@@ -94,7 +96,6 @@ If ($Task -eq 'Processing')
                 'PowerState'                    = $powerState;
                 'Zones'                         = $vm.zones.count;
                 'CreatedTime'                   = $timecreated;
-                'Tags'                          = $tags;
             }
 
             $tmp += $obj
@@ -112,7 +113,6 @@ else
             Select-Object -ExpandProperty ID -Unique |
             Measure-Object |
             Select-Object -ExpandProperty Count)
-
         $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0' -VerticalAlignment Center
 
         $Exc = New-Object System.Collections.Generic.List[System.Object]
@@ -137,7 +137,7 @@ else
         $Exc.Add('AvailabilitySet')
         $Exc.Add('CreatedTime')     
 
-         # Filter: only include VMs that are not SQLVMs
+        # Filter: only include VMs that are not SQLVMs
         $ExcelVar = $SmaResources.VirtualMachines | Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' }
                     
         $ExcelVar | 

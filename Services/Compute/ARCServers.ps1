@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                     'OsName'               = $data.osName;
                     'OsVersion'            = $data.osVersion;
                     'OsSku'                = $data.osSku;
-                    'DomainName'           = $data.domainName;
+                    'DomainName'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.domainName };
                 }
                 
                 $tmp += $obj

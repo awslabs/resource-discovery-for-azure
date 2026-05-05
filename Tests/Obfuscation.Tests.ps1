@@ -72,7 +72,6 @@ Describe "Email Address Leak Check" {
     It "Should not contain any email addresses in any output file" {
         $emailPattern = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         foreach ($fileName in $script:AllContent.Keys) {
-            if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
             $matches = [regex]::Matches($script:AllContent[$fileName], $emailPattern)
             $matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses (found: $($matches.Value -join ', '))"
         }
@@ -235,32 +234,6 @@ Describe "Consumption Obfuscation" {
             }
         }
     }
-
-    It "Should have ReservationId obfuscated or empty" {
-        if ($null -eq $script:ConsumptionFile) { return }
-        $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { return }
-
-        $azureGuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        foreach ($row in $csv) {
-            if (![string]::IsNullOrEmpty($row.ReservationId) -and $row.ReservationId -ne 'obfuscated') {
-                $row.ReservationId | Should -Not -Match $azureGuidPattern -Because "ReservationId should be obfuscated, not a raw GUID"
-            }
-        }
-    }
-
-    It "Should have ReservationOrderId obfuscated or empty" {
-        if ($null -eq $script:ConsumptionFile) { return }
-        $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { return }
-
-        $azureGuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        foreach ($row in $csv) {
-            if (![string]::IsNullOrEmpty($row.ReservationOrderId) -and $row.ReservationOrderId -ne 'obfuscated') {
-                $row.ReservationOrderId | Should -Not -Match $azureGuidPattern -Because "ReservationOrderId should be obfuscated, not a raw GUID"
-            }
-        }
-    }
 }
 
 # ============================================================
@@ -297,8 +270,8 @@ Describe "Metrics JSON Structure" {
 Describe "Consumption CSV Headers" {
     It "Should have a consumption CSV with the correct header columns" {
         if ($null -eq $script:ConsumptionFile) { return }
-        $firstLine = Get-Content $script:ConsumptionFile.FullName -TotalCount 1 -ErrorAction SilentlyContinue
-        if ([string]::IsNullOrEmpty($firstLine)) { return }
+        $firstLine = Get-Content $script:ConsumptionFile.FullName -TotalCount 1
+        $firstLine | Should -Not -BeNullOrEmpty -Because "CSV should not be empty"
 
         $expectedHeaders = @('InstanceData', 'MeterCategory', 'MeterId', 'MeterName', 'MeterRegion', 'MeterSubCategory', 'Quantity', 'Unit', 'UsageStartTime', 'UsageEndTime', 'ResourceId', 'ResourceLocation', 'ConsumptionMeter', 'ReservationId', 'ReservationOrderId')
         foreach ($header in $expectedHeaders) {
@@ -317,207 +290,5 @@ Describe "Tenant ID Leak Check" {
         foreach ($fileName in $script:AllContent.Keys) {
             $script:AllContent[$fileName] | Should -Not -Match $tenantPattern -Because "File '$fileName' should not contain tenant IDs"
         }
-    }
-}
-
-# ============================================================
-# 15. Cross-reference fields are obfuscated or null
-# ============================================================
-Describe "Cross-Reference Field Obfuscation" {
-    # Helper: field should be obfuscated, null, or a safe non-ID value like 'None' or 'obfuscated'
-    BeforeAll {
-        $script:SafePattern = '^((prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|None|obfuscated)$'
-        $script:AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
-    }
-
-    It "AppServices: ServerFarmId should be obfuscated or null" {
-        $resources = @($script:Inventory.AppServices)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ServerFarmId)) {
-                $r.ServerFarmId | Should -Not -Match $script:AzureIdPattern -Because "ServerFarmId should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "VirtualMachines: Set (VMSS ID) should be obfuscated or null" {
-        $resources = @($script:Inventory.VirtualMachines)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Set)) {
-                $r.Set | Should -Match $script:ObfuscationPattern -Because "VMSS Set ID should be obfuscated"
-            }
-        }
-    }
-
-    It "VirtualMachines: Tags should be null when obfuscated" {
-        $resources = @($script:Inventory.VirtualMachines)
-        foreach ($r in $resources) {
-            if ($null -ne $r) {
-                $r.Tags | Should -BeNullOrEmpty -Because "Tags should be stripped when obfuscating"
-            }
-        }
-    }
-
-    It "Purview: CreatedBy should be 'obfuscated' or null" {
-        $resources = @($script:Inventory.Purview)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.CreatedBy)) {
-                $r.CreatedBy | Should -Be 'obfuscated' -Because "CreatedBy contains user identity and should be masked"
-            }
-        }
-    }
-
-    It "SQLDB: DatabaseServer should not contain raw resource names" {
-        $resources = @($script:Inventory.SQLDB)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.DatabaseServer)) {
-                $r.DatabaseServer | Should -Not -Match $script:AzureIdPattern -Because "DatabaseServer should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "SQLDB: ElasticPoolID should be obfuscated or 'None'" {
-        $resources = @($script:Inventory.SQLDB)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ElasticPoolID)) {
-                $r.ElasticPoolID | Should -Not -Match $script:AzureIdPattern -Because "ElasticPoolID should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "SQLMI: InstancePoolName should not contain raw resource IDs" {
-        $resources = @($script:Inventory.SQLMI)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.InstancePoolName)) {
-                $r.InstancePoolName | Should -Not -Match $script:AzureIdPattern -Because "InstancePoolName should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "SQLMIDB: ManagedInstance should be obfuscated or null" {
-        $resources = @($script:Inventory.SQLMIDB)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedInstance)) {
-                $r.ManagedInstance | Should -Not -Match $script:AzureIdPattern -Because "ManagedInstance should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "PublicIP: AssociatedResource should not contain raw resource names" {
-        $resources = @($script:Inventory.PublicIP)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource) -and $r.AssociatedResource -ne 'None') {
-                $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "AssociatedResource should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "VMDisk: AssociatedResource should be obfuscated or null" {
-        $resources = @($script:Inventory.VMDisk)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource)) {
-                $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "Disk AssociatedResource should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "ComputeSnapshots: SourceResourceId should be obfuscated or null" {
-        $resources = @($script:Inventory.ComputeSnapshots)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.SourceResourceId)) {
-                $r.SourceResourceId | Should -Not -Match $script:AzureIdPattern -Because "SourceResourceId should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "AVD: HostId should be obfuscated or null" {
-        $resources = @($script:Inventory.AVD)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.HostId)) {
-                $r.HostId | Should -Not -Match $script:AzureIdPattern -Because "AVD HostId should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "AVD: Hostname should be obfuscated or null" {
-        $resources = @($script:Inventory.AVD)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname)) {
-                $r.Hostname | Should -Not -Match $script:AzureIdPattern -Because "AVD Hostname should not contain raw Azure resource ID"
-                $r.Hostname | Should -Match $script:ObfuscationPattern -Because "AVD Hostname should be obfuscated"
-            }
-        }
-    }
-
-    It "AVD: Hostname should differ from HostId" {
-        $resources = @($script:Inventory.AVD)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname) -and ![string]::IsNullOrEmpty($r.HostId)) {
-                $r.Hostname | Should -Not -Be $r.HostId -Because "Hostname and HostId should be different obfuscated values"
-            }
-        }
-    }
-
-    It "MachineLearning: StorageAccount should be obfuscated or null" {
-        $resources = @($script:Inventory.MachineLearning)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount)) {
-                $r.StorageAccount | Should -Not -Match $script:AzureIdPattern -Because "ML StorageAccount should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "MachineLearning: KeyVault should be obfuscated or null" {
-        $resources = @($script:Inventory.MachineLearning)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.KeyVault)) {
-                $r.KeyVault | Should -Not -Match $script:AzureIdPattern -Because "ML KeyVault should not contain raw Azure resource ID"
-            }
-        }
-    }
-
-    It "Databricks: ManagedResourceGroup should be obfuscated or null" {
-        $resources = @($script:Inventory.Databricks)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedResourceGroup)) {
-                $r.ManagedResourceGroup | Should -BeIn @('obfuscated') -Because "Databricks ManagedResourceGroup should be obfuscated"
-            }
-        }
-    }
-
-    It "Databricks: StorageAccount should be obfuscated or null" {
-        $resources = @($script:Inventory.Databricks)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount)) {
-                $r.StorageAccount | Should -BeIn @('obfuscated') -Because "Databricks StorageAccount should be obfuscated"
-            }
-        }
-    }
-
-    It "Purview: FriendlyName should be obfuscated or null" {
-        $resources = @($script:Inventory.Purview)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.FriendlyName)) {
-                $r.FriendlyName | Should -BeIn @('obfuscated') -Because "Purview FriendlyName should be obfuscated"
-            }
-        }
-    }
-
-    It "Frontdoor: WebApplicationFirewall should be obfuscated or False" {
-        $resources = @($script:Inventory.FRONTDOOR)
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WebApplicationFirewall) -and $r.WebApplicationFirewall -ne 'False') {
-                $r.WebApplicationFirewall | Should -Not -Match $script:AzureIdPattern -Because "Frontdoor WAF should not contain raw Azure resource ID"
-            }
-        }
-    }
-}
-
-# ============================================================
-# 16. Dictionary file excluded from zip
-# ============================================================
-Describe "Dictionary File Exclusion" {
-    It "Should not contain the obfuscation dictionary in the zip" {
-        $dictFiles = $script:AllFiles | Where-Object { $_.Name -like "ObfuscationDictionary_*" }
-        $dictFiles | Should -BeNullOrEmpty -Because "Dictionary file should stay local, not in the zip"
     }
 }

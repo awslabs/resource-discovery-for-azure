@@ -23,12 +23,12 @@ if ($Task -eq 'Processing')
                     'Location'            = $1.LOCATION;
                     'Sku'                 = $data.Sku;
                     'InstanceOSType'      = $data.osType;
-                    'ContainerName'       = $2.name;
+                    'ContainerName'       = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $2.name };
                     'ContainerState'      = $2.properties.instanceView.currentState.state;
-                    'ContainerImage'      = [string]$2.properties.image;
+                    'ContainerImage'      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$2.properties.image };
                     'RestartCount'        = $2.properties.instanceView.restartCount;
                     'StartTime'           = $2.properties.instanceView.currentState.startTime;
-                    'Command'             = [string]$2.properties.command;
+                    'Command'             = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $null } else { [string]$2.properties.command };
                     'RequestCPU'          = $2.properties.resources.requests.cpu;
                     'RequestMemoryGB'     = $2.properties.resources.requests.memoryInGB;
                 }

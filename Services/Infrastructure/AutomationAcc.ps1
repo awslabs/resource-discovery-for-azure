@@ -29,16 +29,16 @@ if ($Task -eq 'Processing')
                         'ID'                            = $1.id;
                         'Subscription'                  = $sub1.Name;
                         'ResourceGroup'                 = $0.RESOURCEGROUP;
-                        'AutomationAccountName'         = $0.NAME;
+                        'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $0.NAME };
                         'AutomationAccountState'        = $0.properties.State;
                         'AutomationAccountSKU'          = $0.properties.sku.name;
                         'AutomationAccountCreatedTime'  = $timecreated;   
                         'Location'                      = $0.LOCATION;
-                        'RunbookName'                   = $1.Name;
+                        'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $1.Name };
                         'LastModifiedTime'              = ([datetime]$data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
                         'RunbookState'                  = $data.state;
                         'RunbookType'                   = $data.runbookType;
-                        'RunbookDescription'            = $data.description;
+                        'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $null } else { $data.description };
                     }
 
                     $tmp += $obj
@@ -50,7 +50,7 @@ if ($Task -eq 'Processing')
                     'ID'                            = $1.id;
                     'Subscription'                  = $sub1.name;
                     'ResourceGroup'                 = $0.RESOURCEGROUP;
-                    'AutomationAccountName'         = $0.NAME;
+                    'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $0.NAME };
                     'AutomationAccountState'        = $0.properties.State;
                     'AutomationAccountSKU'          = $0.properties.sku.name;
                     'AutomationAccountCreatedTime'  = $timecreated;   

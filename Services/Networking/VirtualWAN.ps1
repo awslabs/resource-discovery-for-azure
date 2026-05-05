@@ -29,10 +29,10 @@ if ($Task -eq 'Processing')
                             'ResourceGroup'                 = $1.RESOURCEGROUP;
                             'Name'                          = $1.NAME;
                             'Location'                      = $1.LOCATION;
-                            'HUBName'                       = [string]$2.name;
+                            'HUBName'                       = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$2.name };
                             'HUBLocation'                   = [string]$2.location;
                             'DeviceVendor'                  = [string]$3.properties.deviceProperties.deviceVendor;
-                            'LinkProviderName'              = [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkProviderName;
+                            'LinkProviderName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkProviderName };
                             'LinkSpeedMbps'                 = [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkSpeedInMbps;
                         }
 

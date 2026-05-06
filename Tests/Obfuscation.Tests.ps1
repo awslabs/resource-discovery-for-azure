@@ -292,3 +292,54 @@ Describe "Tenant ID Leak Check" {
         }
     }
 }
+
+# ============================================================
+# NON-OBFUSCATED MODE SAFETY NET
+# This test catches guard pattern bugs where obfuscation
+# logic fires even when -Obfuscate is not set.
+# ============================================================
+Describe "Non-Obfuscated Mode Safety" {
+    BeforeAll {
+        $script:NonObfZip = $env:TEST_NOOBF_ZIP_PATH
+        if ([string]::IsNullOrEmpty($script:NonObfZip)) {
+            Set-ItResult -Skipped -Because "Set \$env:TEST_NOOBF_ZIP_PATH to a non-obfuscated report zip to run this test"
+        }
+        if ($script:NonObfZip -and (Test-Path $script:NonObfZip)) {
+            $script:NoObfExtract = Join-Path ([System.IO.Path]::GetTempPath()) "NoObfTest_$([guid]::NewGuid().ToString().Substring(0,8))"
+            New-Item -ItemType Directory -Path $script:NoObfExtract -Force | Out-Null
+            Expand-Archive -Path $script:NonObfZip -DestinationPath $script:NoObfExtract -Force
+            $script:NoObfContent = @{}
+            Get-ChildItem -Path $script:NoObfExtract -File | ForEach-Object {
+                $script:NoObfContent[$_.Name] = Get-Content $_.FullName -Raw
+            }
+        }
+    }
+
+    AfterAll {
+        if ($script:NoObfExtract -and (Test-Path $script:NoObfExtract)) {
+            Remove-Item -Path $script:NoObfExtract -Recurse -Force
+        }
+    }
+
+    It "Should not contain 'obfuscated' in any output file when run without -Obfuscate" {
+        if (-not $script:NoObfContent) {
+            Set-ItResult -Skipped -Because "No non-obfuscated zip provided"
+            return
+        }
+        foreach ($file in $script:NoObfContent.Keys) {
+            if ($file -like "Transcript_*") { continue }
+            $script:NoObfContent[$file] | Should -Not -Match 'obfuscated' -Because "File '$file' should contain real data, not obfuscated placeholders"
+        }
+    }
+
+    It "Should not contain obfuscation GUID patterns in non-obfuscated output" {
+        if (-not $script:NoObfContent) {
+            Set-ItResult -Skipped -Because "No non-obfuscated zip provided"
+            return
+        }
+        $guidPattern = '(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        foreach ($file in $script:NoObfContent.Keys) {
+            $script:NoObfContent[$file] | Should -Not -Match $guidPattern -Because "File '$file' should not contain obfuscation GUIDs"
+        }
+    }
+}

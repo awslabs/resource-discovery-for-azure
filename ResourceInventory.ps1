@@ -652,9 +652,21 @@ function ExecuteInventoryProcessing()
                 foreach ($resourceItem in $result) 
                 {
                     $obfuscatedID = $resourceIdDictionary[$resourceItem.ID]
+                    if ([string]::IsNullOrEmpty($obfuscatedID)) {
+                        $obfuscatedID = 'obfuscated_' + [guid]::NewGuid().ToString()
+                    }
                     $obfuscatedName = $resourceNameDictionary[$resourceItem.ID]
+                    if ([string]::IsNullOrEmpty($obfuscatedName)) {
+                        $obfuscatedName = 'obfuscated_' + [guid]::NewGuid().ToString()
+                    }
                     $obfuscatedSubscription = $resourceSubscriptionDictionary[$resourceItem.ID]
+                    if ([string]::IsNullOrEmpty($obfuscatedSubscription)) {
+                        $obfuscatedSubscription = 'obfuscated'
+                    }
                     $obfuscatedResourceGroup = $resourceResourceGroupDictionary[$resourceItem.ID]
+                    if ([string]::IsNullOrEmpty($obfuscatedResourceGroup)) {
+                        $obfuscatedResourceGroup = 'obfuscated'
+                    }
                 
                     $resourceItem.ID = $obfuscatedID
                     $resourceItem.Name = $obfuscatedName

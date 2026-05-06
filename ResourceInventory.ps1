@@ -507,10 +507,10 @@ Function RunInventorySetup()
                 if ($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
                 if ($resourceItem.ContainsKey('Tags')) { $resourceItem.Tags = $null }
 
-                $resourceIdDictionary.Add($resourceItem.ID, $obfuscatedID)
-                $resourceNameDictionary.Add($resourceItem.ID, $obfuscatedName)
-                $resourceSubscriptionDictionary.Add($resourceItem.ID, $obfuscatedSubscription)
-                $resourceResourceGroupDictionary.Add($resourceItem.ID, $obfuscatedResourceGroup)
+                $resourceIdDictionary[$resourceItem.ID] = $obfuscatedID
+                $resourceNameDictionary[$resourceItem.ID] = $obfuscatedName
+                $resourceSubscriptionDictionary[$resourceItem.ID] = $obfuscatedSubscription
+                $resourceResourceGroupDictionary[$resourceItem.ID] = $obfuscatedResourceGroup
             }
         }
     }
@@ -815,7 +815,7 @@ function ExecuteInventoryProcessing()
                         if (-not $resourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
                         {
                             $obfuscatedID = "prod_" + [guid]::NewGuid().ToString()
-                            $resourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
+                            $resourceIdDictionary[$usageDataExport[$item].ResourceId] = $obfuscatedID
                             $usageDataExport[$item].ResourceId = $obfuscatedID
                             $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
                         } 

@@ -376,6 +376,11 @@ if ($Task -eq 'Processing')
                         $metric.Name = $ResourceNameDictionary[$originalId]
                         $metric.Subscription = $ResourceSubDictionary[$originalId]
                         $metric.ResourceGroup = $ResourceGroupDictionary[$originalId]
+                    } else {
+                        $metric.ID = 'obfuscated_' + [guid]::NewGuid().ToString()
+                        $metric.Name = 'obfuscated'
+                        $metric.Subscription = 'obfuscated'
+                        $metric.ResourceGroup = 'obfuscated'
                     }
                 }
             }

@@ -19,12 +19,12 @@ If ($Task -eq 'Processing')
             $Insight = $data.applicationInsights.split('/')[8]
             $containerRegistry = $data.containerRegistry.split('/')[8]
 
-            # Obfuscate cross-reference names when dictionary is present
-            if ($null -ne $ResourceIdDictionary) {
-                $StorageAcc = if (![string]::IsNullOrEmpty($data.storageAccount) -and $ResourceIdDictionary.ContainsKey($data.storageAccount)) { $ResourceIdDictionary[$data.storageAccount] } else { 'obfuscated' }
-                $KeyVault = if (![string]::IsNullOrEmpty($data.keyVault) -and $ResourceIdDictionary.ContainsKey($data.keyVault)) { $ResourceIdDictionary[$data.keyVault] } else { 'obfuscated' }
-                $Insight = if (![string]::IsNullOrEmpty($data.applicationInsights) -and $ResourceIdDictionary.ContainsKey($data.applicationInsights)) { $ResourceIdDictionary[$data.applicationInsights] } else { 'obfuscated' }
-                $containerRegistry = if (![string]::IsNullOrEmpty($data.containerRegistry) -and $ResourceIdDictionary.ContainsKey($data.containerRegistry)) { $ResourceIdDictionary[$data.containerRegistry] } else { 'obfuscated' }
+            # Obfuscate cross-reference names when dictionary is populated
+            if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
+                $StorageAcc = if (![string]::IsNullOrEmpty($data.storageAccount) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.storageAccount)) { $ResourceIdDictionary[$data.storageAccount] } else { 'obfuscated' }
+                $KeyVault = if (![string]::IsNullOrEmpty($data.keyVault) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.keyVault)) { $ResourceIdDictionary[$data.keyVault] } else { 'obfuscated' }
+                $Insight = if (![string]::IsNullOrEmpty($data.applicationInsights) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.applicationInsights)) { $ResourceIdDictionary[$data.applicationInsights] } else { 'obfuscated' }
+                $containerRegistry = if (![string]::IsNullOrEmpty($data.containerRegistry) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.containerRegistry)) { $ResourceIdDictionary[$data.containerRegistry] } else { 'obfuscated' }
             }
 
             $obj = @{

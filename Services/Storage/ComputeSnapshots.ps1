@@ -28,7 +28,7 @@ if ($Task -eq 'Processing')
                 'OS'                                    = $data.osType;
                 'Incremental'                           = $data.incremental;
                 'CreatedTime'                           = $timecreated;
-                'SourceResourceId'                      = if (![string]::IsNullOrEmpty($data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.creationData.sourceResourceId)) { $ResourceIdDictionary[$data.creationData.sourceResourceId] } else { 'obfuscated' } } else { $data.creationData.sourceResourceId };
+                'SourceResourceId'                      = if (![string]::IsNullOrEmpty($data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.creationData.sourceResourceId)) { $ResourceIdDictionary[$data.creationData.sourceResourceId] } else { 'obfuscated' } } else { $data.creationData.sourceResourceId };
             }
 
             $tmp += $obj

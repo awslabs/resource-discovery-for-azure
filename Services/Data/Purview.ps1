@@ -24,7 +24,8 @@ if ($Task -eq 'Processing')
                 'Location'            = $1.LOCATION;
                 'SKU'                 = $data.sku.name;
                 'Capacity'            = $data.sku.capacity;
-                'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.createdBy };      
+                'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.createdBy };
+                'FriendlyName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.friendlyName };      
                 'CreatedTime'         = $timecreated;                      
             }
 

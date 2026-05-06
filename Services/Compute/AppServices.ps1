@@ -26,7 +26,7 @@ If ($Task -eq 'Processing')
                 'AvailabilityState'             = $data.availabilityState;
                 'SiteProperties'                = $data.siteProperties;          
                 'ContainerSize'                 = $data.containerSize;
-                'ServerFarmId'                  = if (![string]::IsNullOrEmpty($data.serverFarmId) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.serverFarmId)) { $ResourceIdDictionary[$data.serverFarmId] } else { 'obfuscated' } } else { $data.serverFarmId };
+                'ServerFarmId'                  = if (![string]::IsNullOrEmpty($data.serverFarmId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.serverFarmId)) { $ResourceIdDictionary[$data.serverFarmId] } else { 'obfuscated' } } else { $data.serverFarmId };
             }
 
             $tmp += $obj

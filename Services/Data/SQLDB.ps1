@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
 
             if (![string]::IsNullOrEmpty($data.elasticPoolId)) { $PoolId = $data.elasticPoolId.Split("/")[10] } else { $PoolId = "None"}
 
-            if ($null -ne $ResourceIdDictionary) {
+            if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
                 $serverParentId = ($1.id -split '/databases/')[0]
                 $DBServer = if ($ResourceIdDictionary.ContainsKey($serverParentId)) { $ResourceIdDictionary[$serverParentId] } else { 'obfuscated' }
                 $PoolId = if ($PoolId -ne "None" -and ![string]::IsNullOrEmpty($data.elasticPoolId) -and $ResourceIdDictionary.ContainsKey($data.elasticPoolId)) { $ResourceIdDictionary[$data.elasticPoolId] } else { if ($PoolId -ne "None") { 'obfuscated' } else { $PoolId } }

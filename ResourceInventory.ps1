@@ -928,8 +928,46 @@ $jsonWildCard = $DefaultPath + "*.json"
 
 if($Obfuscate.IsPresent)
 {
+    # Generate obfuscation dictionary (kept LOCAL, never in the zip)
+    $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
+
+    $dictionary = @{
+        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        ResourceIdMap = @{}
+        ResourceNameMap = @{}
+        SubscriptionMap = @{}
+        ResourceGroupMap = @{}
+    }
+
+    foreach ($key in $resourceIdDictionary.Keys) {
+        $dictionary.ResourceIdMap[$resourceIdDictionary[$key]] = $key
+    }
+    foreach ($key in $resourceNameDictionary.Keys) {
+        $dictionary.ResourceNameMap[$resourceNameDictionary[$key]] = $key
+    }
+    foreach ($key in $resourceSubscriptionDictionary.Keys) {
+        $dictionary.SubscriptionMap[$resourceSubscriptionDictionary[$key]] = $key
+    }
+    foreach ($key in $resourceResourceGroupDictionary.Keys) {
+        $dictionary.ResourceGroupMap[$resourceResourceGroupDictionary[$key]] = $key
+    }
+
+    $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
+    Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
+    Write-Log -Message ("") -Severity 'Info'
+    Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
+    Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
+    Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
+    Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
+    Write-Log -Message ("") -Severity 'Info'
+    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
+    Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
+
+    # Exclude dictionary from zip - only include non-dictionary JSON files
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
-        Path = $Global:File, $Global:ConsumptionFileCsv, $jsonWildCard
+        Path = @($Global:File, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }

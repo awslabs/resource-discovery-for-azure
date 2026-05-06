@@ -47,7 +47,7 @@ if ($Task -eq 'Processing')
             else 
             {
                 $obj = @{
-                    'ID'                            = $1.id;
+                    'ID'                            = $0.id;
                     'Subscription'                  = $sub1.name;
                     'ResourceGroup'                 = $0.RESOURCEGROUP;
                     'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $0.NAME };

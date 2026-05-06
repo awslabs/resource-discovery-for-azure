@@ -34,7 +34,7 @@ If ($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'SKU'                       = $1.sku.name;
-                'FriendlyName'              = $data.friendlyName;
+                'FriendlyName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.friendlyName };
                 'Description'               = $data.description;
                 'ContainerRegistry'         = $containerRegistry;
                 'StorageHNSEnabled'         = $data.storageHnsEnabled;

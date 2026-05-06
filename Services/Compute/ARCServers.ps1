@@ -12,7 +12,6 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
-            foreach ($Tag in $Tags) { 
                 $obj = @{
                     'ID'                   = $1.id;
                     'Subscription'         = $sub1.name;
@@ -28,7 +27,6 @@ if ($Task -eq 'Processing')
                 }
                 
                 $tmp += $obj
-            }               
         }
 
         $tmp
@@ -48,7 +46,7 @@ else
         $Exc.Add('Location')
         $Exc.Add('Model')
         $Exc.Add('Status')
-        $Exc.Add('OssName')
+        $Exc.Add('OsName')
         $Exc.Add('OsVersion')
         $Exc.Add('OsSku')
         $Exc.Add('DomainName')

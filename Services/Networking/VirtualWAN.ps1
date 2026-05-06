@@ -74,7 +74,7 @@ else
         $Exc.Add('Location')                                     
         $Exc.Add('HUBName')                          
         $Exc.Add('HUBLocation')                                       
-        $Exc.Add('Device Vendor')                     
+        $Exc.Add('DeviceVendor')                     
         $Exc.Add('LinkProviderName')                
         $Exc.Add('LinkSpeedMbps')                
 

@@ -38,9 +38,6 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $OS = $data.virtualMachineProfile.storageProfile.osDisk.osType
-            $RelatedAKS = ($AKS | Where-Object {$_.properties.nodeResourceGroup -eq $1.resourceGroup}).Name
-
-            if([string]::IsNullOrEmpty($RelatedAKS)){$Related = ($SFC | Where-Object {$_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint}).Name}else{$Related = $RelatedAKS}
             $Scaling = ($AutoScale | Where-Object {$_.Properties.targetResourceUri -eq $1.id})
 
             if([string]::IsNullOrEmpty($Scaling)){$AutoSc = $false}else{$AutoSc = $true}

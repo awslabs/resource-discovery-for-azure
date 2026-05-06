@@ -576,51 +576,6 @@ function ExecuteInventoryProcessing()
         }
     }
 
-    function GetServiceName($moduleUrl)
-    {    
-        if ($moduleUrl -like '*Services/Analytics*')
-        {
-            $directoryService = 'Analytics'
-        }
-
-        if ($moduleUrl -like '*Services/Compute*')
-        {
-            $directoryService = 'Compute'
-        }
-
-        if ($moduleUrl -like '*Services/Containers*')
-        {
-            $directoryService = 'Containers'
-        }
-
-        if ($moduleUrl -like '*Services/Data*')
-        {
-            $directoryService = 'Data'
-        }
-
-        if ($moduleUrl -like '*Services/Infrastructure*')
-        {
-            $directoryService = 'Infrastructure'
-        }
-
-        if ($moduleUrl -like '*Services/Integration*')
-        {
-            $directoryService = 'Integration'
-        }
-
-        if ($moduleUrl -like '*Services/Networking*')
-        {
-            $directoryService = 'Networking'
-        }
-
-        if ($moduleUrl -like '*Services/Storage*')
-        {
-            $directoryService = 'Storage'
-        }
-
-        return $directoryService
-    }
-
     function CreateResourceJobs()
     {
         $Global:SmaResources = New-Object PSObject
@@ -704,11 +659,8 @@ function ExecuteInventoryProcessing()
 
         foreach ($Service in $Services) 
         {
-            $c = (($ReportCounter / $Lops) * 100)
-            $c = [math]::Round($c)
-            
             Write-Log -Message ("Running Services: $Service") -Severity 'Info'
-            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $resourceIdDictionary
+            & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $resourceIdDictionary
 
             $ReportCounter++
         }
@@ -880,7 +832,7 @@ function FinalizeOutputs
             $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
         }
 
-        $ChartsRun = & $SummaryPath -File $file -TableStyle $TableStyle -PlatOS $PlatformOS -Subscriptions $Subscriptions -Resources $Resources -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -RunLite $false -Version $Global:Version
+        & $SummaryPath -File $file -TableStyle $TableStyle -PlatOS $PlatformOS -Subscriptions $Subscriptions -Resources $Resources -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -RunLite $false -Version $Global:Version
     }
 
     ProcessSummary

@@ -114,7 +114,6 @@ if(!$RunLite)
     $ExtractTime = if($ExtractionRunTime.Totalminutes -lt 1){($ExtractionRunTime.Seconds.ToString()+' Seconds')}else{($ExtractionRunTime.Totalminutes.ToString('#######.##')+' Minutes')}
     $ReportTime = ($ReportingRunTime.Totalminutes.ToString('#######.##')+' Minutes')
 
-    $User = if ($Obfuscate) { 'obfuscated' } else { $Subscriptions[0].user.name }
     $TotalRes = $Resources
 
 

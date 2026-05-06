@@ -27,9 +27,9 @@ if ($Task -eq 'Processing')
                     'State'                             = $data.state;
                     'EventRetentionTimeInDays'          = [string]$data.eventHubEndpoints.events.retentionTimeInDays;
                     'EventPartitionCount'               = [string]$data.eventHubEndpoints.events.partitionCount;
-                    'EventsPath'                        = [string]$data.eventHubEndpoints.events.path;
+                    'EventsPath'                        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$data.eventHubEndpoints.events.path };
                     'MaxDeliveryCount'                  = [string]$data.cloudToDevice.maxDeliveryCount;
-                    'HostName'                          = $data.hostName;
+                    'HostName'                          = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.hostName };
                 }
 
                 $tmp += $obj
@@ -53,7 +53,6 @@ else
         $Exc.Add('Location')
         $Exc.Add('SKU')
         $Exc.Add('SKUTier')
-        $Exc.Add('Location')
         $Exc.Add('Role')
         $Exc.Add('State')
         $Exc.Add('EventRetentionTimeInDays')

@@ -61,7 +61,7 @@ else
         $Exc.Add('CreatedDate')
         $Exc.Add('DataLocale')
         $Exc.Add('LateArrivalMaxDelaySeconds')
-        $Exc.Add('OutofOrderMaxDelaySeconds')
+        $Exc.Add('OutOfOrderMaxDelaySeconds')
         $Exc.Add('OutOfOrderPolicy')
         $Exc.Add('Jobstate')
         $Exc.Add('JobType')

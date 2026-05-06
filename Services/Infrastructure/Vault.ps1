@@ -12,7 +12,6 @@ if ($Task -eq 'Processing')
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            if([string]::IsNullOrEmpty($Data.enableSoftDelete)){$Soft = $false}else{$Soft = $Data.enableSoftDelete}
             
             $obj = @{
                 'ID'                            = $1.id;

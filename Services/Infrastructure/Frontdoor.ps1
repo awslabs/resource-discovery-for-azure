@@ -86,6 +86,7 @@ else
         $Exc.Add('Location')
         $Exc.Add('Type')
         $Exc.Add('State')
+        $Exc.Add('ResourceType')
         $Exc.Add('WebApplicationFirewall')
 
         $ExcelVar = $SmaResources.FrontDoor 

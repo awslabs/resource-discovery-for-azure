@@ -73,6 +73,7 @@ else
         $Exc.Add('Status')
         $Exc.Add('Type')
         $Exc.Add('Tier')
+        $Exc.Add('ComputeTier')
         $Exc.Add('Sku')
         $Exc.Add('License')
         $Exc.Add('Capacity')     

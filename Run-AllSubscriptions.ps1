@@ -1,7 +1,6 @@
 param (
     [Parameter(Mandatory=$true)]
-    [string]$TenantID,
-    [switch]$Debug
+    [string]$TenantID
 )
 
 $RunStartTime = Get-Date
@@ -14,7 +13,7 @@ $subscriptions = Get-AzSubscription
 
 # Pass-through parameters for each inner invocation
 $InventoryPassthrough = @{}
-if ($Debug.IsPresent) { $InventoryPassthrough['Debug'] = $true }
+if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = $true }
 
 # Loop through each subscription and run ResourceInventory
 foreach ($sub in $subscriptions) {

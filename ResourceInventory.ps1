@@ -288,7 +288,7 @@ Function RunInventorySetup()
             Write-Log -Message ('Authenticating Azure') -Severity 'Info'
     
             Write-Log -Message ('Clearing account cache') -Severity 'Info'
-            az account clear | Out-Null
+            #az account clear | Out-Null
             Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info'
 
             $DebugPreference = "SilentlyContinue"
@@ -296,14 +296,14 @@ Function RunInventorySetup()
             if($DeviceLogin.IsPresent)
             {
                 Write-Log -Message ('Using device login') -Severity 'Info'
-                az login --use-device-code
-                Connect-AzAccount -UseDeviceAuthentication | Out-Null
+                #az login --use-device-code
+                #Connect-AzAccount -UseDeviceAuthentication | Out-Null
             }
             else 
             {
                 Write-Log -Message ('Using browser login') -Severity 'Info'
-                az login --only-show-errors | Out-Null
-                Connect-AzAccount | Out-Null
+                #az login --only-show-errors | Out-Null
+                #Connect-AzAccount | Out-Null
             }
 
             $DebugPreference = "Continue"
@@ -334,13 +334,13 @@ Function RunInventorySetup()
     
                 if($DeviceLogin.IsPresent)
                 {
-                    az login --use-device-code -t $TenantID
-                    Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
+                    #az login --use-device-code -t $TenantID
+                    #Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
                 }
                 else 
                 {
-                    az login -t $TenantID --only-show-errors | Out-Null
-                    Connect-AzAccount -Tenant $TenantID | Out-Null
+                    #az login -t $TenantID --only-show-errors | Out-Null
+                    #Connect-AzAccount -Tenant $TenantID | Out-Null
                 }
             }
     

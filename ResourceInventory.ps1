@@ -304,14 +304,14 @@ Function RunInventorySetup()
                     if($DeviceLogin.IsPresent)
                     {
                         Write-Log -Message ('Using device login') -Severity 'Info'
-                        #az login --use-device-code
-                        #Connect-AzAccount -UseDeviceAuthentication | Out-Null
+                        az login --use-device-code
+                        Connect-AzAccount -UseDeviceAuthentication | Out-Null
                     }
                     else 
                     {
                         Write-Log -Message ('Using browser login') -Severity 'Info'
-                        #az login --only-show-errors | Out-Null
-                        #Connect-AzAccount | Out-Null
+                        az login --only-show-errors | Out-Null
+                        Connect-AzAccount | Out-Null
                     }
             }
 
@@ -345,13 +345,13 @@ Function RunInventorySetup()
                 {
                         if($DeviceLogin.IsPresent)
                         {
-                            #az login --use-device-code -t $TenantID
-                            #Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
+                            az login --use-device-code -t $TenantID
+                            Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
                         }
                         else 
                         {
-                            #az login -t $TenantID --only-show-errors | Out-Null
-                            #Connect-AzAccount -Tenant $TenantID | Out-Null
+                            az login -t $TenantID --only-show-errors | Out-Null
+                            Connect-AzAccount -Tenant $TenantID | Out-Null
                         }
                 }
             }

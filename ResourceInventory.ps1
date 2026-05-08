@@ -9,6 +9,7 @@ param ($TenantID,
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
         [switch]$Obfuscate,
+        [switch]RunAllSubs,
         $ConcurrencyLimit = 6,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
@@ -288,22 +289,30 @@ Function RunInventorySetup()
             Write-Log -Message ('Authenticating Azure') -Severity 'Info'
     
             Write-Log -Message ('Clearing account cache') -Severity 'Info'
-            #az account clear | Out-Null
+
+            if(!$RunAllSubs.IsPresent)
+            {
+                az account clear | Out-Null
+            }
+            
             Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info'
 
             $DebugPreference = "SilentlyContinue"
-    
-            if($DeviceLogin.IsPresent)
+
+            if(!$RunAllSubs.IsPresent)
             {
-                Write-Log -Message ('Using device login') -Severity 'Info'
-                #az login --use-device-code
-                #Connect-AzAccount -UseDeviceAuthentication | Out-Null
-            }
-            else 
-            {
-                Write-Log -Message ('Using browser login') -Severity 'Info'
-                #az login --only-show-errors | Out-Null
-                #Connect-AzAccount | Out-Null
+                    if($DeviceLogin.IsPresent)
+                    {
+                        Write-Log -Message ('Using device login') -Severity 'Info'
+                        #az login --use-device-code
+                        #Connect-AzAccount -UseDeviceAuthentication | Out-Null
+                    }
+                    else 
+                    {
+                        Write-Log -Message ('Using browser login') -Severity 'Info'
+                        #az login --only-show-errors | Out-Null
+                        #Connect-AzAccount | Out-Null
+                    }
             }
 
             $DebugPreference = "Continue"
@@ -331,16 +340,19 @@ Function RunInventorySetup()
                 [int]$SelectTenant = read-host "Select Tenant (Default 1)"
                 $defaultTenant = --$SelectTenant
                 $TenantID = $Tenants[$defaultTenant]
-    
-                if($DeviceLogin.IsPresent)
+
+                if(!$RunAllSubs.IsPresent)
                 {
-                    #az login --use-device-code -t $TenantID
-                    #Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
-                }
-                else 
-                {
-                    #az login -t $TenantID --only-show-errors | Out-Null
-                    #Connect-AzAccount -Tenant $TenantID | Out-Null
+                        if($DeviceLogin.IsPresent)
+                        {
+                            #az login --use-device-code -t $TenantID
+                            #Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
+                        }
+                        else 
+                        {
+                            #az login -t $TenantID --only-show-errors | Out-Null
+                            #Connect-AzAccount -Tenant $TenantID | Out-Null
+                        }
                 }
             }
     

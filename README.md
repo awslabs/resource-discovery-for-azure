@@ -116,9 +116,14 @@ You might get more than one authentication request due to different collector pr
 ./ResourceInventory.ps1 -ReportName "CompanyName" -ConcurrencyLimit 8
 ```
 
-**Skip consumption metrics:**
+**Skip consumption:**
 ```powershell
 ./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
+```
+
+**Skip metrics:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -SkipMetrics
 ```
 
 **Generate obfuscated report (mask sensitive data before sharing):**
@@ -138,6 +143,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).xlsx` | Consolidated Excel report |
+| `Transcript_Log(date).xlsx` | Transcript log of script activity during the run |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery

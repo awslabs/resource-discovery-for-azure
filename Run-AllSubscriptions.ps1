@@ -19,7 +19,7 @@ if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = 
 foreach ($sub in $subscriptions) {
     Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
     
-    ./ResourceInventory.ps1 -SubscriptionID $sub.Id @InventoryPassthrough
+    ./ResourceInventory.ps1 -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
     
     Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
     Write-Host "-----------------------------------" -ForegroundColor Gray

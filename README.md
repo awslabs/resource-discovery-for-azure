@@ -83,7 +83,7 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 ### Authentication Notes
 
 - **Azure Cloud Shell:** Authentication is automatic
-- **Local PowerShell:** You'll be redirected to Azure sign-in
+- **Local PowerShell:** Run `az login` and `Connect-AzAccount` before executing the script. If you plan to scan all subscriptions in a tenant, use `Run-AllSubscriptions.ps1`, which prompts you to sign in once and then reuses the session for every subscription.
 
 You might get more than one authentication request due to different collector processes running in parallel.
 
@@ -130,6 +130,16 @@ You might get more than one authentication request due to different collector pr
 ```powershell
 ./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
 ```
+
+### Running Across All Subscriptions
+
+Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each subscription in a tenant, instead of the default single consolidated report. The wrapper prompts you to sign in once, then invokes `ResourceInventory.ps1` for each subscription sequentially.
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
+```
+
+Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery.
 
 ## Output Files
 

@@ -9,7 +9,7 @@ param ($TenantID,
         [switch]$DeviceLogin,
         [switch]$EnableLogs,
         [switch]$Obfuscate,
-        [switch]RunAllSubs,
+        [switch]$RunAllSubs,
         $ConcurrencyLimit = 6,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)

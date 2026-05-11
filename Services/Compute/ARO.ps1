@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
                 'ID'                   = $1.id;
                 'Subscription'         = $sub1.Name;
                 'ResourceGroup'        = $1.RESOURCEGROUP;
-                'Clusters'             = $1.NAME;
+                'Clusters'             = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $1.NAME };
                 'Location'             = $1.LOCATION;
                 'AROVersion'           = $data.clusterProfile.version;
                 'OutboundType'         = $data.networkProfile.outboundType;

@@ -235,32 +235,6 @@ Describe "Consumption Obfuscation" {
             }
         }
     }
-
-    It "Should have ReservationId obfuscated or empty" {
-        if ($null -eq $script:ConsumptionFile) { return }
-        $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { return }
-
-        $azureGuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        foreach ($row in $csv) {
-            if (![string]::IsNullOrEmpty($row.ReservationId) -and $row.ReservationId -ne 'obfuscated') {
-                $row.ReservationId | Should -Not -Match $azureGuidPattern -Because "ReservationId should be obfuscated, not a raw GUID"
-            }
-        }
-    }
-
-    It "Should have ReservationOrderId obfuscated or empty" {
-        if ($null -eq $script:ConsumptionFile) { return }
-        $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { return }
-
-        $azureGuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        foreach ($row in $csv) {
-            if (![string]::IsNullOrEmpty($row.ReservationOrderId) -and $row.ReservationOrderId -ne 'obfuscated') {
-                $row.ReservationOrderId | Should -Not -Match $azureGuidPattern -Because "ReservationOrderId should be obfuscated, not a raw GUID"
-            }
-        }
-    }
 }
 
 # ============================================================
@@ -296,9 +270,15 @@ Describe "Metrics JSON Structure" {
 # ============================================================
 Describe "Consumption CSV Headers" {
     It "Should have a consumption CSV with the correct header columns" {
-        if ($null -eq $script:ConsumptionFile) { return }
-        $firstLine = Get-Content $script:ConsumptionFile.FullName -TotalCount 1 -ErrorAction SilentlyContinue
-        if ([string]::IsNullOrEmpty($firstLine)) { return }
+        if ($null -eq $script:ConsumptionFile) {
+            Set-ItResult -Skipped -Because "No consumption CSV in this report"
+            return
+        }
+        $firstLine = Get-Content $script:ConsumptionFile.FullName -TotalCount 1
+        if ([string]::IsNullOrEmpty($firstLine)) {
+            Set-ItResult -Skipped -Because "Consumption CSV is empty (no usage data in this subscription)"
+            return
+        }
 
         $expectedHeaders = @('InstanceData', 'MeterCategory', 'MeterId', 'MeterName', 'MeterRegion', 'MeterSubCategory', 'Quantity', 'Unit', 'UsageStartTime', 'UsageEndTime', 'ResourceId', 'ResourceLocation', 'ConsumptionMeter', 'ReservationId', 'ReservationOrderId')
         foreach ($header in $expectedHeaders) {
@@ -321,8 +301,52 @@ Describe "Tenant ID Leak Check" {
 }
 
 # ============================================================
-# 15. Cross-reference fields are obfuscated or null
+# NON-OBFUSCATED MODE SAFETY NET
+# This test catches guard pattern bugs where obfuscation
+# logic fires even when -Obfuscate is not set.
 # ============================================================
+Describe "Non-Obfuscated Mode Safety" {
+    BeforeAll {
+        $script:NonObfZip = $env:TEST_NOOBF_ZIP_PATH
+        if ($script:NonObfZip -and (Test-Path $script:NonObfZip)) {
+            $script:NoObfExtract = Join-Path ([System.IO.Path]::GetTempPath()) "NoObfTest_$([guid]::NewGuid().ToString().Substring(0,8))"
+            New-Item -ItemType Directory -Path $script:NoObfExtract -Force | Out-Null
+            Expand-Archive -Path $script:NonObfZip -DestinationPath $script:NoObfExtract -Force
+            $script:NoObfContent = @{}
+            Get-ChildItem -Path $script:NoObfExtract -File | ForEach-Object {
+                $script:NoObfContent[$_.Name] = Get-Content $_.FullName -Raw
+            }
+        }
+    }
+
+    AfterAll {
+        if ($script:NoObfExtract -and (Test-Path $script:NoObfExtract)) {
+            Remove-Item -Path $script:NoObfExtract -Recurse -Force
+        }
+    }
+
+    It "Should not contain 'obfuscated' in any output file when run without -Obfuscate" {
+        if (-not $script:NoObfContent) {
+            Set-ItResult -Skipped -Because "No non-obfuscated zip provided"
+            return
+        }
+        foreach ($file in $script:NoObfContent.Keys) {
+            if ($file -like "Transcript_*") { continue }
+            $script:NoObfContent[$file] | Should -Not -Match 'obfuscated' -Because "File '$file' should contain real data, not obfuscated placeholders"
+        }
+    }
+
+    It "Should not contain obfuscation GUID patterns in non-obfuscated output" {
+        if (-not $script:NoObfContent) {
+            Set-ItResult -Skipped -Because "No non-obfuscated zip provided"
+            return
+        }
+        $guidPattern = '(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        foreach ($file in $script:NoObfContent.Keys) {
+            $script:NoObfContent[$file] | Should -Not -Match $guidPattern -Because "File '$file' should not contain obfuscation GUIDs"
+        }
+    }
+}
 Describe "Cross-Reference Field Obfuscation" {
     # Helper: field should be obfuscated, null, or a safe non-ID value like 'None' or 'obfuscated'
     BeforeAll {

@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;
-                'ManagedInstance'           = if ($null -ne $ResourceIdDictionary) { $miParentId = ($1.id -split '/databases/')[0]; if ($ResourceIdDictionary.ContainsKey($miParentId)) { $ResourceIdDictionary[$miParentId] } else { 'obfuscated' } } else { $1.id.split("/")[8] };
+                'ManagedInstance'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $miParentId = ($1.id -split '/databases/')[0]; if ($ResourceIdDictionary.ContainsKey($miParentId)) { $ResourceIdDictionary[$miParentId] } else { 'obfuscated' } } else { $1.id.split("/")[8] };
                 'Name'                      = $1.NAME;
                 'Collation'                 = $data.collation;
                 'CreationDate'              = $data.creationDate;

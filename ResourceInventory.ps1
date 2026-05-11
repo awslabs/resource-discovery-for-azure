@@ -221,7 +221,7 @@ Function RunInventorySetup()
         {
             try 
             {
-                $OutputDirectory = Join-Path (Resolve-Path $OutputDirectory -ErrorAction Stop) ('/' -or '\')
+                $OutputDirectory = (Resolve-Path $OutputDirectory -ErrorAction Stop).Path + [IO.Path]::DirectorySeparatorChar
             }
             catch 
             {
@@ -433,7 +433,7 @@ Function RunInventorySetup()
 
             $Subscri = $SubscriptionID
 
-            $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and strlen(properties.definition.actions) < 123000 | summarize count()"
+            $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
             $EnvSizeNum = $EnvSize.data.'count_'
 
@@ -444,7 +444,7 @@ Function RunInventorySetup()
                 $Limit = 0
 
                 while ($Looper -lt $Loop) {
-                    $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+                    $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
                     $Resource = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
                     $Global:Resources += $Resource.data
@@ -458,7 +458,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
-            $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | summarize count()"
+            $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = az graph query -q $GraphQuery  --output json --subscriptions $SubscriptionID --only-show-errors | ConvertFrom-Json
             $EnvSizeNum = $EnvSize.data.'count_'
 
@@ -469,7 +469,7 @@ Function RunInventorySetup()
                 $Limit = 0
 
                 while ($Looper -lt $Loop) {
-                    $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+                    $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
                     $Resource = (az graph query -q $GraphQuery --subscriptions $SubscriptionID --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
 
                     $Global:Resources += $Resource.data
@@ -481,7 +481,7 @@ Function RunInventorySetup()
         } 
         else 
         {
-            $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | summarize count()"
+            $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = az graph query -q  $GraphQuery --output json --only-show-errors | ConvertFrom-Json
             $EnvSizeCount = $EnvSize.Data.'count_'
             
@@ -496,7 +496,7 @@ Function RunInventorySetup()
             
                 while ($Looper -lt $Loop) 
                 {
-                    $GraphQuery = "resources | where strlen(properties.definition.actions) < 123000 | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+                    $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
                     $Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
                     
                     $Global:Resources += $Resource.Data
@@ -557,6 +557,16 @@ Function RunInventorySetup()
             $obfuscatedID   = $prefix + [guid]::NewGuid().ToString()
             $obfuscatedName = $prefix + [guid]::NewGuid().ToString()
 
+            # Preserve resource type signal in obfuscated name for server-side matching
+            # VMs/Disks managed by services have identifiable patterns in their resource ID
+            if ($resourceItem.id -match 'databricks') {
+                $obfuscatedName = $prefix + 'databricks_' + [guid]::NewGuid().ToString()
+            } elseif ($resourceItem.id -match '/resourcegroups/mc_') {
+                $obfuscatedName = $prefix + 'aks_' + [guid]::NewGuid().ToString()
+            } elseif ($resourceItem.id -match 'virtualmachinescalesets') {
+                $obfuscatedName = $prefix + 'vmss_' + [guid]::NewGuid().ToString()
+            }
+
             # Deterministic subscription obfuscation: derive prefix from sub name, not resource name
             $realSub = ($Global:Subscriptions | Where-Object { $_.id -eq $resourceItem.subscriptionId }).Name
             if ([string]::IsNullOrEmpty($realSub)) { $realSub = $resourceItem.subscriptionId }
@@ -575,10 +585,13 @@ Function RunInventorySetup()
             }
             $obfuscatedResourceGroup = $rgLookup[$realRG]
 
-            $ResourceIdDictionary.Add($resourceItem.ID, $obfuscatedID)
-            $ResourceNameDictionary.Add($resourceItem.ID, $obfuscatedName)
-            $ResourceSubscriptionDictionary.Add($resourceItem.ID, $obfuscatedSubscription)
-            $ResourceResourceGroupDictionary.Add($resourceItem.ID, $obfuscatedResourceGroup)
+            $ResourceIdDictionary[$resourceItem.ID] = $obfuscatedID
+            $ResourceNameDictionary[$resourceItem.ID] = $obfuscatedName
+            $ResourceSubscriptionDictionary[$resourceItem.ID] = $obfuscatedSubscription
+            $ResourceResourceGroupDictionary[$resourceItem.ID] = $obfuscatedResourceGroup
+
+            if ($resourceItem.PSObject.Properties['tags']) { $resourceItem.tags = $null }
+            if ($resourceItem.PSObject.Properties['Tags']) { $resourceItem.Tags = $null }
         }
     }
 }
@@ -622,7 +635,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubscriptionDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent
         }
     }
 
@@ -715,18 +728,22 @@ function ExecuteInventoryProcessing()
                     $origID = $resourceItem.ID
 
                     if ($ResourceIdDictionary.ContainsKey($origID)) {
-                        $resourceItem.ID = $ResourceIdDictionary[$origID]
+                        $obfuscatedID = $ResourceIdDictionary[$origID]
+                        if ([string]::IsNullOrEmpty($obfuscatedID)) { $obfuscatedID = 'obfuscated_' + [guid]::NewGuid().ToString() }
+                        $resourceItem.ID = $obfuscatedID
                     } else {
                         $prefix = if ($origID -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $origID -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
                         $fallback = $prefix + [guid]::NewGuid().ToString()
-                        $ResourceIdDictionary.Add($origID, $fallback)
+                        $ResourceIdDictionary[$origID] = $fallback
                         $resourceItem.ID = $fallback
                     }
 
                     $prefix = $resourceItem.ID.Split('_')[0] + '_'
 
                     if ($ResourceNameDictionary.ContainsKey($origID)) {
-                        $resourceItem.Name = $ResourceNameDictionary[$origID]
+                        $obfuscatedName = $ResourceNameDictionary[$origID]
+                        if ([string]::IsNullOrEmpty($obfuscatedName)) { $obfuscatedName = 'obfuscated_' + [guid]::NewGuid().ToString() }
+                        $resourceItem.Name = $obfuscatedName
                     } else {
                         $fbName = $prefix + [guid]::NewGuid().ToString()
                         $ResourceNameDictionary[$origID] = $fbName
@@ -734,7 +751,9 @@ function ExecuteInventoryProcessing()
                     }
 
                     if ($ResourceSubscriptionDictionary.ContainsKey($origID)) {
-                        $resourceItem.Subscription = $ResourceSubscriptionDictionary[$origID]
+                        $obfuscatedSub = $ResourceSubscriptionDictionary[$origID]
+                        if ([string]::IsNullOrEmpty($obfuscatedSub)) { $obfuscatedSub = 'obfuscated_' + [guid]::NewGuid().ToString() }
+                        $resourceItem.Subscription = $obfuscatedSub
                     } else {
                         $fbSub = $prefix + [guid]::NewGuid().ToString()
                         $ResourceSubscriptionDictionary[$origID] = $fbSub
@@ -742,13 +761,16 @@ function ExecuteInventoryProcessing()
                     }
 
                     if ($ResourceResourceGroupDictionary.ContainsKey($origID)) {
-                        $resourceItem.ResourceGroup = $ResourceResourceGroupDictionary[$origID]
+                        $obfuscatedRG = $ResourceResourceGroupDictionary[$origID]
+                        if ([string]::IsNullOrEmpty($obfuscatedRG)) { $obfuscatedRG = 'obfuscated_' + [guid]::NewGuid().ToString() }
+                        $resourceItem.ResourceGroup = $obfuscatedRG
                     } else {
                         $fbRG = $prefix + [guid]::NewGuid().ToString()
                         $ResourceResourceGroupDictionary[$origID] = $fbRG
                         $resourceItem.ResourceGroup = $fbRG
                     }
 
+                    if($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
                     if($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
                     {
                         $resourceItem.Tags = $null
@@ -900,8 +922,12 @@ function ExecuteInventoryProcessing()
                         if (-not $ResourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
                         {
                             $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { "nonprod_" } else { "prod_" }
-                            $obfuscatedID = $prefix + [guid]::NewGuid().ToString()
-                            $ResourceIdDictionary.Add($usageDataExport[$item].ResourceId, $obfuscatedID)
+                            $resId = $usageDataExport[$item].ResourceId
+                            $obfuscatedID = if ($resId -match 'databricks') { $prefix + 'databricks_' + [guid]::NewGuid().ToString() }
+                                elseif ($resId -match '/resourcegroups/mc_') { $prefix + 'aks_' + [guid]::NewGuid().ToString() }
+                                elseif ($resId -match 'virtualmachinescalesets') { $prefix + 'vmss_' + [guid]::NewGuid().ToString() }
+                                else { $prefix + [guid]::NewGuid().ToString() }
+                            $ResourceIdDictionary[$usageDataExport[$item].ResourceId] = $obfuscatedID
                             $usageDataExport[$item].ResourceId = $obfuscatedID
                             $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
                         } 

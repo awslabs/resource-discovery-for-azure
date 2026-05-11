@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 'ComputeSpecifications'     = $sku.name;
                 'InstanceCount'             = $sku.capacity;
                 'State'                     = $data.state;
-                'StateReason'               = $data.stateReason;
+                'StateReason'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $null } else { $data.stateReason };
                 'DiskEncryption'            = $data.enableDiskEncryption;
                 'StreamingIngestion'        = $data.enableStreamingIngest;
                 'OptimizedAutoscale'        = $AutoScale;

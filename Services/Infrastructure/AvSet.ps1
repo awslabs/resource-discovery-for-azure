@@ -13,10 +13,25 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             
-            foreach ($vmid in $data.virtualMachines.id) 
-            {
-                $vmIds = if ($null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($vmid)) { $ResourceIdDictionary[$vmid] } else { 'obfuscated' } } else { $vmid.split('/')[8] }
-                
+            if ($data.virtualMachines.id) {
+                foreach ($vmid in $data.virtualMachines.id) 
+                {
+                    $vmIds = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($vmid)) { $ResourceIdDictionary[$vmid] } else { 'obfuscated' } } else { $vmid.split('/')[8] }
+                    
+                    $obj = @{
+                        'ID'               = $1.id;
+                        'Subscription'     = $sub1.Name;
+                        'ResourceGroup'    = $1.RESOURCEGROUP;
+                        'Name'             = $1.NAME;
+                        'Location'         = $1.LOCATION;
+                        'FaultDomains'     = [string]$data.platformFaultDomainCount;
+                        'UpdateDomains'    = [string]$data.platformUpdateDomainCount;
+                        'VirtualMachines'  = [string]$vmIds;
+                    }
+
+                    $tmp += $obj                 
+                }
+            } else {
                 $obj = @{
                     'ID'               = $1.id;
                     'Subscription'     = $sub1.Name;
@@ -25,10 +40,10 @@ if ($Task -eq 'Processing')
                     'Location'         = $1.LOCATION;
                     'FaultDomains'     = [string]$data.platformFaultDomainCount;
                     'UpdateDomains'    = [string]$data.platformUpdateDomainCount;
-                    'VirtualMachines'  = [string]$vmIds;
+                    'VirtualMachines'  = '';
                 }
 
-                $tmp += $obj                 
+                $tmp += $obj
             }
         }
 

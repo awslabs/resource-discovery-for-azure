@@ -295,12 +295,11 @@ Function RunInventorySetup()
                 az account clear | Out-Null
             }
             
-            Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info'
-
             $DebugPreference = "SilentlyContinue"
 
             if(!$RunAllSubs.IsPresent)
             {
+                    Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info'
                     if($DeviceLogin.IsPresent)
                     {
                         Write-Log -Message ('Using device login') -Severity 'Info'

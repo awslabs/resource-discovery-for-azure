@@ -1,27 +1,58 @@
+#Requires -Version 7.0
+
 param (
     [Parameter(Mandatory=$true)]
-    [string]$TenantID
+    [string]$TenantID,
+
+    [switch]$DeviceLogin,
+    [switch]$Obfuscate,
+    [switch]$SkipMetrics,
+    [switch]$SkipConsumption
 )
 
 $RunStartTime = Get-Date
+$FailedSubscriptions = @()
 
-az login -t $TenantID --only-show-errors | Out-Null
-Connect-AzAccount -Tenant $TenantID | Out-Null
+# Authenticate
+try {
+    if ($DeviceLogin) {
+        az login -t $TenantID --use-device-code --only-show-errors | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
+        Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
+    } else {
+        az login -t $TenantID --only-show-errors | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
+        Connect-AzAccount -Tenant $TenantID | Out-Null
+    }
+} catch {
+    Write-Host "ERROR: Authentication failed. $_" -ForegroundColor Red
+    exit 1
+}
 
 # Get all Azure subscriptions
 $subscriptions = Get-AzSubscription
 
-# Pass-through parameters for each inner invocation
+# Build passthrough hashtable for optional switches
 $InventoryPassthrough = @{}
+if ($DeviceLogin)      { $InventoryPassthrough['DeviceLogin'] = $true }
+if ($Obfuscate)        { $InventoryPassthrough['Obfuscate'] = $true }
+if ($SkipMetrics)      { $InventoryPassthrough['SkipMetrics'] = $true }
+if ($SkipConsumption)  { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = $true }
 
 # Loop through each subscription and run ResourceInventory
 foreach ($sub in $subscriptions) {
     Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
-    
-    ./ResourceInventory.ps1 -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
-    
-    Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
+
+    try {
+        & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
+        if ($LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+        Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
+    } catch {
+        Write-Host "ERROR processing subscription $($sub.Name): $_" -ForegroundColor Red
+        $FailedSubscriptions += $sub.Name
+    }
+
     Write-Host "-----------------------------------" -ForegroundColor Gray
 }
 
@@ -32,8 +63,10 @@ $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryRepo
 $OuterZipFile = $null
 
 if (Test-Path -Path $InventoryRoot -PathType Container) {
+    # Filter ZIPs by current run timestamp only
     $subZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object {
-        Get-ChildItem -Path $_.FullName -Filter "*.zip" -File
+        Get-ChildItem -Path $_.FullName -Filter "*.zip" -File |
+            Where-Object { $_.LastWriteTime -ge $RunStartTime }
     })
 
     if ($subZips.Count -gt 0) {
@@ -56,6 +89,9 @@ $Elapsed = (Get-Date) - $RunStartTime
 Write-Host ""
 Write-Host "================ Summary ================" -ForegroundColor Green
 Write-Host ("Subscriptions Processed: {0}" -f $subscriptions.Count) -ForegroundColor Green
+if ($FailedSubscriptions.Count -gt 0) {
+    Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
+}
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile) {
     Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green

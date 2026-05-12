@@ -363,10 +363,13 @@ Function RunInventorySetup()
         }
         else 
         {
-            az account clear | Out-Null
-    
-            if (!$Appid) 
+
+            if(!$RunAllSubs.IsPresent)
             {
+                az account clear | Out-Null
+            
+              if (!$Appid) 
+              {
                 if($DeviceLogin.IsPresent)
                 {
                     az login --use-device-code -t $TenantID
@@ -377,21 +380,22 @@ Function RunInventorySetup()
                     az login -t $TenantID --only-show-errors | Out-Null
                     Connect-AzAccount -Tenant $TenantID | Out-Null
                 }
-            }
-            elseif ($Appid -and $Secret -and $tenantid)
-            {
+              }
+              elseif ($Appid -and $Secret -and $tenantid)
+              {
                 Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
                 az login --service-principal -u $appid -p $secret -t $TenantID | Out-Null
                 $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
                 $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
                 Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
-            }
-            else
-            {
+              }
+              else
+              {
                 Write-Log -Message ("You are trying to use Service Principal Authentication Method in a wrong way.") -Severity 'Error'
                 Write-Log -Message ("It's Mandatory to specify Application ID, Secret and Tenant ID in Azure Resource Inventory") -Severity 'Error'
                 Write-Log -Message (".\ResourceInventory.ps1 -appid <SP AppID> -secret <SP Secret> -tenant <TenantID>") -Severity 'Error'
                 Exit
+               }
             }
     
             $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)

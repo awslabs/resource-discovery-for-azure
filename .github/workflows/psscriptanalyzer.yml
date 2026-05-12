@@ -2,7 +2,8 @@ name: PSScriptAnalyzer
 
 on:
   push:
-    branches: [main, master]
+    # Run on every branch so feature work gets immediate feedback.
+    branches: ['**']
     paths:
       - '**.ps1'
       - '**.psm1'
@@ -11,6 +12,7 @@ on:
       - '.scriptanalyzer/**'
       - '.github/workflows/psscriptanalyzer.yml'
   pull_request:
+    # PRs targeting mainline still gate on the same rules.
     branches: [main, master]
     paths:
       - '**.ps1'

@@ -526,10 +526,12 @@ Describe "Cross-Reference Field Obfuscation" {
         }
     }
 
-    It "Frontdoor: WebApplicationFirewall should be obfuscated or False" {
+    It "Frontdoor: WebApplicationFirewall should be obfuscated or a known marker" {
         $resources = @($script:Inventory.FRONTDOOR)
         foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WebApplicationFirewall) -and $r.WebApplicationFirewall -ne 'False') {
+            # Skip known non-ID markers: 'False' (Classic, no WAF), 'Unknown' (Std/Premium,
+            # not detectable from the profile). Any remaining value must not leak an Azure path.
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WebApplicationFirewall) -and $r.WebApplicationFirewall -notin @('False', 'Unknown')) {
                 $r.WebApplicationFirewall | Should -Not -Match $script:AzureIdPattern -Because "Frontdoor WAF should not contain raw Azure resource ID"
             }
         }

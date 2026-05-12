@@ -49,7 +49,7 @@ Describe "Front Door Collector Schema" {
 Describe "Front Door Tier Detection" {
     It "Type field should only contain known tier values" {
         if ($script:FrontDoors.Count -eq 0) { return }
-        $validTypes = @('Classic', 'Standard/Premium')
+        $validTypes = @('Classic', 'Standard', 'Premium')
         foreach ($fd in $script:FrontDoors) {
             $fd.Type | Should -BeIn $validTypes -Because "Type should be one of: $($validTypes -join ', ')"
         }
@@ -76,8 +76,18 @@ Describe "Front Door WAF Field" {
     It "WebApplicationFirewall field should always be populated" {
         if ($script:FrontDoors.Count -eq 0) { return }
         foreach ($fd in $script:FrontDoors) {
-            # False, 'obfuscated', a WAF policy name, or 'Enabled' are all valid
-            $fd.WebApplicationFirewall | Should -Not -BeNullOrEmpty -Because "WAF field should always have a value (False, name, or marker)"
+            # Valid values: 'False' (Classic, no WAF), a WAF policy name (Classic, WAF attached),
+            # 'obfuscated' (Classic, obfuscated mode), 'Unknown' (Standard/Premium — security
+            # policies aren't visible on the profile, so we don't assert attachment).
+            $fd.WebApplicationFirewall | Should -Not -BeNullOrEmpty -Because "WAF field should always have a value (False, name, obfuscated, or Unknown)"
+        }
+    }
+
+    It "WAF value should be a known marker or a non-Azure-path string" {
+        if ($script:FrontDoors.Count -eq 0) { return }
+        foreach ($fd in $script:FrontDoors) {
+            # Disallow misleading 'Enabled' — Standard/Premium should report 'Unknown' now.
+            $fd.WebApplicationFirewall | Should -Not -Be 'Enabled' -Because "Std/Premium WAF attachment is not detectable from the profile; 'Enabled' is misleading"
         }
     }
 

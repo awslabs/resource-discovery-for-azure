@@ -1,0 +1,135 @@
+name: PSScriptAnalyzer
+
+on:
+  push:
+    # Run on every branch so feature work gets immediate feedback.
+    branches: ['**']
+    paths:
+      - '**.ps1'
+      - '**.psm1'
+      - '**.psd1'
+      - 'PSScriptAnalyzerSettings.psd1'
+      - '.scriptanalyzer/**'
+      - '.github/workflows/psscriptanalyzer.yml'
+  pull_request:
+    # PRs targeting mainline still gate on the same rules.
+    branches: [main, master]
+    paths:
+      - '**.ps1'
+      - '**.psm1'
+      - '**.psd1'
+      - 'PSScriptAnalyzerSettings.psd1'
+      - '.scriptanalyzer/**'
+      - '.github/workflows/psscriptanalyzer.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  analyze:
+    name: Analyze PowerShell
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+          Get-Module PSScriptAnalyzer -ListAvailable | Select-Object Name, Version | Format-Table -AutoSize
+
+      - name: Run PSScriptAnalyzer
+        id: analyze
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module PSScriptAnalyzer
+
+          $Targets = @(
+              './Services',
+              './Extension',
+              './Tests',
+              './ResourceInventory.ps1',
+              './Run-AllSubscriptions.ps1'
+          ) | Where-Object { Test-Path $_ }
+
+          $AllResults = @()
+          foreach ($Target in $Targets)
+          {
+              $AllResults += Invoke-ScriptAnalyzer `
+                  -Path $Target `
+                  -Settings ./PSScriptAnalyzerSettings.psd1 `
+                  -Recurse `
+                  -ErrorAction Continue
+          }
+
+          $Errors        = @($AllResults | Where-Object Severity -eq 'Error')
+          $Warnings      = @($AllResults | Where-Object Severity -eq 'Warning')
+          $Informational = @($AllResults | Where-Object Severity -eq 'Information')
+
+          Write-Host "::group::Summary"
+          Write-Host ("Errors:        {0}" -f $Errors.Count)
+          Write-Host ("Warnings:      {0}" -f $Warnings.Count)
+          Write-Host ("Informational: {0}" -f $Informational.Count)
+          Write-Host "::endgroup::"
+
+          # Emit findings as GitHub annotations so they show up inline on the PR.
+          foreach ($Finding in $AllResults)
+          {
+              $Level = switch ($Finding.Severity)
+              {
+                  'Error'       { 'error' }
+                  'Warning'     { 'warning' }
+                  default       { 'notice' }
+              }
+              $Path = $Finding.ScriptPath
+              if ($Path)
+              {
+                  # Make the path repo-relative for GitHub UI linking.
+                  $Path = $Path -replace [regex]::Escape((Get-Location).Path + [IO.Path]::DirectorySeparatorChar), ''
+              }
+              $Line = $Finding.Line
+              $Col  = $Finding.Column
+              $Rule = $Finding.RuleName
+              $Msg  = ($Finding.Message -replace "`r?`n", ' ').Trim()
+              Write-Host "::$Level file=$Path,line=$Line,col=$Col,title=$Rule::$Msg"
+          }
+
+          # Write a job summary for the Actions run page.
+          $SummaryPath = $env:GITHUB_STEP_SUMMARY
+          if ($SummaryPath)
+          {
+              "# PSScriptAnalyzer results" | Out-File $SummaryPath -Append
+              "" | Out-File $SummaryPath -Append
+              "| Severity | Count |" | Out-File $SummaryPath -Append
+              "|----------|-------|" | Out-File $SummaryPath -Append
+              "| Error | $($Errors.Count) |" | Out-File $SummaryPath -Append
+              "| Warning | $($Warnings.Count) |" | Out-File $SummaryPath -Append
+              "| Information | $($Informational.Count) |" | Out-File $SummaryPath -Append
+
+              if ($AllResults.Count -gt 0)
+              {
+                  "" | Out-File $SummaryPath -Append
+                  "## Top findings" | Out-File $SummaryPath -Append
+                  "" | Out-File $SummaryPath -Append
+                  $AllResults |
+                      Group-Object RuleName |
+                      Sort-Object Count -Descending |
+                      Select-Object -First 15 |
+                      ForEach-Object { "- **$($_.Name)**: $($_.Count)" } |
+                      Out-File $SummaryPath -Append
+              }
+          }
+
+          # Fail the job on Errors only. Warnings are reported but don't block,
+          # so legacy PascalCase violations surface without breaking every PR.
+          # Flip this to `$Errors.Count + $Warnings.Count` once the warning
+          # backlog is burned down.
+          if ($Errors.Count -gt 0)
+          {
+              Write-Host "::error::PSScriptAnalyzer found $($Errors.Count) error(s)."
+              exit 1
+          }

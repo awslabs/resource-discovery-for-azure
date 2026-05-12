@@ -21,7 +21,7 @@ if ($Task -eq 'Processing')
                 'Location'                     = $1.LOCATION;
                 'WorkspaceType'                = [string]$data.extraProperties.WorkspaceType;
                 'ManagedVirtualNetwork'        = $data.managedVirtualNetwork;                            
-                'ManagedResourceGroup'         = $data.managedResourceGroupName;
+                'ManagedResourceGroup'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.managedResourceGroupName };
             }
 
             $tmp += $obj

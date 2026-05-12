@@ -12,23 +12,21 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
-            foreach ($Tag in $Tags) { 
-                $obj = @{
-                    'ID'                   = $1.id;
-                    'Subscription'         = $sub1.name;
-                    'ResourceGroup'       = $1.RESOURCEGROUP;
-                    'Name'                 = $1.NAME;
-                    'Location'             = $1.LOCATION;
-                    'Model'                = $data.detectedProperties.model;
-                    'Status'               = $data.status;
-                    'OsName'               = $data.osName;
-                    'OsVersion'            = $data.osVersion;
-                    'OsSku'                = $data.osSku;
-                    'DomainName'           = $data.domainName;
-                }
-                
-                $tmp += $obj
-            }               
+            $obj = @{
+                'ID'                   = $1.id;
+                'Subscription'         = $sub1.name;
+                'ResourceGroup'        = $1.RESOURCEGROUP;
+                'Name'                 = $1.NAME;
+                'Location'             = $1.LOCATION;
+                'Model'                = $data.detectedProperties.model;
+                'Status'               = $data.status;
+                'OsName'               = $data.osName;
+                'OsVersion'            = $data.osVersion;
+                'OsSku'                = $data.osSku;
+                'DomainName'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.domainName };
+            }
+
+            $tmp += $obj
         }
 
         $tmp
@@ -48,7 +46,7 @@ else
         $Exc.Add('Location')
         $Exc.Add('Model')
         $Exc.Add('Status')
-        $Exc.Add('OssName')
+        $Exc.Add('OsName')
         $Exc.Add('OsVersion')
         $Exc.Add('OsSku')
         $Exc.Add('DomainName')

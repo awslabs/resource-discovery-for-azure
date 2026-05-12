@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 'SkuCapacity'                   = $1.sku.capacity;
                 'SkuTier'                       = $1.sku.tier;
                 'SkuFamily'                     = $1.sku.family;
-                'InstancePoolName'              = if (![string]::IsNullOrEmpty($data.instancePoolId) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($data.instancePoolId)) { $ResourceIdDictionary[$data.instancePoolId] } else { 'obfuscated' } } else { $data.instancePoolId };
+                'InstancePoolName'              = if (![string]::IsNullOrEmpty($data.instancePoolId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.instancePoolId)) { $ResourceIdDictionary[$data.instancePoolId] } else { 'obfuscated' } } else { $data.instancePoolId };
                 'vCores'                        = $data.vCores;
                 'StorageGB'                     = $data.storageSizeInGB;
                 'StorageAccountType'            = $data.storageAccountType;

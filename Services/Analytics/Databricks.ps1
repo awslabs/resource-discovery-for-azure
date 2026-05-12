@@ -24,8 +24,8 @@ if($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'PricingTier'               = $sku.name;
-                'ManagedResourceGroup'      = if ($null -ne $ResourceIdDictionary) { 'obfuscated' } else { $data.managedResourceGroupId.split('/')[4] };
-                'StorageAccount'            = if ($null -ne $ResourceIdDictionary) { 'obfuscated' } else { $data.parameters.storageAccountName.value };
+                'ManagedResourceGroup'      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.managedResourceGroupId.split('/')[4] };
+                'StorageAccount'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.parameters.storageAccountName.value };
                 'StorageAccountSKU'         = $data.parameters.storageAccountSkuName.value;
                 'CreatedTime'               = $timecreated;
             }

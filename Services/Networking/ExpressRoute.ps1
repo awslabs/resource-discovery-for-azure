@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'BillingModel'          = $sku.family;
                 'CircuitStatus'         = $data.circuitProvisioningState;
                 'ProviderStatus'        = $data.serviceProviderProvisioningState;
-                'Provider'              = $data.serviceProviderProperties.serviceProviderName;
+                'Provider'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.serviceProviderProperties.serviceProviderName };
                 'Bandwidth'             = $data.bandwidthInMbps;
                 'ERLocation'            = $data.peeringLocation;
                 'GlobalReachEnabled'    = $data.globalReachEnabled;

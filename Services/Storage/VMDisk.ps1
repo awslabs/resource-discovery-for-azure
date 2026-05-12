@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'         = $disk.RESOURCEGROUP;
                 'Name'                  = $disk.NAME;
                 'State'                 = $data.diskState;
-                'AssociatedResource'    = if (![string]::IsNullOrEmpty($disk.MANAGEDBY) -and $null -ne $ResourceIdDictionary) { if ($ResourceIdDictionary.ContainsKey($disk.MANAGEDBY)) { $ResourceIdDictionary[$disk.MANAGEDBY] } else { 'obfuscated' } } else { if(![string]::IsNullOrEmpty($disk.MANAGEDBY)){ $disk.MANAGEDBY.split('/')[8] } else { $null } };
+                'AssociatedResource'    = if (![string]::IsNullOrEmpty($disk.MANAGEDBY) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($disk.MANAGEDBY)) { $ResourceIdDictionary[$disk.MANAGEDBY] } else { 'obfuscated' } } else { if(![string]::IsNullOrEmpty($disk.MANAGEDBY)){ $disk.MANAGEDBY.split('/')[8] } else { $null } };
                 'Location'              = $disk.LOCATION;
                 'SKU'                   = $SKU.Name;
                 'Tier'                  = $data.Tier;

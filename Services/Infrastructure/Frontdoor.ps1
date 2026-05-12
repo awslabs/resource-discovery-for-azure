@@ -5,9 +5,10 @@ if ($Task -eq 'Processing')
     # Match both Classic Front Door and Standard/Premium Front Door.
     # Classic uses microsoft.network/frontdoors; Standard/Premium lives under
     # Microsoft.Cdn/profiles with an AzureFrontDoor SKU (to avoid capturing regular CDN profiles).
+    # SKU regex is anchored and symmetric with the tier classification below.
     $FRONTDOOR = $Resources | Where-Object { 
         $_.TYPE -eq 'microsoft.network/frontdoors' -or 
-        ($_.TYPE -eq 'microsoft.cdn/profiles' -and $_.sku.name -match 'AzureFrontDoor')
+        ($_.TYPE -eq 'microsoft.cdn/profiles' -and $_.sku.name -match '^(Standard|Premium)_AzureFrontDoor$')
     }
 
     if($FRONTDOOR)

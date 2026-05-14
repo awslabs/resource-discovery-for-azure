@@ -258,9 +258,21 @@ Function RunInventorySetup()
 
             if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
             {
-                # Ensure PowerShell Az context is also set
+                # Ensure PowerShell Az context is set for the requested tenant.
+                # We compare the Az PS context's tenant — not its current subscription
+                # — against $existingAccount because the Az PS and az CLI contexts can
+                # have different default subscriptions even when authenticated against
+                # the same tenant. Comparing subscriptions caused a re-Connect-AzAccount
+                # on every iteration of Run-AllSubscriptions.ps1 on PowerShell Desktop,
+                # which prompted the user to log in again for each subscription. Per-
+                # subscription scoping happens later via Set-AzContext / --subscriptions /
+                # resource-id parameters on Get-AzMetric, so the context only needs to
+                # match the tenant.
                 $azContext = Get-AzContext -ErrorAction SilentlyContinue
-                if ($null -eq $azContext -or $azContext.Subscription.Id -ne $existingAccount.id)
+                $needsConnect = $null -eq $azContext -or
+                                [string]::IsNullOrEmpty($azContext.Tenant.Id) -or
+                                $azContext.Tenant.Id -ne $existingAccount.tenantId
+                if ($needsConnect)
                 {
                     Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
                     if($DeviceLogin.IsPresent)

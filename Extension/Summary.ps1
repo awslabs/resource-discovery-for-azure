@@ -1,5 +1,55 @@
 param($File, $TableStyle, $PlatOS, $Subscriptions, $Resources, $ExtractionRunTime, $ReportingRunTime, $RunLite, $Version)
 
+# Helper: invoke $package.Save() with diagnostic context. The bare .Save() call
+# raises a generic 'Error saving file ...' that doesn't tell the maintainer
+# which save site failed, what state the workbook is in, or what the underlying
+# .NET exception was. See #16 for context.
+#
+# Behaviour:
+# - On success: returns silently.
+# - On failure: writes a structured one-line summary to stderr, ensures the
+#   package is disposed (otherwise the file handle leaks and any subsequent
+#   open of the workbook on this run also fails), then re-throws so the caller's
+#   existing catch logic still fires.
+function Save-ExcelPackageWithDiagnostics
+{
+    param(
+        [Parameter(Mandatory = $true)] $Package,
+        [Parameter(Mandatory = $true)] [string] $File,
+        [Parameter(Mandatory = $true)] [string] $SaveSite
+    )
+
+    try
+    {
+        $Package.Save()
+    }
+    catch
+    {
+        $ex = $_.Exception
+        $sizeOnDisk = if (Test-Path $File) { (Get-Item $File).Length } else { -1 }
+        $worksheetCount = try { $Package.Workbook.Worksheets.Count } catch { -1 }
+
+        Write-Host ("[Summary.ps1] Save failed at site '{0}' for {1}" -f $SaveSite, $File) -ForegroundColor Red
+        Write-Host ("[Summary.ps1]   FileSizeOnDisk: {0} bytes; WorksheetCount: {1}" -f $sizeOnDisk, $worksheetCount) -ForegroundColor Red
+        Write-Host ("[Summary.ps1]   Exception:      {0}: {1}" -f $ex.GetType().FullName, $ex.Message) -ForegroundColor Red
+        $inner = $ex.InnerException
+        $depth = 0
+        while ($null -ne $inner -and $depth -lt 5)
+        {
+            Write-Host ("[Summary.ps1]   Inner[{0}]:      {1}: {2}" -f $depth, $inner.GetType().FullName, $inner.Message) -ForegroundColor Red
+            $inner = $inner.InnerException
+            $depth++
+        }
+
+        # Ensure the package is disposed even though Save() failed. Without this
+        # the underlying file handle stays held and the next Open-ExcelPackage
+        # on the same path fails too, which makes downstream errors confusing.
+        try { $Package.Dispose() } catch { }
+
+        throw
+    }
+}
+
 if(!$RunLite)
 {
     $Excel = New-Object -TypeName OfficeOpenXml.ExcelPackage $File
@@ -24,7 +74,7 @@ if(!$RunLite)
         $Loop++    
     }
 
-    $Excel.Save()
+    Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'reorder-worksheets'
     $Excel.Dispose()
 }
 
@@ -52,7 +102,7 @@ if(!$RunLite)
     }
     else
     {
-        $Excel.Save()
+        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'overview-grid-styling'
         $Excel.Dispose()    
     }
         
@@ -98,7 +148,7 @@ if(!$RunLite)
     }
     else
     {
-        $Excel.Save()
+        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'overview-tabs-table'
         $Excel.Dispose()    
     }
 
@@ -201,7 +251,7 @@ if(!$RunLite)
     }
     else
     {
-        $Excel.Save()
+        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'final-shape-and-summary-text'
         $Excel.Dispose()    
     }
 

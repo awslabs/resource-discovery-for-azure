@@ -42,10 +42,10 @@ Before running the script, ensure your Azure user account has the following role
 - Access at [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell")
 
 #### Option 2: Local Environment
-- PowerShell 7 or later
-- Azure CLI
-- Azure CLI Account Extension
-- Azure CLI Resource-Graph Extension (auto-installed by script)
+- [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
+- [Azure CLI Account Extension](https://learn.microsoft.com/en-us/cli/azure/azure-cli-extensions-overview)
+- [Azure CLI Resource-Graph Extension](https://learn.microsoft.com/en-us/cli/azure/resource-graph) (auto-installed by script)
   
 
 

@@ -1087,11 +1087,17 @@ if($Obfuscate.IsPresent)
 }
 else
 {
+    # Exclude the PowerShell transcript from the zip on the default path too.
+    # The transcript captures every Write-Host/Write-Log call after Start-Transcript,
+    # which includes the authenticated account name, tenant/subscription IDs, and
+    # local file paths. Customers expect the non-obfuscated zip to contain inventory
+    # data, not their console session. The transcript stays on disk locally for debug.
     $compressionOutput = @{
-        Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
+        Path = $Global:File, $Global:ConsumptionFileCsv, $jsonWildCard
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
+    Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
 try 

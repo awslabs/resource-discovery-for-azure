@@ -1096,6 +1096,77 @@ function FinalizeOutputs
     ProcessSummary
 }
 
+# === Pre-flight checks ===
+#
+# Detect the most common environment problems that make a long run pointless,
+# before transcript start, authentication, or any per-subscription work.
+#
+# NOTE: Keep this block in sync with the same block at the top of
+# Run-AllSubscriptions.ps1 (just before its Resolve-TenantId call). They are
+# inlined in both files rather than dot-sourced from a shared file because
+# the dot-source itself is a failure surface (path resolution, missing file)
+# we do not want to add to a script whose entire job is to fail loudly when
+# the environment is wrong.
+$PreFlightInventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container)) {
+    try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null } catch { }
+}
+
+Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+# 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.
+if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+    $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
+    if ($null -eq $CheckCloudDrive) {
+        Write-Host ""
+        Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
+        Write-Host "  Outputs in $PreFlightInventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
+        Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
+        Write-Host "    clouddrive mount" -ForegroundColor Yellow
+        Write-Host "  Continuing in ephemeral mode - download the report ZIP from $PreFlightInventoryRoot before closing the shell." -ForegroundColor Yellow
+        Write-Host ""
+    } else {
+        Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
+    }
+}
+
+# 2. Disk space probe.
+try {
+    $rootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
+    $drive = $rootItem.PSDrive
+    if ($null -ne $drive -and $null -ne $drive.Free) {
+        $freeMB = [math]::Round($drive.Free / 1MB, 0)
+        if ($freeMB -lt 100) {
+            throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $freeMB)
+        } elseif ($freeMB -lt 500) {
+            Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $freeMB) -ForegroundColor Yellow
+        } else {
+            Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+        }
+    }
+} catch {
+    if ($_.Exception.Message -match '^Pre-flight:') { throw }
+    Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# 3. Write probe.
+$probePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
+try {
+    Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+    $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
+    if ($probeRead -notmatch 'preflight write probe') {
+        throw "Write probe content mismatch (read back '$probeRead')"
+    }
+    Remove-Item -Path $probePath -Force -ErrorAction Stop
+    Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
+} catch {
+    try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } } catch { }
+    throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+}
+
+Write-Host "Pre-flight checks passed." -ForegroundColor Green
+Write-Host ""
+
 $Global:PowerShellTranscriptFile = ($DefaultPath + "Transcript_Log_"+ $Global:ReportName + "_" + $CurrentDateTime + ".txt")
 Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 

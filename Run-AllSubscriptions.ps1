@@ -65,6 +65,112 @@ function Exit-Wrapper {
     exit $Code
 }
 
+# === Pre-flight checks ===
+#
+# Detect the most common environment problems that make a long run pointless,
+# before authentication, tenant resolution, or any per-subscription work.
+# Each check is one of:
+#   - Hard fail: print a clear message + remediation, call Exit-Wrapper.
+#   - Warn:      print a clear message and continue (the run will still
+#                produce useful output, just with a known caveat).
+#
+# NOTE: Keep this block in sync with the same block at the top of
+# ResourceInventory.ps1 (just before its Start-Transcript call). They are
+# inlined in both files rather than dot-sourced from a shared file because
+# the dot-source itself is a failure surface (path resolution, missing file)
+# we do not want to add to a script whose entire job is to fail loudly when
+# the environment is wrong.
+function Invoke-PreFlightChecks {
+    param(
+        [Parameter(Mandatory = $true)] [string] $InventoryRoot
+    )
+
+    Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+    # 1. Cloud Shell mount detection.
+    #
+    # Get-CloudDrive ships with the Az.CloudShell module which is preloaded
+    # in Cloud Shell and not present in regular PowerShell installs. So the
+    # cmdlet's existence is our "are we in Cloud Shell" probe; its return
+    # value is our "is the drive mounted" probe.
+    #   - Cmdlet absent       -> not in Cloud Shell, skip the check entirely.
+    #   - Cmdlet present, $null returned -> Cloud Shell, ephemeral mode
+    #                            (verified live: emits "Clouddrive is not
+    #                            mounted" warning on stream 3 and returns null).
+    #   - Cmdlet present, object returned -> Cloud Shell, drive mounted.
+    # The 3>$null suppresses the noisy WARNING so our message is the first
+    # thing the user sees.
+    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+        $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
+        if ($null -eq $CheckCloudDrive) {
+            Write-Host ""
+            Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
+            Write-Host "  Outputs in $InventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
+            Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
+            Write-Host "    clouddrive mount" -ForegroundColor Yellow
+            Write-Host "  Continuing in ephemeral mode - download the report ZIP from $InventoryRoot before closing the shell." -ForegroundColor Yellow
+            Write-Host ""
+        } else {
+            Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
+        }
+    }
+
+    # 2. Disk space probe at the inventory root.
+    #
+    # Cloud Shell quota is 5 GB total. A 100+ subscription run can produce
+    # 200+ MB of zips and intermediate files; if free space is already low
+    # the run will fail late with a confusing "There is not enough space"
+    # somewhere deep in EPPlus. Catch it now.
+    try {
+        $rootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
+        $drive = $rootItem.PSDrive
+        if ($null -ne $drive -and $null -ne $drive.Free) {
+            $freeMB = [math]::Round($drive.Free / 1MB, 0)
+            if ($freeMB -lt 100) {
+                Write-Host ("ERROR: Free disk space at {0} is {1} MB. The script needs at least 100 MB to start. Free space and re-run." -f $InventoryRoot, $freeMB) -ForegroundColor Red
+                Exit-Wrapper -Code 1
+            } elseif ($freeMB -lt 500) {
+                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $InventoryRoot, $freeMB) -ForegroundColor Yellow
+            } else {
+                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $InventoryRoot) -ForegroundColor Green
+            }
+        }
+    } catch {
+        # If we cannot read free space (uncommon - usually means the inventory
+        # root is on an exotic filesystem), warn but do not fail. The write
+        # probe below is the real correctness gate.
+        Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    # 3. Write probe.
+    #
+    # Catches any reason the script cannot create files in $InventoryRoot:
+    # readonly mount, permissions, antivirus quarantine, DLP product, etc.
+    # Cheap (~1 ms) and definitive.
+    $probePath = Join-Path $InventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
+    try {
+        Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
+        if ($probeRead -notmatch 'preflight write probe') {
+            throw "Write probe content mismatch (read back '$probeRead')"
+        }
+        Remove-Item -Path $probePath -Force -ErrorAction Stop
+        Write-Host ("Write probe: OK ({0})" -f $InventoryRoot) -ForegroundColor Green
+    } catch {
+        Write-Host ("ERROR: Cannot write to {0}: {1}" -f $InventoryRoot, $_.Exception.Message) -ForegroundColor Red
+        Write-Host "  This usually means: readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Red
+        Write-Host "  Verify the directory is writable and re-run." -ForegroundColor Red
+        # Best-effort cleanup in case Set-Content partially succeeded.
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } } catch { }
+        Exit-Wrapper -Code 1
+    }
+
+    Write-Host "Pre-flight checks passed." -ForegroundColor Green
+    Write-Host ""
+}
+
+Invoke-PreFlightChecks -InventoryRoot $InventoryRoot
+
 # Resolve a tenant identifier to a tenant GUID.
 #
 # -TenantID may be passed as either a GUID (the canonical form) or as a verified

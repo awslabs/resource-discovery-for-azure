@@ -142,21 +142,45 @@ Function RunInventorySetup()
         }
         else
         {
-            Write-Log -Message ('Azure PowerShell Module not found. Trying to install...') -Severity 'Warning'
-            Install-Module -Name Az -Repository PSGallery -Force -Scope CurrentUser
-            $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+            # Behaviour change (deliberate): do not Install-Module Az from inside
+            # this script. A real field run produced a half-installed Az module
+            # - .psd1 manifests present so Get-Module -ListAvailable was happy,
+            # but the bundled MSAL/Azure.Core assemblies were missing on disk -
+            # and the script then ran for nearly an hour producing zero
+            # consumption data because every Get-AzUsageAggregate call failed
+            # with "Azure PowerShell context has not been properly initialized".
+            # In-process module installs into a script that's already importing
+            # the same module are fragile (concurrent install, AppDomain
+            # caching, partial download) and the failure mode is a silent broken
+            # install rather than a clean error. Failing loudly here is safer.
+            Write-Log -Message ('Azure PowerShell Module not found.') -Severity 'Error'
+            Write-Log -Message ('Install it manually before re-running this script. From an elevated PowerShell 7 prompt:') -Severity 'Error'
+            Write-Log -Message ('  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('Or in Cloud Shell, the Az module is already preinstalled - if it is missing your shell environment is broken.') -Severity 'Error'
+            throw 'Azure PowerShell (Az) module is required and was not found. See log above for installation instructions.'
         }
 
-        if ($null -eq $VarAzPs) 
-        {
-            Write-Log -Message ('Failed to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
-            Read-Host ''
-            Exit
+        # Probe that the Az module actually loads. Get-Module -ListAvailable above
+        # only checks for the manifest on disk; it does not validate that the
+        # bundled assemblies (MSAL, Azure.Core, etc.) are present and loadable.
+        # Without this probe a broken install (manifest present, assemblies
+        # missing - a real field-observed scenario) would let the script
+        # continue all the way to the consumption phase before failing.
+        try {
+            Import-Module Az -ErrorAction Stop -DisableNameChecking | Out-Null
+            $Global:AzPowerShellLoaded = $true
+        } catch {
+            Write-Log -Message ('Azure PowerShell module is present on disk but failed to load: {0}' -f $_.Exception.Message) -Severity 'Error'
+            Write-Log -Message ('This usually indicates a broken install - the module manifest is present but its bundled assemblies (MSAL, Azure.Core, etc.) are missing or unloadable.') -Severity 'Error'
+            Write-Log -Message ('Reinstall with: Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('If the broken install was created by a previous run of this script, also run: Get-Module Az* -ListAvailable | Uninstall-Module -Force') -Severity 'Error'
+            $Global:AzPowerShellLoaded = $false
+            throw "Azure PowerShell (Az) module is broken on disk and cannot be loaded. See log above for remediation."
         }
-        
+
 
         Write-Log -Message ('Checking ImportExcel Module...') -Severity 'Info'
-    
+
         $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
     
         if ($null -ne $VarExcel)
@@ -165,16 +189,15 @@ Function RunInventorySetup()
         }
         else
         {
-            Write-Log -Message ('ImportExcel Module not found. Trying to install...') -Severity 'Warning'
-            Install-Module -Name ImportExcel -Force -Scope CurrentUser
-            $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-        }
-    
-        if ($null -eq $VarExcel) 
-        {
-            Write-Log -Message ('Failed to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
-            Read-Host ''
-            Exit
+            # Behaviour change (deliberate): do not Install-Module ImportExcel
+            # from inside this script. Same rationale as the Az module check
+            # above - in-process module installs into a script that's already
+            # importing the same module produce silent broken installs that
+            # only surface much later. Fail loud here with a clear command.
+            Write-Log -Message ('ImportExcel Module not found.') -Severity 'Error'
+            Write-Log -Message ('Install it manually before re-running this script. From an elevated PowerShell 7 prompt:') -Severity 'Error'
+            Write-Log -Message ('  Install-Module -Name ImportExcel -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            throw 'ImportExcel module is required and was not found. See log above for installation instructions.'
         }
 
         # Eagerly import ImportExcel so its bundled EPPlus assembly is loaded into the
@@ -895,21 +918,33 @@ function ExecuteInventoryProcessing()
             Set-AzContext -Subscription $sub.id | Out-Null
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
-            do 
-            {    
-                $params = @{
-                    ReportedStartTime      = $reportedStartTime
-                    ReportedEndTime        = $reportedEndTime
-                    AggregationGranularity = 'Daily'
-                    ShowDetails            = $true
-                }
-    
-                $params.ContinuationToken = $usageData.ContinuationToken
-    
-                $usageData = Get-UsageAggregates @params
-                $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+            # Track consumption health per-subscription so the wrapper can report
+            # at the end whether consumption data was actually collected. Without
+            # this, a broken Az module produces zero consumption records on every
+            # subscription and the run still reports as successful - leaving an
+            # empty consumption sheet in the output that nobody noticed until the
+            # report was reviewed.
+            $consumptionRecordsThisSub = 0
+            $consumptionFailedThisSub = $false
+            $consumptionFailureMessage = $null
 
-                Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
+            try {
+                do
+                {
+                    $params = @{
+                        ReportedStartTime      = $reportedStartTime
+                        ReportedEndTime        = $reportedEndTime
+                        AggregationGranularity = 'Daily'
+                        ShowDetails            = $true
+                    }
+
+                    $params.ContinuationToken = $usageData.ContinuationToken
+
+                    $usageData = Get-UsageAggregates @params -ErrorAction Stop
+                    $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+
+                    Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
+                    $consumptionRecordsThisSub += $usageDataExport.Count
 
                 $newUsageDataExport = [System.Collections.ArrayList]::new()
 
@@ -995,7 +1030,32 @@ function ExecuteInventoryProcessing()
 
                 $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
-            } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
+                } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
+            } catch {
+                # The most common cause is a broken Az module install (manifest
+                # present, MSAL/Azure.Core assemblies missing). The script-level
+                # Import-Module probe should have caught that, but we also catch
+                # here defensively so a transient ARM throttling event or a
+                # subscription the identity cannot bill against does not abort
+                # the entire run for other subscriptions.
+                $consumptionFailedThisSub = $true
+                $consumptionFailureMessage = $_.Exception.Message
+                Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+            }
+
+            # Aggregate per-sub consumption health into globals the wrapper reads
+            # at the end of the run. Globals here live in the wrapper's scope
+            # because ResourceInventory.ps1 is invoked via `& <path>`.
+            if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+            if ($null -eq $Global:ConsumptionFailedSubs)  { $Global:ConsumptionFailedSubs  = @() }
+            $Global:ConsumptionRecordCount += $consumptionRecordsThisSub
+            if ($consumptionFailedThisSub) {
+                $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                    Name    = $sub.Name
+                    Id      = $sub.Id
+                    Message = $consumptionFailureMessage
+                }
+            }
         }
 
         $DebugPreference = "Continue"

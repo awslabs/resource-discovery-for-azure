@@ -1,4 +1,14 @@
-param($File, $TableStyle, $PlatOS, $Subscriptions, $Resources, $ExtractionRunTime, $ReportingRunTime, $RunLite, $Version)
+param(
+    $File, 
+    $TableStyle, 
+    $PlatOS, 
+    $Subscriptions, 
+    $Resources, 
+    $ExtractionRunTime, 
+    $ReportingRunTime, 
+    $RunLite, 
+    $Version
+)
 
 # Ensure the EPPlus types backing ImportExcel are available before any
 # `New-Object -TypeName OfficeOpenXml.ExcelPackage` call below.

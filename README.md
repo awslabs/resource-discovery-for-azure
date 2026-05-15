@@ -46,11 +46,30 @@ Before running the script, ensure your Azure user account has the following role
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
 - [Azure CLI Account Extension](https://learn.microsoft.com/en-us/cli/azure/azure-cli-extensions-overview)
 - Azure CLI Resource-Graph Extension (auto-installed by script)
+- **Az PowerShell module** and **ImportExcel module** (install before running — see below)
 
 > **Note:** Install the Account Extension before running the script:
 > ```powershell
 > az extension add --name account
 > ```
+
+##### Installing the required PowerShell modules
+
+The script needs both `Az` and `ImportExcel` modules. Install them once before the first run, from an elevated **PowerShell 7** prompt (`pwsh`):
+
+```powershell
+Install-Module -Name Az          -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+```
+
+The script no longer auto-installs these modules from inside its own run. Auto-install during a script that's already importing the same module produces a class of silent broken installs (manifest present, bundled assemblies missing — typically MSAL and Azure.Core for Az), and the failure surfaces much later as zero consumption records or "Cannot find type [OfficeOpenXml.ExcelPackage]" errors. Installing once outside the script, ahead of time, is reliable.
+
+If you suspect a previous run left a broken Az install on disk:
+
+```powershell
+Get-Module Az* -ListAvailable | Uninstall-Module -Force
+Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+```
   
 
 

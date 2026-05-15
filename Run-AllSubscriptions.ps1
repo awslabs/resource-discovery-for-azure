@@ -534,6 +534,36 @@ if ($EmptySubs.Count -gt 0) {
     Write-Host ""
 }
 
+# Surface consumption (billing) data health. The inner script's consumption
+# loop populates these globals; if every Get-UsageAggregates call failed
+# (typically because the Az PowerShell module is broken on disk and cannot
+# load its bundled MSAL/Azure.Core assemblies) the customer ends up with an
+# empty consumption sheet and no signal that anything went wrong. Make it
+# loud here so it's caught before the report is shared.
+$consumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$consumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
+if ($consumptionRecords -gt 0 -or $consumptionFailures.Count -gt 0) {
+    Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $consumptionRecords) -ForegroundColor Green
+}
+if ($consumptionFailures.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Consumption Failures:    {0} subscription(s)" -f $consumptionFailures.Count) -ForegroundColor Yellow
+    # The consumption failure message is repeated verbatim across every sub
+    # when the cause is a broken Az module - dedupe to avoid screen wall.
+    $uniqueMessages = @($consumptionFailures | Select-Object -ExpandProperty Message -Unique)
+    foreach ($m in $uniqueMessages) {
+        Write-Host ("  - {0}" -f $m) -ForegroundColor Yellow
+    }
+    if ($uniqueMessages | Where-Object { $_ -match 'context has not been properly initialized|Could not load file or assembly|MSAL|Azure\.Core' }) {
+        Write-Host "  This message strongly suggests the Az PowerShell module is broken on disk." -ForegroundColor Yellow
+        Write-Host "  Reinstall with:" -ForegroundColor Yellow
+        Write-Host "    Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
+        Write-Host "    Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck" -ForegroundColor Yellow
+    }
+    Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 if ($FailedSubscriptions.Count -gt 0) {
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow

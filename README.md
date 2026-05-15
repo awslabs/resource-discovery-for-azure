@@ -146,6 +146,18 @@ Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each 
 
 Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery.
 
+#### Subscription state filter
+
+By default, `Run-AllSubscriptions.ps1` only inventories subscriptions whose `State` is `Enabled`. Subscriptions in any other state (`Disabled`, `Warned`, `PastDue`, `Deleted`) are skipped because they return little or no data from Resource Graph and most ARM data-plane calls, so processing them produces near-empty reports while still costing wall-clock time.
+
+To include every subscription regardless of state, pass `-IncludeDisabled`:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -IncludeDisabled
+```
+
+The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
+
 #### Resuming an interrupted run
 
 For tenants with many subscriptions, the run can be cut short by environment-level limits — for example, an Azure Cloud Shell session that ends when a Conditional Access policy enforces a maximum session lifetime. The wrapper supports resuming:

@@ -8,7 +8,8 @@ param (
     [switch]$Obfuscate,
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$IncludeDisabled
 )
 
 $RunStartTime = Get-Date
@@ -73,7 +74,28 @@ try {
 }
 
 # Get all Azure subscriptions
-$subscriptions = Get-AzSubscription
+$allSubscriptions = Get-AzSubscription
+
+# Filter out non-Enabled subscriptions by default. Disabled / Warned / Deleted
+# subscriptions return little-to-no data from Resource Graph and most ARM
+# data-plane calls, so processing them produces near-empty per-subscription
+# reports while still costing wall-clock time (which matters for environments
+# like Azure Cloud Shell where the session has a hard maximum lifetime).
+# Pass -IncludeDisabled to inventory every subscription regardless of state.
+if ($IncludeDisabled) {
+    $subscriptions = $allSubscriptions
+    $excluded = @()
+} else {
+    $subscriptions = @($allSubscriptions | Where-Object { $_.State -eq 'Enabled' })
+    $excluded     = @($allSubscriptions | Where-Object { $_.State -ne 'Enabled' })
+}
+
+Write-Host ("Subscriptions visible: {0}" -f $allSubscriptions.Count) -ForegroundColor Cyan
+if ($excluded.Count -gt 0) {
+    $byState = $excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
+    Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $excluded.Count, ($byState -join ', ')) -ForegroundColor Yellow
+}
+Write-Host ("Subscriptions to process: {0}" -f $subscriptions.Count) -ForegroundColor Cyan
 
 # Apply resume filter (only when -Resume is explicitly passed)
 $CompletedIds = @()
@@ -170,7 +192,11 @@ if ($FailedSubscriptions.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -Pat
 $Elapsed = (Get-Date) - $RunStartTime
 Write-Host ""
 Write-Host "================ Summary ================" -ForegroundColor Green
-Write-Host ("Subscriptions Total:     {0}" -f $subscriptions.Count) -ForegroundColor Green
+Write-Host ("Subscriptions Visible:   {0}" -f $allSubscriptions.Count) -ForegroundColor Green
+if ($excluded.Count -gt 0) {
+    Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $excluded.Count) -ForegroundColor Green
+}
+Write-Host ("Subscriptions Eligible:  {0}" -f $subscriptions.Count) -ForegroundColor Green
 if ($Resume) {
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
 }

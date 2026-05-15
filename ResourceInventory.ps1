@@ -1101,71 +1101,99 @@ function FinalizeOutputs
 # Detect the most common environment problems that make a long run pointless,
 # before transcript start, authentication, or any per-subscription work.
 #
-# NOTE: Keep this block in sync with the same block at the top of
-# Run-AllSubscriptions.ps1 (just before its Resolve-TenantId call). They are
-# inlined in both files rather than dot-sourced from a shared file because
-# the dot-source itself is a failure surface (path resolution, missing file)
-# we do not want to add to a script whose entire job is to fail loudly when
-# the environment is wrong.
-$PreFlightInventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container)) {
-    try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null } catch { }
-}
+# When this script is invoked by Run-AllSubscriptions.ps1 (-RunAllSubs is
+# set), the wrapper has already executed the same checks at its top level,
+# so the entire block is skipped here - otherwise the checks would re-run
+# once per subscription (e.g. 164 times in a 164-sub run), adding noise to
+# the per-subscription transcript without adding safety. Standalone invocation
+# of this script still runs the full block.
+#
+# NOTE: Keep the body of this block in sync with the same block at the top
+# of Run-AllSubscriptions.ps1 (just before its Resolve-TenantId call). They
+# are inlined in both files rather than dot-sourced from a shared file
+# because the dot-source itself is a failure surface (path resolution,
+# missing file) we do not want to add to a script whose entire job is to
+# fail loudly when the environment is wrong. Intentional differences vs the
+# wrapper copy:
+#   - This copy honors -OutputDirectory if the caller passed one (the wrapper
+#     does not expose or forward that parameter).
+#   - This copy throws on hard-fail; the wrapper's copy calls Exit-Wrapper.
+#   - This copy is gated on -not $RunAllSubs to avoid duplicate execution
+#     when invoked by the wrapper.
+if (-not $RunAllSubs.IsPresent) {
 
-Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
-
-# 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.
-if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
-    $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
-    if ($null -eq $CheckCloudDrive) {
-        Write-Host ""
-        Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
-        Write-Host "  Outputs in $PreFlightInventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
-        Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
-        Write-Host "    clouddrive mount" -ForegroundColor Yellow
-        Write-Host "  Continuing in ephemeral mode - download the report ZIP from $PreFlightInventoryRoot before closing the shell." -ForegroundColor Yellow
-        Write-Host ""
+    # Honor -OutputDirectory when the caller passed one. CheckPowerShell will
+    # re-validate -OutputDirectory itself further down and is the authoritative
+    # gate; we Resolve-Path here defensively so a relative path is checked at
+    # the right location, and fall back to the raw value if it does not yet
+    # resolve (the write probe below will surface the underlying error).
+    $PreFlightInventoryRoot = if ($OutputDirectory) {
+        try { (Resolve-Path $OutputDirectory -ErrorAction Stop).Path }
+        catch { $OutputDirectory }
+    } elseif ($PSVersionTable.Platform -eq 'Unix') {
+        "$HOME/InventoryReports"
     } else {
-        Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
+        "C:\InventoryReports"
     }
-}
+    if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container)) {
+        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null } catch { }
+    }
 
-# 2. Disk space probe.
-try {
-    $rootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
-    $drive = $rootItem.PSDrive
-    if ($null -ne $drive -and $null -ne $drive.Free) {
-        $freeMB = [math]::Round($drive.Free / 1MB, 0)
-        if ($freeMB -lt 100) {
-            throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $freeMB)
-        } elseif ($freeMB -lt 500) {
-            Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $freeMB) -ForegroundColor Yellow
+    Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+    # 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.
+    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+        $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
+        if ($null -eq $CheckCloudDrive) {
+            Write-Host ""
+            Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
+            Write-Host "  Outputs in $PreFlightInventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
+            Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
+            Write-Host "    clouddrive mount" -ForegroundColor Yellow
+            Write-Host "  Continuing in ephemeral mode - download the report ZIP from $PreFlightInventoryRoot before closing the shell." -ForegroundColor Yellow
+            Write-Host ""
         } else {
-            Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+            Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
         }
     }
-} catch {
-    if ($_.Exception.Message -match '^Pre-flight:') { throw }
-    Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
-}
 
-# 3. Write probe.
-$probePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
-try {
-    Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
-    $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
-    if ($probeRead -notmatch 'preflight write probe') {
-        throw "Write probe content mismatch (read back '$probeRead')"
+    # 2. Disk space probe.
+    try {
+        $rootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
+        $drive = $rootItem.PSDrive
+        if ($null -ne $drive -and $null -ne $drive.Free) {
+            $freeMB = [math]::Round($drive.Free / 1MB, 0)
+            if ($freeMB -lt 100) {
+                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $freeMB)
+            } elseif ($freeMB -lt 500) {
+                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $freeMB) -ForegroundColor Yellow
+            } else {
+                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+            }
+        }
+    } catch {
+        if ($_.Exception.Message -match '^Pre-flight:') { throw }
+        Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
     }
-    Remove-Item -Path $probePath -Force -ErrorAction Stop
-    Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
-} catch {
-    try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } } catch { }
-    throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
-}
 
-Write-Host "Pre-flight checks passed." -ForegroundColor Green
-Write-Host ""
+    # 3. Write probe.
+    $probePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
+    try {
+        Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
+        if ($probeRead -notmatch 'preflight write probe') {
+            throw "Write probe content mismatch (read back '$probeRead')"
+        }
+        Remove-Item -Path $probePath -Force -ErrorAction Stop
+        Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
+    } catch {
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } } catch { }
+        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+    }
+
+    Write-Host "Pre-flight checks passed." -ForegroundColor Green
+    Write-Host ""
+}
 
 # Setup and Inventory Gathering.
 #

@@ -20,7 +20,8 @@ $FailedSubscriptions = @()
 # anything else writes to the host.
 $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
 if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {
-    try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null } catch { }
+    try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
+    catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
 }
 
 # Wrapper-level transcript.
@@ -60,7 +61,8 @@ try {
 function Exit-Wrapper {
     param([int]$Code = 0)
     if ($WrapperTranscriptStarted) {
-        try { Stop-Transcript | Out-Null } catch { }
+        try { Stop-Transcript | Out-Null }
+        catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
     }
     exit $Code
 }
@@ -161,7 +163,8 @@ function Invoke-PreFlightChecks {
         Write-Host "  This usually means: readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Red
         Write-Host "  Verify the directory is writable and re-run." -ForegroundColor Red
         # Best-effort cleanup in case Set-Content partially succeeded.
-        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } } catch { }
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } }
+        catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $probePath, $_.Exception.Message) }
         Exit-Wrapper -Code 1
     }
 
@@ -536,7 +539,7 @@ foreach ($sub in $subscriptions) {
             $proc = Get-Process -Id $PID
             $diagLines += "Process WorkingSet (MB):  $([math]::Round($proc.WorkingSet64 / 1MB, 1))"
             $diagLines += "Process PrivateMemory (MB): $([math]::Round($proc.PrivateMemorySize64 / 1MB, 1))"
-        } catch { }
+        } catch { Write-Verbose ("Process snapshot failed: {0}" -f $_.Exception.Message) }
 
         try {
             $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
@@ -546,7 +549,7 @@ foreach ($sub in $subscriptions) {
                     $diagLines += "Free disk on $($rootDrive.Name): (MB): $([math]::Round($rootDrive.Free / 1MB, 1))"
                 }
             }
-        } catch { }
+        } catch { Write-Verbose ("Disk snapshot failed: {0}" -f $_.Exception.Message) }
 
         $diagLines += ""
 
@@ -554,11 +557,13 @@ foreach ($sub in $subscriptions) {
         if ($null -eq $DiagFile) {
             $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
             if (-not (Test-Path $InventoryRoot)) {
-                try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null } catch { }
+                try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null }
+                catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
             }
             $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
         }
-        try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 } catch { }
+        try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+        catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
         $FailedSubscriptions += $sub.Name
     }
@@ -693,5 +698,6 @@ Write-Host "=========================================" -ForegroundColor Green
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted) {
-    try { Stop-Transcript | Out-Null } catch { }
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }

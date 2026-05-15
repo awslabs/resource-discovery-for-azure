@@ -139,7 +139,8 @@ function Save-ExcelPackageWithDiagnostics
         # Ensure the package is disposed even though Save() failed. Without this
         # the underlying file handle stays held and the next Open-ExcelPackage
         # on the same path fails too, which makes downstream errors confusing.
-        try { $Package.Dispose() } catch { }
+        try { $Package.Dispose() }
+        catch { Write-Verbose ("Package.Dispose() after Save failure threw: {0}" -f $_.Exception.Message) }
 
         throw
     }

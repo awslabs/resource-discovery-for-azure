@@ -1136,7 +1136,8 @@ if (-not $RunAllSubs.IsPresent) {
         "C:\InventoryReports"
     }
     if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container)) {
-        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null } catch { }
+        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null }
+        catch { Write-Verbose ("PreFlightInventoryRoot create failed at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) }
     }
 
     Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
@@ -1187,7 +1188,8 @@ if (-not $RunAllSubs.IsPresent) {
         Remove-Item -Path $probePath -Force -ErrorAction Stop
         Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
     } catch {
-        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } } catch { }
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } }
+        catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $probePath, $_.Exception.Message) }
         throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
     }
 

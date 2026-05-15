@@ -1167,13 +1167,22 @@ try {
 Write-Host "Pre-flight checks passed." -ForegroundColor Green
 Write-Host ""
 
-$Global:PowerShellTranscriptFile = ($DefaultPath + "Transcript_Log_"+ $Global:ReportName + "_" + $CurrentDateTime + ".txt")
-Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
-
-# Setup and Inventory Gathering
+# Setup and Inventory Gathering.
+#
+# Variables and RunInventorySetup populate $Global:DefaultPath, $Global:ReportName,
+# and $Global:CurrentDateTime which are required to compute the transcript path.
+# Start-Transcript must therefore run *after* RunInventorySetup, not before.
+# Previously this block placed Start-Transcript above Variables, with the result
+# that $DefaultPath/$ReportName/$CurrentDateTime were all $null at that point and
+# the transcript file landed in the current working directory with the literal
+# name "Transcript_Log__.txt" - two underscores, missing report name and missing
+# timestamp.
 $Global:Runtime = Measure-Command -Expression {
     Variables
     RunInventorySetup
+
+    $Global:PowerShellTranscriptFile = ($Global:DefaultPath + "Transcript_Log_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".txt")
+    Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
 # Execution and processing of inventory

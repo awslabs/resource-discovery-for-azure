@@ -144,6 +144,12 @@ Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each 
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
 ```
 
+`-TenantID` accepts either a tenant GUID or a verified domain. When a domain is passed (for example `contoso.onmicrosoft.com`), the wrapper resolves it to the GUID via Microsoft's anonymous OIDC discovery endpoint before doing anything else, so this also works:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
+```
+
 Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery.
 
 #### Subscription state filter

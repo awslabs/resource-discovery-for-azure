@@ -15,6 +15,55 @@ param (
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
+# Resolve a tenant identifier to a tenant GUID.
+#
+# -TenantID may be passed as either a GUID (the canonical form) or as a verified
+# domain (e.g. "contoso.onmicrosoft.com" or "contoso.com"). When given a domain,
+# resolve it to the GUID via Microsoft's public OIDC discovery endpoint:
+#
+#   https://login.microsoftonline.com/<domain>/v2.0/.well-known/openid-configuration
+#
+# That endpoint is anonymous (no sign-in required) and returns a JSON document
+# whose "issuer" field embeds the tenant GUID. Resolving up front means every
+# downstream call (az login, Get-AzSubscription, the resume state filename, the
+# auth gate) operates on a stable identifier even if Azure later renames the
+# domain.
+function Resolve-TenantId {
+    param([Parameter(Mandatory=$true)][string]$Value)
+
+    $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    if ($Value -match $guidPattern) { return $Value }
+
+    $url = "https://login.microsoftonline.com/$Value/v2.0/.well-known/openid-configuration"
+    Write-Host ("Resolving tenant '{0}' via OIDC discovery..." -f $Value) -ForegroundColor Cyan
+    try {
+        $config = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
+    } catch {
+        throw "Could not resolve tenant '$Value' to a GUID. Check that it is a valid Azure AD domain or pass the tenant GUID directly. Underlying error: $($_.Exception.Message)"
+    }
+
+    if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.issuer)) {
+        throw "OIDC discovery for tenant '$Value' returned an unexpected response (no issuer)."
+    }
+
+    # issuer looks like https://login.microsoftonline.com/<guid>/v2.0
+    $segments = $config.issuer -split '/'
+    $resolved = $segments | Where-Object { $_ -match $guidPattern } | Select-Object -First 1
+    if (-not $resolved) {
+        throw "OIDC discovery for tenant '$Value' did not contain a recognizable tenant GUID. issuer='$($config.issuer)'"
+    }
+
+    Write-Host ("Resolved tenant '{0}' -> {1}" -f $Value, $resolved) -ForegroundColor Green
+    return $resolved
+}
+
+try {
+    $TenantID = Resolve-TenantId -Value $TenantID
+} catch {
+    Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+
 # Inventory root (used for resume state and consolidated output)
 $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
 if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {

@@ -341,6 +341,11 @@ if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = 
 # Loop through each subscription and run ResourceInventory
 $SkippedCount = 0
 $DiagFile = $null
+# Per-subscription resource counts collected for the final summary so the user
+# can see at a glance which subscriptions came back empty (the most common
+# explanation is that the signed-in identity does not have Reader on the
+# subscription, but it can also legitimately mean the subscription is empty).
+$SubResourceCounts = @()
 foreach ($sub in $subscriptions) {
     if ($Resume -and ($CompletedIds -contains $sub.Id)) {
         Write-Host ("Skipping (already completed): {0} ({1})" -f $sub.Name, $sub.Id) -ForegroundColor DarkGray
@@ -353,6 +358,31 @@ foreach ($sub in $subscriptions) {
     try {
         & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
         if ($LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+
+        # Capture the per-subscription resource count from the inner script.
+        # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
+        # lives in this wrapper's scope. The inner script resets that variable
+        # to @() at the start of every invocation, so the count after return
+        # accurately reflects the subscription that just finished.
+        $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+        $SubResourceCounts += [pscustomobject]@{
+            Name  = $sub.Name
+            Id    = $sub.Id
+            Count = $resCount
+        }
+
+        if ($resCount -eq 0) {
+            # Loud yellow signal so this stands out in the per-iteration narration
+            # and in the wrapper transcript. The most common cause is the signed-in
+            # identity not having Reader on the subscription; second is a sub that
+            # genuinely has no resources. Either way the user almost always wants
+            # to know immediately rather than discover it days later when the
+            # consolidated report turns out to be empty for some subs.
+            Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: az graph query -q ""resources | summarize count()"" --subscriptions {1}" -f $sub.Name, $sub.Id) -ForegroundColor Yellow
+        } else {
+            Write-Host ("Resources collected: {0:N0}" -f $resCount) -ForegroundColor DarkGreen
+        }
+
         Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
 
         # Mark complete and persist immediately so a mid-run sign-out is recoverable.
@@ -481,6 +511,29 @@ if ($Resume) {
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
 }
 Write-Host ("Subscriptions Processed: {0}" -f ($subscriptions.Count - $SkippedCount)) -ForegroundColor Green
+
+# Surface the per-subscription resource-count result so the user does not have
+# to scan individual transcripts to find subs that came back empty. Empty subs
+# are shown distinctly because they almost always indicate a permission gap;
+# treating them as "successful" in the summary is misleading.
+$EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
+$NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
+if ($SubResourceCounts.Count -gt 0) {
+    $totalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
+    Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $totalRes, $NonEmptySubs.Count) -ForegroundColor Green
+}
+if ($EmptySubs.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Subscriptions Empty:     {0} (returned 0 resources)" -f $EmptySubs.Count) -ForegroundColor Yellow
+    Write-Host "  Likely permission gap (no Reader on the subscription) or genuinely empty subscription." -ForegroundColor Yellow
+    Write-Host "  Verify Reader access for these specifically:" -ForegroundColor Yellow
+    foreach ($e in $EmptySubs) {
+        Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow
+    }
+    Write-Host "  Acid test: az graph query -q ""resources | summarize count()"" --subscriptions <id>" -ForegroundColor Yellow
+    Write-Host ""
+}
+
 if ($FailedSubscriptions.Count -gt 0) {
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow

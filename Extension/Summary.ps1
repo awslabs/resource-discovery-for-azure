@@ -1,5 +1,36 @@
 param($File, $TableStyle, $PlatOS, $Subscriptions, $Resources, $ExtractionRunTime, $ReportingRunTime, $RunLite, $Version)
 
+# Ensure the EPPlus types backing ImportExcel are available before any
+# `New-Object -TypeName OfficeOpenXml.ExcelPackage` call below.
+#
+# Background: this script is invoked via `& $SummaryPath ...` from
+# ResourceInventory.ps1, which creates a new child scope. PowerShell's
+# auto-import of modules only triggers on first use of a *cmdlet* exported
+# by the module, but the lines below reference the underlying EPPlus type
+# directly via `New-Object`. Type references do not trigger auto-import,
+# so on a fresh script invocation - or on the second-and-later iterations
+# of a long Run-AllSubscriptions.ps1 loop where module state can be
+# evicted on Windows PowerShell - the type lookup fails with:
+#
+#   Cannot find type [OfficeOpenXml.ExcelPackage]: verify that the
+#   assembly containing this type is loaded.
+#
+# Importing ImportExcel explicitly here is idempotent and inexpensive, and
+# guarantees the EPPlus assembly is loaded into the current AppDomain
+# before any New-Object call against its types. This matches the pattern
+# already used elsewhere in the script for Az modules.
+try {
+    if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
+        Import-Module ImportExcel -ErrorAction Stop -Force -DisableNameChecking | Out-Null
+    }
+    if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
+        throw "ImportExcel module imported but the OfficeOpenXml.ExcelPackage type is still not loadable. The ImportExcel module may be present but its bundled EPPlus assembly is missing or unloadable in this runspace."
+    }
+} catch {
+    Write-Error ("Summary.ps1 cannot proceed: {0}" -f $_.Exception.Message)
+    throw
+}
+
 # Helper: invoke $package.Save() with diagnostic context. The bare .Save() call
 # raises a generic 'Error saving file ...' that doesn't tell the maintainer
 # which save site failed, what state the workbook is in, or what the underlying

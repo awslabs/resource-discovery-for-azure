@@ -176,6 +176,30 @@ Function RunInventorySetup()
             Read-Host ''
             Exit
         }
+
+        # Eagerly import ImportExcel so its bundled EPPlus assembly is loaded into the
+        # current AppDomain before any code path constructs OfficeOpenXml types via
+        # New-Object. -ListAvailable (above) only confirms the module exists; it does
+        # not load it. Without this explicit import, scripts further down the call
+        # chain (notably Extension/Summary.ps1, which is invoked in a child scope via
+        # `& $SummaryPath ...`) fail with:
+        #
+        #   Cannot find type [OfficeOpenXml.ExcelPackage]: verify that the
+        #   assembly containing this type is loaded.
+        #
+        # The failure surfaces especially on Windows PowerShell Desktop in
+        # multi-subscription runs where the auto-import behavior across iterations
+        # can lose the loaded assembly's reference. Importing once here is idempotent
+        # and inexpensive.
+        try {
+            Import-Module ImportExcel -ErrorAction Stop -Force -DisableNameChecking | Out-Null
+            if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
+                Write-Log -Message ('ImportExcel imported but OfficeOpenXml.ExcelPackage type is not loadable. The Excel report step will fail.') -Severity 'Error'
+            }
+        } catch {
+            Write-Log -Message ('Import-Module ImportExcel failed: {0}' -f $_.Exception.Message) -Severity 'Error'
+            throw
+        }
     }
     
     function CheckPowerShell() 

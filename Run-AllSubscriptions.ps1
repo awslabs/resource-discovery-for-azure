@@ -57,16 +57,72 @@ function Save-CompletedSubscriptionIds {
     }
 }
 
-# Authenticate
+# Authenticate, but only if needed.
+#
+# In environments like Azure Cloud Shell the shell already has a valid az CLI
+# and Az PowerShell session for the signed-in user. Unconditionally calling
+# `az login` and `Connect-AzAccount` from the wrapper produces a redundant
+# browser/device-code prompt every run. The script also needs each context
+# to be on the requested tenant - if either is on a different tenant the
+# subscription queries below will return the wrong (or no) results.
+#
+# Check both contexts first; only sign in for the side that is missing or on
+# the wrong tenant. The signal we care about is the tenant, not the default
+# subscription, because per-subscription scoping is handled at use-site
+# (Set-AzContext / --subscriptions / resource-id-scoped Get-AzMetric).
+
+function Get-AzCliSignedInTenant {
+    $raw = az account show --output json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+    try { return ($raw | ConvertFrom-Json).tenantId } catch { return $null }
+}
+
+function Get-AzPsSignedInTenant {
+    try {
+        $ctx = Get-AzContext -ErrorAction Stop
+        if ($null -eq $ctx -or $null -eq $ctx.Account) { return $null }
+        return $ctx.Tenant.Id
+    } catch {
+        return $null
+    }
+}
+
 try {
-    if ($DeviceLogin) {
-        az login -t $TenantID --use-device-code --only-show-errors | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
-        Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
+    $cliTenant = Get-AzCliSignedInTenant
+    $psTenant  = Get-AzPsSignedInTenant
+
+    $cliOk = ($cliTenant -eq $TenantID)
+    $psOk  = ($psTenant  -eq $TenantID)
+
+    if ($cliOk -and $psOk) {
+        Write-Host ("Existing session detected for tenant {0}; skipping interactive login." -f $TenantID) -ForegroundColor Green
     } else {
-        az login -t $TenantID --only-show-errors | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
-        Connect-AzAccount -Tenant $TenantID | Out-Null
+        if (-not $cliOk) {
+            if ($null -eq $cliTenant) {
+                Write-Host "az CLI is not signed in; authenticating..." -ForegroundColor Cyan
+            } else {
+                Write-Host ("az CLI is signed in to tenant {0}; switching to {1}..." -f $cliTenant, $TenantID) -ForegroundColor Cyan
+            }
+            if ($DeviceLogin) {
+                az login -t $TenantID --use-device-code --only-show-errors | Out-Null
+            } else {
+                az login -t $TenantID --only-show-errors | Out-Null
+            }
+            if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
+        }
+
+        if (-not $psOk) {
+            if ($null -eq $psTenant) {
+                Write-Host "Az PowerShell is not signed in; authenticating..." -ForegroundColor Cyan
+            } else {
+                Write-Host ("Az PowerShell is signed in to tenant {0}; switching to {1}..." -f $psTenant, $TenantID) -ForegroundColor Cyan
+            }
+            if ($DeviceLogin) {
+                Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
+            } else {
+                Connect-AzAccount -Tenant $TenantID | Out-Null
+            }
+        }
     }
 } catch {
     Write-Host "ERROR: Authentication failed. $_" -ForegroundColor Red

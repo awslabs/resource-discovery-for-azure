@@ -298,11 +298,13 @@ if(!$RunLite)
     $ExtractTime = if($ExtractionRunTime.Totalminutes -lt 1){($ExtractionRunTime.Seconds.ToString()+' Seconds')}else{($ExtractionRunTime.Totalminutes.ToString('#######.##')+' Minutes')}
     $ReportTime = ($ReportingRunTime.Totalminutes.ToString('#######.##')+' Minutes')
 
-    # $User is referenced once below for the summary text drawing. Guard
-    # against the (rare but possible) case where Subscriptions is empty or
-    # the first element lacks a .user.name; an out-of-bounds or null member
-    # access here would abort the entire Summary build for what is purely a
-    # cosmetic field.
+    # $User and $TotalRes are kept for backward-compatibility - upstream forks
+    # or downstream consumers may reference them via dot-sourcing patterns.
+    # The original assignment of $User crashed the entire Summary build if
+    # $Subscriptions was empty or its first element lacked a .user, even
+    # though nothing in the script body reads $User itself. Guarding the
+    # assignment is cheap insurance against a regression that would surface
+    # only in unusual environments.
     $User = if ($Subscriptions -and $Subscriptions.Count -gt 0 -and $Subscriptions[0].user) { $Subscriptions[0].user.name } else { '<unknown user>' }
     $TotalRes = $Resources
 

@@ -7,30 +7,437 @@ param (
     [switch]$DeviceLogin,
     [switch]$Obfuscate,
     [switch]$SkipMetrics,
-    [switch]$SkipConsumption
+    [switch]$SkipConsumption,
+    [switch]$Resume,
+    [switch]$IncludeDisabled
 )
 
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
-# Authenticate
+# Inventory root (used for resume state, consolidated output, and the wrapper
+# transcript). Computed up front so the transcript can be started before
+# anything else writes to the host.
+$InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {
+    try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
+    catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
+}
+
+# Wrapper-level transcript.
+#
+# ResourceInventory.ps1 already records a per-subscription transcript inside
+# each subscription's output folder. That captures everything inside a single
+# sub's run, but it does not capture the wrapper's own output: tenant
+# resolution, the auth gate's decisions, resume-state messages, the
+# Processing/Completed/ERROR cross-iteration narration, the consolidation
+# step, or the final summary. For multi-subscription runs that bookkeeping is
+# the most useful diagnostic signal of all - which sub failed, why, what came
+# before, and how the wrapper proceeded.
+#
+# This transcript runs at the wrapper level for every invocation (single sub
+# or many) and lands at:
+#   <InventoryRoot>/RunAllSubscriptions_transcript_<timestamp>.txt
+# It also catches everything Write-Host'd by the inner script into the same
+# console session, so the file is a complete record of one wrapper invocation.
+# Start-Transcript is idempotent in the sense that we Stop it on every exit
+# path via Exit-Wrapper.
+$WrapperTranscriptStarted = $false
+$WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 try {
-    if ($DeviceLogin) {
-        az login -t $TenantID --use-device-code --only-show-errors | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
-        Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
+    Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
+    $WrapperTranscriptStarted = $true
+    Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
+} catch {
+    # Non-fatal. If transcript fails to start (rare - usually permissions or
+    # an already-running transcript on this host), the run continues without
+    # one rather than aborting.
+    Write-Host ("WARNING: Could not start wrapper transcript at {0}: {1}" -f $WrapperTranscriptFile, $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# Single exit path that ensures the wrapper transcript is stopped before
+# returning to the host. Used by every error path that previously called
+# `exit <code>` directly.
+function Exit-Wrapper {
+    param([int]$Code = 0)
+    if ($WrapperTranscriptStarted) {
+        try { Stop-Transcript | Out-Null }
+        catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
+    }
+    exit $Code
+}
+
+# === Pre-flight checks ===
+#
+# Detect the most common environment problems that make a long run pointless,
+# before authentication, tenant resolution, or any per-subscription work.
+# Each check is one of:
+#   - Hard fail: print a clear message + remediation, call Exit-Wrapper.
+#   - Warn:      print a clear message and continue (the run will still
+#                produce useful output, just with a known caveat).
+#
+# NOTE: Keep this block in sync with the same block at the top of
+# ResourceInventory.ps1 (just before its Start-Transcript call). They are
+# inlined in both files rather than dot-sourced from a shared file because
+# the dot-source itself is a failure surface (path resolution, missing file)
+# we do not want to add to a script whose entire job is to fail loudly when
+# the environment is wrong.
+function Invoke-PreFlightChecks {
+    param(
+        [Parameter(Mandatory = $true)] [string] $InventoryRoot
+    )
+
+    Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+    # 1. Cloud Shell mount detection.
+    #
+    # Get-CloudDrive ships with the Az.CloudShell module which is preloaded
+    # in Cloud Shell and not present in regular PowerShell installs. So the
+    # cmdlet's existence is our "are we in Cloud Shell" probe; its return
+    # value is our "is the drive mounted" probe.
+    #   - Cmdlet absent       -> not in Cloud Shell, skip the check entirely.
+    #   - Cmdlet present, $null returned -> Cloud Shell, ephemeral mode
+    #                            (verified live: emits "Clouddrive is not
+    #                            mounted" warning on stream 3 and returns null).
+    #   - Cmdlet present, object returned -> Cloud Shell, drive mounted.
+    # The 3>$null suppresses the noisy WARNING so our message is the first
+    # thing the user sees.
+    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+        $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
+        if ($null -eq $CheckCloudDrive) {
+            Write-Host ""
+            Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
+            Write-Host "  Outputs in $InventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
+            Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
+            Write-Host "    clouddrive mount" -ForegroundColor Yellow
+            Write-Host "  Continuing in ephemeral mode - download the report ZIP from $InventoryRoot before closing the shell." -ForegroundColor Yellow
+            Write-Host ""
+        } else {
+            Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
+        }
+    }
+
+    # 2. Disk space probe at the inventory root.
+    #
+    # Cloud Shell quota is 5 GB total. A 100+ subscription run can produce
+    # 200+ MB of zips and intermediate files; if free space is already low
+    # the run will fail late with a confusing "There is not enough space"
+    # somewhere deep in EPPlus. Catch it now.
+    try {
+        $rootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
+        $drive = $rootItem.PSDrive
+        if ($null -ne $drive -and $null -ne $drive.Free) {
+            $freeMB = [math]::Round($drive.Free / 1MB, 0)
+            if ($freeMB -lt 100) {
+                Write-Host ("ERROR: Free disk space at {0} is {1} MB. The script needs at least 100 MB to start. Free space and re-run." -f $InventoryRoot, $freeMB) -ForegroundColor Red
+                Exit-Wrapper -Code 1
+            } elseif ($freeMB -lt 500) {
+                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $InventoryRoot, $freeMB) -ForegroundColor Yellow
+            } else {
+                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $InventoryRoot) -ForegroundColor Green
+            }
+        }
+    } catch {
+        # If we cannot read free space (uncommon - usually means the inventory
+        # root is on an exotic filesystem), warn but do not fail. The write
+        # probe below is the real correctness gate.
+        Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    # 3. Write probe.
+    #
+    # Catches any reason the script cannot create files in $InventoryRoot:
+    # readonly mount, permissions, antivirus quarantine, DLP product, etc.
+    # Cheap (~1 ms) and definitive.
+    $probePath = Join-Path $InventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
+    try {
+        Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
+        if ($probeRead -notmatch 'preflight write probe') {
+            throw "Write probe content mismatch (read back '$probeRead')"
+        }
+        Remove-Item -Path $probePath -Force -ErrorAction Stop
+        Write-Host ("Write probe: OK ({0})" -f $InventoryRoot) -ForegroundColor Green
+    } catch {
+        Write-Host ("ERROR: Cannot write to {0}: {1}" -f $InventoryRoot, $_.Exception.Message) -ForegroundColor Red
+        Write-Host "  This usually means: readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Red
+        Write-Host "  Verify the directory is writable and re-run." -ForegroundColor Red
+        # Best-effort cleanup in case Set-Content partially succeeded.
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } }
+        catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $probePath, $_.Exception.Message) }
+        Exit-Wrapper -Code 1
+    }
+
+    Write-Host "Pre-flight checks passed." -ForegroundColor Green
+    Write-Host ""
+}
+
+Invoke-PreFlightChecks -InventoryRoot $InventoryRoot
+
+# Resolve a tenant identifier to a tenant GUID.
+#
+# -TenantID may be passed as either a GUID (the canonical form) or as a verified
+# domain (e.g. "contoso.onmicrosoft.com" or "contoso.com"). When given a domain,
+# resolve it to the GUID via Microsoft's public OIDC discovery endpoint:
+#
+#   https://login.microsoftonline.com/<domain>/v2.0/.well-known/openid-configuration
+#
+# That endpoint is anonymous (no sign-in required) and returns a JSON document
+# whose "issuer" field embeds the tenant GUID. Resolving up front means every
+# downstream call (az login, Get-AzSubscription, the resume state filename, the
+# auth gate) operates on a stable identifier even if Azure later renames the
+# domain.
+function Resolve-TenantId {
+    param([Parameter(Mandatory=$true)][string]$Value)
+
+    $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    if ($Value -match $guidPattern) { return $Value }
+
+    $url = "https://login.microsoftonline.com/$Value/v2.0/.well-known/openid-configuration"
+    Write-Host ("Resolving tenant '{0}' via OIDC discovery..." -f $Value) -ForegroundColor Cyan
+    try {
+        $config = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
+    } catch {
+        throw "Could not resolve tenant '$Value' to a GUID. Check that it is a valid Azure AD domain or pass the tenant GUID directly. Underlying error: $($_.Exception.Message)"
+    }
+
+    if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.issuer)) {
+        throw "OIDC discovery for tenant '$Value' returned an unexpected response (no issuer)."
+    }
+
+    # issuer looks like https://login.microsoftonline.com/<guid>/v2.0
+    $segments = $config.issuer -split '/'
+    $resolved = $segments | Where-Object { $_ -match $guidPattern } | Select-Object -First 1
+    if (-not $resolved) {
+        throw "OIDC discovery for tenant '$Value' did not contain a recognizable tenant GUID. issuer='$($config.issuer)'"
+    }
+
+    Write-Host ("Resolved tenant '{0}' -> {1}" -f $Value, $resolved) -ForegroundColor Green
+    return $resolved
+}
+
+try {
+    $TenantID = Resolve-TenantId -Value $TenantID
+} catch {
+    Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Exit-Wrapper -Code 1
+}
+
+# Resume state helpers
+$ResumeStateFile = Join-Path $InventoryRoot (".resume-state-{0}.json" -f $TenantID)
+
+function Get-CompletedSubscriptionIds {
+    param([string]$Path, [string]$Tenant)
+
+    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    try {
+        $state = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        if ($state.TenantID -ne $Tenant) {
+            Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $state.TenantID) -ForegroundColor Yellow
+            return @()
+        }
+        if ($null -eq $state.CompletedSubscriptionIds) { return @() }
+        return @($state.CompletedSubscriptionIds)
+    } catch {
+        Write-Host ("Could not read resume state file ({0}); starting fresh. $_" -f $Path) -ForegroundColor Yellow
+        return @()
+    }
+}
+
+function Save-CompletedSubscriptionIds {
+    param([string]$Path, [string]$Tenant, [string[]]$Ids)
+
+    $state = [pscustomobject]@{
+        TenantID                  = $Tenant
+        CompletedSubscriptionIds  = @($Ids)
+        LastUpdated               = (Get-Date).ToString('o')
+    }
+    try {
+        $state | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+    } catch {
+        Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
+    }
+}
+
+# Authenticate, but only if needed.
+#
+# In environments like Azure Cloud Shell the shell already has a valid az CLI
+# and Az PowerShell session for the signed-in user. Unconditionally calling
+# `az login` and `Connect-AzAccount` from the wrapper produces a redundant
+# browser/device-code prompt every run.
+#
+# Two things have to be true to skip the interactive login:
+#   1. The cached context for each side must be on the requested tenant.
+#   2. That cached context must still be able to *acquire a token* silently.
+# Condition 1 alone is not enough: a context can persist on disk (e.g. in
+# ~/.Azure/AzureRmContext.json) with the right tenant ID but an expired or
+# revoked refresh token. In that state Azure AD requires user interaction
+# (typically driven by Conditional Access or MFA), so any data-plane call
+# from inside the script will emit a warning like "Unable to acquire token
+# for tenant ... User interaction is required" and silently return nothing -
+# producing an empty inventory rather than failing loudly.
+#
+# Therefore the gate probes token acquisition for the requested tenant on both
+# sides. Only if both probes succeed do we skip the login.
+
+function Get-AzCliSignedInTenant {
+    $raw = az account show --output json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+    try { return ($raw | ConvertFrom-Json).tenantId } catch { return $null }
+}
+
+function Get-AzPsSignedInTenant {
+    try {
+        $ctx = Get-AzContext -ErrorAction Stop
+        if ($null -eq $ctx -or $null -eq $ctx.Account) { return $null }
+        return $ctx.Tenant.Id
+    } catch {
+        return $null
+    }
+}
+
+# Probe whether az CLI can silently acquire a token for $TenantID.
+# Returns $true on success, $false on any failure.
+function Test-AzCliTokenSilent {
+    param([Parameter(Mandatory=$true)][string]$Tenant)
+    az account get-access-token --tenant $Tenant --output none 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+# Probe whether Az PowerShell can silently acquire a token for $TenantID.
+# Get-AzAccessToken in this configuration emits a non-terminating warning
+# instead of throwing on token-acquisition failure, so we capture warnings
+# explicitly and treat any warning as a failure signal in addition to
+# catching outright exceptions.
+function Test-AzPsTokenSilent {
+    param([Parameter(Mandatory=$true)][string]$Tenant)
+    $warnings = @()
+    try {
+        $token = Get-AzAccessToken -TenantId $Tenant -ErrorAction Stop -WarningVariable warnings -WarningAction SilentlyContinue
+        if ($null -eq $token -or [string]::IsNullOrWhiteSpace($token.Token)) { return $false }
+        if ($warnings.Count -gt 0) { return $false }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+try {
+    $cliTenant = Get-AzCliSignedInTenant
+    $psTenant  = Get-AzPsSignedInTenant
+
+    $cliTenantOk = ($cliTenant -eq $TenantID)
+    $psTenantOk  = ($psTenant  -eq $TenantID)
+
+    $cliTokenOk = $false
+    $psTokenOk  = $false
+    if ($cliTenantOk) { $cliTokenOk = Test-AzCliTokenSilent -Tenant $TenantID }
+    if ($psTenantOk)  { $psTokenOk  = Test-AzPsTokenSilent  -Tenant $TenantID }
+
+    $cliOk = $cliTenantOk -and $cliTokenOk
+    $psOk  = $psTenantOk  -and $psTokenOk
+
+    if ($cliOk -and $psOk) {
+        Write-Host ("Existing session detected for tenant {0} (token probe ok); skipping interactive login." -f $TenantID) -ForegroundColor Green
     } else {
-        az login -t $TenantID --only-show-errors | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
-        Connect-AzAccount -Tenant $TenantID | Out-Null
+        if (-not $cliOk) {
+            if ($null -eq $cliTenant) {
+                Write-Host "az CLI is not signed in; authenticating..." -ForegroundColor Cyan
+            } elseif (-not $cliTenantOk) {
+                Write-Host ("az CLI is signed in to tenant {0}; switching to {1}..." -f $cliTenant, $TenantID) -ForegroundColor Cyan
+            } else {
+                Write-Host ("az CLI session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
+            }
+            if ($DeviceLogin) {
+                az login -t $TenantID --use-device-code --only-show-errors | Out-Null
+            } else {
+                az login -t $TenantID --only-show-errors | Out-Null
+            }
+            if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
+        }
+
+        if (-not $psOk) {
+            if ($null -eq $psTenant) {
+                Write-Host "Az PowerShell is not signed in; authenticating..." -ForegroundColor Cyan
+            } elseif (-not $psTenantOk) {
+                Write-Host ("Az PowerShell is signed in to tenant {0}; switching to {1}..." -f $psTenant, $TenantID) -ForegroundColor Cyan
+            } else {
+                Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
+            }
+            if ($DeviceLogin) {
+                Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
+            } else {
+                Connect-AzAccount -Tenant $TenantID | Out-Null
+            }
+        }
     }
 } catch {
     Write-Host "ERROR: Authentication failed. $_" -ForegroundColor Red
-    exit 1
+    Exit-Wrapper -Code 1
 }
 
-# Get all Azure subscriptions
-$subscriptions = Get-AzSubscription
+# Get all Azure subscriptions.
+#
+# Get-AzSubscription emits warnings (rather than throwing) when token
+# acquisition for a tenant fails - typically due to CA/MFA gating. In that
+# state the cmdlet returns no subscriptions, which would otherwise cause
+# this wrapper to report "All subscriptions processed!" with an empty
+# inventory. Capture warnings and treat zero-results-with-warnings as a
+# loud failure instead of a silent one.
+$subWarnings = @()
+$allSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable subWarnings -WarningAction SilentlyContinue
+if ($null -eq $allSubscriptions) { $allSubscriptions = @() }
+$allSubscriptions = @($allSubscriptions)
+
+if ($allSubscriptions.Count -eq 0) {
+    Write-Host ("ERROR: Get-AzSubscription returned no subscriptions for tenant {0}." -f $TenantID) -ForegroundColor Red
+    if ($subWarnings.Count -gt 0) {
+        Write-Host "Underlying warnings:" -ForegroundColor Red
+        foreach ($w in $subWarnings) { Write-Host ("  - {0}" -f $w) -ForegroundColor Red }
+        Write-Host "This typically indicates the cached session cannot acquire a token (Conditional Access / MFA), or the signed-in identity has no access to any subscription in this tenant." -ForegroundColor Yellow
+        Write-Host "Try re-running with -DeviceLogin, or sign out and sign back in to the requested tenant." -ForegroundColor Yellow
+    } else {
+        Write-Host "The signed-in identity may have no subscriptions in this tenant. Verify with 'Get-AzSubscription -TenantId <id>' interactively." -ForegroundColor Yellow
+    }
+    Exit-Wrapper -Code 1
+}
+
+# Filter out non-Enabled subscriptions by default. Disabled / Warned / Deleted
+# subscriptions return little-to-no data from Resource Graph and most ARM
+# data-plane calls, so processing them produces near-empty per-subscription
+# reports while still costing wall-clock time (which matters for environments
+# like Azure Cloud Shell where the session has a hard maximum lifetime).
+# Pass -IncludeDisabled to inventory every subscription regardless of state.
+if ($IncludeDisabled) {
+    $subscriptions = $allSubscriptions
+    $excluded = @()
+} else {
+    $subscriptions = @($allSubscriptions | Where-Object { $_.State -eq 'Enabled' })
+    $excluded     = @($allSubscriptions | Where-Object { $_.State -ne 'Enabled' })
+}
+
+Write-Host ("Subscriptions visible: {0}" -f $allSubscriptions.Count) -ForegroundColor Cyan
+if ($excluded.Count -gt 0) {
+    $byState = $excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
+    Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $excluded.Count, ($byState -join ', ')) -ForegroundColor Yellow
+}
+Write-Host ("Subscriptions to process: {0}" -f $subscriptions.Count) -ForegroundColor Cyan
+
+# Apply resume filter (only when -Resume is explicitly passed)
+$CompletedIds = @()
+if ($Resume) {
+    $CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID
+    if ($CompletedIds.Count -gt 0) {
+        Write-Host ("Resume mode: {0} previously completed subscription(s) will be skipped." -f $CompletedIds.Count) -ForegroundColor Cyan
+    } else {
+        Write-Host "Resume mode: no previous state found; processing all subscriptions." -ForegroundColor Cyan
+    }
+} else {
+    # Without -Resume, do not auto-skip. Inform the user if stale state exists.
+    if (Test-Path -Path $ResumeStateFile -PathType Leaf) {
+        Write-Host ("Note: resume state file exists at {0}. Pass -Resume to skip previously completed subscriptions." -f $ResumeStateFile) -ForegroundColor Yellow
+    }
+}
 
 # Build passthrough hashtable for optional switches
 $InventoryPassthrough = @{}
@@ -41,15 +448,123 @@ if ($SkipConsumption)  { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = $true }
 
 # Loop through each subscription and run ResourceInventory
+$SkippedCount = 0
+$DiagFile = $null
+# Per-subscription resource counts collected for the final summary so the user
+# can see at a glance which subscriptions came back empty (the most common
+# explanation is that the signed-in identity does not have Reader on the
+# subscription, but it can also legitimately mean the subscription is empty).
+$SubResourceCounts = @()
 foreach ($sub in $subscriptions) {
+    if ($Resume -and ($CompletedIds -contains $sub.Id)) {
+        Write-Host ("Skipping (already completed): {0} ({1})" -f $sub.Name, $sub.Id) -ForegroundColor DarkGray
+        $SkippedCount++
+        continue
+    }
+
     Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
 
     try {
         & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
         if ($LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+
+        # Capture the per-subscription resource count from the inner script.
+        # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
+        # lives in this wrapper's scope. The inner script resets that variable
+        # to @() at the start of every invocation, so the count after return
+        # accurately reflects the subscription that just finished.
+        $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+        $SubResourceCounts += [pscustomobject]@{
+            Name  = $sub.Name
+            Id    = $sub.Id
+            Count = $resCount
+        }
+
+        if ($resCount -eq 0) {
+            # Loud yellow signal so this stands out in the per-iteration narration
+            # and in the wrapper transcript. The most common cause is the signed-in
+            # identity not having Reader on the subscription; second is a sub that
+            # genuinely has no resources. Either way the user almost always wants
+            # to know immediately rather than discover it days later when the
+            # consolidated report turns out to be empty for some subs.
+            Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: az graph query -q ""resources | summarize count()"" --subscriptions {1}" -f $sub.Name, $sub.Id) -ForegroundColor Yellow
+        } else {
+            Write-Host ("Resources collected: {0:N0}" -f $resCount) -ForegroundColor DarkGreen
+        }
+
         Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
+
+        # Mark complete and persist immediately so a mid-run sign-out is recoverable.
+        if (-not ($CompletedIds -contains $sub.Id)) {
+            $CompletedIds += $sub.Id
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
+        }
     } catch {
-        Write-Host "ERROR processing subscription $($sub.Name): $_" -ForegroundColor Red
+        # Surface the full exception chain so failures (e.g. EPPlus Save errors,
+        # OOM in long CloudShell runs, file-handle leaks) are diagnosable instead
+        # of being summarised to a single line. See #16.
+        $errRecord = $_
+        Write-Host "ERROR processing subscription $($sub.Name): $errRecord" -ForegroundColor Red
+
+        $diagLines = @()
+        $diagLines += "==== Failure for subscription: $($sub.Name) ($($sub.Id)) ===="
+        $diagLines += "Timestamp: $(Get-Date -Format 'o')"
+        $diagLines += "Message:   $($errRecord.Exception.Message)"
+        $diagLines += "Type:      $($errRecord.Exception.GetType().FullName)"
+
+        $inner = $errRecord.Exception.InnerException
+        $depth = 0
+        while ($null -ne $inner -and $depth -lt 5) {
+            $diagLines += "Inner[$depth] Type:    $($inner.GetType().FullName)"
+            $diagLines += "Inner[$depth] Message: $($inner.Message)"
+            $inner = $inner.InnerException
+            $depth++
+        }
+
+        if ($null -ne $errRecord.InvocationInfo) {
+            $diagLines += "ScriptName:    $($errRecord.InvocationInfo.ScriptName)"
+            $diagLines += "Line:          $($errRecord.InvocationInfo.ScriptLineNumber)"
+            $diagLines += "PositionMsg:   $($errRecord.InvocationInfo.PositionMessage)"
+        }
+
+        $diagLines += "StackTrace:"
+        $diagLines += $errRecord.ScriptStackTrace
+        if ($null -ne $errRecord.Exception.StackTrace) {
+            $diagLines += "ExceptionStackTrace:"
+            $diagLines += $errRecord.Exception.StackTrace
+        }
+
+        # Environment snapshot — useful when CloudShell runs out of memory or disk
+        try {
+            $proc = Get-Process -Id $PID
+            $diagLines += "Process WorkingSet (MB):  $([math]::Round($proc.WorkingSet64 / 1MB, 1))"
+            $diagLines += "Process PrivateMemory (MB): $([math]::Round($proc.PrivateMemorySize64 / 1MB, 1))"
+        } catch { Write-Verbose ("Process snapshot failed: {0}" -f $_.Exception.Message) }
+
+        try {
+            $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+            if (Test-Path $InventoryRoot) {
+                $rootDrive = (Get-Item $InventoryRoot).PSDrive
+                if ($rootDrive) {
+                    $diagLines += "Free disk on $($rootDrive.Name): (MB): $([math]::Round($rootDrive.Free / 1MB, 1))"
+                }
+            }
+        } catch { Write-Verbose ("Disk snapshot failed: {0}" -f $_.Exception.Message) }
+
+        $diagLines += ""
+
+        # Write to a per-run failures file so we don't lose the detail when many subs fail.
+        if ($null -eq $DiagFile) {
+            $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+            if (-not (Test-Path $InventoryRoot)) {
+                try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null }
+                catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
+            }
+            $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        }
+        try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+        catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
+
         $FailedSubscriptions += $sub.Name
     }
 
@@ -59,7 +574,6 @@ foreach ($sub in $subscriptions) {
 Write-Host "All subscriptions processed!" -ForegroundColor Green
 
 # Consolidate per-subscription ZIPs into a single outer ZIP
-$InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
 $OuterZipFile = $null
 
 if (Test-Path -Path $InventoryRoot -PathType Container) {
@@ -84,16 +598,106 @@ if (Test-Path -Path $InventoryRoot -PathType Container) {
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
 }
 
+# Clean up resume state on a fully successful run (all subs processed, no failures).
+# Otherwise leave it so the next invocation with -Resume can pick up where this stopped.
+if ($FailedSubscriptions.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf)) {
+    try {
+        Remove-Item -Path $ResumeStateFile -Force
+        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+    } catch {
+        Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+    }
+}
+
 # Final summary
 $Elapsed = (Get-Date) - $RunStartTime
 Write-Host ""
 Write-Host "================ Summary ================" -ForegroundColor Green
-Write-Host ("Subscriptions Processed: {0}" -f $subscriptions.Count) -ForegroundColor Green
+Write-Host ("Subscriptions Visible:   {0}" -f $allSubscriptions.Count) -ForegroundColor Green
+if ($excluded.Count -gt 0) {
+    Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $excluded.Count) -ForegroundColor Green
+}
+Write-Host ("Subscriptions Eligible:  {0}" -f $subscriptions.Count) -ForegroundColor Green
+if ($Resume) {
+    Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
+}
+Write-Host ("Subscriptions Processed: {0}" -f ($subscriptions.Count - $SkippedCount)) -ForegroundColor Green
+
+# Surface the per-subscription resource-count result so the user does not have
+# to scan individual transcripts to find subs that came back empty. Empty subs
+# are shown distinctly because they almost always indicate a permission gap;
+# treating them as "successful" in the summary is misleading.
+$EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
+$NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
+if ($SubResourceCounts.Count -gt 0) {
+    $totalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
+    Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $totalRes, $NonEmptySubs.Count) -ForegroundColor Green
+}
+if ($EmptySubs.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Subscriptions Empty:     {0} (returned 0 resources)" -f $EmptySubs.Count) -ForegroundColor Yellow
+    Write-Host "  Likely permission gap (no Reader on the subscription) or genuinely empty subscription." -ForegroundColor Yellow
+    Write-Host "  Verify Reader access for these specifically:" -ForegroundColor Yellow
+    foreach ($e in $EmptySubs) {
+        Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow
+    }
+    Write-Host "  Acid test: az graph query -q ""resources | summarize count()"" --subscriptions <id>" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Surface consumption (billing) data health. The inner script's consumption
+# loop populates these globals; if every Get-UsageAggregates call failed
+# (typically because the Az PowerShell module is broken on disk and cannot
+# load its bundled MSAL/Azure.Core assemblies) the customer ends up with an
+# empty consumption sheet and no signal that anything went wrong. Make it
+# loud here so it's caught before the report is shared.
+$consumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$consumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
+if ($consumptionRecords -gt 0 -or $consumptionFailures.Count -gt 0) {
+    Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $consumptionRecords) -ForegroundColor Green
+}
+if ($consumptionFailures.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Consumption Failures:    {0} subscription(s)" -f $consumptionFailures.Count) -ForegroundColor Yellow
+    # The consumption failure message is repeated verbatim across every sub
+    # when the cause is a broken Az module - dedupe to avoid screen wall.
+    $uniqueMessages = @($consumptionFailures | Select-Object -ExpandProperty Message -Unique)
+    foreach ($m in $uniqueMessages) {
+        Write-Host ("  - {0}" -f $m) -ForegroundColor Yellow
+    }
+    if ($uniqueMessages | Where-Object { $_ -match 'context has not been properly initialized|Could not load file or assembly|MSAL|Azure\.Core' }) {
+        Write-Host "  This message strongly suggests the Az PowerShell module is broken on disk." -ForegroundColor Yellow
+        Write-Host "  Reinstall with:" -ForegroundColor Yellow
+        Write-Host "    Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
+        Write-Host "    Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck" -ForegroundColor Yellow
+    }
+    Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 if ($FailedSubscriptions.Count -gt 0) {
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
+    Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
+    Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
+    if ($DiagFile -and (Test-Path $DiagFile)) {
+        Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
+    }
+    if ($WrapperTranscriptStarted) {
+        Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
+    }
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile) {
     Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
 }
+if ($WrapperTranscriptStarted) {
+    Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
+}
 Write-Host "=========================================" -ForegroundColor Green
+
+# Stop the wrapper transcript on the normal-completion path. Error paths take
+# Exit-Wrapper which does the same.
+if ($WrapperTranscriptStarted) {
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
+}

@@ -46,11 +46,30 @@ Before running the script, ensure your Azure user account has the following role
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
 - [Azure CLI Account Extension](https://learn.microsoft.com/en-us/cli/azure/azure-cli-extensions-overview)
 - Azure CLI Resource-Graph Extension (auto-installed by script)
+- **Az PowerShell module** and **ImportExcel module** (install before running — see below)
 
 > **Note:** Install the Account Extension before running the script:
 > ```powershell
 > az extension add --name account
 > ```
+
+##### Installing the required PowerShell modules
+
+The script needs both `Az` and `ImportExcel` modules. Install them once before the first run, from an elevated **PowerShell 7** prompt (`pwsh`):
+
+```powershell
+Install-Module -Name Az          -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+```
+
+The script no longer auto-installs these modules from inside its own run. Auto-install during a script that's already importing the same module produces a class of silent broken installs (manifest present, bundled assemblies missing — typically MSAL and Azure.Core for Az), and the failure surfaces much later as zero consumption records or "Cannot find type [OfficeOpenXml.ExcelPackage]" errors. Installing once outside the script, ahead of time, is reliable.
+
+If you suspect a previous run left a broken Az install on disk:
+
+```powershell
+Get-Module Az* -ListAvailable | Uninstall-Module -Force
+Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+```
   
 
 
@@ -144,7 +163,45 @@ Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each 
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
 ```
 
+`-TenantID` accepts either a tenant GUID or a verified domain. When a domain is passed (for example `contoso.onmicrosoft.com`), the wrapper resolves it to the GUID via Microsoft's anonymous OIDC discovery endpoint before doing anything else, so this also works:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
+```
+
 Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery.
+
+#### Subscription state filter
+
+By default, `Run-AllSubscriptions.ps1` only inventories subscriptions whose `State` is `Enabled`. Subscriptions in any other state (`Disabled`, `Warned`, `PastDue`, `Deleted`) are skipped because they return little or no data from Resource Graph and most ARM data-plane calls, so processing them produces near-empty reports while still costing wall-clock time.
+
+To include every subscription regardless of state, pass `-IncludeDisabled`:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -IncludeDisabled
+```
+
+The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
+
+#### Resuming an interrupted run
+
+For tenants with many subscriptions, the run can be cut short by environment-level limits — for example, an Azure Cloud Shell session that ends when a Conditional Access policy enforces a maximum session lifetime. The wrapper supports resuming:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Resume
+```
+
+After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The state file is cleared automatically after a clean run with no failures.
+
+`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription`, and existing state is left untouched.
+
+#### Run transcript and failure diagnostics
+
+Every invocation of `Run-AllSubscriptions.ps1` writes a wrapper-level transcript to `InventoryReports/RunAllSubscriptions_transcript_<timestamp>.txt`. Unlike the per-subscription transcripts that `ResourceInventory.ps1` writes inside each subscription folder, this file captures the full wrapper run end-to-end: tenant resolution, authentication decisions, resume-state messages, the cross-iteration narration of which subscription is being processed, the consolidation step, and the final summary. This applies to every run, single subscription or many.
+
+If a subscription fails, the wrapper additionally writes a structured failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log` containing the full exception type, message, up to five levels of `InnerException`, the script line, stack traces, and a snapshot of process memory and free disk at failure time. The final summary points at both files when failures have occurred.
+
+When reporting an issue, attach both files. They contain enough context to diagnose most failures without a follow-up round trip.
 
 ## Output Files
 

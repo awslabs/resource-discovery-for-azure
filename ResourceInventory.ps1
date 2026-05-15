@@ -142,21 +142,45 @@ Function RunInventorySetup()
         }
         else
         {
-            Write-Log -Message ('Azure PowerShell Module not found. Trying to install...') -Severity 'Warning'
-            Install-Module -Name Az -Repository PSGallery -Force -Scope CurrentUser
-            $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+            # Behaviour change (deliberate): do not Install-Module Az from inside
+            # this script. A real field run produced a half-installed Az module
+            # - .psd1 manifests present so Get-Module -ListAvailable was happy,
+            # but the bundled MSAL/Azure.Core assemblies were missing on disk -
+            # and the script then ran for nearly an hour producing zero
+            # consumption data because every Get-AzUsageAggregate call failed
+            # with "Azure PowerShell context has not been properly initialized".
+            # In-process module installs into a script that's already importing
+            # the same module are fragile (concurrent install, AppDomain
+            # caching, partial download) and the failure mode is a silent broken
+            # install rather than a clean error. Failing loudly here is safer.
+            Write-Log -Message ('Azure PowerShell Module not found.') -Severity 'Error'
+            Write-Log -Message ('Install it manually before re-running this script. From an elevated PowerShell 7 prompt:') -Severity 'Error'
+            Write-Log -Message ('  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('Or in Cloud Shell, the Az module is already preinstalled - if it is missing your shell environment is broken.') -Severity 'Error'
+            throw 'Azure PowerShell (Az) module is required and was not found. See log above for installation instructions.'
         }
 
-        if ($null -eq $VarAzPs) 
-        {
-            Write-Log -Message ('Failed to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
-            Read-Host ''
-            Exit
+        # Probe that the Az module actually loads. Get-Module -ListAvailable above
+        # only checks for the manifest on disk; it does not validate that the
+        # bundled assemblies (MSAL, Azure.Core, etc.) are present and loadable.
+        # Without this probe a broken install (manifest present, assemblies
+        # missing - a real field-observed scenario) would let the script
+        # continue all the way to the consumption phase before failing.
+        try {
+            Import-Module Az -ErrorAction Stop -DisableNameChecking | Out-Null
+            $Global:AzPowerShellLoaded = $true
+        } catch {
+            Write-Log -Message ('Azure PowerShell module is present on disk but failed to load: {0}' -f $_.Exception.Message) -Severity 'Error'
+            Write-Log -Message ('This usually indicates a broken install - the module manifest is present but its bundled assemblies (MSAL, Azure.Core, etc.) are missing or unloadable.') -Severity 'Error'
+            Write-Log -Message ('Reinstall with: Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('If the broken install was created by a previous run of this script, also run: Get-Module Az* -ListAvailable | Uninstall-Module -Force') -Severity 'Error'
+            $Global:AzPowerShellLoaded = $false
+            throw "Azure PowerShell (Az) module is broken on disk and cannot be loaded. See log above for remediation."
         }
-        
+
 
         Write-Log -Message ('Checking ImportExcel Module...') -Severity 'Info'
-    
+
         $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
     
         if ($null -ne $VarExcel)
@@ -165,16 +189,39 @@ Function RunInventorySetup()
         }
         else
         {
-            Write-Log -Message ('ImportExcel Module not found. Trying to install...') -Severity 'Warning'
-            Install-Module -Name ImportExcel -Force -Scope CurrentUser
-            $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+            # Behaviour change (deliberate): do not Install-Module ImportExcel
+            # from inside this script. Same rationale as the Az module check
+            # above - in-process module installs into a script that's already
+            # importing the same module produce silent broken installs that
+            # only surface much later. Fail loud here with a clear command.
+            Write-Log -Message ('ImportExcel Module not found.') -Severity 'Error'
+            Write-Log -Message ('Install it manually before re-running this script. From an elevated PowerShell 7 prompt:') -Severity 'Error'
+            Write-Log -Message ('  Install-Module -Name ImportExcel -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            throw 'ImportExcel module is required and was not found. See log above for installation instructions.'
         }
-    
-        if ($null -eq $VarExcel) 
-        {
-            Write-Log -Message ('Failed to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
-            Read-Host ''
-            Exit
+
+        # Eagerly import ImportExcel so its bundled EPPlus assembly is loaded into the
+        # current AppDomain before any code path constructs OfficeOpenXml types via
+        # New-Object. -ListAvailable (above) only confirms the module exists; it does
+        # not load it. Without this explicit import, scripts further down the call
+        # chain (notably Extension/Summary.ps1, which is invoked in a child scope via
+        # `& $SummaryPath ...`) fail with:
+        #
+        #   Cannot find type [OfficeOpenXml.ExcelPackage]: verify that the
+        #   assembly containing this type is loaded.
+        #
+        # The failure surfaces especially on Windows PowerShell Desktop in
+        # multi-subscription runs where the auto-import behavior across iterations
+        # can lose the loaded assembly's reference. Importing once here is idempotent
+        # and inexpensive.
+        try {
+            Import-Module ImportExcel -ErrorAction Stop -Force -DisableNameChecking | Out-Null
+            if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
+                Write-Log -Message ('ImportExcel imported but OfficeOpenXml.ExcelPackage type is not loadable. The Excel report step will fail.') -Severity 'Error'
+            }
+        } catch {
+            Write-Log -Message ('Import-Module ImportExcel failed: {0}' -f $_.Exception.Message) -Severity 'Error'
+            throw
         }
     }
     
@@ -258,9 +305,21 @@ Function RunInventorySetup()
 
             if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
             {
-                # Ensure PowerShell Az context is also set
+                # Ensure PowerShell Az context is set for the requested tenant.
+                # We compare the Az PS context's tenant — not its current subscription
+                # — against $existingAccount because the Az PS and az CLI contexts can
+                # have different default subscriptions even when authenticated against
+                # the same tenant. Comparing subscriptions caused a re-Connect-AzAccount
+                # on every iteration of Run-AllSubscriptions.ps1 on PowerShell Desktop,
+                # which prompted the user to log in again for each subscription. Per-
+                # subscription scoping happens later via Set-AzContext / --subscriptions /
+                # resource-id parameters on Get-AzMetric, so the context only needs to
+                # match the tenant.
                 $azContext = Get-AzContext -ErrorAction SilentlyContinue
-                if ($null -eq $azContext -or $azContext.Subscription.Id -ne $existingAccount.id)
+                $needsConnect = $null -eq $azContext -or
+                                [string]::IsNullOrEmpty($azContext.Tenant.Id) -or
+                                $azContext.Tenant.Id -ne $existingAccount.tenantId
+                if ($needsConnect)
                 {
                     Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
                     if($DeviceLogin.IsPresent)
@@ -859,21 +918,33 @@ function ExecuteInventoryProcessing()
             Set-AzContext -Subscription $sub.id | Out-Null
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
-            do 
-            {    
-                $params = @{
-                    ReportedStartTime      = $reportedStartTime
-                    ReportedEndTime        = $reportedEndTime
-                    AggregationGranularity = 'Daily'
-                    ShowDetails            = $true
-                }
-    
-                $params.ContinuationToken = $usageData.ContinuationToken
-    
-                $usageData = Get-UsageAggregates @params
-                $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+            # Track consumption health per-subscription so the wrapper can report
+            # at the end whether consumption data was actually collected. Without
+            # this, a broken Az module produces zero consumption records on every
+            # subscription and the run still reports as successful - leaving an
+            # empty consumption sheet in the output that nobody noticed until the
+            # report was reviewed.
+            $consumptionRecordsThisSub = 0
+            $consumptionFailedThisSub = $false
+            $consumptionFailureMessage = $null
 
-                Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
+            try {
+                do
+                {
+                    $params = @{
+                        ReportedStartTime      = $reportedStartTime
+                        ReportedEndTime        = $reportedEndTime
+                        AggregationGranularity = 'Daily'
+                        ShowDetails            = $true
+                    }
+
+                    $params.ContinuationToken = $usageData.ContinuationToken
+
+                    $usageData = Get-UsageAggregates @params -ErrorAction Stop
+                    $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+
+                    Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
+                    $consumptionRecordsThisSub += $usageDataExport.Count
 
                 $newUsageDataExport = [System.Collections.ArrayList]::new()
 
@@ -959,7 +1030,32 @@ function ExecuteInventoryProcessing()
 
                 $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
-            } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
+                } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
+            } catch {
+                # The most common cause is a broken Az module install (manifest
+                # present, MSAL/Azure.Core assemblies missing). The script-level
+                # Import-Module probe should have caught that, but we also catch
+                # here defensively so a transient ARM throttling event or a
+                # subscription the identity cannot bill against does not abort
+                # the entire run for other subscriptions.
+                $consumptionFailedThisSub = $true
+                $consumptionFailureMessage = $_.Exception.Message
+                Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+            }
+
+            # Aggregate per-sub consumption health into globals the wrapper reads
+            # at the end of the run. Globals here live in the wrapper's scope
+            # because ResourceInventory.ps1 is invoked via `& <path>`.
+            if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+            if ($null -eq $Global:ConsumptionFailedSubs)  { $Global:ConsumptionFailedSubs  = @() }
+            $Global:ConsumptionRecordCount += $consumptionRecordsThisSub
+            if ($consumptionFailedThisSub) {
+                $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                    Name    = $sub.Name
+                    Id      = $sub.Id
+                    Message = $consumptionFailureMessage
+                }
+            }
         }
 
         $DebugPreference = "Continue"
@@ -1000,13 +1096,123 @@ function FinalizeOutputs
     ProcessSummary
 }
 
-$Global:PowerShellTranscriptFile = ($DefaultPath + "Transcript_Log_"+ $Global:ReportName + "_" + $CurrentDateTime + ".txt")
-Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
+# === Pre-flight checks ===
+#
+# Detect the most common environment problems that make a long run pointless,
+# before transcript start, authentication, or any per-subscription work.
+#
+# When this script is invoked by Run-AllSubscriptions.ps1 (-RunAllSubs is
+# set), the wrapper has already executed the same checks at its top level,
+# so the entire block is skipped here - otherwise the checks would re-run
+# once per subscription (e.g. 164 times in a 164-sub run), adding noise to
+# the per-subscription transcript without adding safety. Standalone invocation
+# of this script still runs the full block.
+#
+# NOTE: Keep the body of this block in sync with the same block at the top
+# of Run-AllSubscriptions.ps1 (just before its Resolve-TenantId call). They
+# are inlined in both files rather than dot-sourced from a shared file
+# because the dot-source itself is a failure surface (path resolution,
+# missing file) we do not want to add to a script whose entire job is to
+# fail loudly when the environment is wrong. Intentional differences vs the
+# wrapper copy:
+#   - This copy honors -OutputDirectory if the caller passed one (the wrapper
+#     does not expose or forward that parameter).
+#   - This copy throws on hard-fail; the wrapper's copy calls Exit-Wrapper.
+#   - This copy is gated on -not $RunAllSubs to avoid duplicate execution
+#     when invoked by the wrapper.
+if (-not $RunAllSubs.IsPresent) {
 
-# Setup and Inventory Gathering
+    # Honor -OutputDirectory when the caller passed one. CheckPowerShell will
+    # re-validate -OutputDirectory itself further down and is the authoritative
+    # gate; we Resolve-Path here defensively so a relative path is checked at
+    # the right location, and fall back to the raw value if it does not yet
+    # resolve (the write probe below will surface the underlying error).
+    $PreFlightInventoryRoot = if ($OutputDirectory) {
+        try { (Resolve-Path $OutputDirectory -ErrorAction Stop).Path }
+        catch { $OutputDirectory }
+    } elseif ($PSVersionTable.Platform -eq 'Unix') {
+        "$HOME/InventoryReports"
+    } else {
+        "C:\InventoryReports"
+    }
+    if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container)) {
+        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null }
+        catch { Write-Verbose ("PreFlightInventoryRoot create failed at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) }
+    }
+
+    Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+    # 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.
+    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+        $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
+        if ($null -eq $CheckCloudDrive) {
+            Write-Host ""
+            Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
+            Write-Host "  Outputs in $PreFlightInventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
+            Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
+            Write-Host "    clouddrive mount" -ForegroundColor Yellow
+            Write-Host "  Continuing in ephemeral mode - download the report ZIP from $PreFlightInventoryRoot before closing the shell." -ForegroundColor Yellow
+            Write-Host ""
+        } else {
+            Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
+        }
+    }
+
+    # 2. Disk space probe.
+    try {
+        $rootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
+        $drive = $rootItem.PSDrive
+        if ($null -ne $drive -and $null -ne $drive.Free) {
+            $freeMB = [math]::Round($drive.Free / 1MB, 0)
+            if ($freeMB -lt 100) {
+                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $freeMB)
+            } elseif ($freeMB -lt 500) {
+                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $freeMB) -ForegroundColor Yellow
+            } else {
+                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+            }
+        }
+    } catch {
+        if ($_.Exception.Message -match '^Pre-flight:') { throw }
+        Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    # 3. Write probe.
+    $probePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
+    try {
+        Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
+        if ($probeRead -notmatch 'preflight write probe') {
+            throw "Write probe content mismatch (read back '$probeRead')"
+        }
+        Remove-Item -Path $probePath -Force -ErrorAction Stop
+        Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
+    } catch {
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } }
+        catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $probePath, $_.Exception.Message) }
+        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+    }
+
+    Write-Host "Pre-flight checks passed." -ForegroundColor Green
+    Write-Host ""
+}
+
+# Setup and Inventory Gathering.
+#
+# Variables and RunInventorySetup populate $Global:DefaultPath, $Global:ReportName,
+# and $Global:CurrentDateTime which are required to compute the transcript path.
+# Start-Transcript must therefore run *after* RunInventorySetup, not before.
+# Previously this block placed Start-Transcript above Variables, with the result
+# that $DefaultPath/$ReportName/$CurrentDateTime were all $null at that point and
+# the transcript file landed in the current working directory with the literal
+# name "Transcript_Log__.txt" - two underscores, missing report name and missing
+# timestamp.
 $Global:Runtime = Measure-Command -Expression {
     Variables
     RunInventorySetup
+
+    $Global:PowerShellTranscriptFile = ($Global:DefaultPath + "Transcript_Log_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".txt")
+    Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
 # Execution and processing of inventory

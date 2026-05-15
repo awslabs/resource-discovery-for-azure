@@ -111,14 +111,21 @@ function Save-CompletedSubscriptionIds {
 # In environments like Azure Cloud Shell the shell already has a valid az CLI
 # and Az PowerShell session for the signed-in user. Unconditionally calling
 # `az login` and `Connect-AzAccount` from the wrapper produces a redundant
-# browser/device-code prompt every run. The script also needs each context
-# to be on the requested tenant - if either is on a different tenant the
-# subscription queries below will return the wrong (or no) results.
+# browser/device-code prompt every run.
 #
-# Check both contexts first; only sign in for the side that is missing or on
-# the wrong tenant. The signal we care about is the tenant, not the default
-# subscription, because per-subscription scoping is handled at use-site
-# (Set-AzContext / --subscriptions / resource-id-scoped Get-AzMetric).
+# Two things have to be true to skip the interactive login:
+#   1. The cached context for each side must be on the requested tenant.
+#   2. That cached context must still be able to *acquire a token* silently.
+# Condition 1 alone is not enough: a context can persist on disk (e.g. in
+# ~/.Azure/AzureRmContext.json) with the right tenant ID but an expired or
+# revoked refresh token. In that state Azure AD requires user interaction
+# (typically driven by Conditional Access or MFA), so any data-plane call
+# from inside the script will emit a warning like "Unable to acquire token
+# for tenant ... User interaction is required" and silently return nothing -
+# producing an empty inventory rather than failing loudly.
+#
+# Therefore the gate probes token acquisition for the requested tenant on both
+# sides. Only if both probes succeed do we skip the login.
 
 function Get-AzCliSignedInTenant {
     $raw = az account show --output json 2>$null
@@ -136,21 +143,57 @@ function Get-AzPsSignedInTenant {
     }
 }
 
+# Probe whether az CLI can silently acquire a token for $TenantID.
+# Returns $true on success, $false on any failure.
+function Test-AzCliTokenSilent {
+    param([Parameter(Mandatory=$true)][string]$Tenant)
+    az account get-access-token --tenant $Tenant --output none 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+# Probe whether Az PowerShell can silently acquire a token for $TenantID.
+# Get-AzAccessToken in this configuration emits a non-terminating warning
+# instead of throwing on token-acquisition failure, so we capture warnings
+# explicitly and treat any warning as a failure signal in addition to
+# catching outright exceptions.
+function Test-AzPsTokenSilent {
+    param([Parameter(Mandatory=$true)][string]$Tenant)
+    $warnings = @()
+    try {
+        $token = Get-AzAccessToken -TenantId $Tenant -ErrorAction Stop -WarningVariable warnings -WarningAction SilentlyContinue
+        if ($null -eq $token -or [string]::IsNullOrWhiteSpace($token.Token)) { return $false }
+        if ($warnings.Count -gt 0) { return $false }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 try {
     $cliTenant = Get-AzCliSignedInTenant
     $psTenant  = Get-AzPsSignedInTenant
 
-    $cliOk = ($cliTenant -eq $TenantID)
-    $psOk  = ($psTenant  -eq $TenantID)
+    $cliTenantOk = ($cliTenant -eq $TenantID)
+    $psTenantOk  = ($psTenant  -eq $TenantID)
+
+    $cliTokenOk = $false
+    $psTokenOk  = $false
+    if ($cliTenantOk) { $cliTokenOk = Test-AzCliTokenSilent -Tenant $TenantID }
+    if ($psTenantOk)  { $psTokenOk  = Test-AzPsTokenSilent  -Tenant $TenantID }
+
+    $cliOk = $cliTenantOk -and $cliTokenOk
+    $psOk  = $psTenantOk  -and $psTokenOk
 
     if ($cliOk -and $psOk) {
-        Write-Host ("Existing session detected for tenant {0}; skipping interactive login." -f $TenantID) -ForegroundColor Green
+        Write-Host ("Existing session detected for tenant {0} (token probe ok); skipping interactive login." -f $TenantID) -ForegroundColor Green
     } else {
         if (-not $cliOk) {
             if ($null -eq $cliTenant) {
                 Write-Host "az CLI is not signed in; authenticating..." -ForegroundColor Cyan
-            } else {
+            } elseif (-not $cliTenantOk) {
                 Write-Host ("az CLI is signed in to tenant {0}; switching to {1}..." -f $cliTenant, $TenantID) -ForegroundColor Cyan
+            } else {
+                Write-Host ("az CLI session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
             }
             if ($DeviceLogin) {
                 az login -t $TenantID --use-device-code --only-show-errors | Out-Null
@@ -163,8 +206,10 @@ try {
         if (-not $psOk) {
             if ($null -eq $psTenant) {
                 Write-Host "Az PowerShell is not signed in; authenticating..." -ForegroundColor Cyan
-            } else {
+            } elseif (-not $psTenantOk) {
                 Write-Host ("Az PowerShell is signed in to tenant {0}; switching to {1}..." -f $psTenant, $TenantID) -ForegroundColor Cyan
+            } else {
+                Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
             }
             if ($DeviceLogin) {
                 Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
@@ -178,8 +223,31 @@ try {
     exit 1
 }
 
-# Get all Azure subscriptions
-$allSubscriptions = Get-AzSubscription
+# Get all Azure subscriptions.
+#
+# Get-AzSubscription emits warnings (rather than throwing) when token
+# acquisition for a tenant fails - typically due to CA/MFA gating. In that
+# state the cmdlet returns no subscriptions, which would otherwise cause
+# this wrapper to report "All subscriptions processed!" with an empty
+# inventory. Capture warnings and treat zero-results-with-warnings as a
+# loud failure instead of a silent one.
+$subWarnings = @()
+$allSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable subWarnings -WarningAction SilentlyContinue
+if ($null -eq $allSubscriptions) { $allSubscriptions = @() }
+$allSubscriptions = @($allSubscriptions)
+
+if ($allSubscriptions.Count -eq 0) {
+    Write-Host ("ERROR: Get-AzSubscription returned no subscriptions for tenant {0}." -f $TenantID) -ForegroundColor Red
+    if ($subWarnings.Count -gt 0) {
+        Write-Host "Underlying warnings:" -ForegroundColor Red
+        foreach ($w in $subWarnings) { Write-Host ("  - {0}" -f $w) -ForegroundColor Red }
+        Write-Host "This typically indicates the cached session cannot acquire a token (Conditional Access / MFA), or the signed-in identity has no access to any subscription in this tenant." -ForegroundColor Yellow
+        Write-Host "Try re-running with -DeviceLogin, or sign out and sign back in to the requested tenant." -ForegroundColor Yellow
+    } else {
+        Write-Host "The signed-in identity may have no subscriptions in this tenant. Verify with 'Get-AzSubscription -TenantId <id>' interactively." -ForegroundColor Yellow
+    }
+    exit 1
+}
 
 # Filter out non-Enabled subscriptions by default. Disabled / Warned / Deleted
 # subscriptions return little-to-no data from Resource Graph and most ARM

@@ -15,6 +15,56 @@ param (
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
+# Inventory root (used for resume state, consolidated output, and the wrapper
+# transcript). Computed up front so the transcript can be started before
+# anything else writes to the host.
+$InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {
+    try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null } catch { }
+}
+
+# Wrapper-level transcript.
+#
+# ResourceInventory.ps1 already records a per-subscription transcript inside
+# each subscription's output folder. That captures everything inside a single
+# sub's run, but it does not capture the wrapper's own output: tenant
+# resolution, the auth gate's decisions, resume-state messages, the
+# Processing/Completed/ERROR cross-iteration narration, the consolidation
+# step, or the final summary. For multi-subscription runs that bookkeeping is
+# the most useful diagnostic signal of all - which sub failed, why, what came
+# before, and how the wrapper proceeded.
+#
+# This transcript runs at the wrapper level for every invocation (single sub
+# or many) and lands at:
+#   <InventoryRoot>/RunAllSubscriptions_transcript_<timestamp>.txt
+# It also catches everything Write-Host'd by the inner script into the same
+# console session, so the file is a complete record of one wrapper invocation.
+# Start-Transcript is idempotent in the sense that we Stop it on every exit
+# path via Exit-Wrapper.
+$WrapperTranscriptStarted = $false
+$WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+try {
+    Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
+    $WrapperTranscriptStarted = $true
+    Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
+} catch {
+    # Non-fatal. If transcript fails to start (rare - usually permissions or
+    # an already-running transcript on this host), the run continues without
+    # one rather than aborting.
+    Write-Host ("WARNING: Could not start wrapper transcript at {0}: {1}" -f $WrapperTranscriptFile, $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# Single exit path that ensures the wrapper transcript is stopped before
+# returning to the host. Used by every error path that previously called
+# `exit <code>` directly.
+function Exit-Wrapper {
+    param([int]$Code = 0)
+    if ($WrapperTranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+    exit $Code
+}
+
 # Resolve a tenant identifier to a tenant GUID.
 #
 # -TenantID may be passed as either a GUID (the canonical form) or as a verified
@@ -61,13 +111,7 @@ try {
     $TenantID = Resolve-TenantId -Value $TenantID
 } catch {
     Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
-    exit 1
-}
-
-# Inventory root (used for resume state and consolidated output)
-$InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {
-    try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null } catch { }
+    Exit-Wrapper -Code 1
 }
 
 # Resume state helpers
@@ -220,7 +264,7 @@ try {
     }
 } catch {
     Write-Host "ERROR: Authentication failed. $_" -ForegroundColor Red
-    exit 1
+    Exit-Wrapper -Code 1
 }
 
 # Get all Azure subscriptions.
@@ -246,7 +290,7 @@ if ($allSubscriptions.Count -eq 0) {
     } else {
         Write-Host "The signed-in identity may have no subscriptions in this tenant. Verify with 'Get-AzSubscription -TenantId <id>' interactively." -ForegroundColor Yellow
     }
-    exit 1
+    Exit-Wrapper -Code 1
 }
 
 # Filter out non-Enabled subscriptions by default. Disabled / Warned / Deleted
@@ -444,9 +488,21 @@ if ($FailedSubscriptions.Count -gt 0) {
     if ($DiagFile -and (Test-Path $DiagFile)) {
         Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
     }
+    if ($WrapperTranscriptStarted) {
+        Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
+    }
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile) {
     Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
 }
+if ($WrapperTranscriptStarted) {
+    Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
+}
 Write-Host "=========================================" -ForegroundColor Green
+
+# Stop the wrapper transcript on the normal-completion path. Error paths take
+# Exit-Wrapper which does the same.
+if ($WrapperTranscriptStarted) {
+    try { Stop-Transcript | Out-Null } catch { }
+}

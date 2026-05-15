@@ -176,6 +176,14 @@ After each subscription is fully processed (its per-subscription ZIP has been wr
 
 `-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription`, and existing state is left untouched.
 
+#### Run transcript and failure diagnostics
+
+Every invocation of `Run-AllSubscriptions.ps1` writes a wrapper-level transcript to `InventoryReports/RunAllSubscriptions_transcript_<timestamp>.txt`. Unlike the per-subscription transcripts that `ResourceInventory.ps1` writes inside each subscription folder, this file captures the full wrapper run end-to-end: tenant resolution, authentication decisions, resume-state messages, the cross-iteration narration of which subscription is being processed, the consolidation step, and the final summary. This applies to every run, single subscription or many.
+
+If a subscription fails, the wrapper additionally writes a structured failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log` containing the full exception type, message, up to five levels of `InnerException`, the script line, stack traces, and a snapshot of process memory and free disk at failure time. The final summary points at both files when failures have occurred.
+
+When reporting an issue, attach both files. They contain enough context to diagnose most failures without a follow-up round trip.
+
 ## Output Files
 
 Upon completion, the script generates reports in the `InventoryReports` folder:

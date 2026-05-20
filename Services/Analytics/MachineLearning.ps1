@@ -14,10 +14,18 @@ If ($Task -eq 'Processing')
             $data = $1.PROPERTIES
             $timecreated = [datetime]($data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm"
 
-            $StorageAcc = $data.storageAccount.split('/')[8]
-            $KeyVault = $data.keyVault.split('/')[8]
-            $Insight = $data.applicationInsights.split('/')[8]
-            $containerRegistry = $data.containerRegistry.split('/')[8]
+            # The four cross-resource references (storage / key vault / app insights /
+            # container registry) are *optional* on an Azure ML workspace - a workspace
+            # without one of them returns $null in PROPERTIES rather than the property
+            # being absent. The original line `$data.storageAccount.split('/')[8]` then
+            # fails with "You cannot call a method on a null-valued expression" and
+            # aborts the entire subscription. Guard every reference and emit $null
+            # (or, for obfuscated runs, the literal string 'obfuscated' to match the
+            # rest of this module's lossy fallback pattern) when the field is absent.
+            $StorageAcc        = if ([string]::IsNullOrEmpty($data.storageAccount))      { $null } else { $data.storageAccount.split('/')[8] }
+            $KeyVault          = if ([string]::IsNullOrEmpty($data.keyVault))            { $null } else { $data.keyVault.split('/')[8] }
+            $Insight           = if ([string]::IsNullOrEmpty($data.applicationInsights)) { $null } else { $data.applicationInsights.split('/')[8] }
+            $containerRegistry = if ([string]::IsNullOrEmpty($data.containerRegistry))   { $null } else { $data.containerRegistry.split('/')[8] }
 
             # Obfuscate cross-reference names when dictionary is populated
             if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {

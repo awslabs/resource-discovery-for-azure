@@ -89,8 +89,24 @@ Function RunInventorySetup()
     {
         Write-Log -Message ('Checking Version') -Severity 'Info'
         Write-Log -Message ('Version: {0}' -f $Global:Version) -Severity 'Info'
-        
-        $versionJson = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Version.json') | ConvertFrom-Json
+
+        # The version check is best-effort. On corporate networks that block
+        # raw.githubusercontent.com (DNS failure, firewall, or air-gap), this
+        # WebClient call would otherwise raise SocketException and abort the
+        # entire subscription before any inventory work began. A failed update
+        # check is not a reason to skip a subscription's inventory - log a
+        # clear note and continue with the local version. See #18.
+        try
+        {
+            $versionJson = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Version.json') | ConvertFrom-Json
+        }
+        catch
+        {
+            Write-Log -Message ("Could not reach {0}/Version.json to check for an update: {1}" -f $RawRepo, $_.Exception.Message) -Severity 'Warning'
+            Write-Log -Message ('Continuing with local version {0}. If you are on a managed network, this is expected.' -f $Global:Version) -Severity 'Info'
+            return
+        }
+
         $versionNumber = ('{0}.{1}.{2}' -f $versionJson.MajorVersion, $versionJson.MinorVersion, $versionJson.BuildVersion)
 
         if($versionNumber -ne $Global:Version)

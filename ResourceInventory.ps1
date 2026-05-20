@@ -1298,10 +1298,49 @@ if($SkipMetrics.IsPresent)
 {
     @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
 }
+else
+{
+    # Subscriptions with zero metric-eligible resources never enter the
+    # batched-write loop in Extension/Metrics.ps1, so no Metrics_*.json is
+    # produced for them. Downstream consumers that expect *every* per-sub
+    # bundle to contain a Metrics JSON (dashboard ingestion, the
+    # ParallelStreamsAggregation tests) reject the bundle when the file is
+    # missing. Detect that case and emit an empty-but-valid Metrics JSON
+    # at the canonical $Global:MetricsJsonFile path so the bundle is always
+    # structurally complete. Use Get-ChildItem with a wildcard because the
+    # batched writer suffixes filenames with "_<rangeIdx>.json".
+    $metricsPattern = ('Metrics_{0}_{1}*.json' -f $Global:ReportName, $CurrentDateTime)
+    $metricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $metricsPattern -ErrorAction SilentlyContinue)
+    if ($metricsAny.Count -eq 0)
+    {
+        @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+    }
+}
 
 $consumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
 
-if($SkipConsumption.IsPresent -or !$consumptionCreated)
+# A subscription with zero billing records produces an empty (0-byte) CSV
+# rather than a header-only one, because Export-Csv -Append with no input
+# objects writes nothing. Treat 0-byte files as "not created" so the safety
+# net below emits the header. Without this, downstream consumers that parse
+# the CSV by header (dashboard ingestion, the Pester tests) fail on the
+# empty file and reject the entire per-sub bundle.
+$consumptionEmpty = $false
+if ($consumptionCreated)
+{
+    try
+    {
+        $consumptionEmpty = ((Get-Item -Path $Global:ConsumptionFileCsv -ErrorAction Stop).Length -eq 0)
+    }
+    catch
+    {
+        # Treat unreadable as not-created so the header gets written; safer than
+        # leaving an unparseable file in the bundle.
+        $consumptionEmpty = $true
+    }
+}
+
+if($SkipConsumption.IsPresent -or !$consumptionCreated -or $consumptionEmpty)
 {
     "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }

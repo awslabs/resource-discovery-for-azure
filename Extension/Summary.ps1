@@ -257,6 +257,16 @@ if(!$RunLite)
     $Worksheets = $Excel.Workbook.Worksheets | Where-Object { $_.Name -ne 'Overview' }
     $WS = $Excel.Workbook.Worksheets | Where-Object { $_.Name -eq 'Overview' }
 
+    # AddShape throws "Name already exists in the drawings collection" if the
+    # named shape is already on the worksheet from a prior save. This can
+    # happen when ResourceInventory.ps1 runs against an .xlsx that already
+    # has shapes baked in - either because a previous wrapper iteration left
+    # the file behind, or because the per-service Export-Excel calls upstream
+    # added drawings of their own. Defensive: remove the shape if present
+    # before adding it. Idempotent and safe.
+    $existingTP00 = $WS.Drawings | Where-Object { $_.Name -eq 'TP00' }
+    if ($existingTP00) { $WS.Drawings.Remove($existingTP00) }
+
     $TabDraw = $WS.Drawings.AddShape('TP00', 'Rect')
     $TabDraw.SetSize(130 , 78)
     $TabDraw.SetPosition(1, 0, 0, 0)
@@ -341,6 +351,13 @@ if(!$RunLite)
         $Link = New-Object -TypeName OfficeOpenXml.ExcelHyperLink ("'"+$Works+"'"+'!A1'),$Works
         $Item.Hyperlink = $Link
     }
+
+    # Same defensive guard as the TP00 site above. EPPlus throws
+    # "Name already exists in the drawings collection" if AddShape is called
+    # with a name that's already present, which surfaces when running against
+    # an .xlsx that retained shapes from an earlier reporting pass.
+    $existingInventory = $WS.Drawings | Where-Object { $_.Name -eq 'Inventory' }
+    if ($existingInventory) { $WS.Drawings.Remove($existingInventory) }
 
     $Draw = $WS.Drawings.AddShape('Inventory', 'Rect')
     $Draw.SetSize(445, 240)

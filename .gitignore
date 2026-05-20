@@ -494,3 +494,8 @@ Tests/*.zip
 
 Transcript_Log_*
 ObfuscationDictionary_*
+
+# Local-only working notes — must not land in any public commit
+.exploration/
+.kiro/
+docs/components/

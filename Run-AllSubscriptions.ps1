@@ -20,7 +20,27 @@ param (
     # without hitting Azure Monitor's 12,000 reads/hour/subscription ceiling.
     # Don't go above ~24 in a single tenant - tenant-scoped Resource Graph
     # rate limits start to bite.
-    [int]$ConcurrencyLimit = 6
+    [int]$ConcurrencyLimit = 6,
+
+    # Number of parallel "streams" that process subscriptions concurrently.
+    # Default 1 = current sequential behavior, no change. Each stream is a
+    # separate `pwsh` background process with its own Az PowerShell context
+    # and its own resume-state file (.resume-state-<TenantID>-stream-<N>.json),
+    # so they cannot race on the shared Az static state or the resume file.
+    # The wrapper splits the eligible subscription list into N approximately
+    # equal chunks at the start and assigns one chunk per stream.
+    #
+    # Practical guidance:
+    #   1   = sequential (default, lowest memory, easiest to debug)
+    #   2-4 = recommended for most large-tenant runs
+    #   5-8 = only if you've validated memory headroom (each stream loads its
+    #         own Az module set, ~400MB resident; on Cloud Shell's 5GB cap,
+    #         4 streams is the practical ceiling)
+    #
+    # Tenant-scoped Azure Resource Graph rate limits (~15 req/sec/tenant) are
+    # the hard ceiling - more than ~6 parallel streams in one tenant will
+    # start to throttle and provide no further wall-time benefit.
+    [int]$ParallelStreams = 1
 )
 
 $RunStartTime = Get-Date
@@ -434,19 +454,20 @@ if ($excluded.Count -gt 0) {
 }
 Write-Host ("Subscriptions to process: {0}" -f $subscriptions.Count) -ForegroundColor Cyan
 
-# Apply resume filter (only when -Resume is explicitly passed)
-$CompletedIds = @()
+# Always seed $CompletedIds from the existing state file. -Resume only
+# controls whether we *use* that list to skip subscriptions; reading it
+# either way ensures the per-iteration writes below append to existing
+# state instead of overwriting it.
+$CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID
 if ($Resume) {
-    $CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID
     if ($CompletedIds.Count -gt 0) {
         Write-Host ("Resume mode: {0} previously completed subscription(s) will be skipped." -f $CompletedIds.Count) -ForegroundColor Cyan
     } else {
         Write-Host "Resume mode: no previous state found; processing all subscriptions." -ForegroundColor Cyan
     }
 } else {
-    # Without -Resume, do not auto-skip. Inform the user if stale state exists.
-    if (Test-Path -Path $ResumeStateFile -PathType Leaf) {
-        Write-Host ("Note: resume state file exists at {0}. Pass -Resume to skip previously completed subscriptions." -f $ResumeStateFile) -ForegroundColor Yellow
+    if ($CompletedIds.Count -gt 0) {
+        Write-Host ("Note: resume state file exists at {0} ({1} previously completed). Pass -Resume to skip them." -f $ResumeStateFile, $CompletedIds.Count) -ForegroundColor Yellow
     }
 }
 
@@ -471,6 +492,10 @@ $DiagFile = $null
 # explanation is that the signed-in identity does not have Reader on the
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
+
+if ($ParallelStreams -le 1) {
+    # === SEQUENTIAL PATH (default) ============================================
+    # Original behavior, unchanged. Selected when -ParallelStreams 1 or unset.
 foreach ($sub in $subscriptions) {
     if ($Resume -and ($CompletedIds -contains $sub.Id)) {
         Write-Host ("Skipping (already completed): {0} ({1})" -f $sub.Name, $sub.Id) -ForegroundColor DarkGray
@@ -585,6 +610,329 @@ foreach ($sub in $subscriptions) {
     }
 
     Write-Host "-----------------------------------" -ForegroundColor Gray
+}
+
+} else {
+    # === PARALLEL-STREAMS PATH ================================================
+    #
+    # Each "stream" is a separate `pwsh` background job (Start-Job runs the
+    # provided ScriptBlock in a fresh process). Process-level isolation is
+    # what makes this safe: the inner script's `Set-AzContext -Subscription`
+    # call (in the consumption phase) mutates *process-global* Az PowerShell
+    # state, so two streams running in the same process would race each
+    # other's contexts and silently cross-contaminate consumption data.
+    # A separate process per stream sidesteps that entirely.
+    #
+    # Each stream owns:
+    #   - Its own slice of the eligible subscription list (round-robin split).
+    #   - Its own resume-state file at
+    #     $InventoryRoot/.resume-state-<TenantID>-stream-<N>.json
+    #     so concurrent state writes cannot race.
+    #   - Its own per-stream summary JSON (Stream_<N>_Summary.json) which the
+    #     parent aggregates at the end.
+    #   - Its own per-stream failures log (RunAllSubscriptions_failures_*_stream-<N>.log).
+    #
+    # All streams share:
+    #   - One Az context snapshot, written by the parent via Save-AzContext
+    #     and imported by every stream via Import-AzContext. This is the only
+    #     way to avoid an interactive sign-in prompt in each child process.
+    #     The snapshot is removed after all streams finish.
+    #
+    # Output is interleaved (each stream prints its own lines, prefixed
+    # `[stream-N]`). The final summary is consolidated from the per-stream
+    # summary JSON files.
+
+    $StreamCount = [Math]::Min($ParallelStreams, $subscriptions.Count)
+    Write-Host ""
+    Write-Host ("Parallel-streams mode: {0} streams across {1} eligible subscription(s)" -f $StreamCount, $subscriptions.Count) -ForegroundColor Cyan
+    if ($ParallelStreams -gt $subscriptions.Count) {
+        Write-Host ("Note: -ParallelStreams {0} clamped to {1} (one stream per subscription is the practical limit)." -f $ParallelStreams, $StreamCount) -ForegroundColor DarkGray
+    }
+    Write-Host "Each stream is a separate pwsh background job with its own Az context and resume-state file." -ForegroundColor DarkGray
+    Write-Host ""
+
+    if ($StreamCount -le 1) {
+        # User asked for parallel but only one (or zero) sub is eligible.
+        # Process it inline using the same per-sub logic the sequential
+        # branch uses, instead of bailing and asking the user to re-run.
+        Write-Host "Only one eligible subscription; running sequentially." -ForegroundColor Yellow
+        if ($subscriptions.Count -gt 0) {
+            $sub = $subscriptions[0]
+            Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
+            try {
+                & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
+                if ($LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+                $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+                $SubResourceCounts += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Count = $resCount }
+                if ($resCount -eq 0) {
+                    Write-Host ("WARNING: '{0}' returned 0 resources." -f $sub.Name) -ForegroundColor Yellow
+                } else {
+                    Write-Host ("Resources collected: {0:N0}" -f $resCount) -ForegroundColor DarkGreen
+                }
+                if (-not ($CompletedIds -contains $sub.Id)) {
+                    $CompletedIds += $sub.Id
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
+                }
+            } catch {
+                Write-Host ("ERROR processing subscription {0}: {1}" -f $sub.Name, $_.Exception.Message) -ForegroundColor Red
+                $FailedSubscriptions += $sub.Name
+            }
+        }
+        # Skip the parallel orchestration entirely; fall through to the
+        # post-processing (consolidation, summary) below.
+        $StreamCount = 0
+    }
+    if ($StreamCount -ge 2) {
+
+    # Snapshot the parent's Az context to a shared file so each stream can
+    # Import-AzContext without prompting. Save-AzContext writes a JSON file
+    # containing a token cache, so it MUST NOT be left on disk after the
+    # run completes - that's the responsibility of the `finally` block
+    # below, which guarantees cleanup even on stream-launch crash, on
+    # Receive-Job failure, or on Ctrl+C.
+    $AzContextSnapshot = Join-Path $InventoryRoot (".rda-stream-azcontext-{0}.json" -f ([guid]::NewGuid().ToString()))
+    try {
+        Save-AzContext -Path $AzContextSnapshot -Force -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Host ("ERROR: could not snapshot Az context for stream workers: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host "Re-run without -ParallelStreams to use the sequential code path." -ForegroundColor Yellow
+        # No snapshot was successfully written, so no security cleanup needed -
+        # but Save-AzContext can write a partial file before throwing on some
+        # error paths, so still try to remove it.
+        if (Test-Path -Path $AzContextSnapshot) {
+            try { Remove-Item -Path $AzContextSnapshot -Force }
+            catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
+        }
+        Exit-Wrapper -Code 1
+    }
+
+    # Everything from here until the matching `finally` is the orchestration
+    # body. The `finally` guarantees the Az context snapshot is always wiped,
+    # which is the primary reason for this try/finally structure.
+    try {
+        $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
+        if (-not (Test-Path -Path $WorkerScript -PathType Leaf)) {
+            Write-Host ("ERROR: parallel worker script not found at {0}." -f $WorkerScript) -ForegroundColor Red
+            Write-Host "Make sure Run-AllSubscriptions.Stream.ps1 is present alongside Run-AllSubscriptions.ps1, or re-run without -ParallelStreams." -ForegroundColor Yellow
+            Exit-Wrapper -Code 1
+        }
+
+        # Round-robin split: sub 0 -> stream 0, sub 1 -> stream 1, ..., sub N -> stream (N % StreamCount).
+        # This balances the slices regardless of how subscription sizes vary,
+        # and keeps slices roughly the same length even when the total
+        # subscription count is not evenly divisible by StreamCount.
+        $slices = New-Object 'System.Collections.Generic.List[object][]' $StreamCount
+        for ($i = 0; $i -lt $StreamCount; $i++) {
+            $slices[$i] = New-Object 'System.Collections.Generic.List[object]'
+        }
+        for ($i = 0; $i -lt $subscriptions.Count; $i++) {
+            $slices[$i % $StreamCount].Add($subscriptions[$i])
+        }
+
+        # Build per-stream output paths up front so we know where to look later.
+        $StreamSummaries = @()
+        $jobs = @()
+        for ($s = 0; $s -lt $StreamCount; $s++) {
+            $sliceList     = $slices[$s]
+            $sliceIds      = @($sliceList | ForEach-Object { $_.Id })
+            $sliceNames    = @($sliceList | ForEach-Object { $_.Name })
+
+            $summaryPath   = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json"   -f $s)
+            $failuresPath  = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $s)
+
+            $StreamSummaries += [pscustomobject]@{
+                StreamId     = $s
+                SummaryPath  = $summaryPath
+                FailuresPath = $failuresPath
+                SubCount     = $sliceList.Count
+            }
+
+            Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $s, $sliceList.Count) -ForegroundColor DarkCyan
+
+            # Pass arguments to the worker via a single hashtable so the worker
+            # script's named parameters bind correctly. Start-Job's -FilePath
+            # mode passes ArgumentList positionally which collides with our
+            # named-parameter contract. Switches are only included when they
+            # are set, since switch parameters bind correctly from a splatted
+            # hashtable when present with value $true.
+            $workerArgs = @{
+                TenantID           = $TenantID
+                StreamId           = [string]$s
+                InventoryRoot      = $InventoryRoot
+                ScriptRoot         = $PSScriptRoot
+                AzContextPath      = $AzContextSnapshot
+                StreamSummaryPath  = $summaryPath
+                StreamFailuresPath = $failuresPath
+                SubscriptionIds    = $sliceIds
+                SubscriptionNames  = $sliceNames
+                ConcurrencyLimit   = $ConcurrencyLimit
+            }
+            if ($Resume)          { $workerArgs.Resume          = $true }
+            if ($DeviceLogin)     { $workerArgs.DeviceLogin     = $true }
+            if ($Obfuscate)       { $workerArgs.Obfuscate       = $true }
+            if ($SkipMetrics)     { $workerArgs.SkipMetrics     = $true }
+            if ($SkipConsumption) { $workerArgs.SkipConsumption = $true }
+
+            $jobs += Start-Job -ScriptBlock {
+                param($WorkerScript, $WorkerArgs)
+                & $WorkerScript @WorkerArgs
+            } -ArgumentList @($WorkerScript, $workerArgs)
+        }
+
+        # Stream output back to the user as it arrives. Receive-Job is
+        # non-blocking when called against a still-running job; without this
+        # loop the wrapper would appear frozen until every stream completed.
+        Write-Host ""
+        Write-Host "All streams launched. Streaming output (lines prefixed [stream-N]):" -ForegroundColor Green
+        Write-Host ""
+        # Initial drain handles the case where every stream crashes immediately
+        # (jobs reach Completed state in <1500 ms, so the loop predicate would
+        # otherwise be false on first check and we'd skip output streaming).
+        $jobs | Receive-Job
+        while ($jobs | Where-Object { $_.State -eq 'Running' }) {
+            $jobs | Receive-Job
+            Start-Sleep -Milliseconds 1500
+        }
+        # Drain anything still buffered after all jobs reached terminal state.
+        $jobs | Receive-Job
+
+        # Capture exit codes and any errors from the jobs themselves before removing.
+        foreach ($j in $jobs) {
+            if ($j.State -ne 'Completed') {
+                Write-Host ("[stream-{0}] job ended in state {1}" -f $j.Id, $j.State) -ForegroundColor Yellow
+            }
+        }
+        $jobs | Remove-Job -Force
+
+        # Aggregate per-stream summaries into the wrapper's existing
+        # accumulators so the consolidated summary at end-of-run looks the
+        # same shape as a sequential run.
+        foreach ($s in $StreamSummaries) {
+            if (-not (Test-Path -Path $s.SummaryPath -PathType Leaf)) {
+                Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $s.StreamId, $s.SummaryPath) -ForegroundColor Yellow
+                $FailedSubscriptions += ("stream-{0} (no summary)" -f $s.StreamId)
+                continue
+            }
+            try {
+                $streamSummary = Get-Content -Path $s.SummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $s.StreamId, $s.SummaryPath, $_.Exception.Message) -ForegroundColor Red
+                $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $s.StreamId)
+                continue
+            }
+
+            # Surface stream-level failures (failed-to-start, etc.) so the
+            # wrapper transcript distinguishes "the whole stream broke" from
+            # "the stream ran fine but some subs in it failed". Per-sub
+            # failures are still folded into $FailedSubscriptions via the
+            # streamSummary.Failed enumeration below.
+            if ($streamSummary.Status -and $streamSummary.Status -ne 'ok' -and $streamSummary.Status -ne 'partial-failure') {
+                $reasonText = if ($streamSummary.Reason) { $streamSummary.Reason } else { '(no reason given)' }
+                Write-Host ("[stream-{0}] stream status: {1} - {2}" -f $s.StreamId, $streamSummary.Status, $reasonText) -ForegroundColor Red
+            }
+
+            if ($streamSummary.ResourceCounts) {
+                foreach ($rc in $streamSummary.ResourceCounts) {
+                    $SubResourceCounts += [pscustomobject]@{
+                        Name  = $rc.Name
+                        Id    = $rc.Id
+                        Count = [int]$rc.Count
+                    }
+                }
+            }
+
+            if ($streamSummary.Failed) {
+                foreach ($f in $streamSummary.Failed) {
+                    $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $s.StreamId, $f.Reason)
+                }
+            }
+
+            if ($null -ne $streamSummary.ConsumptionRecords) {
+                if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+                $Global:ConsumptionRecordCount = [int]$Global:ConsumptionRecordCount + [int]$streamSummary.ConsumptionRecords
+            }
+            if ($streamSummary.ConsumptionFailedSubs -and $streamSummary.ConsumptionFailedSubs.Count -gt 0) {
+                if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+                $Global:ConsumptionFailedSubs += @($streamSummary.ConsumptionFailedSubs)
+            }
+
+            # If a stream wrote a failures log, add it to the wrapper's diag-file
+            # accumulator so the final summary surfaces the path. The wrapper's
+            # existing $DiagFile was nullable; using a single concatenated log
+            # avoids breaking that contract.
+            if ((Test-Path -Path $s.FailuresPath -PathType Leaf) -and ((Get-Item $s.FailuresPath).Length -gt 0)) {
+                if ($null -eq $DiagFile) {
+                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+                }
+                try {
+                    Get-Content -Path $s.FailuresPath -Raw | Out-File -FilePath $DiagFile -Append -Encoding utf8
+                } catch {
+                    Write-Verbose ("Failed to merge stream failures log {0}: {1}" -f $s.FailuresPath, $_.Exception.Message)
+                }
+            }
+        }
+
+        # Clean up per-stream summary JSON files (the data is now folded into
+        # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
+        # they are referenced from the merged $DiagFile via Append above. The
+        # Az context snapshot cleanup lives in the `finally` block below so it
+        # runs even on failure paths.
+        foreach ($s in $StreamSummaries) {
+            if (Test-Path -Path $s.SummaryPath) {
+                try { Remove-Item -Path $s.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $s.SummaryPath, $_.Exception.Message) }
+            }
+        }
+
+        # When parallel streams have completed (clean or otherwise), merge each
+        # stream's resume-state file into the unified resume-state file so a
+        # subsequent -Resume run picks up correctly. The unified file is also
+        # what the existing "clean run -> remove resume state" logic below
+        # will look at.
+        $allCompletedFromStreams = @()
+        for ($s = 0; $s -lt $StreamCount; $s++) {
+            $perStreamFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $s)
+            if (Test-Path -Path $perStreamFile -PathType Leaf) {
+                try {
+                    $obj = Get-Content -Path $perStreamFile -Raw | ConvertFrom-Json
+                    if ($null -ne $obj.Completed) {
+                        $allCompletedFromStreams += @($obj.Completed)
+                    }
+                } catch {
+                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message)
+                }
+            }
+        }
+        if ($allCompletedFromStreams.Count -gt 0) {
+            $CompletedIds = @($CompletedIds + $allCompletedFromStreams | Sort-Object -Unique)
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
+        }
+        # Also delete per-stream resume files now that the unified file holds
+        # the truth - this prevents drift if a future run uses a different
+        # stream count.
+        for ($s = 0; $s -lt $StreamCount; $s++) {
+            $perStreamFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $s)
+            if (Test-Path -Path $perStreamFile -PathType Leaf) {
+                try { Remove-Item -Path $perStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message) }
+            }
+        }
+    } finally {
+        # Unconditional cleanup of the Az context snapshot. This runs whether
+        # the orchestration succeeded, threw, or was interrupted via Ctrl+C
+        # while a child stream was still running. The snapshot file contains
+        # a token cache; leaving it on disk is a security exposure (bounded
+        # by the ~1h token lifetime, but real). Best-effort: log if the
+        # delete fails but do not propagate the error - that would mask the
+        # real exit reason.
+        if (Test-Path -Path $AzContextSnapshot) {
+            try {
+                Remove-Item -Path $AzContextSnapshot -Force -ErrorAction Stop
+            } catch {
+                Write-Host ("WARNING: could not remove Az context snapshot at {0}: {1}" -f $AzContextSnapshot, $_.Exception.Message) -ForegroundColor Yellow
+                Write-Host "  This file contains an Azure token cache and should be deleted manually." -ForegroundColor Yellow
+            }
+        }
+    }
+    }
 }
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green

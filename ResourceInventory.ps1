@@ -248,7 +248,15 @@ Function RunInventorySetup()
         $Global:PlatformOS = 'PowerShell Desktop'
         $cloudShell = try{Get-CloudDrive}catch{}
 
-        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmss")
+        # Millisecond precision is required when multiple inner-script invocations
+        # can start in the same second (the parallel-streams orchestration in
+        # Run-AllSubscriptions.ps1 fans out N child processes that all run this
+        # init block concurrently). Without it, two workers compute the same
+        # $Global:CurrentDateTime, point at the same per-sub folder, and the
+        # second worker's Compress-Archive fails with "archive file already
+        # exists". The format change is invisible to every downstream consumer:
+        # all glob filters use `*` wildcards over the timestamp segment.
+        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmssfff")
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
         
         if ($cloudShell) 

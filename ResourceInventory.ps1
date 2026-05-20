@@ -865,7 +865,13 @@ function ExecuteInventoryProcessing()
             }
 
             $Global:SmaResources | Add-Member -MemberType NoteProperty -Name $ModName -Value NotSet
-            $Global:SmaResources.$ModName = $result
+            # Wrap with @() so the JSON serializer always emits an array, even
+            # when the collector returns exactly one resource. Without this,
+            # PowerShell unwraps a single-element pipeline result into a scalar
+            # PSCustomObject, ConvertTo-Json emits {...} instead of [{...}],
+            # and downstream parsers that iterate the resource type as an
+            # array silently see zero rows.
+            $Global:SmaResources.$ModName = @($result)
 
             $result = $null
             [System.GC]::Collect()

@@ -9,7 +9,18 @@ param (
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$Resume,
-    [switch]$IncludeDisabled
+    [switch]$IncludeDisabled,
+
+    # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
+    # the inner script's own default. The inner script uses this as the throttle
+    # for its metrics-collection runspace pool (Get-AzMetric calls in
+    # Extension/Metrics.ps1). Tenants with metric-heavy subscriptions (many VMs,
+    # SQL DBs, Storage Accounts, Scale Sets, Container Registries) bottleneck on
+    # this phase; raising the limit to 12-24 typically cuts that phase 30-50%
+    # without hitting Azure Monitor's 12,000 reads/hour/subscription ceiling.
+    # Don't go above ~24 in a single tenant - tenant-scoped Resource Graph
+    # rate limits start to bite.
+    [int]$ConcurrencyLimit = 6
 )
 
 $RunStartTime = Get-Date
@@ -445,6 +456,11 @@ if ($DeviceLogin)      { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate)        { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics)      { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption)  { $InventoryPassthrough['SkipConsumption'] = $true }
+# Always forward ConcurrencyLimit so the operator can tune metrics-phase
+# throttling end-to-end from a single param instead of editing the inner
+# script's default. Defaults to 6 (the inner script's existing default), so
+# behavior is unchanged for runs that don't pass it.
+$InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = $true }
 
 # Loop through each subscription and run ResourceInventory

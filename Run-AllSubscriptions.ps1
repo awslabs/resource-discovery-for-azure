@@ -139,8 +139,9 @@ function Invoke-PreFlightChecks {
             Write-Host ""
             Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
             Write-Host "  Outputs in $InventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
-            Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
-            Write-Host "    clouddrive mount" -ForegroundColor Yellow
+            Write-Host "  This includes the resume-state file, so -Resume on a future session won't help recover." -ForegroundColor Yellow
+            Write-Host "  To persist outputs across sessions, attach a storage account via the Cloud Shell" -ForegroundColor Yellow
+            Write-Host "  settings menu (gear icon) > Reset User Settings > Mount storage account." -ForegroundColor Yellow
             Write-Host "  Continuing in ephemeral mode - download the report ZIP from $InventoryRoot before closing the shell." -ForegroundColor Yellow
             Write-Host ""
         } else {
@@ -150,10 +151,12 @@ function Invoke-PreFlightChecks {
 
     # 2. Disk space probe at the inventory root.
     #
-    # Cloud Shell quota is 5 GB total. A 100+ subscription run can produce
-    # 200+ MB of zips and intermediate files; if free space is already low
-    # the run will fail late with a confusing "There is not enough space"
-    # somewhere deep in EPPlus. Catch it now.
+    # Cloud Shell's overlay filesystem provides ~50 GB (verified with `df -h`
+    # in 2026); the legacy 5 GB number some older docs cite is outdated.
+    # A 100+ subscription run can produce 200-500 MB of zips and intermediate
+    # files; if free space is already low (typically because something else
+    # is filling the home directory) the run will fail late with a confusing
+    # "There is not enough space" somewhere deep in EPPlus. Catch it now.
     try {
         $rootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
         $drive = $rootItem.PSDrive

@@ -668,7 +668,7 @@ foreach ($sub in $subscriptions) {
                 try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null }
                 catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
             }
-            $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+            $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0,4))
         }
         try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
         catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
@@ -741,7 +741,24 @@ foreach ($sub in $subscriptions) {
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
                 }
             } catch {
-                Write-Host ("ERROR processing subscription {0}: {1}" -f $sub.Name, $_.Exception.Message) -ForegroundColor Red
+                # Match the sequential branch's diagnostic detail so users do not
+                # get a degraded error report when -ParallelStreams collapses to a
+                # single subscription. Mirrors the catch handler around line 615.
+                $errRecord = $_
+                Write-Host ("ERROR processing subscription {0}: {1}" -f $sub.Name, $errRecord) -ForegroundColor Red
+                $diagLines = @()
+                $diagLines += "==== Failure for subscription: $($sub.Name) ($($sub.Id)) ===="
+                $diagLines += "Timestamp: $(Get-Date -Format 'o')"
+                $diagLines += "Message:   $($errRecord.Exception.Message)"
+                $diagLines += "Type:      $($errRecord.Exception.GetType().FullName)"
+                $diagLines += "StackTrace:"
+                $diagLines += $errRecord.ScriptStackTrace
+                $diagLines += ""
+                if ($null -eq $DiagFile) {
+                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0,4))
+                }
+                try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+                catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
                 $FailedSubscriptions += $sub.Name
             }
         }
@@ -855,8 +872,17 @@ foreach ($sub in $subscriptions) {
         # Initial drain handles the case where every stream crashes immediately
         # (jobs reach Completed state in <1500 ms, so the loop predicate would
         # otherwise be false on first check and we'd skip output streaming).
+        # Drain output once before the polling loop, in case all streams
+        # finished synchronously between Start-Job and our first poll
+        # (jobs reach Completed state in <1500 ms, so the loop predicate would
+        # otherwise be false on first check and we'd skip output streaming).
         $jobs | Receive-Job
-        while ($jobs | Where-Object { $_.State -eq 'Running' }) {
+        # Explicit count check is safer than truthiness on the Where-Object
+        # result: when zero jobs match, Where-Object returns $null which is
+        # falsy, but when one matches it returns a single non-array object
+        # whose truthiness varies by PowerShell edition. @(...).Count is
+        # always an integer.
+        while (@($jobs | Where-Object { $_.State -eq 'Running' }).Count -gt 0) {
             $jobs | Receive-Job
             Start-Sleep -Milliseconds 1500
         }
@@ -929,7 +955,7 @@ foreach ($sub in $subscriptions) {
             # avoids breaking that contract.
             if ((Test-Path -Path $s.FailuresPath -PathType Leaf) -and ((Get-Item $s.FailuresPath).Length -gt 0)) {
                 if ($null -eq $DiagFile) {
-                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0,4))
                 }
                 try {
                     Get-Content -Path $s.FailuresPath -Raw | Out-File -FilePath $DiagFile -Append -Encoding utf8

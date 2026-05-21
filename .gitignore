@@ -494,3 +494,11 @@ Tests/*.zip
 
 Transcript_Log_*
 ObfuscationDictionary_*
+
+# Local-only directories - never commit
+.exploration/
+.kiro/
+docs/components/
+
+# Local agent / IDE state
+.git-hooks-local/

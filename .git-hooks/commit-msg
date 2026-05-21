@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# .git-hooks/commit-msg
+#
+# Doer/judge separation: orchestrator hands the commit-message file path to
+# the judge. Validates against universal forbidden patterns AND review-process
+# language (spec Section 1.6).
+
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec pwsh -NoProfile -File "$repo_root/tools/Validate-Diff.ps1" -CommitMsgFile "$1"

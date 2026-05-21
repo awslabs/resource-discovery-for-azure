@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# .git-hooks/pre-commit
+#
+# Doer/judge separation, layer 2 (file-based handoff): we hand the staged
+# diff to the judge as a git-managed payload, never as doer-supplied text.
+# The judge has its own defensive instructions; this hook is only the
+# orchestrator that invokes it.
+
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec pwsh -NoProfile -File "$repo_root/tools/Validate-Diff.ps1" -StagedDiff

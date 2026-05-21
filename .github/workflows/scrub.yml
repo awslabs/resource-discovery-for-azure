@@ -1,0 +1,77 @@
+name: content-safety-scrub
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  scrub-diff-and-messages:
+    name: Scrub diff + commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run unit tests for the scrub library
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          if (-not (Get-Module -Name Pester -ListAvailable)) {
+            Install-Module -Name Pester -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          $r = Invoke-Pester ./Tests/ScrubContent.Tests.ps1 -Output Detailed -PassThru
+          if ($r.FailedCount -gt 0) {
+            Write-Host "::error::ScrubContent unit tests failed: $($r.FailedCount) failure(s)"
+            exit 1
+          }
+
+      - name: Compute base/head SHAs
+        id: shas
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+            echo "head=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+          else
+            # push event - scan only the pushed commits
+            echo "base=${{ github.event.before }}" >> $GITHUB_OUTPUT
+            echo "head=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run the judge on the diff + commit messages
+        shell: pwsh
+        run: |
+          $base = '${{ steps.shas.outputs.base }}'
+          $head = '${{ steps.shas.outputs.head }}'
+          if ([string]::IsNullOrEmpty($base) -or $base -match '^0+$') {
+            Write-Host "::warning::No base sha available; scanning HEAD commit only"
+            ./tools/Validate-Diff.ps1 -CommitSha $head -ScanCommitMessages
+          } else {
+            ./tools/Validate-Diff.ps1 -CommitRange "$base..$head" -ScanCommitMessages
+          }
+
+  scrub-pr-body:
+    name: Scrub PR body
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and validate PR body
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $body = gh pr view ${{ github.event.pull_request.number }} --json body -q .body
+          # The judge runs in PrBody mode - file-based handoff with no
+          # other context bleed.
+          ./tools/Validate-Diff.ps1 -PrBody "$body"

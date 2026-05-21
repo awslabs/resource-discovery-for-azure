@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# .git-hooks/pre-push
+#
+# Last gate before content reaches a remote. Doer/judge separation, layer 2:
+# we hand the orchestrator-computed range to the judge.
+#
+# Two checks:
+#   1. Block any push to awslabs/* upstream (overridable with --no-verify
+#      for deliberate releases).
+#   2. Run the judge against every commit in the push range.
+
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+remote="$1"
+url="$2"
+
+# Guard against accidental pushes to upstream public org. The user must
+# explicitly --no-verify to push there.
+if echo "$url" | grep -qE 'github\.com[:/]+awslabs/'; then
+    echo "BLOCKED: pre-push refuses pushes to awslabs/* upstream." >&2
+    echo "  If this is intentional (deliberate release / authorised PR push)," >&2
+    echo "  re-run with: git push --no-verify $remote ..." >&2
+    exit 1
+fi
+
+# Read pushed refs from stdin (git pre-push protocol)
+empty_sha="0000000000000000000000000000000000000000"
+exit_code=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$local_sha" = "$empty_sha" ]; then
+        # Branch deletion - nothing to validate
+        continue
+    fi
+    if [ "$remote_sha" = "$empty_sha" ]; then
+        # New branch - validate every commit reachable from local that's not
+        # already on any remote. Use a stable upper bound (origin/main) when
+        # available; fall back to the last 50 commits.
+        if git rev-parse origin/main >/dev/null 2>&1; then
+            range="origin/main..$local_sha"
+        else
+            range="$(git rev-list --max-count=50 $local_sha | tail -1)..$local_sha"
+        fi
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    echo "pre-push: validating range $range" >&2
+    if ! pwsh -NoProfile -File "$repo_root/tools/Validate-Diff.ps1" -CommitRange "$range" -ScanCommitMessages; then
+        exit_code=1
+    fi
+done
+
+exit $exit_code

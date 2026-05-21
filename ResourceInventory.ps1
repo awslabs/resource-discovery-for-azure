@@ -235,6 +235,29 @@ Function RunInventorySetup()
             if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
                 Write-Log -Message ('ImportExcel imported but OfficeOpenXml.ExcelPackage type is not loadable. The Excel report step will fail.') -Severity 'Error'
             }
+
+            # New-ExcelStyle health probe.
+            #
+            # On a partially-installed ImportExcel (manifest present but bundled
+            # EPPlus assemblies missing or version-mismatched), New-ExcelStyle
+            # returns $null instead of an OfficeOpenXml.Style.ExcelStyle. That
+            # $null then flows into ~30 collectors under Services\* and crashes
+            # deep inside Set-ExcelRange.ps1 with a confusing 'HorizontalAlignment
+            # cannot be found' error - long after the user has waited through
+            # resource enumeration. Catch it here with one actionable message.
+            # See ARI issue #17 for upstream context.
+            $rdaStyleProbe = $null
+            try { $rdaStyleProbe = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0 -ErrorAction Stop }
+            catch { Write-Log -Message ('New-ExcelStyle probe threw: {0}' -f $_.Exception.Message) -Severity 'Error' }
+            $rdaStyleProbeOk = $false
+            if ($null -ne $rdaStyleProbe) {
+                try { $rdaStyleProbeOk = ($rdaStyleProbe['HorizontalAlignment'] -eq 'Center') }
+                catch { $rdaStyleProbeOk = $false }
+            }
+            if (-not $rdaStyleProbeOk) {
+                Write-Log -Message ('ImportExcel module is in a broken state - New-ExcelStyle returned an unusable object. This usually means manifest is present but bundled EPPlus assemblies are missing or version-mismatched. Reinstall with: Get-Module ImportExcel -ListAvailable | Uninstall-Module -Force; Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser') -Severity 'Error'
+                throw 'ImportExcel preflight failed - reinstall the module and re-run.'
+            }
         } catch {
             Write-Log -Message ('Import-Module ImportExcel failed: {0}' -f $_.Exception.Message) -Severity 'Error'
             throw

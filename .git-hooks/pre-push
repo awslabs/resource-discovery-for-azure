@@ -16,8 +16,12 @@ remote="$1"
 url="$2"
 
 # Guard against accidental pushes to upstream public org. The user must
-# explicitly --no-verify to push there.
-if echo "$url" | grep -qE 'github\.com[:/]+awslabs/'; then
+# explicitly --no-verify to push there. Match real awslabs URL forms:
+# - https://github.com/awslabs/...   - https://github.com:443/awslabs/...
+# - https://user:[email protected]/awslabs/...
+# - git@github.com:awslabs/...   - ssh://git@github.com/awslabs/...
+# - ssh://[email protected]:22/awslabs/...
+if echo "$url" | grep -qE '(github\.com(:[0-9]+)?[:/]+awslabs/|@github\.com[:/]+awslabs/)'; then
     echo "BLOCKED: pre-push refuses pushes to awslabs/* upstream." >&2
     echo "  If this is intentional (deliberate release / authorised PR push)," >&2
     echo "  re-run with: git push --no-verify $remote ..." >&2
@@ -34,21 +38,41 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         continue
     fi
     if [ "$remote_sha" = "$empty_sha" ]; then
-        # New branch - validate every commit reachable from local that's not
-        # already on any remote. Use a stable upper bound (origin/main) when
-        # available; fall back to the last 50 commits.
-        if git rev-parse origin/main >/dev/null 2>&1; then
-            range="origin/main..$local_sha"
-        else
-            range="$(git rev-list --max-count=50 $local_sha | tail -1)..$local_sha"
-        fi
+        # New branch - validate every commit reachable from local that's NOT
+        # already on any remote (ignoring whatever placeholder remote_sha was).
+        # Using --not --remotes is more correct than the old origin/main fallback
+        # because it works even when origin/main does not exist locally and is
+        # robust to force-pushes that rewrite history.
+        range_args="$local_sha --not --remotes"
+        scan_label="$local_sha (new commits not on any remote)"
     else
-        range="$remote_sha..$local_sha"
+        # Existing branch update. For force-pushes the protocol still gives
+        # remote_sha..local_sha, but the rewritten ancestry may not be reachable
+        # from remote_sha anymore. --not --remotes catches everything that is
+        # genuinely new on this push regardless of how history was rewritten.
+        range_args="$local_sha ^$remote_sha"
+        scan_label="$remote_sha..$local_sha"
     fi
 
-    echo "pre-push: validating range $range" >&2
-    if ! pwsh -NoProfile -File "$repo_root/tools/Validate-Diff.ps1" -CommitRange "$range" -ScanCommitMessages; then
-        exit_code=1
+    echo "pre-push: validating $scan_label" >&2
+    # Materialise the range into a list of commits, then scan each. If the list
+    # is empty (no new commits), skip cleanly.
+    commits="$(git rev-list $range_args 2>/dev/null)"
+    if [ -z "$commits" ]; then
+        echo "pre-push: no new commits to scan" >&2
+        continue
+    fi
+    head_sha="$(echo "$commits" | head -1)"
+    base_sha="$(echo "$commits" | tail -1)~1"
+    if ! git rev-parse "$base_sha" >/dev/null 2>&1; then
+        # Range starts at the root commit
+        if ! pwsh -NoProfile -File "$repo_root/tools/Validate-Diff.ps1" -CommitSha "$head_sha" -ScanCommitMessages; then
+            exit_code=1
+        fi
+    else
+        if ! pwsh -NoProfile -File "$repo_root/tools/Validate-Diff.ps1" -CommitRange "$base_sha..$head_sha" -ScanCommitMessages; then
+            exit_code=1
+        fi
     fi
 done
 

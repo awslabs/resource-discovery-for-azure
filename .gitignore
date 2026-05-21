@@ -502,3 +502,4 @@ docs/components/
 
 # Local agent / IDE state
 .git-hooks-local/
+.scrub-review/

@@ -84,11 +84,23 @@ function Get-FilteredDiff {
     $inSkippedSection = $false
 
     foreach ($line in $lines) {
-        if ($line -match '^diff --git a/(.+) b/') {
-            $path = $Matches[1]
-            $inSkippedSection = ($script:SkippedFiles -contains $path)
+        # Match the diff-header form. Use a non-greedy capture and a back-reference
+        # to enforce that a/<path> and b/<path> match exactly — guards against
+        # forged headers with mismatched paths or trailing whitespace shenanigans.
+        if ($line -match '^diff --git a/(.+?) b/\1$') {
+            $rawPath = $Matches[1]
+            # Canonicalise: strip leading "./", collapse repeated slashes, then compare
+            # case-sensitively. Matters on Linux where Tools/ and tools/ are distinct
+            # paths but PowerShell's default -contains is case-insensitive — without this
+            # canonicalisation a malicious PR could create Tools/Scrub-Content.ps1 and
+            # inherit the skip.
+            $canonical = ($rawPath -replace '^\./','') -replace '/+','/'
+            $inSkippedSection = $false
+            foreach ($skipped in $script:SkippedFiles) {
+                if ($canonical -ceq $skipped) { $inSkippedSection = $true; break }
+            }
             if ($inSkippedSection) {
-                Write-Host ("SKIPPED-FILE: {0}" -f $path) -ForegroundColor DarkGray
+                Write-Host ("SKIPPED-FILE: {0}" -f $canonical) -ForegroundColor DarkGray
             } else {
                 $output.Add($line) | Out-Null
             }

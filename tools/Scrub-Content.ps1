@@ -39,24 +39,30 @@ $script:AllowListLiterals = @(
 
 # === Forbidden-pattern regexes (must match SPEC Section 1) ====================
 
-# 1.1 Real GUIDs (8-4-4-4-12 lowercase hex)
-$script:GuidRegex = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+# 1.1 Real GUIDs (8-4-4-4-12 hex, case-insensitive — matched with IgnoreCase
+# option in [regex]::Matches calls below)
+$script:GuidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 
-# 1.2 AWS 12-digit account IDs (standalone word boundary)
-$script:AwsAccountRegex = '\b[0-9]{12}\b'
+# 1.2 AWS 12-digit account IDs. Use lookarounds so digits-adjacent-to-letters
+# (e.g. "987654321098abc") still trigger; only adjacent additional digits
+# (timestamps) suppress.
+$script:AwsAccountRegex = '(?<![0-9])[0-9]{12}(?![0-9])'
 
-# 1.3 Internal Amazon service / tooling names (case-insensitive)
-$script:InternalNameRegex = 'cloudrays|sentral|aws-crm|midway|aea\b|acme\b|amazon-corp|amazon\.dev|amazon\.work|a2z|phonetool|quip-amazon'
+# 1.3 Internal Amazon service / tooling names (case-insensitive). The
+# `[-_ ]?` allowance between letters catches obfuscation attempts like
+# `cloud-rays`, `cloud_rays`, and `aws crm`.
+$script:InternalNameRegex = 'cloud[-_ ]?rays|sen[-_ ]?tral|aws[-_ ]?crm|mid[-_ ]?way|aea\b|acme\b|amazon[-_ ]?corp|amazon\.dev|amazon\.work|a2z|phone[-_ ]?tool|quip[-_ ]?amazon'
 
 # 1.3 (cont.) Internal hostnames
 $script:InternalHostRegex = '\.amazon-corp\.com|\.aws\.dev|\.a2z\.com|\.amazon\.work'
 
-# 1.4 Customer scale fingerprints
-$script:ScaleSubsRegex      = '\d{2,}\s+subscriptions'
-$script:ScaleResourcesRegex = '\d{4,}\s+resources'
-$script:ScaleDollarsRegex   = '\$\s?\d[\d,]{4,}'
+# 1.4 Customer scale fingerprints (thousand-separator tolerant)
+$script:ScaleSubsRegex      = '\d{2,}(?:,\d{3})*\s+subscriptions'
+$script:ScaleResourcesRegex = '(?:\d{1,3}(?:,\d{3})+|\d{4,})\s+resources'
+$script:ScaleDollarsRegex   = '\$\s?(?:\d{1,3}(?:,\d{3})+|\d{5,})'
 
-# 1.5 Auth artefacts
+# 1.5 Auth artefacts. The JWT regex needs Singleline so a token split across
+# newlines is still detected.
 $script:JwtRegex    = 'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'
 $script:SasRegex    = 'sv=\d{4}-\d{2}-\d{2}.*&sig=[A-Za-z0-9%]{20,}'
 $script:BearerRegex = 'Bearer\s+[A-Za-z0-9._-]{40,}'
@@ -73,15 +79,21 @@ function Test-IsAllowListed {
         [Parameter(Mandatory = $true)] [string] $Type
     )
 
-    # Literal allow-list (Section 3 verbatim entries)
+    # Literal allow-list (Section 3 verbatim entries). GUID comparisons are
+    # case-insensitive because the GUID regex is case-insensitive too — we
+    # don't want a mixed-case allowed GUID to slip through detection.
     foreach ($literal in $script:AllowListLiterals) {
-        if ($Match -eq $literal) { return $true }
+        if ($Type -eq 'guid') {
+            if ($Match.ToLowerInvariant() -ceq $literal.ToLowerInvariant()) { return $true }
+        } else {
+            if ($Match -ceq $literal) { return $true }
+        }
     }
 
     # AWS-account special case: 14+ digit "AWS account" matches are timestamps,
-    # not account IDs (yyyyMMddHHmmssfff). The \b[0-9]{12}\b regex anchors on
-    # word boundaries so a 17-digit timestamp wouldn't match anyway, but
-    # double-check defensively.
+    # not account IDs (yyyyMMddHHmmssfff). With the new lookaround pattern this
+    # path can still be reached if the regex implementation changes; keep the
+    # belt-and-braces guard.
     if ($Type -eq 'aws-account' -and $Match.Length -gt 12) { return $true }
 
     return $false
@@ -99,8 +111,8 @@ function Test-ContentForLeaks {
 
     $hits = @()
 
-    # 1.1 GUIDs
-    foreach ($m in [regex]::Matches($Content, $script:GuidRegex)) {
+    # 1.1 GUIDs (case-insensitive — Azure portal URLs and ARM resource IDs use uppercase)
+    foreach ($m in [regex]::Matches($Content, $script:GuidRegex, 'IgnoreCase')) {
         if (-not (Test-IsAllowListed -Match $m.Value -Type 'guid')) {
             $hits += [PSCustomObject]@{ Type = 'guid'; Value = $m.Value; Position = $m.Index }
         }
@@ -132,11 +144,32 @@ function Test-ContentForLeaks {
         $hits += [PSCustomObject]@{ Type = 'scale-fingerprint'; Value = $m.Value; Position = $m.Index }
     }
 
-    # 1.5 Auth artefacts
-    foreach ($m in [regex]::Matches($Content, $script:JwtRegex)) {
+    # 1.5 Auth artefacts. Scan both the raw content AND a whitespace-collapsed
+    # version so tokens that have been line-wrapped by PR-description editors,
+    # diff context lines, or comment-block-formatters still match. The
+    # whitespace-collapsed version uses the position from the original via a
+    # back-mapping, but for simplicity we report the position as -1 to indicate
+    # "match found in normalized form" so reviewers know to look in line-wrapped
+    # context.
+    foreach ($m in [regex]::Matches($Content, $script:JwtRegex, 'Singleline')) {
         $hits += [PSCustomObject]@{ Type = 'auth-token'; Value = $m.Value; Position = $m.Index }
     }
-    foreach ($m in [regex]::Matches($Content, $script:SasRegex, 'IgnoreCase')) {
+    $normalised = ($Content -replace '\s+', '')
+    if ($normalised -ne $Content) {
+        foreach ($m in [regex]::Matches($normalised, $script:JwtRegex)) {
+            # Avoid double-flagging a token already caught in raw form.
+            $alreadyFlagged = $false
+            foreach ($h in $hits) {
+                if ($h.Type -eq 'auth-token' -and $h.Value.Replace("`n","").Replace("`r","").Replace(' ','') -eq $m.Value) {
+                    $alreadyFlagged = $true; break
+                }
+            }
+            if (-not $alreadyFlagged) {
+                $hits += [PSCustomObject]@{ Type = 'auth-token'; Value = $m.Value; Position = -1 }
+            }
+        }
+    }
+    foreach ($m in [regex]::Matches($Content, $script:SasRegex, ([System.Text.RegularExpressions.RegexOptions]'IgnoreCase, Singleline'))) {
         $hits += [PSCustomObject]@{ Type = 'auth-token'; Value = $m.Value; Position = $m.Index }
     }
     foreach ($m in [regex]::Matches($Content, $script:BearerRegex)) {

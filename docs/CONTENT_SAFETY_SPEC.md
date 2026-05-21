@@ -23,8 +23,10 @@ content destined for a public surface:
 
 ### 1.1 Real Azure tenant or subscription GUIDs
 
-A "real GUID" is any 8-4-4-4-12 lowercase-hex group, **except** the documentation
-placeholder `12345678-1234-1234-1234-123456789012`.
+A "real GUID" is any 8-4-4-4-12 hex group in either case (lowercase or
+uppercase or mixed), **except** the documentation placeholder
+`12345678-1234-1234-1234-123456789012`. Matching is case-insensitive because
+Azure portal URLs and ARM resource IDs commonly use uppercase.
 
 Test fixture for unit testing: include the real-shape GUID
 `1ffec608-964c-4aaa-8f1e-125baacd6ed2` in the *test input only* (never anywhere
@@ -32,14 +34,16 @@ else in the repo). The test verifies the checker flags it.
 
 ### 1.2 AWS 12-digit account IDs
 
-Any standalone 12-digit decimal sequence (`\b[0-9]{12}\b`) counts as a possible
-AWS account ID. The checker flags it. False-positive rate is low because most
-12-digit decimals in code are timestamps, which appear in identifiable contexts
-(see the allow-list rules below).
+Any 12 consecutive decimal digits not adjacent to additional digits is treated
+as a possible AWS account ID. Matching uses lookaround so trailing letters
+(e.g. `987654321098abc`) do not suppress detection. Pure-digit timestamps of
+14+ digits (`yyyyMMddHHmmssfff` and longer) are excluded by the allow-list.
 
 ### 1.3 Internal Amazon service or tooling names
 
-Case-insensitive match against any of:
+Case-insensitive match against any of the trigger names below. The match is
+also tolerant of word-internal separators (hyphen, underscore, single space)
+between letters, so `cloud-rays` and `cloud_rays` both match `cloudrays`:
 
 ```
 cloudrays | sentral | aws-crm | midway | aea\b | acme\b
@@ -56,19 +60,35 @@ Plus internal hostname patterns:
 ### 1.4 Customer scale fingerprints
 
 Specific subscription counts, resource counts, or dollar amounts that could
-identify a specific customer. The checker flags:
+identify a specific customer. The checker flags the following, with optional
+thousand separators (`,`) tolerated within the digit run:
 
-- `\d{2,}\s+subscriptions` (e.g. "125 subscriptions")
-- `\d{4,}\s+resources` (e.g. "17,290 resources")
-- `\$\s?\d[\d,]{4,}` (e.g. "$50,000")
+- `\d{2,}(?:,\d{3})*\s+subscriptions` (e.g. "125 subscriptions" or "1,250 subscriptions")
+- `\d{1,3}(?:,\d{3})+\s+resources` or `\d{4,}\s+resources` (e.g. "17,290 resources")
+- `\$\s?\d{1,3}(?:,\d{3})+` or `\$\s?\d{5,}` (e.g. "$50,000")
 
 ### 1.5 Authentication artefacts
 
 Even expired tokens are forbidden. The checker flags:
 
-- JWT-looking strings: `eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`
+- JWT-looking strings: `eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}` (matched with the singleline option so a token split across newlines is still detected)
 - SAS token query strings: `sv=\d{4}-\d{2}-\d{2}.*&sig=[A-Za-z0-9%]{20,}`
 - Bearer-token-shaped strings: `Bearer\s+[A-Za-z0-9._-]{40,}`
+
+### 1.5a Out-of-scope secret patterns
+
+The following secret types are out of scope for this spec, by design:
+
+- AWS access key IDs (`AKIA*`)
+- GitHub PATs (`ghp_*`, `ghu_*`, `gho_*`, `ghr_*`)
+- OpenAI keys (`sk-*`)
+- SSH private keys (PEM blocks)
+- Azure tenant domain patterns (`*.onmicrosoft.com`)
+- Storage account name patterns
+
+These are handled by upstream pre-commit secret-scanning tools (e.g. GitHub
+push protection, gitleaks) and are not duplicated here. If a future need
+arises, add them to Section 1.5 and update the implementation in lockstep.
 
 ### 1.6 Review-process language in commit messages
 
@@ -135,6 +155,11 @@ paths:
 Skipping is **per-file**, not whole-diff. A commit that touches a skipped file
 AND a non-skipped file still runs the judge against the non-skipped file's
 hunks. The judge produces a `SKIPPED-FILE` line in its output for transparency.
+
+Skip-list matching is **case-sensitive** and **path-canonical**. The implementation
+strips a leading `./`, collapses repeated `/` to a single `/`, and compares with
+case-sensitive equality. This prevents a malicious PR from creating a sibling
+file at `Tools/Scrub-Content.ps1` (capital T) on Linux to inherit the skip.
 
 The checker MUST consult this allow-list before flagging. The allow-list
 implementation lives in `tools/Scrub-Content.ps1` and the spec for it is

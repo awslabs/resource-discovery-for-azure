@@ -21,16 +21,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run unit tests for the scrub library
+      - name: Run unit and integration tests for the scrub library and judge
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           if (-not (Get-Module -Name Pester -ListAvailable)) {
             Install-Module -Name Pester -Force -SkipPublisherCheck -Scope CurrentUser
           }
-          $r = Invoke-Pester ./Tests/ScrubContent.Tests.ps1 -Output Detailed -PassThru
+          $r = Invoke-Pester -Path @('./Tests/ScrubContent.Tests.ps1', './Tests/ValidateDiff.Tests.ps1') -Output Detailed -PassThru
           if ($r.FailedCount -gt 0) {
-            Write-Host "::error::ScrubContent unit tests failed: $($r.FailedCount) failure(s)"
+            Write-Host "::error::Scrub framework tests failed: $($r.FailedCount) failure(s)"
             exit 1
           }
 
@@ -71,7 +71,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $body = gh pr view ${{ github.event.pull_request.number }} --json body -q .body
-          # The judge runs in PrBody mode - file-based handoff with no
-          # other context bleed.
-          ./tools/Validate-Diff.ps1 -PrBody "$body"
+          # Pipe the body to a temp file rather than inline. Large PR bodies can
+          # exceed argv size limits or get reinterpreted as a command-line by the
+          # shell; reading from a file avoids both classes of bug.
+          $bodyFile = New-TemporaryFile
+          gh pr view ${{ github.event.pull_request.number }} --json body -q .body | Set-Content -Path $bodyFile -Encoding utf8 -NoNewline
+          $body = Get-Content -Path $bodyFile -Raw
+          if ([string]::IsNullOrEmpty($body)) {
+            Write-Host "PR body is empty - skipping body scan"
+            exit 0
+          }
+          ./tools/Validate-Diff.ps1 -PrBody $body

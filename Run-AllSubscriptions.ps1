@@ -32,10 +32,11 @@ param (
     #
     # Practical guidance:
     #   1   = sequential (default, lowest memory, easiest to debug)
-    #   2-4 = recommended for most large-tenant runs
-    #   5-8 = only if you've validated memory headroom (each stream loads its
-    #         own Az module set, ~400MB resident; on Cloud Shell's 5GB cap,
-    #         4 streams is the practical ceiling)
+    #   2   = Cloud Shell (3.5 GB RAM / 2 vCPU). Saturates both vCPUs without
+    #         OOM-killing workers.
+    #   3-4 = local laptop / VM with 16+ GB RAM and 4+ vCPUs.
+    #   5+  = only if you have validated memory headroom (each stream loads
+    #         its own Az module set, roughly 400 MB resident).
     #
     # Tenant-scoped Azure Resource Graph rate limits (~15 req/sec/tenant) are
     # the hard ceiling - more than ~6 parallel streams in one tenant will

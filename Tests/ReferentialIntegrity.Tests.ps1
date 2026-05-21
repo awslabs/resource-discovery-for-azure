@@ -68,7 +68,7 @@ Describe "Obfuscated ID Uniqueness" {
 
 Describe "Consumption to Inventory Cross-Reference" {
     It "Consumption ResourceIds that exist in inventory should use the same obfuscated value" {
-        if ($script:ConsumptionCsv.Count -eq 0) { return }
+        if ($script:ConsumptionCsv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
         $inventoryIds = $script:AllIds
         foreach ($row in $script:ConsumptionCsv) {
             if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $inventoryIds) {

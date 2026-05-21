@@ -325,11 +325,11 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).json` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).xlsx` | Consolidated Excel report |
-| `Transcript_Log(date).xlsx` | Transcript log of script activity during the run |
+| `Transcript_Log_<ReportName>_(date).txt` | Plaintext transcript of script activity (excluded from the zip when `-Obfuscate` is used) |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery
@@ -388,7 +388,6 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
-| `CollectionDays` | Integer | Number of days for consumption lookback | 31 | `-CollectionDays 14` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
 

@@ -68,9 +68,9 @@ Describe "Prefix Format Validation" {
 Describe "Consumption Prefix Consistency" {
     It "Consumption ResourceIds should have prod_ or nonprod_ prefix" {
         $csvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
-        if ($null -eq $csvFile) { return }
+        if ($null -eq $csvFile) { Set-ItResult -Skipped -Because "no consumption csv in fixture"; return }
         $content = Get-Content $csvFile.FullName -ErrorAction SilentlyContinue
-        if ($null -eq $content -or $content.Count -le 1) { return }
+        if ($null -eq $content -or $content.Count -le 1) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
         $csv = Import-Csv $csvFile.FullName
         foreach ($row in $csv) {
             if (![string]::IsNullOrEmpty($row.ResourceId)) {

@@ -214,9 +214,9 @@ Describe "Metrics Obfuscation" {
 # ============================================================
 Describe "Consumption Obfuscation" {
     It "Should have all consumption ResourceIds matching the obfuscation pattern" {
-        if ($null -eq $script:ConsumptionFile) { return }
+        if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }
         $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { return }
+        if ($csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
 
         foreach ($row in $csv) {
             if (![string]::IsNullOrEmpty($row.ResourceId)) {
@@ -226,9 +226,9 @@ Describe "Consumption Obfuscation" {
     }
 
     It "Should have obfuscated ResourceUri inside InstanceData JSON" {
-        if ($null -eq $script:ConsumptionFile) { return }
+        if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }
         $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { return }
+        if ($csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
 
         foreach ($row in $csv) {
             if (![string]::IsNullOrEmpty($row.InstanceData)) {

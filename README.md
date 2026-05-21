@@ -267,9 +267,9 @@ The default is `-ParallelStreams 1` (existing sequential behavior, fully preserv
 
 When you run with `-ParallelStreams`, several things change in the output:
 
-- Every line in the transcript starts with `[stream-N]` so you can tell which subscription's stream produced it.
+- The wrapper's own narration (which subscription a stream is starting, which one it finished) is prefixed with `[stream-N]`. The inner script's `Write-Host` and `Write-Log` output is **not** prefixed and will interleave across streams in the transcript. Use the per-stream summary at the end of the run, or the per-stream failures log, to disambiguate.
 - Each stream writes its own failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>_stream-<N>.log`. At the end of the run, the wrapper merges those into a single combined failure log so you only have one file to read.
-- Each stream tracks its own progress in a separate resume-state file. When the run finishes, those are merged into the main resume-state file. This means `-Resume` works the same way regardless of whether the previous run was sequential or parallel, so you don't need to remember which mode you used.
+- Each stream tracks its own progress in a separate resume-state file. When the run finishes, those are merged into the main resume-state file. This means `-Resume` works the same way regardless of whether the previous run was sequential or parallel — but only if the previous run reached the post-aggregation step. If you Ctrl+C a parallel run mid-stream, the per-stream resume files are still on disk; running `-Resume` on the next attempt will read them and skip the subs each stream had already completed.
 
 Authentication only happens once. The wrapper saves the parent process's Az PowerShell context to a file and each stream loads it, so you don't get prompted to sign in again for each parallel worker. The wrapper deletes that snapshot file when the run ends, including if you cancel with Ctrl+C or a stream crashes during startup.
 
@@ -441,11 +441,33 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Ensure you have the required Azure roles assigned
 - For local environments, run `az login` before executing the script
 - Multiple authentication prompts may appear due to parallel processing
+- "Get-AzSubscription returned no subscriptions" — usually a Conditional Access / MFA gate. Re-run with `-DeviceLogin` to use the browser-based device-code flow.
+- Tenant-domain-style `-TenantID` (e.g. `contoso.onmicrosoft.com`) is resolved via Microsoft's public OIDC discovery endpoint, no sign-in needed. Pass the tenant GUID directly if discovery fails.
+
+**Subscription returned 0 resources:**
+- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
+- Less commonly, the subscription is genuinely empty.
+- Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
+
+**Consumption sheet empty across many subs:**
+- Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
+- The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+
+**ImportExcel `'HorizontalAlignment' cannot be found` error:**
+- Same partial-install pattern as the `Az` module. The wrapper preflight catches this at startup now, but if you see it mid-run on an older code branch, fix it with: `Get-Module ImportExcel -ListAvailable | Uninstall-Module -Force; Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+- Then re-run with `-Resume` to retry only the failed subs.
+
+**Cloud Shell session ended mid-run:**
+- Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.
+- If you mounted storage (Settings > Mount storage account), the resume-state file persists. Re-launch a Cloud Shell and run with `-Resume` to skip already-completed subs.
+- Without mounted storage, all output is lost on session end. Move to a local PowerShell 7 install for runs that may exceed the timeout.
 
 **Performance Issues:**
 - Reduce `ConcurrencyLimit` if experiencing timeouts
 - Use `SkipConsumption` to speed up execution. This is not recommended, as it greatly reduces the usefulness of the report.
 - Consider targeting specific subscriptions or resource groups
+- For tenants with many subscriptions, use `-ParallelStreams` (see the Cloud Shell sizing table above).
 
 **Excel Formatting (Azure Cloud Shell):**
 - Auto-fit columns may not work in Cloud Shell
@@ -458,3 +480,4 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Resource-Graph extension installs automatically if missing
 - All operations are read-only and safe to execute
 - Historical data covers the previous 31 days
+

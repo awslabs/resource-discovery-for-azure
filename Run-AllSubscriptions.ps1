@@ -407,14 +407,29 @@ function Test-AzCliTokenSilent {
 # Get-AzAccessToken in this configuration emits a non-terminating warning
 # instead of throwing on token-acquisition failure, so we capture warnings
 # explicitly and treat any warning as a failure signal in addition to
-# catching outright exceptions.
+# catching outright exceptions. We DO NOT treat the Az.Accounts 4.x
+# deprecation banner as a failure - that warning fires on every successful
+# call now that the SecureString-output cmdlet is the recommended path,
+# and ignoring it lets users on the new module version skip re-auth.
 function Test-AzPsTokenSilent {
     param([Parameter(Mandatory=$true)][string]$Tenant)
     $warnings = @()
     try {
         $token = Get-AzAccessToken -TenantId $Tenant -ErrorAction Stop -WarningVariable warnings -WarningAction SilentlyContinue
         if ($null -eq $token -or [string]::IsNullOrWhiteSpace($token.Token)) { return $false }
-        if ($warnings.Count -gt 0) { return $false }
+        # Filter out known-benign warnings before deciding the call failed.
+        # Az.Accounts >= 4.x emits a deprecation banner about the plain-string
+        # output every time the cmdlet returns successfully; treating that as
+        # failure forces users to re-authenticate every run.
+        $realWarnings = @($warnings | Where-Object {
+            $msg = $_.Message
+            -not (
+                $msg -match 'Get-AzAccessToken\s*:?\s*Upcoming breaking changes' -or
+                $msg -match 'AsSecureString' -or
+                $msg -match 'plain string token output is deprecated'
+            )
+        })
+        if ($realWarnings.Count -gt 0) { return $false }
         return $true
     } catch {
         return $false
@@ -575,7 +590,11 @@ foreach ($sub in $subscriptions) {
 
     try {
         & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
-        if ($LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+        # Only treat as failure if the inner script set a non-zero exit code.
+        # Some completion paths leave $LASTEXITCODE unset ($null), and
+        # PowerShell's `-ne 0` returns $true against $null - which would
+        # spuriously fail every successful sub.
+        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
 
         # Capture the per-subscription resource count from the inner script.
         # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
@@ -729,7 +748,8 @@ foreach ($sub in $subscriptions) {
             Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
             try {
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
-                if ($LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+                # Same null-guard as the sequential branch above.
+                if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
                 $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
                 $SubResourceCounts += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Count = $resCount }
                 if ($resCount -eq 0) {
@@ -792,8 +812,12 @@ foreach ($sub in $subscriptions) {
     }
 
     # Everything from here until the matching `finally` is the orchestration
-    # body. The `finally` guarantees the Az context snapshot is always wiped,
-    # which is the primary reason for this try/finally structure.
+    # body. The `finally` guarantees the Az context snapshot is always wiped
+    # AND that any background jobs are cleaned up, which is the primary
+    # reason for this try/finally structure.
+    # Declared outside the try so the finally can always see them.
+    $jobs = @()
+    $StreamSummaries = @()
     try {
         $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
         if (-not (Test-Path -Path $WorkerScript -PathType Leaf)) {
@@ -806,17 +830,15 @@ foreach ($sub in $subscriptions) {
         # This balances the slices regardless of how subscription sizes vary,
         # and keeps slices roughly the same length even when the total
         # subscription count is not evenly divisible by StreamCount.
-        $slices = New-Object 'System.Collections.Generic.List[object][]' $StreamCount
+        $slices = @()
         for ($i = 0; $i -lt $StreamCount; $i++) {
-            $slices[$i] = New-Object 'System.Collections.Generic.List[object]'
+            $slices += ,(New-Object 'System.Collections.Generic.List[object]')
         }
         for ($i = 0; $i -lt $subscriptions.Count; $i++) {
             $slices[$i % $StreamCount].Add($subscriptions[$i])
         }
 
         # Build per-stream output paths up front so we know where to look later.
-        $StreamSummaries = @()
-        $jobs = @()
         for ($s = 0; $s -lt $StreamCount; $s++) {
             $sliceList     = $slices[$s]
             $sliceIds      = @($sliceList | ForEach-Object { $_.Id })
@@ -870,6 +892,9 @@ foreach ($sub in $subscriptions) {
         Write-Host ""
         Write-Host "All streams launched. Streaming output (lines prefixed [stream-N]):" -ForegroundColor Green
         Write-Host ""
+        Write-Host ("Note: per-stream tags only prefix the wrapper's narration. The inner script's") -ForegroundColor DarkGray
+        Write-Host ("Write-Host/Write-Log output is unprefixed and will interleave across streams.") -ForegroundColor DarkGray
+        Write-Host ""
         # Initial drain handles the case where every stream crashes immediately
         # (jobs reach Completed state in <1500 ms, so the loop predicate would
         # otherwise be false on first check and we'd skip output streaming).
@@ -896,7 +921,8 @@ foreach ($sub in $subscriptions) {
                 Write-Host ("[stream-{0}] job ended in state {1}" -f $j.Id, $j.State) -ForegroundColor Yellow
             }
         }
-        $jobs | Remove-Job -Force
+        # Job cleanup is in the `finally` block below so it runs even if any
+        # exception was raised during Receive-Job polling or aggregation.
 
         # Aggregate per-stream summaries into the wrapper's existing
         # accumulators so the consolidated summary at end-of-run looks the
@@ -927,6 +953,7 @@ foreach ($sub in $subscriptions) {
 
             if ($streamSummary.ResourceCounts) {
                 foreach ($rc in $streamSummary.ResourceCounts) {
+                    if ($null -eq $rc) { continue }
                     $SubResourceCounts += [pscustomobject]@{
                         Name  = $rc.Name
                         Id    = $rc.Id
@@ -1010,13 +1037,33 @@ foreach ($sub in $subscriptions) {
             }
         }
     } finally {
-        # Unconditional cleanup of the Az context snapshot. This runs whether
-        # the orchestration succeeded, threw, or was interrupted via Ctrl+C
-        # while a child stream was still running. The snapshot file contains
-        # a token cache; leaving it on disk is a security exposure (bounded
-        # by the ~1h token lifetime, but real). Best-effort: log if the
-        # delete fails but do not propagate the error - that would mask the
-        # real exit reason.
+        # Unconditional cleanup of background jobs and the Az context snapshot.
+        # Runs whether the orchestration succeeded, threw mid-aggregation, or
+        # was interrupted via Ctrl+C while a child stream was still running.
+
+        # 1. Background jobs. If we threw before $jobs was declared, the
+        # variable is null/empty and Remove-Job is a no-op. Each job is a
+        # separate `pwsh` process holding an Az context snapshot reference;
+        # leaving them running after the parent exits would leak both
+        # processes and authentication state.
+        if ($null -ne $jobs -and @($jobs).Count -gt 0) {
+            try {
+                # Stop any still-running jobs first so Remove-Job doesn't
+                # block waiting for them.
+                @($jobs | Where-Object { $_.State -eq 'Running' }) | ForEach-Object {
+                    try { Stop-Job -Job $_ -ErrorAction SilentlyContinue } catch {}
+                }
+                $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+            } catch {
+                Write-Host ("WARNING: could not fully clean up background jobs: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+            }
+        }
+
+        # 2. Az context snapshot. The snapshot file contains a token cache;
+        # leaving it on disk is a security exposure (bounded by the ~1h
+        # token lifetime, but real). Best-effort: log if the delete fails
+        # but do not propagate the error - that would mask the real exit
+        # reason.
         if (Test-Path -Path $AzContextSnapshot) {
             try {
                 Remove-Item -Path $AzContextSnapshot -Force -ErrorAction Stop
@@ -1076,6 +1123,15 @@ if ($excluded.Count -gt 0) {
     Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $excluded.Count) -ForegroundColor Green
 }
 Write-Host ("Subscriptions Eligible:  {0}" -f $subscriptions.Count) -ForegroundColor Green
+# In parallel mode, $SkippedCount is not populated by the foreach loop above
+# (each worker skips independently). Derive it from the difference between
+# the number of eligible subs and the number of subs that actually ran in
+# this invocation (the union of $SubResourceCounts entries plus failures).
+if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0) {
+    $actuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
+    $derivedSkip = $subscriptions.Count - $actuallyProcessed
+    if ($derivedSkip -gt 0) { $SkippedCount = $derivedSkip }
+}
 if ($Resume) {
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
 }

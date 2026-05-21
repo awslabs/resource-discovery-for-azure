@@ -84,6 +84,13 @@ Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 # context without prompting for sign-in. Import-AzContext is idempotent.
 try {
     Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
+    # Prevent the imported context from being persisted to the user's on-disk
+    # AzureRmContext.json. Without this, every parallel worker writes its
+    # token cache to the same shared profile and the streams race on disk
+    # state. Process-scope auto-save is per-process, so calling it here
+    # confines this worker's context to in-memory.
+    try { Disable-AzContextAutosave -Scope Process -ErrorAction Stop | Out-Null }
+    catch { Write-Stream ("WARNING: could not disable AzContext autosave: {0}" -f $_.Exception.Message) 'Yellow' }
     Import-AzContext -Path $AzContextPath -ErrorAction Stop | Out-Null
     Write-Stream "Az context imported from shared snapshot" 'Green'
 } catch {
@@ -96,8 +103,10 @@ try {
         Status        = 'failed-to-start'
         Reason        = $_.Exception.Message
         Completed     = @()
-        Failed        = @($SubscriptionIds | ForEach-Object {
-            [pscustomobject]@{ Id = $_; Reason = 'stream did not start: Az context import failed' }
+        Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
+            $name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
+            $id   = if ($_ -lt $SubscriptionIds.Count)   { $SubscriptionIds[$_] }   else { '<unknown>' }
+            [pscustomobject]@{ Id = $id; Name = $name; Reason = 'stream did not start: Az context import failed' }
         })
         ResourceCounts = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8

@@ -118,7 +118,10 @@ Describe "Non-Sensitive Fields Preserved" {
         $vms = @($script:Inventory.VirtualMachines)
         foreach ($vm in $vms) {
             if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size)) {
-                $vm.Size | Should -Match '^standard_' -Because "VM Size should be a real Azure size like standard_d2s_v5"
+                # Same rationale as DataIntegrity.Tests.ps1: VM SKUs include
+                # Standard_*, Basic_*, M*, N* etc. The invariant under test is
+                # "not obfuscated", not a particular naming convention.
+                $vm.Size | Should -Not -Match '^(prod|nonprod)_' -Because "VM Size should not be obfuscated"
             }
         }
     }

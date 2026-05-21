@@ -24,7 +24,24 @@ BeforeAll {
         $script:AllContent[$file.Name] = Get-Content $file.FullName -Raw
     }
 
-    $script:ObfuscationPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    $script:ObfuscationPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+    # Detect obfuscation mode: if any resource ID matches the obfuscation
+    # pattern, treat the run as obfuscated. The PII-leak Describe later
+    # also depends on this signal.
+    $script:IsObfuscated = $false
+    if ($null -ne $script:Inventory) {
+        $script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object {
+                @($_.Value) | ForEach-Object {
+                    if ($script:IsObfuscated) { return }
+                    if ($null -ne $_ -and $null -ne $_.ID -and $_.ID -match $script:ObfuscationPattern) {
+                        $script:IsObfuscated = $true
+                    }
+                }
+            }
+    }
 }
 
 AfterAll {
@@ -146,7 +163,11 @@ Describe "Non-Sensitive Fields Preserved" {
     It "VM Size should be a real Azure VM size" {
         foreach ($vm in @($script:Inventory.VirtualMachines)) {
             if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size)) {
-                $vm.Size | Should -Match '^standard_' -Because "VM Size should be a real Azure size"
+                # Azure VM SKUs include Standard_*, Basic_*, M-series (M64s, M128ms),
+                # N-series GPU sizes etc. The invariant is "not obfuscated" - i.e.
+                # the size string was not run through the obfuscator. The actual
+                # SKU shape is not under this script's control.
+                $vm.Size | Should -Not -Match '^(prod|nonprod)_' -Because "VM Size should not be obfuscated"
             }
         }
     }
@@ -220,5 +241,37 @@ Describe "No Null Obfuscated Fields" {
                 }
             }
         }
+    }
+}
+
+
+# ============================================================
+# 6. Generic per-property leak scan
+# ============================================================
+# Walks every property of every resource across all collectors and asserts no
+# value contains a raw Azure resource path. This catches secondary-field leaks
+# that the per-collector specialised tests do not cover (since only ~14 of the
+# 57 collectors have dedicated cross-reference tests).
+Describe "Generic per-property leak scan" {
+    It "No resource property in obfuscated output should contain a raw Azure resource path" {
+        if (-not $script:IsObfuscated) {
+            Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
+            return
+        }
+        $azureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
+        $script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object {
+                $collector = $_.Name
+                @($_.Value) | ForEach-Object {
+                    if ($null -eq $_) { return }
+                    foreach ($prop in $_.PSObject.Properties) {
+                        if ($null -ne $prop.Value -and $prop.Value -is [string] -and $prop.Value -match $azureIdPattern) {
+                            $hint = "[{0}.{1}]" -f $collector, $prop.Name
+                            $prop.Value | Should -Not -Match $azureIdPattern -Because "Field $hint contains raw Azure resource path"
+                        }
+                    }
+                }
+            }
     }
 }

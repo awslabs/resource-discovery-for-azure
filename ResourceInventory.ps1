@@ -279,7 +279,12 @@ Function RunInventorySetup()
         # second worker's Compress-Archive fails with "archive file already
         # exists". The format change is invisible to every downstream consumer:
         # all glob filters use `*` wildcards over the timestamp segment.
-        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmssfff")
+        # Append a 4-char per-process discriminator to the timestamp. Two
+        # worker processes that hit the same millisecond still produce
+        # different folder names. Discriminator is hex-only and length-stable
+        # so the existing `*<timestamp>*` glob filters keep matching.
+        $procDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
+        $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $procDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
         
         if ($cloudShell) 

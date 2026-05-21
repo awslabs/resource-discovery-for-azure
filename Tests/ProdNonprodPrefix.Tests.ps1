@@ -48,7 +48,10 @@ Describe "Prefix Format Validation" {
     It "All obfuscated IDs should start with exactly 'prod_' or 'nonprod_'" {
         foreach ($r in $script:AllResources) {
             if ($null -ne $r.ID) {
-                $r.ID | Should -Match '^(prod|nonprod)_[0-9a-f]{8}-' -Because "ID should have valid prefix format"
+                # Type-tagged variants (databricks_, aks_, vmss_) are legitimate
+                # output for resources whose IDs do not fit the standard ARM shape;
+                # see ResourceInventory.ps1 lines 650-655 and 1030-1034.
+                $r.ID | Should -Match '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-' -Because "ID should have valid prefix format"
             }
         }
     }

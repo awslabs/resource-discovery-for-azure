@@ -36,8 +36,13 @@ BeforeAll {
         $script:AllContent[$file.Name] = Get-Content $file.FullName -Raw
     }
 
-    # Obfuscation pattern: prod_ or nonprod_ followed by a GUID
-    $script:ObfuscationPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    # Obfuscation pattern: prod_ or nonprod_ followed by an optional type-tag
+    # (databricks_, aks_, vmss_) and a GUID. The type-tagged variants are the
+    # legitimate output for resources whose IDs do not fit the standard ARM
+    # shape (AKS-managed RGs, Databricks-managed clusters, VMSS instances
+    # inside AKS node pools). See ResourceInventory.ps1 lines 650-655 and
+    # 1030-1034 for where these are produced.
+    $script:ObfuscationPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
     # Helper: get all resources from inventory as flat list
     $script:AllResources = @()

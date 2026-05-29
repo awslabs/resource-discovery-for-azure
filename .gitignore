@@ -500,3 +500,4 @@ ObfuscationDictionary_*
 .kiro/
 docs/components/
 .scrub-review/
+testResults.xml

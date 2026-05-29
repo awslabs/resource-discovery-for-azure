@@ -1243,6 +1243,68 @@ foreach ($sub in $subscriptions) {
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green
 
+# === Per-subscription output verification (hard-stop) ========================
+#
+# Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if the
+# number of per-subscription zip files written by this invocation is lower
+# than the number of subscriptions that ran to completion this invocation.
+#
+# Why this matters. The consolidation step below globs `*.zip` under
+# $InventoryRoot. If a per-sub zip is missing for any reason - antivirus
+# quarantine, Cloud Shell ephemeral-storage eviction between worker exit and
+# wrapper consolidation, a worker that crashed after the inner script logged
+# completion but before its zip flushed, an out-of-disk-space write that the
+# inner script silently swallowed - the wrapper would silently consolidate
+# the smaller set and tell the operator everything succeeded. The downstream
+# consumer then discovers an incomplete archive days later.
+#
+# Invariant. ResourceInventory.ps1 always writes a per-sub zip on a
+# successful return, even when the sub holds zero resources (it still emits
+# the empty-shape report). So:
+#   expected zip count = number of subs in $SubResourceCounts
+# (which is appended to ONLY on the inner script's successful return path,
+# both in the sequential branch and after streaming aggregation).
+# Failed subs (in $FailedSubscriptions) are intentionally NOT counted -
+# their zip-or-no-zip state is unreliable and the wrapper already surfaces
+# them via the failure summary.
+$expectedZipCount = @($SubResourceCounts).Count
+if ($expectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container)) {
+    $actualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $RunStartTime }
+    })
+    $actualZipCount = $actualSubZips.Count
+    if ($actualZipCount -lt $expectedZipCount) {
+        $missingCount = $expectedZipCount - $actualZipCount
+        Write-Host ""
+        Write-Host "ERROR: Per-subscription output verification failed." -ForegroundColor Red
+        Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $expectedZipCount) -ForegroundColor Red
+        Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $actualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
+        Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $missingCount) -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Subscriptions whose inner script reported success this run:" -ForegroundColor Yellow
+        foreach ($s in $SubResourceCounts) {
+            Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $s.Name, $s.Id, $s.Count) -ForegroundColor Yellow
+        }
+        Write-Host ""
+        Write-Host "Likely causes:" -ForegroundColor Yellow
+        Write-Host "  - Antivirus or DLP product quarantined the per-sub zip after the inner script wrote it." -ForegroundColor Yellow
+        Write-Host "  - Cloud Shell ephemeral storage was evicted between worker exit and wrapper consolidation." -ForegroundColor Yellow
+        Write-Host "  - A parallel worker crashed after the inner script logged completion but before flushing the zip to disk." -ForegroundColor Yellow
+        Write-Host "  - Out-of-disk-space write that the inner script swallowed silently." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
+        Write-Host "Recover by either:" -ForegroundColor Yellow
+        Write-Host "  - Locating the missing per-sub directory under the inventory root and inspecting why its zip is absent, OR" -ForegroundColor Yellow
+        Write-Host "  - Re-running with -Resume to re-collect any unprocessed/missing subscription." -ForegroundColor Yellow
+        if ($WrapperTranscriptStarted) {
+            Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
+        }
+        Exit-Wrapper -Code 2
+    }
+    Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $actualZipCount) -ForegroundColor Green
+}
+
 # Consolidate per-subscription ZIPs into a single outer ZIP
 $OuterZipFile = $null
 

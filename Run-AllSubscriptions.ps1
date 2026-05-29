@@ -9,6 +9,13 @@ param (
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$Resume,
+    # Retry only previously-failed subscriptions. Reads FailedAttempts from the
+    # resume-state file and processes ONLY those, skipping both completed AND
+    # never-attempted subs. Implies -Resume's "skip completed" semantics and
+    # narrows further. If the FailedAttempts list is empty (clean prior run or
+    # no prior run), prints "Nothing to retry" and exits 0. Combines naturally
+    # with -ParallelStreams: the failed-only filter is applied before slicing.
+    [switch]$ResumeFailedOnly,
     [switch]$IncludeDisabled,
 
     # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
@@ -343,12 +350,38 @@ function Get-CompletedSubscriptionIds {
     }
 }
 
+# Read the FailedAttempts list out of the same resume-state file. Returns an
+# array of objects shaped { Id, Name, LastFailedAt, Reason, Attempts }, or an
+# empty array if the file is absent, malformed, or for a different tenant.
+# Backward-compatible: a state file written by an older version of this
+# script (which has CompletedSubscriptionIds but no FailedAttempts key) reads
+# back as empty here, so existing on-disk state never blocks an upgrade.
+function Get-FailedAttempts {
+    param([string]$Path, [string]$Tenant)
+
+    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    try {
+        $state = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        if ($state.TenantID -ne $Tenant) { return @() }
+        if ($null -eq $state.FailedAttempts) { return @() }
+        return @($state.FailedAttempts)
+    } catch {
+        return @()
+    }
+}
+
 function Save-CompletedSubscriptionIds {
-    param([string]$Path, [string]$Tenant, [string[]]$Ids)
+    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @())
 
     $state = [pscustomobject]@{
         TenantID                  = $Tenant
         CompletedSubscriptionIds  = @($Ids)
+        # FailedAttempts is the canonical "what to retry" list. The wrapper
+        # appends/refreshes entries on every catch and removes them on the
+        # next successful attempt for the same sub, so the file is always
+        # an accurate snapshot of "subs that failed at least once and have
+        # not yet succeeded since".
+        FailedAttempts            = @($FailedAttempts)
         LastUpdated               = (Get-Date).ToString('o')
     }
     try {
@@ -356,6 +389,45 @@ function Save-CompletedSubscriptionIds {
     } catch {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
     }
+}
+
+# Update an in-memory FailedAttempts list to record (or refresh) one sub's
+# failure. Increments Attempts when the sub is already in the list. Caller
+# is responsible for persisting via Save-CompletedSubscriptionIds afterwards.
+function Add-FailedAttempt {
+    param(
+        [System.Collections.IEnumerable]$Existing,
+        [string]$Id,
+        [string]$Name,
+        [string]$Reason
+    )
+    $list = @($Existing | Where-Object { $_ })
+    $existingEntry = $list | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if ($null -ne $existingEntry) {
+        $list = @($list | Where-Object { $_.Id -ne $Id })
+        $attempts = if ($existingEntry.Attempts) { [int]$existingEntry.Attempts + 1 } else { 2 }
+    } else {
+        $attempts = 1
+    }
+    $list += [pscustomobject]@{
+        Id           = $Id
+        Name         = $Name
+        LastFailedAt = (Get-Date).ToString('o')
+        Reason       = $Reason
+        Attempts     = $attempts
+    }
+    return $list
+}
+
+# Remove a sub's FailedAttempts entry once it has succeeded on a retry, so
+# the resume-state file does not grow into a graveyard of historical
+# failures. Caller persists.
+function Remove-FailedAttempt {
+    param(
+        [System.Collections.IEnumerable]$Existing,
+        [string]$Id
+    )
+    return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
 }
 
 # Authenticate, but only if needed.
@@ -542,6 +614,10 @@ Write-Host ("Subscriptions to process: {0}" -f $subscriptions.Count) -Foreground
 # either way ensures the per-iteration writes below append to existing
 # state instead of overwriting it.
 $CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID
+# Always seed $FailedAttempts the same way. Read on every run so the writes
+# below preserve any existing failure history; -ResumeFailedOnly is what
+# uses it to filter the subscription list.
+$FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
 if ($Resume) {
     if ($CompletedIds.Count -gt 0) {
         Write-Host ("Resume mode: {0} previously completed subscription(s) will be skipped." -f $CompletedIds.Count) -ForegroundColor Cyan
@@ -551,6 +627,36 @@ if ($Resume) {
 } else {
     if ($CompletedIds.Count -gt 0) {
         Write-Host ("Note: resume state file exists at {0} ({1} previously completed). Pass -Resume to skip them." -f $ResumeStateFile, $CompletedIds.Count) -ForegroundColor Yellow
+    }
+}
+
+# -ResumeFailedOnly narrows the eligible-subscription list to only those that
+# have a FailedAttempts entry from a prior run. This is the targeted-retry
+# workflow: a 100-sub run had 7 failures, the operator wants to re-run JUST
+# those 7 instead of walking the whole tenant again with -Resume.
+#
+# Filter happens here, BEFORE the -Resume "skip completed" check below, because
+# in failed-only mode the resume list is the authority on what to do; the
+# completed list is only checked to defend against a sub that succeeded on a
+# previous retry but whose FailedAttempts entry was not yet pruned (shouldn't
+# happen if the catch/success paths are correct, but cheap to defend).
+if ($ResumeFailedOnly) {
+    if ($FailedAttempts.Count -eq 0) {
+        Write-Host "ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry." -ForegroundColor Green
+        Write-Host ("If you expected failures here, verify {0} has a non-empty FailedAttempts array." -f $ResumeStateFile) -ForegroundColor DarkGray
+        Exit-Wrapper -Code 0
+    }
+    $failedIds = @($FailedAttempts | ForEach-Object { $_.Id })
+    $beforeCount = $subscriptions.Count
+    $subscriptions = @($subscriptions | Where-Object { $failedIds -contains $_.Id })
+    Write-Host ("ResumeFailedOnly: filtered to {0} previously-failed subscription(s) (was {1})." -f $subscriptions.Count, $beforeCount) -ForegroundColor Cyan
+    if ($subscriptions.Count -eq 0) {
+        # Could happen if the visible-subs list no longer contains the failed
+        # IDs (sub was deleted, identity lost access, IncludeDisabled toggled
+        # off relative to the prior run). Tell the user instead of silently
+        # processing nothing.
+        Write-Host "WARNING: FailedAttempts list contained IDs but none are visible in the current subscription set. Verify access and -IncludeDisabled flag matches the prior run." -ForegroundColor Yellow
+        Exit-Wrapper -Code 0
     }
 }
 
@@ -623,9 +729,19 @@ foreach ($sub in $subscriptions) {
         Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
 
         # Mark complete and persist immediately so a mid-run sign-out is recoverable.
+        # If the sub was previously in FailedAttempts (i.e. this is a retry that
+        # finally succeeded), remove its entry so the resume-state file reflects
+        # current truth.
+        $stateChanged = $false
         if (-not ($CompletedIds -contains $sub.Id)) {
             $CompletedIds += $sub.Id
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
+            $stateChanged = $true
+        }
+        $beforeFailedCount = @($FailedAttempts).Count
+        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $sub.Id
+        if (@($FailedAttempts).Count -ne $beforeFailedCount) { $stateChanged = $true }
+        if ($stateChanged) {
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
         }
     } catch {
         # Surface the full exception chain so failures (e.g. EPPlus Save errors,
@@ -694,6 +810,14 @@ foreach ($sub in $subscriptions) {
         catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
         $FailedSubscriptions += $sub.Name
+        # Persist the failure to the resume-state file so a future run with
+        # -ResumeFailedOnly can target it. Use the exception message as the
+        # Reason so the operator can see at a glance why each sub failed
+        # without opening the diag log.
+        $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
+            -Id $sub.Id -Name $sub.Name `
+            -Reason $errRecord.Exception.Message
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
     }
 
     Write-Host "-----------------------------------" -ForegroundColor Gray
@@ -759,7 +883,8 @@ foreach ($sub in $subscriptions) {
                 }
                 if (-not ($CompletedIds -contains $sub.Id)) {
                     $CompletedIds += $sub.Id
-                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
+                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $sub.Id
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
                 }
             } catch {
                 # Match the sequential branch's diagnostic detail so users do not
@@ -781,6 +906,13 @@ foreach ($sub in $subscriptions) {
                 try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
                 catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
                 $FailedSubscriptions += $sub.Name
+                # Mirror the sequential branch: persist failure to the
+                # resume-state file so -ResumeFailedOnly works even for the
+                # single-sub-collapses-to-inline corner case.
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
+                    -Id $sub.Id -Name $sub.Name `
+                    -Reason $errRecord.Exception.Message
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
             }
         }
         # Skip the parallel orchestration entirely; fall through to the
@@ -875,6 +1007,7 @@ foreach ($sub in $subscriptions) {
                 ConcurrencyLimit   = $ConcurrencyLimit
             }
             if ($Resume)          { $workerArgs.Resume          = $true }
+            if ($ResumeFailedOnly) { $workerArgs.ResumeFailedOnly = $true }
             if ($DeviceLogin)     { $workerArgs.DeviceLogin     = $true }
             if ($Obfuscate)       { $workerArgs.Obfuscate       = $true }
             if ($SkipMetrics)     { $workerArgs.SkipMetrics     = $true }
@@ -1010,6 +1143,7 @@ foreach ($sub in $subscriptions) {
         # what the existing "clean run -> remove resume state" logic below
         # will look at.
         $allCompletedFromStreams = @()
+        $allFailedFromStreams    = @()
         for ($s = 0; $s -lt $StreamCount; $s++) {
             $perStreamFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $s)
             if (Test-Path -Path $perStreamFile -PathType Leaf) {
@@ -1018,6 +1152,15 @@ foreach ($sub in $subscriptions) {
                     if ($null -ne $obj.Completed) {
                         $allCompletedFromStreams += @($obj.Completed)
                     }
+                    # Per-stream files written by workers also carry their
+                    # FailedAttempts entries. Merge by Id so the unified
+                    # state file reflects every stream's failures, with the
+                    # most-recent attempt's Reason/LastFailedAt winning when
+                    # the same sub appears in multiple streams (which would
+                    # only happen across re-runs with different slicing).
+                    if ($null -ne $obj.FailedAttempts) {
+                        $allFailedFromStreams += @($obj.FailedAttempts)
+                    }
                 } catch {
                     Write-Verbose ("Could not read stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message)
                 }
@@ -1025,7 +1168,29 @@ foreach ($sub in $subscriptions) {
         }
         if ($allCompletedFromStreams.Count -gt 0) {
             $CompletedIds = @($CompletedIds + $allCompletedFromStreams | Sort-Object -Unique)
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds
+        }
+        # Reconcile failed attempts from all streams against the unified list.
+        # If a sub now appears in CompletedIds (i.e. a different stream or
+        # this run succeeded for it) drop it from FailedAttempts. Otherwise,
+        # keep the entry with the highest Attempts count.
+        if ($allFailedFromStreams.Count -gt 0) {
+            $merged = @($FailedAttempts) + $allFailedFromStreams
+            $byId = $merged | Where-Object { $_ } | Group-Object -Property Id
+            $reconciled = @()
+            foreach ($g in $byId) {
+                if ($CompletedIds -contains $g.Name) { continue }
+                $best = $g.Group | Sort-Object -Property @{Expression={[int]($_.Attempts)}} -Descending | Select-Object -First 1
+                $reconciled += $best
+            }
+            $FailedAttempts = $reconciled
+        } else {
+            # Even with no new stream failures, prune any FailedAttempts entry
+            # whose sub now appears in CompletedIds (a different stream
+            # succeeded for it).
+            $FailedAttempts = @($FailedAttempts | Where-Object { $_ -and -not ($CompletedIds -contains $_.Id) })
+        }
+        if ($allCompletedFromStreams.Count -gt 0 -or $allFailedFromStreams.Count -gt 0) {
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
         }
         # Also delete per-stream resume files now that the unified file holds
         # the truth - this prevents drift if a future run uses a different
@@ -1103,9 +1268,10 @@ if (Test-Path -Path $InventoryRoot -PathType Container) {
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
 }
 
-# Clean up resume state on a fully successful run (all subs processed, no failures).
-# Otherwise leave it so the next invocation with -Resume can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf)) {
+# Clean up resume state on a fully successful run (all subs processed, no failures
+# this run AND no pending retries from a prior run). Otherwise leave it so a
+# future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf)) {
     try {
         Remove-Item -Path $ResumeStateFile -Force
         Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
@@ -1193,12 +1359,20 @@ if ($FailedSubscriptions.Count -gt 0) {
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
     Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
+    Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the failed subscriptions." -ForegroundColor Yellow
     if ($DiagFile -and (Test-Path $DiagFile)) {
         Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
     }
     if ($WrapperTranscriptStarted) {
         Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
     }
+} elseif ($FailedAttempts.Count -gt 0) {
+    # No new failures this run, but the resume-state file still has lingering
+    # FailedAttempts from a prior run that have not yet been retried. Surface
+    # them so the operator does not lose track of historical failures simply
+    # because the most recent run was clean.
+    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
+    Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile) {

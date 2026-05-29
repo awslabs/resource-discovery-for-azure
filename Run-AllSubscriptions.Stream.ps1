@@ -40,6 +40,12 @@ param (
     [string[]] $SubscriptionNames = @(),
 
     [switch] $Resume,
+    # Forwarded from the parent wrapper. Workers themselves don't read the
+    # FailedAttempts list (the parent already filtered $SubscriptionIds to
+    # the failed-only subset before slicing), but the flag is forwarded so
+    # workers can self-report mode in their stream summary and so future
+    # parent-side changes don't have to re-thread it.
+    [switch] $ResumeFailedOnly,
     [switch] $DeviceLogin,
     [switch] $Obfuscate,
     [switch] $SkipMetrics,
@@ -120,32 +126,75 @@ $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json"
 
 function Read-StreamState {
     param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
     try {
         $obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if ($null -eq $obj.Completed) { return @() }
-        return @($obj.Completed)
+        return @{
+            Completed = if ($null -eq $obj.Completed) { @() } else { @($obj.Completed) }
+            # Backward-compatible: state files written by an older worker had
+            # no FailedAttempts key, so default to @().
+            Failed    = if ($null -eq $obj.FailedAttempts) { @() } else { @($obj.FailedAttempts) }
+        }
     } catch {
         Write-Stream ("WARNING: could not read stream state at {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
-        return @()
+        return @{ Completed = @(); Failed = @() }
     }
 }
 
 function Write-StreamState {
-    param([string]$Path, [string[]]$Completed)
+    param([string]$Path, [string[]]$Completed, $FailedAttempts = @())
     try {
-        @{ Tenant = $TenantID; StreamId = $StreamId; Completed = $Completed } |
-            ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+        @{
+            Tenant         = $TenantID
+            StreamId       = $StreamId
+            Completed      = $Completed
+            FailedAttempts = @($FailedAttempts)
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
     } catch {
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
     }
 }
 
-$CompletedIds = @()
-if ($Resume) {
-    $CompletedIds = Read-StreamState -Path $StreamStateFile
+# Per-sub helpers, matching the parent wrapper's Add-FailedAttempt /
+# Remove-FailedAttempt semantics (same shape, same Attempts increment, same
+# id-based dedup). Inlined rather than dot-sourced because workers cannot
+# reach the parent's function table.
+function Add-StreamFailedAttempt {
+    param([System.Collections.IEnumerable]$Existing, [string]$Id, [string]$Name, [string]$Reason)
+    $list = @($Existing | Where-Object { $_ })
+    $existingEntry = $list | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if ($null -ne $existingEntry) {
+        $list = @($list | Where-Object { $_.Id -ne $Id })
+        $attempts = if ($existingEntry.Attempts) { [int]$existingEntry.Attempts + 1 } else { 2 }
+    } else {
+        $attempts = 1
+    }
+    $list += [pscustomobject]@{
+        Id           = $Id
+        Name         = $Name
+        LastFailedAt = (Get-Date).ToString('o')
+        Reason       = $Reason
+        Attempts     = $attempts
+    }
+    return $list
+}
+
+function Remove-StreamFailedAttempt {
+    param([System.Collections.IEnumerable]$Existing, [string]$Id)
+    return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
+}
+
+$CompletedIds   = @()
+$FailedAttempts = @()
+if ($Resume -or $ResumeFailedOnly) {
+    $state          = Read-StreamState -Path $StreamStateFile
+    $CompletedIds   = $state.Completed
+    $FailedAttempts = $state.Failed
     if ($CompletedIds.Count -gt 0) {
         Write-Stream ("resume: skipping {0} previously-completed subs in this slice" -f $CompletedIds.Count) 'DarkGray'
+    }
+    if ($ResumeFailedOnly -and $FailedAttempts.Count -gt 0) {
+        Write-Stream ("resume-failed-only: prior FailedAttempts list has {0} entry(ies) for this stream" -f $FailedAttempts.Count) 'DarkGray'
     }
 }
 
@@ -215,7 +264,10 @@ for ($i = 0; $i -lt $pairCount; $i++) {
 
         if (-not ($Completed -contains $subId)) {
             $Completed += $subId
-            Write-StreamState -Path $StreamStateFile -Completed @($Completed)
+            # If this is a retry that finally succeeded, drop the sub from
+            # FailedAttempts so the unified resume-state file reflects truth.
+            $FailedAttempts = Remove-StreamFailedAttempt -Existing $FailedAttempts -Id $subId
+            Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
         }
     } catch {
         $errRecord = $_
@@ -254,6 +306,15 @@ for ($i = 0; $i -lt $pairCount; $i++) {
         catch { Write-Stream ("could not write to stream failures log {0}: {1}" -f $StreamFailuresPath, $_.Exception.Message) 'Yellow' }
 
         $FailedSubs += [pscustomobject]@{ Id = $subId; Name = $subName; Reason = $errRecord.Exception.Message }
+        # Persist the failure to the per-stream state file. The parent
+        # wrapper will fold these entries into the unified FailedAttempts
+        # list when it merges per-stream state at run end. Persisting on
+        # every failure (rather than only at end-of-stream) means a worker
+        # that is killed mid-slice still surfaces its partial failure
+        # history to the next -ResumeFailedOnly invocation.
+        $FailedAttempts = Add-StreamFailedAttempt -Existing $FailedAttempts `
+            -Id $subId -Name $subName -Reason $errRecord.Exception.Message
+        Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
     }
 }
 

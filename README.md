@@ -6,6 +6,16 @@ The Azure Resource Discovery Tool is a PowerShell script that generates comprehe
 
 This tool leverages read-only integrations with Azure APIs and Azure Monitor. Our goal is to deliver a reliable and efficient solution for Azure environment reporting, empowering you with comprehensive insights into your cloud resources and their utilization.
 
+> **Quick Start (In Azure CloudShell - PowerShell):**
+> ```powershell
+> git clone https://github.com/awslabs/resource-discovery-for-azure.git
+> cd resource-discovery-for-azure
+> ```
+> Then update the TenantID and ReportName below and run:
+> ```powershell
+> ./Run-AllSubscriptions.ps1 -TenantID "<your-tenant-id>" -ReportName "YourCompanyName"
+> ```
+
 **Key Features:**
 
 - Read-only Azure API integration
@@ -118,6 +128,8 @@ This will:
 3. Run `ResourceInventory.ps1` for each subscription sequentially
 4. Bundle all per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the `InventoryReports/` folder
 
+> **Estimated runtime:** Approximately 10-20 minutes per subscription depending on resource count and Azure API responsiveness.
+
 ### Single Subscription Mode
 
 To scan only a specific subscription instead of the full tenant, use `ResourceInventory.ps1` directly:
@@ -177,7 +189,15 @@ When running across all subscriptions, each subscription produces its own set of
 
 ### File Delivery
 
-1. **Locate the output:** Check the `InventoryReports` folder
+**All Subscriptions (default):**
+
+1. **Locate the output:** Check the `InventoryReports` folder for `AllSubscriptions_ResourcesReport_<timestamp>.zip`
+2. **Optionally rename:** Prefix with your company name (e.g., `CompanyName_AllSubscriptions_ResourcesReport_2024-01-15.zip`)
+3. **Deliver to AWS team:** Send the ZIP file for analysis
+
+**Single Subscription:**
+
+1. **Locate the output:** Check the `InventoryReports` folder for `ResourcesReport_(date).zip`
 2. **Rename the ZIP file:** Include your company name (e.g., `CompanyName_ResourcesReport_2024-01-15.zip`)
 3. **Deliver to AWS team:** Send the renamed ZIP file for analysis
 
@@ -302,7 +322,9 @@ After unblocking, you can run the script from the folder.
 - Warning messages are expected and don't affect data accuracy
 - Download and open locally for proper formatting
 
-### Important Notes
+---
+
+### Additional Notes
 
 - The script does not upgrade existing PowerShell modules
 - Resource-Graph extension installs automatically if missing

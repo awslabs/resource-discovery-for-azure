@@ -54,6 +54,12 @@ param (
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
+# Metrics-phase auth health, aggregated across streams (mirrors the
+# consumption health accumulators populated later). True if any stream
+# reported that metrics were requested but skipped for an auth/context gap.
+$Global:MetricsAuthFailed = $false
+$Global:MetricsFailureMessage = $null
+
 # Inventory root (used for resume state, consolidated output, and the wrapper
 # transcript). Computed up front so the transcript can be started before
 # anything else writes to the host.
@@ -1110,6 +1116,13 @@ foreach ($sub in $subscriptions) {
                 $Global:ConsumptionFailedSubs += @($streamSummary.ConsumptionFailedSubs)
             }
 
+            if ($streamSummary.MetricsAuthFailed) {
+                $Global:MetricsAuthFailed = $true
+                if ([string]::IsNullOrEmpty($Global:MetricsFailureMessage) -and -not [string]::IsNullOrEmpty($streamSummary.MetricsFailureMessage)) {
+                    $Global:MetricsFailureMessage = $streamSummary.MetricsFailureMessage
+                }
+            }
+
             # If a stream wrote a failures log, add it to the wrapper's diag-file
             # accumulator so the final summary surfaces the path. The wrapper's
             # existing $DiagFile was nullable; using a single concatenated log
@@ -1417,6 +1430,21 @@ if ($consumptionFailures.Count -gt 0) {
     Write-Host ""
 }
 
+# Surface metrics-phase auth health. Mirrors the consumption block above:
+# metrics were requested (no -SkipMetrics) but skipped because no usable Azure
+# context/token could be established even after a reconnect attempt. Without
+# this the metrics sheet is silently empty and looks like "no metric-eligible
+# resources" rather than an auth failure.
+if ($Global:MetricsAuthFailed) {
+    Write-Host ""
+    Write-Host "Metrics:                 SKIPPED (authentication)" -ForegroundColor Yellow
+    $metricsMsg = if (-not [string]::IsNullOrEmpty($Global:MetricsFailureMessage)) { $Global:MetricsFailureMessage } else { 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.' }
+    Write-Host ("  - {0}" -f $metricsMsg) -ForegroundColor Yellow
+    Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
+    Write-Host "  Note: the metrics sheet in the output report will be empty for affected subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 if ($FailedSubscriptions.Count -gt 0) {
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
@@ -1445,9 +1473,45 @@ if ($WrapperTranscriptStarted) {
 }
 Write-Host "=========================================" -ForegroundColor Green
 
+# Final, last-thing-the-user-sees banner when a requested data phase could not
+# be collected due to authentication. Printed AFTER the summary block so it is
+# the final output on screen. Covers metrics (no -SkipMetrics) and consumption
+# (no -SkipConsumption) auth skips. The Excel sheets are intentionally NOT
+# annotated (server-side ingestion expects fixed columns); this banner is the
+# human-facing signal, and the non-zero exit below is the machine-facing one.
+$authSkippedPhases = @()
+if ($Global:MetricsAuthFailed) { $authSkippedPhases += 'Metrics' }
+$consumptionAuthSkipped = @(
+    if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
+) | Where-Object { $_.Id -eq '(auth)' }
+if ($consumptionAuthSkipped.Count -gt 0) { $authSkippedPhases += 'Consumption' }
+
+if ($authSkippedPhases.Count -gt 0) {
+    Write-Host ""
+    Write-Host "===================== FAILED (auth) =====================" -ForegroundColor Red
+    Write-Host ("Could not collect: {0}" -f ($authSkippedPhases -join ' and ')) -ForegroundColor Red
+    Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
+    Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
+    Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
+    Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    Write-Host "=========================================================" -ForegroundColor Red
+}
+
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted) {
     try { Stop-Transcript | Out-Null }
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
+
+# Machine-facing signal. Exit code 3 == "completed, but a requested data phase
+# was auth-skipped". Distinct from the existing codes (1 = hard pre-flight /
+# auth / setup failure, 2 = per-subscription output verification gap, 0 =
+# clean). Nothing inside this repo consumes the WRAPPER's exit code (it is the
+# top-level entrypoint); the inner ResourceInventory.ps1 exit code is left
+# UNCHANGED because the wrapper treats inner non-zero as "this whole
+# subscription failed" (see the $LASTEXITCODE checks in the run loops).
+if ($authSkippedPhases.Count -gt 0) {
+    exit 3
+}
+

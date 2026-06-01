@@ -11,6 +11,7 @@ param ($TenantID,
         [switch]$Obfuscate,
         [switch]$RunAllSubs,
         $ConcurrencyLimit = 6,
+        $MetricsLookbackDays = 31,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
 
@@ -728,12 +729,104 @@ function ExecuteInventoryProcessing()
         Write-Log -Message ('Report Excel File: {0}' -f $File) -Severity 'Info'
     }
 
+    function Test-DataPlaneAuthReady([string]$Phase)
+    {
+        # Verify a live Azure context + token are available before a data-plane
+        # phase (Metrics via Get-AzMetric in parallel runspaces; Consumption via
+        # Get-UsageAggregates). Both silently produce ZERO records when the
+        # context/token is missing. Because the caller did NOT pass the matching
+        # -Skip* switch, the user wants this data - so we detect the gap, attempt
+        # ONE reconnect using the same auth method the script was invoked with,
+        # then re-check. Returns $true only when a usable token is confirmed.
+        #
+        # Reuses the script's existing auth approach (Service Principal /
+        # device / browser); it does not introduce a new auth path. Under
+        # -RunAllSubs the phase may run in a background job where an interactive
+        # prompt cannot reach the user, so interactive reconnect is skipped there
+        # in favour of a loud failure.
+        $tokenOk = {
+            $ctx = $null
+            try { $ctx = Get-AzContext -ErrorAction Stop } catch { return $false }
+            if ($null -eq $ctx -or $null -eq $ctx.Account) { return $false }
+            try
+            {
+                $tok = Get-AzAccessToken -ErrorAction Stop -WarningAction SilentlyContinue
+                return ($null -ne $tok -and -not [string]::IsNullOrWhiteSpace($tok.Token))
+            }
+            catch { return $false }
+        }
+
+        if (& $tokenOk) { return $true }
+
+        Write-Log -Message ("{0}: no usable Azure context/token detected; attempting one reconnect before collecting {0} data." -f $Phase) -Severity 'Warning'
+
+        try
+        {
+            if ($Appid -and $Secret -and $TenantID)
+            {
+                Write-Log -Message ("{0}: reconnecting via Service Principal." -f $Phase) -Severity 'Info'
+                $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
+                Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID -ErrorAction Stop | Out-Null
+            }
+            elseif ($RunAllSubs.IsPresent)
+            {
+                Write-Log -Message ("{0}: running under -RunAllSubs without Service Principal credentials - cannot prompt for interactive login in this context. Authenticate before the run (e.g. Connect-AzAccount) or supply -appid/-secret/-tenant." -f $Phase) -Severity 'Error'
+                return $false
+            }
+            elseif ($DeviceLogin.IsPresent)
+            {
+                Write-Log -Message ("{0}: reconnecting via device login." -f $Phase) -Severity 'Info'
+                Connect-AzAccount -UseDeviceAuthentication -ErrorAction Stop | Out-Null
+            }
+            else
+            {
+                Write-Log -Message ("{0}: reconnecting via interactive browser login." -f $Phase) -Severity 'Info'
+                Connect-AzAccount -ErrorAction Stop | Out-Null
+            }
+        }
+        catch
+        {
+            Write-Log -Message ("{0}: reconnect attempt failed: {1}" -f $Phase, $_.Exception.Message) -Severity 'Error'
+            return $false
+        }
+
+        return (& $tokenOk)
+    }
+
     function CreateMetricsJob()
     {
         Write-Log -Message ('Checking if Metrics Job Should be Run.') -Severity 'Info'
 
         if (!$SkipMetrics.IsPresent) 
         {
+            # -SkipMetrics was NOT passed, so the user wants metrics. Get-AzMetric
+            # runs in parallel runspaces and returns ZERO data (silently) if the
+            # Azure context/token is missing. Detect + attempt recovery first; if
+            # it still cannot authenticate, fail loud and skip ONLY this phase so
+            # the rest of the inventory still completes (the end-of-script
+            # empty-metrics-JSON fallback keeps the output bundle structurally
+            # valid). This is intentionally NOT a silent skip.
+            if (-not (Test-DataPlaneAuthReady -Phase 'Metrics'))
+            {
+                Write-Log -Message ('Metrics: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Metrics were requested (no -SkipMetrics) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+
+                $Global:AzMetrics = New-Object PSObject
+                $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
+                $Global:AzMetrics.Metrics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+
+                # Record metrics-phase health so the wrapper's final summary can
+                # surface the auth skip (mirrors $Global:ConsumptionFailedSubs).
+                # Lives in the wrapper's scope because ResourceInventory.ps1 is
+                # invoked via `& <path>`.
+                if ($null -eq $Global:MetricsAuthFailed) { $Global:MetricsAuthFailed = $false }
+                $Global:MetricsAuthFailed = $true
+                if ($null -eq $Global:MetricsFailureMessage) {
+                    $Global:MetricsFailureMessage = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                }
+                return
+            }
+
             Write-Log -Message ('Running Metrics Jobs') -Severity 'Success'
 
             if($PSScriptRoot -like '*\*')
@@ -749,7 +842,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays
         }
     }
 
@@ -955,6 +1048,27 @@ function ExecuteInventoryProcessing()
 
         $reportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $reportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
+
+        # Consumption was requested (no -SkipConsumption). Get-UsageAggregates
+        # silently returns ZERO records when the Azure context/token is missing,
+        # which would otherwise leave an empty consumption sheet that looks like
+        # "this tenant has no billing data". Detect + attempt one reconnect; if
+        # still unauthenticated, record a loud per-run health entry (reusing the
+        # existing $Global:ConsumptionFailedSubs surfaced by the wrapper summary)
+        # and skip the phase rather than producing silent empty output.
+        if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
+        {
+            Write-Log -Message ('Consumption: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Consumption was requested (no -SkipConsumption) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+
+            if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+            if ($null -eq $Global:ConsumptionFailedSubs)  { $Global:ConsumptionFailedSubs  = @() }
+            $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                Name    = '(all subscriptions)'
+                Id      = '(auth)'
+                Message = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+            }
+            return
+        }
 
         foreach($sub in $Global:Subscriptions)
         {

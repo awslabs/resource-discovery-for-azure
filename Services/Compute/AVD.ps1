@@ -34,8 +34,11 @@ if ($Task -eq 'Processing')
                 $hostIdValue = $null
                 $hostnameValue = $null
                 if (![string]::IsNullOrEmpty($vmsessionhosts.Id)) {
-                    if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.ContainsKey($vmsessionhosts.Id)) {
-                        $hostIdValue = $ResourceIdDictionary[$vmsessionhosts.Id]
+                    if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
+                        # Obfuscation ON: never emit the real VM id or name. Use the
+                        # dictionary value when the backing VM was indexed, else the
+                        # lossy 'obfuscated' fallback used elsewhere in the codebase.
+                        $hostIdValue = if ($ResourceIdDictionary.ContainsKey($vmsessionhosts.Id)) { $ResourceIdDictionary[$vmsessionhosts.Id] } else { 'obfuscated' }
                         # Deterministic hostname: derive from VM ID hash so same input = same output
                         $hnPrefix = $hostIdValue.Split('_')[0]
                         $sha = [System.Security.Cryptography.SHA256]::Create()

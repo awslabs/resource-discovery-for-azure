@@ -22,9 +22,9 @@ if ($Task -eq 'Processing')
                 'Subscription'                      = $sub1.Name;
                 'ResourceGroup'                     = $1.RESOURCEGROUP;
                 'Location'                          = $1.LOCATION;
-                'NetAppAccount'                     = $NetApp;
-                'CapacityPool'                      = $CapacityPool;
-                'Volume'                            = $Volume;
+                'NetAppAccount'                     = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $NetApp };
+                'CapacityPool'                      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $CapacityPool };
+                'Volume'                            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Volume };
                 'ServiceLevel'                      = $data.serviceLevel;
                 'QuotaTB'                           = [string]$Quota;
                 'Protocol'                          = [string]$data.protocolTypes;

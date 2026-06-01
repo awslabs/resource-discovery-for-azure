@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                     'SkuTier'                   = $1.sku.tier;
                     'KubernetesVersion'         = $data.kubernetesVersion;
                     'LoadBalancerSku'           = $data.networkProfile.loadBalancerSku;                
-                    'NodePoolName'              = $2.name;
+                    'NodePoolName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $2.name };
                     'PoolProfileType'           = $2.type;
                     'PoolMode'                  = $2.mode;
                     'PoolOS'                    = $2.osType;

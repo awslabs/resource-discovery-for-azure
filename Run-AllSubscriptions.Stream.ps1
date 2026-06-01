@@ -40,11 +40,10 @@ param (
     [string[]] $SubscriptionNames = @(),
 
     [switch] $Resume,
-    # Forwarded from the parent wrapper. Workers themselves don't read the
-    # FailedAttempts list (the parent already filtered $SubscriptionIds to
-    # the failed-only subset before slicing), but the flag is forwarded so
-    # workers can self-report mode in their stream summary and so future
-    # parent-side changes don't have to re-thread it.
+    # The parent already narrowed $SubscriptionIds to just the failed subs
+    # before starting this worker, so the worker does no filtering of its own.
+    # This flag is passed in only so the worker can note "failed-only mode" in
+    # its summary, and so it's already wired up if the parent ever needs it.
     [switch] $ResumeFailedOnly,
     [switch] $DeviceLogin,
     [switch] $Obfuscate,
@@ -77,6 +76,8 @@ if ($SubscriptionIds.Count -eq 0) {
         ResourceCounts        = @()
         ConsumptionRecords    = 0
         ConsumptionFailedSubs = @()
+        MetricsAuthFailed     = $false
+        MetricsFailureMessage = $null
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
     exit 0
 }
@@ -229,6 +230,13 @@ $FailedSubs            = @()
 $Global:ConsumptionRecordCount = 0
 $Global:ConsumptionFailedSubs  = @()
 
+# Metrics-phase auth health. ResourceInventory.ps1 sets $Global:MetricsAuthFailed
+# (in this worker's scope, since it is invoked via `&`) when metrics were
+# requested but skipped because no usable Azure context/token could be
+# established. Reset to a known state up-front so a stale value cannot leak in.
+$Global:MetricsAuthFailed     = $false
+$Global:MetricsFailureMessage = $null
+
 $pairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
 for ($i = 0; $i -lt $pairCount; $i++) {
     $subId   = $SubscriptionIds[$i]
@@ -329,6 +337,8 @@ for ($i = 0; $i -lt $pairCount; $i++) {
 # the per-iteration double-counting trap.
 $ConsumptionTotal      = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs)  { @($Global:ConsumptionFailedSubs) } else { @() }
+$MetricsAuthFailed     = if ($null -ne $Global:MetricsAuthFailed) { [bool]$Global:MetricsAuthFailed } else { $false }
+$MetricsFailureMessage = $Global:MetricsFailureMessage
 
 $summary = [pscustomobject]@{
     StreamId               = $StreamId
@@ -340,6 +350,8 @@ $summary = [pscustomobject]@{
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
+    MetricsAuthFailed      = $MetricsAuthFailed
+    MetricsFailureMessage  = $MetricsFailureMessage
 }
 try {
     $summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8

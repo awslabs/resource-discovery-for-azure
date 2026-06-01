@@ -43,7 +43,7 @@ If ($Task -eq 'Processing')
                 'Location'                  = $1.LOCATION;
                 'SKU'                       = $1.sku.name;
                 'FriendlyName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.friendlyName };
-                'Description'               = $data.description;
+                'Description'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $null } else { $data.description };
                 'ContainerRegistry'         = $containerRegistry;
                 'StorageHNSEnabled'         = $data.storageHnsEnabled;
                 'StorageAccount'            = $StorageAcc;

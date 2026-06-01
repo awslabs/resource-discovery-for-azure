@@ -222,7 +222,15 @@ Describe "Consumption Obfuscation" {
     #   - flat: prod_<guid>            (legacy / non-ARM uris like $system)
     #   - ARM:  /subscriptions/...     (the new structure-preserving shape)
     # And separately enforce the no-leak invariants that actually matter.
-    $script:ConsumptionSafePattern = '^(' + $script:ObfuscationPattern.TrimStart('^').TrimEnd('$') + '|/subscriptions/(prod|nonprod)_sub_)'
+    #
+    # NOTE: this derivation must run at RUN time, not discovery time. It depends
+    # on $script:ObfuscationPattern, which the top-level BeforeAll assigns. A
+    # bare assignment in the Describe body would execute during Pester discovery
+    # (when the pattern is still $null) and crash the whole block, silently
+    # dropping the two consumption assertions below. Keep it inside BeforeAll.
+    BeforeAll {
+        $script:ConsumptionSafePattern = '^(' + $script:ObfuscationPattern.TrimStart('^').TrimEnd('$') + '|/subscriptions/(prod|nonprod)_sub_)'
+    }
 
     It "Should have all consumption ResourceIds matching the obfuscation pattern" {
         if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }

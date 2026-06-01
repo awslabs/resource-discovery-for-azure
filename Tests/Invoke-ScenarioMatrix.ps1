@@ -184,6 +184,21 @@ try
         $skipped = $res.SkippedCount
         $realFailures = @($res.Failed)
 
+        # A container (test file) can fail at DISCOVERY time - e.g. code in a
+        # Describe body throwing before any It runs. That produces zero failed
+        # tests (the assertions never execute) so FailedCount stays 0 and the
+        # scenario would otherwise look green while a whole block is broken.
+        # Detect failed containers explicitly and force the scenario red.
+        $failedContainers = @($res.Containers | Where-Object { $_.Result -eq 'Failed' })
+        if ($failedContainers.Count -gt 0) {
+            $failed = $failed + $failedContainers.Count
+            foreach ($c in $failedContainers) {
+                $itemName = if ($c.Item) { $c.Item.ToString() } else { 'unknown container' }
+                $errText  = if ($c.ErrorRecord) { ($c.ErrorRecord | Select-Object -First 1) } else { 'discovery/container error' }
+                Write-Host ("    CONTAINER FAILED: {0} - {1}" -f $itemName, $errText) -ForegroundColor Red
+            }
+        }
+
         # On non-obfuscated scenarios, two assertions in OutputCompleteness are
         # actually obfuscation-safety checks (a non-obfuscated zip deliberately
         # includes the transcript .txt - see ResourceInventory.ps1 ~line 1514).

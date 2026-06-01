@@ -72,9 +72,13 @@ Describe "Consumption Prefix Consistency" {
         $content = Get-Content $csvFile.FullName -ErrorAction SilentlyContinue
         if ($null -eq $content -or $content.Count -le 1) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
         $csv = Import-Csv $csvFile.FullName
+        # Two valid shapes for an obfuscated consumption ResourceId:
+        #   - legacy flat token: ^(prod|nonprod)_...
+        #   - structure-preserving ARM path: starts with /subscriptions/(prod|nonprod)_sub_...
+        $validShape = '^((prod|nonprod)_|/subscriptions/(prod|nonprod)_sub_)'
         foreach ($row in $csv) {
             if (![string]::IsNullOrEmpty($row.ResourceId)) {
-                $row.ResourceId | Should -Match '^(prod|nonprod)_' -Because "Consumption ResourceId should have prefix"
+                $row.ResourceId | Should -Match $validShape -Because "Consumption ResourceId should be obfuscated with prod_/nonprod_ prefix (flat or ARM-shape)"
             }
         }
     }

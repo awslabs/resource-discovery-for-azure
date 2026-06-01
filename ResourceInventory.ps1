@@ -1182,24 +1182,115 @@ function ExecuteInventoryProcessing()
 
                     if($Obfuscate.IsPresent)
                     {
-                        if (-not $ResourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
+                        # Pick a prefix (prod_/nonprod_) based on the original
+                        # resourceUri before any obfuscation, so we cannot match
+                        # against an already-obfuscated value below.
+                        $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+
+                        # Obfuscate the consumption ResourceUri while PRESERVING the
+                        # ARM path STRUCTURE (resourcegroups/<rg>/providers/<rp>/<type>[/...]/<name>).
+                        # The dashboard categorises rows by parsing this path - it
+                        # looks at the resource provider + type to detect AKS, VMSS,
+                        # Container Instances, Container Registry, Kusto, etc., and
+                        # at the `mc_*` resource-group marker to detect AKS-managed
+                        # resources specifically. Replacing the whole URI with a flat
+                        # opaque token (the previous behaviour) destroyed every one
+                        # of those signals and made AKS/VMSS rows invisible on the
+                        # dashboard. We now obfuscate ONLY the identifying segments
+                        # (subscription id, resource group name, resource name) and
+                        # keep the rest of the path intact - including the `mc_`
+                        # prefix on AKS-managed RGs - so the server can still
+                        # categorise without seeing real customer identifiers.
+                        $rawUri = $instanceObject.'Microsoft.Resources'.resourceUri
+                        $obfuscatedUri = $rawUri
+
+                        # Per-run caches keyed by REAL value, so the same real sub
+                        # id / RG / resource name always maps to the same obfuscated
+                        # token within a run (deterministic, per the obfuscation
+                        # rules in steering). Kept separate from $ResourceIdDictionary
+                        # because that dictionary's public contract (the
+                        # ObfuscationDictionary file) maps obfuscated full Azure IDs
+                        # to their real values - we don't want to pollute it with
+                        # per-name-segment entries from consumption ARM-path rebuilds.
+                        if (-not $script:ConsumptionSubCache)  { $script:ConsumptionSubCache  = @{} }
+                        if (-not $script:ConsumptionRgCache)   { $script:ConsumptionRgCache   = @{} }
+                        if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
+
+                        if ($rawUri -match '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
                         {
-                            $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { "nonprod_" } else { "prod_" }
-                            $resId = $usageDataExport[$item].ResourceId
-                            $obfuscatedID = if ($resId -match 'databricks') { $prefix + 'databricks_' + [guid]::NewGuid().ToString() }
-                                elseif ($resId -match '/resourcegroups/mc_') { $prefix + 'aks_' + [guid]::NewGuid().ToString() }
-                                elseif ($resId -match 'virtualmachinescalesets') { $prefix + 'vmss_' + [guid]::NewGuid().ToString() }
-                                else { $prefix + [guid]::NewGuid().ToString() }
-                            $ResourceIdDictionary[$usageDataExport[$item].ResourceId] = $obfuscatedID
-                            $usageDataExport[$item].ResourceId = $obfuscatedID
-                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
-                        } 
-                        else 
-                        {
-                            $obfuscatedID = $ResourceIdDictionary[$usageDataExport[$item].ResourceId]
-                            $usageDataExport[$item].ResourceId = $obfuscatedID
-                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
+                            $realSub  = $matches[1]
+                            $realRg   = $matches[3]
+                            $realProv = $matches[5]   # e.g. 'microsoft.compute/<type>/<name>[/<subtype>/<name2>]'
+
+                            $obfSub = if ($script:ConsumptionSubCache.ContainsKey($realSub)) { $script:ConsumptionSubCache[$realSub] } else {
+                                $v = $prefix + 'sub_' + [guid]::NewGuid().ToString()
+                                $script:ConsumptionSubCache[$realSub] = $v; $v
+                            }
+
+                            $rebuiltUri = '/subscriptions/' + $obfSub
+
+                            if (-not [string]::IsNullOrEmpty($realRg))
+                            {
+                                $obfRg = if ($script:ConsumptionRgCache.ContainsKey($realRg)) { $script:ConsumptionRgCache[$realRg] } else {
+                                    # Preserve the AKS-managed-RG marker so the dashboard can
+                                    # still detect AKS-managed resources after obfuscation.
+                                    $isMc = $realRg -match '^mc_'
+                                    $tag  = if ($isMc) { 'mc_' } else { '' }
+                                    $v = $prefix + 'rg_' + $tag + [guid]::NewGuid().ToString()
+                                    $script:ConsumptionRgCache[$realRg] = $v; $v
+                                }
+                                $rebuiltUri += '/resourcegroups/' + $obfRg
+                            }
+
+                            if (-not [string]::IsNullOrEmpty($realProv))
+                            {
+                                # $realProv = "<rp>/<type>[/<name>[/<subtype>/<name2>...]]"
+                                # Keep the resource provider (segment 0) and every
+                                # type segment so categorisation works; obfuscate
+                                # only the name segments. After the provider, the
+                                # path alternates type-name-type-name, so within
+                                # the provider-relative index space TYPE segments
+                                # are at indices 1,3,5,... (i.e. odd) and NAME
+                                # segments are at indices 2,4,6,... (i.e. even).
+                                $provParts = $realProv -split '/'
+                                $rebuilt   = @()
+                                for ($pi = 0; $pi -lt $provParts.Count; $pi++)
+                                {
+                                    $part = $provParts[$pi]
+                                    $isNameSegment = ($pi -ge 2 -and ($pi % 2 -eq 0))
+                                    if ($isNameSegment -and -not [string]::IsNullOrEmpty($part) -and $part -ne '$system')
+                                    {
+                                        $obfName = if ($script:ConsumptionNameCache.ContainsKey($part)) { $script:ConsumptionNameCache[$part] } else {
+                                            $v = $prefix + [guid]::NewGuid().ToString()
+                                            $script:ConsumptionNameCache[$part] = $v; $v
+                                        }
+                                        $rebuilt += $obfName
+                                    }
+                                    else
+                                    {
+                                        $rebuilt += $part
+                                    }
+                                }
+                                $rebuiltUri += '/providers/' + ($rebuilt -join '/')
+                            }
+
+                            $obfuscatedUri = $rebuiltUri
                         }
+                        else
+                        {
+                            # Non-ARM-shape uri (e.g. system-namespace placeholder). Hash it
+                            # to a stable token rather than emitting the raw value. Use
+                            # the local name cache so the obfuscation dictionary file
+                            # only ever contains real-Azure-ID -> obfuscated mappings.
+                            if (-not $script:ConsumptionNameCache.ContainsKey($rawUri))
+                            {
+                                $script:ConsumptionNameCache[$rawUri] = $prefix + [guid]::NewGuid().ToString()
+                            }
+                            $obfuscatedUri = $script:ConsumptionNameCache[$rawUri]
+                        }
+
+                        $usageDataExport[$item].ResourceId = $obfuscatedUri
+                        $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedUri
 
                         # Obfuscate reservation identifiers (customer purchasing fingerprints)
                         if (![string]::IsNullOrEmpty($usageDataExport[$item].ReservationId)) {

@@ -213,6 +213,17 @@ Describe "Metrics Obfuscation" {
 # 10. Consumption ResourceIds are obfuscated
 # ============================================================
 Describe "Consumption Obfuscation" {
+    # NOTE: the consumption ResourceUri shape preserves the ARM path structure
+    # (/subscriptions/<obf-sub>/resourcegroups/<obf-rg>/providers/<rp>/<type>/<obf-name>)
+    # so the server-side dashboard can categorise rows by resource provider +
+    # type. The pre-2026 behaviour replaced the whole URI with a flat token,
+    # which broke AKS / VMSS / Container Instance / Container Registry / Kusto
+    # detection on the dashboard. Tests must accept BOTH shapes:
+    #   - flat: prod_<guid>            (legacy / non-ARM uris like $system)
+    #   - ARM:  /subscriptions/...     (the new structure-preserving shape)
+    # And separately enforce the no-leak invariants that actually matter.
+    $script:ConsumptionSafePattern = '^(' + $script:ObfuscationPattern.TrimStart('^').TrimEnd('$') + '|/subscriptions/(prod|nonprod)_sub_)'
+
     It "Should have all consumption ResourceIds matching the obfuscation pattern" {
         if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }
         $csv = Import-Csv $script:ConsumptionFile.FullName
@@ -220,7 +231,8 @@ Describe "Consumption Obfuscation" {
 
         foreach ($row in $csv) {
             if (![string]::IsNullOrEmpty($row.ResourceId)) {
-                $row.ResourceId | Should -Match $script:ObfuscationPattern -Because "Consumption ResourceId should be obfuscated"
+                $row.ResourceId | Should -Match $script:ConsumptionSafePattern -Because "Consumption ResourceId should be obfuscated (flat token or structure-preserving ARM path)"
+                $row.ResourceId | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "Consumption ResourceId must not contain a real subscription GUID"
             }
         }
     }
@@ -235,7 +247,8 @@ Describe "Consumption Obfuscation" {
                 $instanceData = $row.InstanceData | ConvertFrom-Json
                 $uri = $instanceData.'Microsoft.Resources'.ResourceUri
                 if (![string]::IsNullOrEmpty($uri)) {
-                    $uri | Should -Match $script:ObfuscationPattern -Because "InstanceData ResourceUri should be obfuscated"
+                    $uri | Should -Match $script:ConsumptionSafePattern -Because "InstanceData ResourceUri should be obfuscated (flat token or structure-preserving ARM path)"
+                    $uri | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "InstanceData ResourceUri must not contain a real subscription GUID"
                 }
             }
         }

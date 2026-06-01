@@ -815,14 +815,31 @@ function ExecuteInventoryProcessing()
                 $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
                 $Global:AzMetrics.Metrics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
-                # Record metrics-phase health so the wrapper's final summary can
-                # surface the auth skip (mirrors $Global:ConsumptionFailedSubs).
-                # Lives in the wrapper's scope because ResourceInventory.ps1 is
-                # invoked via `& <path>`.
-                if ($null -eq $Global:MetricsAuthFailed) { $Global:MetricsAuthFailed = $false }
-                $Global:MetricsAuthFailed = $true
-                if ($null -eq $Global:MetricsFailureMessage) {
-                    $Global:MetricsFailureMessage = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                # Record per-subscription metrics-phase health so the wrapper's
+                # final summary can name exactly which subs are missing metrics
+                # (mirrors $Global:ConsumptionFailedSubs). Lives in the wrapper's
+                # scope because ResourceInventory.ps1 is invoked via `& <path>`.
+                # Resolve which subscription(s) this skip applies to: when invoked
+                # per-sub (the wrapper passes -SubscriptionID) it is that one sub;
+                # for a standalone all-subs run it is every in-scope subscription.
+                if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+                $metricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                $affectedSubs = @(
+                    if (![string]::IsNullOrEmpty($SubscriptionID)) {
+                        $Global:Subscriptions | Where-Object { $_.id -eq $SubscriptionID }
+                    } else {
+                        $Global:Subscriptions
+                    }
+                )
+                if ($affectedSubs.Count -eq 0) {
+                    # Fallback when the subscription list is unavailable: still
+                    # record one entry so the failure is never silent.
+                    $idLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $idLabel; Message = $metricsSkipMsg }
+                } else {
+                    foreach ($asub in $affectedSubs) {
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $metricsSkipMsg }
+                    }
                 }
                 return
             }

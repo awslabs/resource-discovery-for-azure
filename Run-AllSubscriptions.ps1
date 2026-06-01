@@ -54,11 +54,20 @@ param (
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
-# Metrics-phase auth health, aggregated across streams (mirrors the
-# consumption health accumulators populated later). True if any stream
-# reported that metrics were requested but skipped for an auth/context gap.
-$Global:MetricsAuthFailed = $false
-$Global:MetricsFailureMessage = $null
+# Per-subscription metrics-phase auth health, aggregated across the whole run.
+# This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
+# same way: a list of { Name, Id, Message } objects, one per subscription whose
+# metrics phase was skipped because Azure auth was unavailable (no valid
+# context/token) even though the user did NOT pass -SkipMetrics.
+#   - Sequential run: ResourceInventory.ps1 appends entries directly (it runs in
+#     this wrapper's scope).
+#   - Parallel run: each stream worker collects its own list and reports it in
+#     its summary JSON; the aggregation loop below concatenates them, so the
+#     run-level list names every affected subscription regardless of which
+#     stream processed it.
+# The final summary reads this list to print which subscriptions had metrics
+# skipped, and to set the non-zero wrapper exit code. Empty list = no problem.
+$Global:MetricsFailedSubs = @()
 
 # Inventory root (used for resume state, consolidated output, and the wrapper
 # transcript). Computed up front so the transcript can be started before
@@ -1116,11 +1125,9 @@ foreach ($sub in $subscriptions) {
                 $Global:ConsumptionFailedSubs += @($streamSummary.ConsumptionFailedSubs)
             }
 
-            if ($streamSummary.MetricsAuthFailed) {
-                $Global:MetricsAuthFailed = $true
-                if ([string]::IsNullOrEmpty($Global:MetricsFailureMessage) -and -not [string]::IsNullOrEmpty($streamSummary.MetricsFailureMessage)) {
-                    $Global:MetricsFailureMessage = $streamSummary.MetricsFailureMessage
-                }
+            if ($streamSummary.MetricsFailedSubs -and $streamSummary.MetricsFailedSubs.Count -gt 0) {
+                if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+                $Global:MetricsFailedSubs += @($streamSummary.MetricsFailedSubs)
             }
 
             # If a stream wrote a failures log, add it to the wrapper's diag-file
@@ -1434,14 +1441,22 @@ if ($consumptionFailures.Count -gt 0) {
 # metrics were requested (no -SkipMetrics) but skipped because no usable Azure
 # context/token could be established even after a reconnect attempt. Without
 # this the metrics sheet is silently empty and looks like "no metric-eligible
-# resources" rather than an auth failure.
-if ($Global:MetricsAuthFailed) {
+# resources" rather than an auth failure. Listed per-subscription so the
+# operator knows exactly which subs are missing metrics.
+$metricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+if ($metricsFailures.Count -gt 0) {
     Write-Host ""
-    Write-Host "Metrics:                 SKIPPED (authentication)" -ForegroundColor Yellow
-    $metricsMsg = if (-not [string]::IsNullOrEmpty($Global:MetricsFailureMessage)) { $Global:MetricsFailureMessage } else { 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.' }
-    Write-Host ("  - {0}" -f $metricsMsg) -ForegroundColor Yellow
+    Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $metricsFailures.Count) -ForegroundColor Yellow
+    foreach ($m in ($metricsFailures | Sort-Object Name -Unique)) {
+        Write-Host ("  - {0} ({1})" -f $m.Name, $m.Id) -ForegroundColor Yellow
+    }
+    # The reason is the same across subs (auth), so show it once.
+    $firstMsg = @($metricsFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
+    if (-not [string]::IsNullOrEmpty($firstMsg)) {
+        Write-Host ("  Reason: {0}" -f $firstMsg) -ForegroundColor Yellow
+    }
     Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
-    Write-Host "  Note: the metrics sheet in the output report will be empty for affected subscriptions." -ForegroundColor Yellow
+    Write-Host "  Note: the metrics sheet in the output report will be empty for these subscriptions." -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -1480,7 +1495,7 @@ Write-Host "=========================================" -ForegroundColor Green
 # annotated (server-side ingestion expects fixed columns); this banner is the
 # human-facing signal, and the non-zero exit below is the machine-facing one.
 $authSkippedPhases = @()
-if ($Global:MetricsAuthFailed) { $authSkippedPhases += 'Metrics' }
+if (@($Global:MetricsFailedSubs).Count -gt 0) { $authSkippedPhases += 'Metrics' }
 $consumptionAuthSkipped = @(
     if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
 ) | Where-Object { $_.Id -eq '(auth)' }

@@ -76,8 +76,7 @@ if ($SubscriptionIds.Count -eq 0) {
         ResourceCounts        = @()
         ConsumptionRecords    = 0
         ConsumptionFailedSubs = @()
-        MetricsAuthFailed     = $false
-        MetricsFailureMessage = $null
+        MetricsFailedSubs     = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
     exit 0
 }
@@ -230,12 +229,12 @@ $FailedSubs            = @()
 $Global:ConsumptionRecordCount = 0
 $Global:ConsumptionFailedSubs  = @()
 
-# Metrics-phase auth health. ResourceInventory.ps1 sets $Global:MetricsAuthFailed
-# (in this worker's scope, since it is invoked via `&`) when metrics were
-# requested but skipped because no usable Azure context/token could be
-# established. Reset to a known state up-front so a stale value cannot leak in.
-$Global:MetricsAuthFailed     = $false
-$Global:MetricsFailureMessage = $null
+# Per-subscription metrics-phase auth health. ResourceInventory.ps1 appends to
+# $Global:MetricsFailedSubs (in this worker's scope, since it is invoked via `&`)
+# for each sub whose metrics phase was skipped because no usable Azure
+# context/token could be established. Reset up-front so a stale value cannot leak
+# in; read once after the slice loop and reported in the summary JSON.
+$Global:MetricsFailedSubs = @()
 
 $pairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
 for ($i = 0; $i -lt $pairCount; $i++) {
@@ -337,8 +336,7 @@ for ($i = 0; $i -lt $pairCount; $i++) {
 # the per-iteration double-counting trap.
 $ConsumptionTotal      = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs)  { @($Global:ConsumptionFailedSubs) } else { @() }
-$MetricsAuthFailed     = if ($null -ne $Global:MetricsAuthFailed) { [bool]$Global:MetricsAuthFailed } else { $false }
-$MetricsFailureMessage = $Global:MetricsFailureMessage
+$MetricsFailedSubs     = if ($null -ne $Global:MetricsFailedSubs)      { @($Global:MetricsFailedSubs) } else { @() }
 
 $summary = [pscustomobject]@{
     StreamId               = $StreamId
@@ -350,8 +348,7 @@ $summary = [pscustomobject]@{
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
-    MetricsAuthFailed      = $MetricsAuthFailed
-    MetricsFailureMessage  = $MetricsFailureMessage
+    MetricsFailedSubs      = @($MetricsFailedSubs)
 }
 try {
     $summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8

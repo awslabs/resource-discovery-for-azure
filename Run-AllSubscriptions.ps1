@@ -121,6 +121,51 @@ function Exit-Wrapper {
     exit $Code
 }
 
+# Classify a subscription that returned 0 resources as either a genuine
+# permission gap (the signed-in identity has NO role on the subscription) or a
+# genuinely empty subscription. This distinction is impossible to make from the
+# resource-discovery phase alone: Azure Resource Graph queries at the tenant
+# level and returns reduced/empty results rather than a 403 when the identity
+# lacks a role, so "no access" and "empty" look identical there.
+#
+# To tell them apart we make ONE cheap, access-scoped control-plane call:
+# `az group list` on the subscription. Listing resource groups requires a role
+# on the subscription (Reader is enough). If the identity has none, ARM returns
+# AuthorizationFailed (403), which we detect. If it succeeds (even with zero
+# RGs) the identity DOES have access, so the subscription is genuinely empty.
+#
+# Returns one of: 'NoAccess', 'Empty', 'Unknown'. Only called for subs that
+# returned 0 resources, so it adds no cost to the normal (non-empty) path.
+function Get-SubscriptionAccessState {
+    param([Parameter(Mandatory=$true)][string]$SubscriptionId)
+
+    # One cheap, access-scoped control-plane call. Capture stdout+stderr
+    # together and the exit code. Listing resource groups requires a role on
+    # the subscription, so a no-access identity gets AuthorizationFailed.
+    $output = (az group list --subscription $SubscriptionId --query "length(@)" -o tsv 2>&1) -join ' '
+    $exit = $LASTEXITCODE
+
+    if ($exit -eq 0) {
+        # Call succeeded: identity can read the subscription, so 0 resources
+        # means it is genuinely empty.
+        return 'Empty'
+    }
+    if ($output -match 'AuthorizationFailed|does not have authorization|not authorized|Forbidden|403') {
+        return 'NoAccess'
+    }
+    # An identity that can ENUMERATE a subscription (it came from
+    # Get-AzSubscription) but gets "not found / not recognized" on a
+    # control-plane read into it has no usable role there - ARM hides the
+    # subscription rather than returning a 403. Treat that as NoAccess too,
+    # since the sub IDs we probe are always real and tenant-visible.
+    if ($output -match "not found|not recognized|could not be found|was not found") {
+        return 'NoAccess'
+    }
+    # Some other failure (transient ARM error, throttling, network). Don't
+    # mislabel it - report Unknown so the summary can hedge.
+    return 'Unknown'
+}
+
 # === Pre-flight checks ===
 #
 # Detect the most common environment problems that make a long run pointless,
@@ -1396,14 +1441,39 @@ if ($SubResourceCounts.Count -gt 0) {
     Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $totalRes, $NonEmptySubs.Count) -ForegroundColor Green
 }
 if ($EmptySubs.Count -gt 0) {
-    Write-Host ""
-    Write-Host ("Subscriptions Empty:     {0} (returned 0 resources)" -f $EmptySubs.Count) -ForegroundColor Yellow
-    Write-Host "  Likely permission gap (no Reader on the subscription) or genuinely empty subscription." -ForegroundColor Yellow
-    Write-Host "  Verify Reader access for these specifically:" -ForegroundColor Yellow
+    # A sub that returned 0 resources is either a permission gap (no role on the
+    # sub) or genuinely empty. Probe each one to label it precisely so the user
+    # knows whether to fix access or ignore it. The probe is one cheap ARM call
+    # per empty sub (only empties, so no cost on normal runs).
+    $noAccessSubs = @()
+    $genuinelyEmptySubs = @()
+    $unknownSubs = @()
     foreach ($e in $EmptySubs) {
-        Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow
+        switch (Get-SubscriptionAccessState -SubscriptionId $e.Id) {
+            'NoAccess' { $noAccessSubs += $e }
+            'Empty'    { $genuinelyEmptySubs += $e }
+            default    { $unknownSubs += $e }
+        }
     }
-    Write-Host "  Acid test: az graph query -q ""resources | summarize count()"" --subscriptions <id>" -ForegroundColor Yellow
+
+    Write-Host ""
+    Write-Host ("Subscriptions with 0 resources: {0}" -f $EmptySubs.Count) -ForegroundColor Yellow
+
+    if ($noAccessSubs.Count -gt 0) {
+        Write-Host ("  NO ACCESS ({0}) - the signed-in identity has no role on these subscriptions:" -f $noAccessSubs.Count) -ForegroundColor Red
+        foreach ($e in $noAccessSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Red }
+        Write-Host "    Fix: grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
+    }
+    if ($genuinelyEmptySubs.Count -gt 0) {
+        Write-Host ("  GENUINELY EMPTY ({0}) - access confirmed, the subscription has no resources:" -f $genuinelyEmptySubs.Count) -ForegroundColor Yellow
+        foreach ($e in $genuinelyEmptySubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
+        Write-Host "    No action needed - these are expected to be empty in the report." -ForegroundColor DarkGray
+    }
+    if ($unknownSubs.Count -gt 0) {
+        Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $unknownSubs.Count) -ForegroundColor Yellow
+        foreach ($e in $unknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
+        Write-Host "    Verify manually: az group list --subscription <id>" -ForegroundColor Yellow
+    }
     Write-Host ""
 }
 

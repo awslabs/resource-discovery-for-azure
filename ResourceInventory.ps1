@@ -774,6 +774,16 @@ function ExecuteInventoryProcessing()
                 Write-Log -Message ("{0}: running under -RunAllSubs without Service Principal credentials - cannot prompt for interactive login in this context. Authenticate before the run (e.g. Connect-AzAccount) or supply -appid/-secret/-tenant." -f $Phase) -Severity 'Error'
                 return $false
             }
+            elseif (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected)
+            {
+                # No interactive console available (background job, CI, piped/
+                # redirected input, or a detached process). An interactive
+                # Connect-AzAccount here would block FOREVER waiting on a browser
+                # or device prompt that no one can answer - which manifests as a
+                # silent hang. Fail loud instead so the run does not wedge.
+                Write-Log -Message ("{0}: no usable Azure context and no interactive console to prompt for login (non-interactive session). Authenticate before the run (Connect-AzAccount) or supply -appid/-secret/-tenant, then re-run." -f $Phase) -Severity 'Error'
+                return $false
+            }
             elseif ($DeviceLogin.IsPresent)
             {
                 Write-Log -Message ("{0}: reconnecting via device login." -f $Phase) -Severity 'Info'

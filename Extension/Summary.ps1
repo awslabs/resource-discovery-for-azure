@@ -1,431 +1,776 @@
+# Summary.ps1
+#
+# Generates the self-contained HTML report for a Resource Discovery for Azure
+# (RDA) run. Reads the aggregated Inventory_*.json produced by the Processing
+# phase and writes a single .html file with NO external dependencies (no CDN,
+# no JS libraries, no images, no Excel/EPPlus). The output renders in any
+# browser and is suitable for emailing, sharing, or opening in Cloud Shell.
+#
+# This replaces the previous Excel (ImportExcel/EPPlus) report. The data
+# pipeline is unchanged: collectors still run in the Processing phase to build
+# the Inventory JSON; this script only renders that JSON as HTML.
+#
+# Invoked from ResourceInventory.ps1 (ProcessSummary) via `& $SummaryPath ...`.
+#
+# Inputs (Inventory JSON schema):
+#   The JSON file is a single object whose top-level keys are service-type
+#   names (VirtualMachines, AppServices, StorageAcc, ...) and whose values
+#   are arrays of records. Each record has a heterogeneous set of fields,
+#   typically including: Name, Subscription, Location, ResourceGroup, ID,
+#   plus service-specific fields. The report iterates these dynamically so a
+#   new service type added in Services/* surfaces automatically.
+#
+# Outputs:
+#   A single self-contained .html file. ~50 KB framework + ~1 KB per record.
 param(
-    $File, 
-    $TableStyle, 
-    $PlatOS, 
-    $Subscriptions, 
-    $Resources, 
-    $ExtractionRunTime, 
-    $ReportingRunTime, 
-    $RunLite, 
-    $Version
+    # Path to the aggregated Inventory_*.json file (input).
+    $JsonFile,
+
+    # Path to write the .html report to (output).
+    $HtmlFile,
+
+    # Report title shown in <h1>. Defaults to a recognisable label.
+    $Title = 'Azure Resource Inventory',
+
+    # Subscription friendly name for the header. If empty, the first
+    # resource record's Subscription field is used.
+    $SubscriptionName,
+
+    # Tenant ID (display only).
+    $TenantId,
+
+    # RDA version string (display only). If empty, falls back to the
+    # Version key inside the Inventory JSON.
+    $Version,
+
+    # Extraction / reporting run durations (TimeSpan) for the header. Optional;
+    # omitted on standalone invocations.
+    $ExtractionRunTime,
+    $ReportingRunTime,
+
+    # Environment label (e.g. 'Azure CloudShell', 'PowerShell Unix'). Display only.
+    $PlatOS
 )
 
-# Ensure the EPPlus types backing ImportExcel are available before any
-# `New-Object -TypeName OfficeOpenXml.ExcelPackage` call below.
-#
-# Background: this script is invoked via `& $SummaryPath ...` from
-# ResourceInventory.ps1, which creates a new child scope. PowerShell's
-# auto-import of modules only triggers on first use of a *cmdlet* exported
-# by the module, but the lines below reference the underlying EPPlus type
-# directly via `New-Object`. Type references do not trigger auto-import,
-# so on a fresh script invocation - or on the second-and-later iterations
-# of a long Run-AllSubscriptions.ps1 loop where module state can be
-# evicted on Windows PowerShell - the type lookup fails with:
-#
-#   Cannot find type [OfficeOpenXml.ExcelPackage]: verify that the
-#   assembly containing this type is loaded.
-#
-# Importing ImportExcel explicitly here is idempotent and inexpensive, and
-# guarantees the EPPlus assembly is loaded into the current AppDomain
-# before any New-Object call against its types. This matches the pattern
-# already used elsewhere in the script for Az modules.
-try {
-    if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
-        Import-Module ImportExcel -ErrorAction Stop -Force -DisableNameChecking | Out-Null
-    }
-    if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
-        throw "ImportExcel module imported but the OfficeOpenXml.ExcelPackage type is still not loadable. The ImportExcel module may be present but its bundled EPPlus assembly is missing or unloadable in this runspace."
-    }
-} catch {
-    Write-Error ("Summary.ps1 cannot proceed: {0}" -f $_.Exception.Message)
-    throw
+$ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -Path $JsonFile -PathType Leaf))
+{
+    throw "Summary.ps1: Inventory JSON not found at '$JsonFile'."
+}
+if ([string]::IsNullOrWhiteSpace($HtmlFile))
+{
+    throw "Summary.ps1: -HtmlFile output path is required."
 }
 
-# Translate the underlying exception chain into a single plain-English
-# explanation of what most likely went wrong, so the user does not have to
-# read .NET stack traces to triage. Inspects the full InnerException chain
-# for known signals and falls through to a generic message if none match.
-function Get-SaveFailureDiagnosis
+# Read input JSON. Top-level keys are service-type names; values are arrays of
+# resource records. No schema validation - a new field simply appears as a new
+# column in that service's table.
+$rawJson = Get-Content -Path $JsonFile -Raw -Encoding utf8
+$Inventory = $rawJson | ConvertFrom-Json
+
+# Compute summary stats. Every array-valued key becomes a (service, count)
+# pair. Empty services and the "Version" metadata key are filtered out.
+$ServiceSummary = @()
+foreach ($prop in $Inventory.PSObject.Properties)
+{
+    if ($prop.Name -eq 'Version') { continue }
+    $value = $prop.Value
+    if ($null -eq $value) { continue }
+    $count = @($value).Count
+    if ($count -le 0) { continue }
+    $ServiceSummary += [pscustomobject]@{
+        Service = $prop.Name
+        Count   = $count
+    }
+}
+$ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
+$TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
+
+# Detect obfuscation so the header can carry a privacy-posture banner. Sample
+# resource Names and Subscription values across the first few populated
+# services; if most match the obfuscation signature treat the report as
+# obfuscated, else identifiable (the safe default for an unclear posture).
+$ObfuscationStatus = 'identifiable'
+$obfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+$samples = New-Object System.Collections.Generic.List[string]
+foreach ($svc in $ServiceSummary | Select-Object -First 5)
+{
+    $records = $Inventory.($svc.Service)
+    foreach ($r in (@($records) | Select-Object -First 4))
+    {
+        if ($null -eq $r) { continue }
+        if ($r.PSObject.Properties.Name -contains 'Name' -and -not [string]::IsNullOrWhiteSpace([string]$r.Name)) { $samples.Add([string]$r.Name) }
+        if ($r.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace([string]$r.Subscription)) { $samples.Add([string]$r.Subscription) }
+    }
+}
+if ($samples.Count -gt 0)
+{
+    $obfHits = ($samples | Where-Object { $_ -match $obfPattern }).Count
+    if ($obfHits -gt ($samples.Count * 0.7))
+    {
+        $ObfuscationStatus = 'obfuscated'
+    }
+}
+
+# Resolve a sensible subscription label for the header.
+if ([string]::IsNullOrWhiteSpace($SubscriptionName))
+{
+    foreach ($svc in $ServiceSummary)
+    {
+        $records = $Inventory.($svc.Service)
+        if ($records -and @($records).Count -gt 0)
+        {
+            $first = @($records)[0]
+            if ($first.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace($first.Subscription))
+            {
+                $SubscriptionName = [string]$first.Subscription
+                break
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($SubscriptionName)) { $SubscriptionName = '(unknown)' }
+}
+
+# Resolve version: explicit -Version wins, else the JSON's Version key.
+if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Version)
+{
+    $Version = [string]$Inventory.Version
+}
+
+# === HTML helpers =============================================================
+#
+# All output is HTML-escaped by default. The report embeds JSON-derived strings
+# from a downstream system (Azure Resource Graph) which could legitimately
+# contain HTML-significant characters in a name or tag. Escaping at the edge
+# is the only safe pattern; we never trust the input.
+function ConvertTo-HtmlSafe
+{
+    param([Parameter(ValueFromPipeline = $true)]$Value)
+    process
+    {
+        if ($null -eq $Value) { return '' }
+        $s = [string]$Value
+        $s = $s.Replace('&', '&amp;')
+        $s = $s.Replace('<', '&lt;')
+        $s = $s.Replace('>', '&gt;')
+        $s = $s.Replace('"', '&quot;')
+        $s = $s.Replace("'", '&#39;')
+        return $s
+    }
+}
+
+# === Chart helpers ============================================================
+#
+# Hand-rolled SVG. Two chart types: donut (proportions) and horizontal bar
+# (top-N counts). Both produce strings that drop straight into the HTML body.
+# No JS, no external library, ~5 KB combined.
+
+function New-DonutChart
 {
     param(
-        [Parameter(Mandatory = $true)] $Exception,
-        [Parameter(Mandatory = $true)] [int] $WorksheetCount,
-        [Parameter(Mandatory = $true)] [bool] $FileExists
+        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
+        [int]$Size = 240,
+        [int]$Thickness = 50
     )
 
-    $messages = @()
-    $e = $Exception
-    while ($null -ne $e)
-    {
-        $messages += $e.Message
-        $e = $e.InnerException
-    }
-    $combined = ($messages -join ' | ')
+    $total = ($Data | Measure-Object -Property Value -Sum).Sum
+    if ($total -le 0) { return '<div class="empty">No data</div>' }
 
-    if ($combined -match 'must contain at least one worksheet')
+    $cx = $Size / 2
+    $cy = $Size / 2
+    $radius = ($Size / 2) - 10
+    $innerRadius = $radius - $Thickness
+
+    # Color palette - colorblind-friendly (Okabe-Ito + neutrals). Wraps if
+    # there are more services than colors, which is fine for visual purpose.
+    $palette = @(
+        '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9',
+        '#D55E00', '#F0E442', '#999999', '#332288', '#117733',
+        '#88CCEE', '#DDCC77', '#CC6677', '#AA4499', '#882255'
+    )
+
+    $svg = New-Object System.Text.StringBuilder
+    [void]$svg.Append("<svg viewBox='0 0 $Size $Size' class='chart-donut' role='img' aria-label='Resource count by service'>")
+
+    $angleStart = -90.0
+    $i = 0
+    foreach ($item in $Data)
     {
-        return 'The workbook is empty (zero worksheets). EPPlus refuses to save a workbook with no sheets. This usually means the inventory phase produced no resources for this subscription, so there were no per-service tabs to write into the file.'
+        $value = [double]$item.Value
+        if ($value -le 0) { $i++; continue }
+        $sweep = ($value / $total) * 360.0
+        $angleEnd = $angleStart + $sweep
+
+        $x1 = $cx + ($radius * [math]::Cos($angleStart * [math]::PI / 180.0))
+        $y1 = $cy + ($radius * [math]::Sin($angleStart * [math]::PI / 180.0))
+        $x2 = $cx + ($radius * [math]::Cos($angleEnd * [math]::PI / 180.0))
+        $y2 = $cy + ($radius * [math]::Sin($angleEnd * [math]::PI / 180.0))
+        $largeArc = if ($sweep -gt 180) { 1 } else { 0 }
+
+        $color = $palette[$i % $palette.Count]
+        $label = ConvertTo-HtmlSafe $item.Label
+        $pct = [math]::Round(($value / $total) * 100, 1)
+        $titleText = "$label`: $value ($pct%)"
+
+        $path = "M $cx $cy L $x1 $y1 A $radius $radius 0 $largeArc 1 $x2 $y2 Z"
+        [void]$svg.AppendFormat("<path d='{0}' fill='{1}'><title>{2}</title></path>", $path, $color, $titleText)
+
+        $angleStart = $angleEnd
+        $i++
     }
-    if ($combined -match 'being used by another process|cannot access the file|sharing violation')
-    {
-        return 'The output file is held open by another process. Close any Microsoft Excel window that has this file open and re-run.'
-    }
-    if ($combined -match 'UnauthorizedAccess|access to the path .* is denied|access is denied')
-    {
-        return 'Access to the output file or its parent folder was denied. Check permissions on the InventoryReports folder, and that no antivirus or DLP product is blocking writes.'
-    }
-    if ($combined -match 'There is not enough space|disk full|not enough room')
-    {
-        return 'Insufficient disk space to write the output file.'
-    }
-    if (-not $FileExists -and $WorksheetCount -gt 0)
-    {
-        return 'The output file does not exist on disk yet, but the in-memory workbook has worksheets. The Save call should have created the file. This is most likely a path or permission issue from EPPlus rather than a content issue.'
-    }
-    return 'No specific diagnosis matched. See the exception details below for the underlying error.'
+
+    # Inner cutout to make it a donut
+    [void]$svg.AppendFormat("<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $cx, $cy, $innerRadius)
+    [void]$svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $cx, ($cy - 6), $total)
+    [void]$svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $cx, ($cy + 14))
+
+    [void]$svg.Append('</svg>')
+    return $svg.ToString()
 }
 
-# Helper: invoke $package.Save() with diagnostic context. The bare .Save() call
-# raises a generic 'Error saving file ...' that doesn't tell the maintainer
-# which save site failed, what state the workbook is in, or what the underlying
-# .NET exception was. See #16 for context.
-#
-# Behaviour:
-# - On success: returns silently.
-# - On failure: writes a structured, human-readable diagnosis followed by the
-#   raw exception chain to the host stream; ensures the package is disposed
-#   (otherwise the file handle leaks and any subsequent open of the workbook
-#   on this run also fails); then re-throws so the caller's existing catch
-#   logic still fires.
-function Save-ExcelPackageWithDiagnostics
+function New-BarChart
 {
     param(
-        [Parameter(Mandatory = $true)] $Package,
-        [Parameter(Mandatory = $true)] [string] $File,
-        [Parameter(Mandatory = $true)] [string] $SaveSite
+        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
+        [int]$Width = 480,
+        [int]$RowHeight = 26,
+        [int]$LabelWidth = 160
     )
 
-    try
+    if ($Data.Count -eq 0) { return '<div class="empty">No data</div>' }
+
+    $maxValue = ($Data | Measure-Object -Property Value -Maximum).Maximum
+    if ($maxValue -le 0) { return '<div class="empty">No data</div>' }
+
+    $height = $RowHeight * $Data.Count + 8
+    $barAreaWidth = $Width - $LabelWidth - 60
+
+    $svg = New-Object System.Text.StringBuilder
+    [void]$svg.Append("<svg viewBox='0 0 $Width $height' class='chart-bar' role='img' aria-label='Top services by count'>")
+
+    $i = 0
+    foreach ($item in $Data)
     {
-        $Package.Save()
+        $y = ($i * $RowHeight) + 4
+        $label = ConvertTo-HtmlSafe $item.Label
+        $value = [int]$item.Value
+        $barWidth = [int](($value / $maxValue) * $barAreaWidth)
+        if ($barWidth -lt 1) { $barWidth = 1 }
+
+        # Label on the left
+        [void]$svg.AppendFormat("<text x='{0}' y='{1}' class='bar-label' text-anchor='end'>{2}</text>", ($LabelWidth - 8), ($y + 17), $label)
+        # Bar
+        [void]$svg.AppendFormat("<rect x='{0}' y='{1}' width='{2}' height='{3}' rx='3' class='bar-fill' />", $LabelWidth, $y, $barWidth, ($RowHeight - 8))
+        # Count to the right of the bar
+        [void]$svg.AppendFormat("<text x='{0}' y='{1}' class='bar-value'>{2}</text>", ($LabelWidth + $barWidth + 6), ($y + 17), $value)
+
+        $i++
     }
-    catch
-    {
-        $ex = $_.Exception
-        $fileExists = Test-Path $File
-        $sizeOnDisk = if ($fileExists) { (Get-Item $File).Length } else { $null }
-        $worksheetCount = try { [int]$Package.Workbook.Worksheets.Count } catch { -1 }
-        $sizeText = if (-not $fileExists) { '<file does not exist on disk yet>' } else { '{0} bytes' -f $sizeOnDisk }
-        $worksheetText = if ($worksheetCount -lt 0) { '<could not read; package state inaccessible>' } else { [string]$worksheetCount }
 
-        $diagnosis = Get-SaveFailureDiagnosis -Exception $ex -WorksheetCount $worksheetCount -FileExists $fileExists
-
-        Write-Host ("[Summary.ps1] Save failed at site '{0}' for {1}" -f $SaveSite, $File) -ForegroundColor Red
-        Write-Host ("[Summary.ps1] Likely cause: {0}" -f $diagnosis) -ForegroundColor Yellow
-        Write-Host "[Summary.ps1] State at failure:" -ForegroundColor Red
-        Write-Host ("[Summary.ps1]   File on disk: {0}" -f $sizeText) -ForegroundColor Red
-        Write-Host ("[Summary.ps1]   Worksheets:   {0}" -f $worksheetText) -ForegroundColor Red
-        Write-Host "[Summary.ps1] Underlying exception:" -ForegroundColor Red
-        Write-Host ("[Summary.ps1]   {0}: {1}" -f $ex.GetType().FullName, $ex.Message) -ForegroundColor Red
-        $inner = $ex.InnerException
-        $depth = 0
-        while ($null -ne $inner -and $depth -lt 5)
-        {
-            Write-Host ("[Summary.ps1]   Inner[{0}]: {1}: {2}" -f $depth, $inner.GetType().FullName, $inner.Message) -ForegroundColor Red
-            $inner = $inner.InnerException
-            $depth++
-        }
-
-        # Ensure the package is disposed even though Save() failed. Without this
-        # the underlying file handle stays held and the next Open-ExcelPackage
-        # on the same path fails too, which makes downstream errors confusing.
-        try { $Package.Dispose() }
-        catch { Write-Verbose ("Package.Dispose() after Save failure threw: {0}" -f $_.Exception.Message) }
-
-        throw
-    }
+    [void]$svg.Append('</svg>')
+    return $svg.ToString()
 }
 
-if(!$RunLite)
+# === Per-service table builder ================================================
+#
+# Each service section is an HTML <details> element (so it's collapsible
+# without any JS) wrapping a search input + a sortable <table>.
+#
+# Column selection: the union of all field names across the records, ordered
+# by frequency. This avoids the trap of letting a single record with many
+# fields blow out the column list.
+
+function New-ServiceTable
 {
-    $Excel = New-Object -TypeName OfficeOpenXml.ExcelPackage $File
-    $Worksheets = $Excel.Workbook.Worksheets
+    param(
+        [Parameter(Mandatory)] [string]$ServiceName,
+        [Parameter(Mandatory)] $Records
+    )
 
-    # Skip the reorder/save step if the workbook is empty.
-    #
-    # Background: New-Object OfficeOpenXml.ExcelPackage <path> does not
-    # require the file to exist - if the path is missing it returns a fresh
-    # in-memory package with zero worksheets. EPPlus then refuses to .Save()
-    # a workbook with no sheets ("The workbook must contain at least one
-    # worksheet") and the bare error gives no hint about why. Reaching this
-    # state means the inventory phase produced no per-service tabs for this
-    # subscription - a sub with no resources, a Resource Graph permission
-    # gap, or an obfuscation pipeline that filtered everything out. Either
-    # way there is nothing to reorder. Let the next block (Export-Excel
-    # ... -WorksheetName 'Overview' below) bootstrap the workbook with at
-    # least the Overview sheet so subsequent steps have something to work
-    # with.
-    if ($Worksheets.Count -eq 0)
+    $records = @($Records)
+    $count = $records.Count
+    if ($count -eq 0)
     {
-        Write-Host ("[Summary.ps1] Workbook for '{0}' has zero worksheets at the reorder step. The inventory phase produced no per-service tabs (likely an empty subscription, a permission gap, or all rows filtered by obfuscation). Skipping reorder; the Overview sheet will be created in the next step." -f $File) -ForegroundColor Yellow
-        $Excel.Dispose()
+        return ''
     }
-    else
+
+    # Discover columns from the records themselves. Frequency ordering puts
+    # the most consistently-populated columns first.
+    $colCounts = @{}
+    foreach ($r in $records)
     {
-        $Order = $Worksheets | Select-Object -Property Index, name, @{N = "Dimension"; E = { $_.dimension.Rows - 1 } } | Sort-Object -Property Dimension -Descending
-
-        # When the workbook has only one or two sheets there is nothing to
-        # reorder either: $Order[0] and ($Order | Select -Last 1) collapse to
-        # the same item (or are the entire collection), and $Order0 ends up
-        # empty. Handle both edge cases explicitly rather than relying on
-        # Where-Object filtering an undefined index.
-        if ($Worksheets.Count -lt 3)
+        if ($null -eq $r) { continue }
+        if ($r -is [string] -or $r -is [int] -or $r -is [bool])
         {
-            $Order0 = @()
+            # Defensive: collectors should emit objects, not scalars. If a
+            # scalar slips in, surface it under a fixed column name so the
+            # table still renders.
+            if (-not $colCounts.ContainsKey('Value')) { $colCounts['Value'] = 0 }
+            $colCounts['Value'] += 1
+            continue
         }
-        else
+        foreach ($p in $r.PSObject.Properties)
         {
-            $firstName = $Order[0].name
-            $lastName  = ($Order | Select-Object -Last 1).Name
-            $Order0 = $Order | Where-Object { $_.Name -ne $firstName -and $_.Name -ne $lastName }
+            if (-not $colCounts.ContainsKey($p.Name)) { $colCounts[$p.Name] = 0 }
+            $colCounts[$p.Name] += 1
         }
-
-        $Loop = 0
-
-        Foreach ($Ord in $Order0)
-        {
-            if ($Ord.Index -and $Loop -ne 0)
-            {
-                $Worksheets.MoveAfter($Ord.Name, $Order0[$Loop - 1].Name)
-            }
-            if ($Loop -eq 0)
-            {
-                $Worksheets.MoveAfter($Ord.Name, $Order[0].Name)
-            }
-
-            $Loop++
-        }
-
-        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'reorder-worksheets'
-        $Excel.Dispose()
     }
+
+    # Promote a stable preferred-column order for fields that almost every
+    # service has, so the most useful columns lead. Anything not in this list
+    # falls back to frequency order.
+    $preferredOrder = @('Name', 'Subscription', 'ResourceGroup', 'Location', 'SKU', 'Tier', 'State', 'Status', 'Kind', 'AppType', 'OSType', 'Size')
+    $columns = @()
+    foreach ($p in $preferredOrder)
+    {
+        if ($colCounts.ContainsKey($p))
+        {
+            $columns += $p
+            $colCounts.Remove($p)
+        }
+    }
+    # Append remaining columns ordered by descending frequency, but skip
+    # nested-object fields (they don't render usefully in a table cell).
+    $remaining = $colCounts.GetEnumerator() | Sort-Object -Property Value -Descending | ForEach-Object { $_.Key }
+    $columns += $remaining
+
+    # Drop columns that always contain a complex object - they render as
+    # "@{...}" which is noise. Detect by sampling the first non-null value.
+    $columnsClean = @()
+    foreach ($col in $columns)
+    {
+        $sample = $null
+        foreach ($r in $records)
+        {
+            if ($null -eq $r) { continue }
+            $v = $null
+            try { $v = $r.$col } catch { $v = $null }
+            if ($null -ne $v) { $sample = $v; break }
+        }
+        if ($null -eq $sample) { $columnsClean += $col; continue }
+        if ($sample -is [psobject] -and -not ($sample -is [string]) -and -not ($sample -is [int]) -and -not ($sample -is [bool]) -and -not ($sample -is [double]) -and -not ($sample -is [long]) -and -not ($sample -is [array]))
+        {
+            # Skip nested objects but keep arrays - we render arrays joined.
+            continue
+        }
+        $columnsClean += $col
+    }
+    $columns = $columnsClean
+
+    # Cap column count to keep the table readable. 12 is a soft limit that
+    # fits the most informative columns without horizontal scroll on most
+    # screens.
+    if ($columns.Count -gt 12) { $columns = $columns[0..11] }
+
+    # Render header
+    $sb = New-Object System.Text.StringBuilder
+    $safeServiceName = ConvertTo-HtmlSafe $ServiceName
+    $sectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLower()
+    [void]$sb.AppendFormat('<details class="service-section" id="svc-{0}">', $sectionId)
+    [void]$sb.AppendFormat('<summary><span class="svc-name">{0}</span><span class="svc-count">{1}</span></summary>', $safeServiceName, $count)
+    [void]$sb.Append('<div class="svc-body">')
+    [void]$sb.AppendFormat('<input type="search" class="svc-search" placeholder="Filter {0}..." aria-label="Filter {0}" />', $safeServiceName)
+    [void]$sb.Append('<div class="table-scroll"><table class="svc-table"><thead><tr>')
+    foreach ($col in $columns)
+    {
+        $colSafe = ConvertTo-HtmlSafe $col
+        [void]$sb.AppendFormat('<th data-col="{0}">{0}</th>', $colSafe)
+    }
+    [void]$sb.Append('</tr></thead><tbody>')
+
+    foreach ($r in $records)
+    {
+        [void]$sb.Append('<tr>')
+        foreach ($col in $columns)
+        {
+            $val = $null
+            try { $val = $r.$col } catch { $val = $null }
+
+            if ($null -eq $val)
+            {
+                [void]$sb.Append('<td class="empty">&mdash;</td>')
+            }
+            elseif ($val -is [array])
+            {
+                # Render arrays joined. Truncate ID arrays for readability.
+                $joined = ($val | ForEach-Object {
+                    if ($null -eq $_) { return '' }
+                    if ($_ -is [psobject] -and -not ($_ -is [string])) { '(obj)' } else { [string]$_ }
+                }) -join ', '
+                if ($joined.Length -gt 200) { $joined = $joined.Substring(0, 200) + '...' }
+                [void]$sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $joined))
+            }
+            elseif ($val -is [bool])
+            {
+                $cls = if ($val) { 'val-true' } else { 'val-false' }
+                [void]$sb.AppendFormat('<td class="{0}">{1}</td>', $cls, $val)
+            }
+            else
+            {
+                $s = [string]$val
+                if ($s.Length -gt 200) { $s = $s.Substring(0, 200) + '...' }
+                [void]$sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $s))
+            }
+        }
+        [void]$sb.Append('</tr>')
+    }
+
+    [void]$sb.Append('</tbody></table></div></div></details>')
+    return $sb.ToString()
 }
 
-"" | Export-Excel -Path $File -WorksheetName 'Overview' -MoveToStart
+# === Page assembly ============================================================
 
-    if($RunLite)
-    {
-        $excel = Open-ExcelPackage -Path $file -KillExcel
+# Build the chart row data. Top 10 services by count for the bar chart;
+# all services for the donut.
+$topN = $ServiceSummary | Select-Object -First 10
+$donutData = $ServiceSummary | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
+$barData   = $topN           | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
+$donutSvg  = if ($donutData) { New-DonutChart -Data $donutData } else { '<div class="empty">No data</div>' }
+$barSvg    = if ($barData)   { New-BarChart   -Data $barData }   else { '<div class="empty">No data</div>' }
+
+# Build per-service tables in summary-order (highest count first) so the
+# scroll order matches the bar chart.
+$serviceSectionsHtml = New-Object System.Text.StringBuilder
+foreach ($svc in $ServiceSummary)
+{
+    $records = $Inventory.($svc.Service)
+    [void]$serviceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $records))
+}
+
+$generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
+$titleSafe = ConvertTo-HtmlSafe $Title
+$subSafe   = ConvertTo-HtmlSafe $SubscriptionName
+$tenantSafe = if ([string]::IsNullOrWhiteSpace($TenantId)) { '' } else { (ConvertTo-HtmlSafe $TenantId) }
+$versionSafe = if (-not [string]::IsNullOrWhiteSpace([string]$Version)) { ConvertTo-HtmlSafe ([string]$Version) } else { '' }
+
+# Optional run-stats carried over from the old Excel Overview sheet so no
+# information is lost in the HTML migration. Each is rendered only when
+# supplied by the caller.
+$extractTimeText = ''
+if ($ExtractionRunTime -is [TimeSpan])
+{
+    $extractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##')) }
+}
+$reportTimeText = ''
+if ($ReportingRunTime -is [TimeSpan])
+{
+    $reportTimeText = ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##'))
+}
+$platSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { (ConvertTo-HtmlSafe ([string]$PlatOS)) }
+
+# CSS - inlined. Print rules expand all <details> and strip non-essential
+# chrome so Cmd+P produces a clean PDF.
+$css = @'
+:root {
+    --bg: #fafbfc;
+    --panel: #ffffff;
+    --border: #e1e4e8;
+    --text: #24292e;
+    --muted: #6a737d;
+    --accent: #0366d6;
+    --accent-soft: #f1f8ff;
+    --bar-fill: #0072B2;
+    --row-alt: #f6f8fa;
+    --warn: #d73a49;
+    --good: #28a745;
+}
+* { box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+}
+.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+header {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+}
+header h1 { margin: 0 0 8px 0; font-size: 22px; }
+.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 24px; color: var(--muted); font-size: 13px; }
+.meta b { color: var(--text); font-weight: 600; }
+.charts {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) { .charts { grid-template-columns: 1fr; } }
+.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+}
+.card h2 { margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.chart-donut { width: 100%; height: auto; }
+.chart-bar   { width: 100%; height: auto; }
+.donut-total { font-size: 24px; font-weight: 600; fill: var(--text); }
+.donut-label { font-size: 11px; fill: var(--muted); }
+.bar-fill    { fill: var(--bar-fill); }
+.bar-label   { font-size: 12px; fill: var(--text); }
+.bar-value   { font-size: 12px; fill: var(--muted); }
+.svc-section, .service-section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+.service-section summary {
+    padding: 12px 20px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    user-select: none;
+    list-style: none;
+}
+.service-section summary::-webkit-details-marker { display: none; }
+.service-section summary::before {
+    content: '\25B6';
+    font-size: 10px;
+    margin-right: 10px;
+    color: var(--muted);
+    transition: transform 150ms;
+    display: inline-block;
+}
+.service-section[open] summary::before { transform: rotate(90deg); }
+.svc-name { font-weight: 600; font-size: 15px; }
+.svc-count {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+.svc-body { padding: 0 20px 16px 20px; border-top: 1px solid var(--border); }
+.svc-search {
+    width: 100%;
+    padding: 8px 12px;
+    margin-top: 12px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+}
+.table-scroll { overflow-x: auto; }
+.svc-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.svc-table th, .svc-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.svc-table th { background: var(--row-alt); font-weight: 600; cursor: pointer; user-select: none; }
+.svc-table th:hover { background: #ebedef; }
+.svc-table th[data-sort="asc"]::after { content: ' \25B2'; color: var(--accent); font-size: 10px; }
+.svc-table th[data-sort="desc"]::after { content: ' \25BC'; color: var(--accent); font-size: 10px; }
+.svc-table tbody tr:nth-child(even) { background: var(--row-alt); }
+.svc-table .empty { color: var(--muted); }
+.svc-table .val-true  { color: var(--good); font-weight: 600; }
+.svc-table .val-false { color: var(--warn); }
+footer {
+    margin-top: 24px;
+    padding: 16px 0;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+    border-top: 1px solid var(--border);
+}
+.empty { padding: 16px; text-align: center; color: var(--muted); }
+.privacy-banner {
+    border-radius: 6px;
+    padding: 10px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.privacy-banner.obfuscated {
+    background: #d4edda;
+    border: 1px solid #28a745;
+    color: #155724;
+}
+.privacy-banner.identifiable {
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    color: #856404;
+}
+.privacy-banner b { font-weight: 600; }
+.privacy-icon { font-size: 16px; }
+@media print {
+    body { background: white; font-size: 11px; }
+    .container { max-width: none; padding: 12px; }
+    .charts { display: block; }
+    .card { break-inside: avoid; margin-bottom: 12px; }
+    .service-section { break-inside: avoid; }
+    .service-section[open] summary::before { transform: rotate(90deg); }
+    .service-section { page-break-inside: auto; }
+    details > summary { pointer-events: none; }
+    details > div { display: block !important; }
+    .svc-search { display: none; }
+}
+'@
+
+# JS - also inlined. Provides per-table search + click-to-sort. Vanilla,
+# no dependencies. Tables degrade to plain HTML if JS is disabled.
+$js = @'
+(function () {
+    "use strict";
+
+    // Per-section search filter
+    function attachSearch(input) {
+        var section = input.closest('.service-section');
+        if (!section) return;
+        var rows = section.querySelectorAll('tbody tr');
+        input.addEventListener('input', function () {
+            var q = input.value.trim().toLowerCase();
+            var visible = 0;
+            rows.forEach(function (tr) {
+                var match = !q || tr.textContent.toLowerCase().indexOf(q) !== -1;
+                tr.style.display = match ? '' : 'none';
+                if (match) visible++;
+            });
+        });
     }
-    else
-    {
-        $Excel = New-Object -TypeName OfficeOpenXml.ExcelPackage $File
+
+    // Click-to-sort on column header
+    function attachSort(table) {
+        var headers = table.querySelectorAll('thead th');
+        headers.forEach(function (th, idx) {
+            th.addEventListener('click', function () {
+                var dir = th.dataset.sort === 'asc' ? 'desc' : 'asc';
+                headers.forEach(function (h) { h.dataset.sort = ''; });
+                th.dataset.sort = dir;
+
+                var tbody = table.querySelector('tbody');
+                var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+                rows.sort(function (a, b) {
+                    var av = (a.children[idx] && a.children[idx].textContent || '').trim();
+                    var bv = (b.children[idx] && b.children[idx].textContent || '').trim();
+                    // Numeric sort if both look numeric
+                    var an = parseFloat(av);
+                    var bn = parseFloat(bv);
+                    var bothNumeric = !isNaN(an) && !isNaN(bn) && av !== '' && bv !== '';
+                    var cmp;
+                    if (bothNumeric) cmp = an - bn;
+                    else cmp = av.localeCompare(bv);
+                    return dir === 'asc' ? cmp : -cmp;
+                });
+                rows.forEach(function (r) { tbody.appendChild(r); });
+            });
+        });
     }
 
-    $Worksheets = $Excel.Workbook.Worksheets
-    $WS = $Excel.Workbook.Worksheets | Where-Object { $_.Name -eq 'Overview' }
+    document.querySelectorAll('.svc-search').forEach(attachSearch);
+    document.querySelectorAll('.svc-table').forEach(attachSort);
 
-    $WS.SetValue(75, 70, '')
-    $WS.SetValue(76, 70, '')
-    $WS.View.ShowGridLines = $false
+    // "Expand all" / "Collapse all" toolbar
+    var btnExpand = document.getElementById('expand-all');
+    var btnCollapse = document.getElementById('collapse-all');
+    if (btnExpand) btnExpand.addEventListener('click', function () {
+        document.querySelectorAll('.service-section').forEach(function (d) { d.open = true; });
+    });
+    if (btnCollapse) btnCollapse.addEventListener('click', function () {
+        document.querySelectorAll('.service-section').forEach(function (d) { d.open = false; });
+    });
+})();
+'@
 
-    if($RunLite)
-    {
-        Close-ExcelPackage $excel
-    }
-    else
-    {
-        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'overview-grid-styling'
-        $Excel.Dispose()    
-    }
-        
+# Build the full document. Using a here-string so the layout reads top-down.
+$tenantBlock  = if ([string]::IsNullOrWhiteSpace($tenantSafe))  { '' } else { "<div><b>Tenant:</b> $tenantSafe</div>" }
+$versionBlock = if ([string]::IsNullOrWhiteSpace($versionSafe)) { '' } else { "<div><b>RDA version:</b> $versionSafe</div>" }
+$extractBlock = if ([string]::IsNullOrWhiteSpace($extractTimeText)) { '' } else { "<div><b>Extraction time:</b> $extractTimeText</div>" }
+$reportBlock  = if ([string]::IsNullOrWhiteSpace($reportTimeText))  { '' } else { "<div><b>Reporting time:</b> $reportTimeText</div>" }
+$platBlock    = if ([string]::IsNullOrWhiteSpace($platSafe))        { '' } else { "<div><b>Environment:</b> $platSafe</div>" }
 
-    $TableStyleEx = if($PlatOS -eq 'PowerShell Desktop'){'Medium1'}else{$TableStyle}
-    $TableStyle = if($PlatOS -eq 'PowerShell Desktop'){'Medium15'}else{$TableStyle}
-    #$TableStyle = 'Medium22'
-    $Font = 'Segoe UI'
+# Privacy banner. Obfuscated runs surface a green confirmation; identifiable
+# runs surface an amber warning so anyone opening the report is reminded the
+# content carries real subscription / resource names.
+if ($ObfuscationStatus -eq 'obfuscated')
+{
+    $privacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names have been replaced with deterministic pseudonyms (prod_/nonprod_ prefixes). Real identifiers are not present. Suitable for sharing.</div></div>'
+}
+else
+{
+    $privacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
+}
 
-    if($RunLite)
-    {
-        $excel = Open-ExcelPackage -Path $file -KillExcel
-    }
-    else
-    {
-        $Excel = New-Object -TypeName OfficeOpenXml.ExcelPackage $File
-    }
+$html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="Resource Discovery for Azure (Summary.ps1)">
+<title>$titleSafe - $subSafe</title>
+<style>
+$css
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1>$titleSafe</h1>
+<div class="meta">
+<div><b>Subscription:</b> $subSafe</div>
+$tenantBlock
+<div><b>Generated:</b> $generated</div>
+$versionBlock
+$extractBlock
+$reportBlock
+$platBlock
+<div><b>Total Resources:</b> $TotalResources</div>
+<div><b>Service Types:</b> $($ServiceSummary.Count)</div>
+</div>
+</header>
 
-    $Worksheets = $Excel.Workbook.Worksheets | Where-Object { $_.Name -ne 'Overview' }
-    $WS = $Excel.Workbook.Worksheets | Where-Object { $_.Name -eq 'Overview' }
+$privacyBanner
 
-    # AddShape throws "Name already exists in the drawings collection" if the
-    # named shape is already on the worksheet from a prior save. This can
-    # happen when ResourceInventory.ps1 runs against an .xlsx that already
-    # has shapes baked in - either because a previous wrapper iteration left
-    # the file behind, or because the per-service Export-Excel calls upstream
-    # added drawings of their own. Defensive: remove the shape if present
-    # before adding it. Idempotent and safe.
-    $existingTP00 = $WS.Drawings | Where-Object { $_.Name -eq 'TP00' }
-    if ($existingTP00) { $WS.Drawings.Remove($existingTP00) }
+<div class="charts">
+<section class="card">
+<h2>By Service</h2>
+$donutSvg
+</section>
+<section class="card">
+<h2>Top Services by Count</h2>
+$barSvg
+</section>
+</div>
 
-    $TabDraw = $WS.Drawings.AddShape('TP00', 'Rect')
-    $TabDraw.SetSize(130 , 78)
-    $TabDraw.SetPosition(1, 0, 0, 0)
-    $TabDraw.TextAlignment = 'Center'
+<div class="card" style="margin-bottom: 20px;">
+<h2>Services <button id="expand-all" type="button" style="float:right; margin-left:8px;">Expand all</button><button id="collapse-all" type="button" style="float:right;">Collapse all</button></h2>
+$($serviceSectionsHtml.ToString())
+</div>
 
-    $Table = @()
-    foreach ($WorkS in $Worksheets)
-    {
-        # Each per-service worksheet is expected to have exactly one Table
-        # whose name follows the pattern "<Name>_<Size>" (the size half is
-        # the row count used to populate the Overview tabs grid). Worksheets
-        # that lack a Table - or have a Table whose name does not match the
-        # pattern - are skipped rather than being allowed to throw on an
-        # unsplittable null. Without this guard a single misshapen sheet
-        # blocks the entire Overview build.
-        $tableName = try { $WorkS.Tables.Name } catch { $null }
-        if ([string]::IsNullOrWhiteSpace($tableName)) { continue }
+<footer>
+Generated by Resource Discovery for Azure (RDA) - Summary.ps1
+</footer>
+</div>
+<script>
+$js
+</script>
+</body>
+</html>
+"@
 
-        $parts = $tableName -split '_'
-        $size = 0
-        if ($parts.Count -ge 2) { [int]::TryParse($parts[1], [ref]$size) | Out-Null }
-
-        $tmp = @{
-            'Name' = $WorkS.name;
-            'Size' = $size
-        }
-
-        $Table += $tmp
-    }
-
-    if($RunLite)
-    {
-        Close-ExcelPackage $excel
-    }
-    else
-    {
-        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'overview-tabs-table'
-        $Excel.Dispose()    
-    }
-
-    $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-    $Table | 
-    ForEach-Object { [PSCustomObject]$_ } | Sort-Object -Property 'Size' -Descending |
-    Select-Object -Unique 'Name',
-    'Size' | Export-Excel -Path $File -WorksheetName 'Overview' -AutoSize -MaxAutoSizeRows 100 -TableName 'AzureTabs' -TableStyle $TableStyleEx -Style $Style -StartRow 6 -StartColumn 1
-
-    $Date = (get-date -Format "MM/dd/yyyy")
-
-    $ExtractTime = if($ExtractionRunTime.Totalminutes -lt 1){($ExtractionRunTime.Seconds.ToString()+' Seconds')}else{($ExtractionRunTime.Totalminutes.ToString('#######.##')+' Minutes')}
-    $ReportTime = ($ReportingRunTime.Totalminutes.ToString('#######.##')+' Minutes')
-
-    # $User and $TotalRes are kept for backward-compatibility - upstream forks
-    # or downstream consumers may reference them via dot-sourcing patterns.
-    # The original assignment of $User crashed the entire Summary build if
-    # $Subscriptions was empty or its first element lacked a .user, even
-    # though nothing in the script body reads $User itself. Guarding the
-    # assignment is cheap insurance against a regression that would surface
-    # only in unusual environments.
-    $User = if ($Subscriptions -and $Subscriptions.Count -gt 0 -and $Subscriptions[0].user) { $Subscriptions[0].user.name } else { '<unknown user>' }
-    $TotalRes = $Resources
-
-
-    if($RunLite)
-    {
-        $excel = Open-ExcelPackage -Path $file -KillExcel
-    }
-    else
-    {
-        $Excel = New-Object -TypeName OfficeOpenXml.ExcelPackage $File
-    }
-
-    $Worksheets = $Excel.Workbook.Worksheets 
-    $WS = $Excel.Workbook.Worksheets | Where-Object { $_.Name -eq 'Overview' }
-
-
-    $cell = $WS.Cells | Where-Object {$_.Address -like 'A*' -and $_.Address -notin 'A1','A2','A3','A4','A5','A6'}
-    
-    foreach ($item in $cell) 
-    {
-        $Works = $Item.Text
-        $Link = New-Object -TypeName OfficeOpenXml.ExcelHyperLink ("'"+$Works+"'"+'!A1'),$Works
-        $Item.Hyperlink = $Link
-    }
-
-    # Same defensive guard as the TP00 site above. EPPlus throws
-    # "Name already exists in the drawings collection" if AddShape is called
-    # with a name that's already present, which surfaces when running against
-    # an .xlsx that retained shapes from an earlier reporting pass.
-    $existingInventory = $WS.Drawings | Where-Object { $_.Name -eq 'Inventory' }
-    if ($existingInventory) { $WS.Drawings.Remove($existingInventory) }
-
-    $Draw = $WS.Drawings.AddShape('Inventory', 'Rect')
-    $Draw.SetSize(445, 240)
-    $Draw.SetPosition(1, 0, 2, 5)
-
-    $txt = $Draw.RichText.Add('Version ' + $Version + "`n")
-    $txt.Size = 14
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add('Report Date: ')
-    $txt.Size = 11
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add($Date + "`n")
-    $txt.Size = 12
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add('Extraction Time: ')
-    $txt.Size = 11
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add($ExtractTime + "`n")
-    $txt.Size = 12
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add('Reporting Time: ')
-    $txt.Size = 11
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add($ReportTime + "`n")
-    $txt.Size = 12
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add('Environment: ')
-    $txt.Size = 11
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $txt = $Draw.RichText.Add($PlatOS)
-    $txt.Size = 12
-    $txt.ComplexFont = $Font
-    $txt.LatinFont = $Font
-
-    $Draw.TextAlignment = 'Center'
-
-    $DrawP00 = $WS.Drawings | Where-Object { $_.Name -eq 'TP00' }
-    $P00Name = 'Reported Resources'
-    $DrawP00.RichText.Add($P00Name).Size = 16
-
-    if($RunLite)
-    {
-        Close-ExcelPackage $excel
-    }
-    else
-    {
-        Save-ExcelPackageWithDiagnostics -Package $Excel -File $File -SaveSite 'final-shape-and-summary-text'
-        $Excel.Dispose()    
-    }
-
-
-
-$excel = Open-ExcelPackage -Path $file -KillExcel
-
-Close-ExcelPackage $excel
+Set-Content -Path $HtmlFile -Value $html -Encoding utf8
+Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
+Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
+$fileSize = (Get-Item $HtmlFile).Length
+Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $fileSize, ($fileSize / 1KB)) -ForegroundColor Green
+if ($ObfuscationStatus -eq 'obfuscated')
+{
+    Write-Host "  Privacy posture: obfuscated (safe to share)" -ForegroundColor Green
+}
+else
+{
+    Write-Host "  Privacy posture: identifiable (contains real names; treat as confidential)" -ForegroundColor Yellow
+}

@@ -270,69 +270,12 @@ function Invoke-PreFlightChecks {
         Exit-Wrapper -Code 1
     }
 
-    # 4. ImportExcel health probe.
+    # 4. (removed) ImportExcel / EPPlus health probe.
     #
-    # ImportExcel is the Excel-writer this script depends on. A partially
-    # installed module (manifest present, bundled EPPlus assemblies missing
-    # or version-mismatched) causes New-ExcelStyle to silently return $null.
-    # That $null then flows through every collector under Services\* and
-    # crashes ~30 layers down inside Set-ExcelRange.ps1 with a confusing
-    # 'HorizontalAlignment cannot be found' error - long after the user has
-    # waited through resource enumeration. Catch it here with a one-line
-    # actionable message instead. See ARI issue #17 for upstream context.
-    if (-not (Get-Module -Name ImportExcel -ListAvailable))
-    {
-        Write-Host "ERROR: ImportExcel module is not installed." -ForegroundColor Red
-        Write-Host "  Install with:" -ForegroundColor Red
-        Write-Host "    Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
-        Exit-Wrapper -Code 1
-    }
-    try
-    {
-        Import-Module ImportExcel -ErrorAction Stop
-    }
-    catch
-    {
-        Write-Host ("ERROR: ImportExcel is installed but failed to import: {0}" -f $_.Exception.Message) -ForegroundColor Red
-        Write-Host "  Reinstall with:" -ForegroundColor Red
-        Write-Host "    Get-Module ImportExcel -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
-        Write-Host "    Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
-        Exit-Wrapper -Code 1
-    }
-    $styleProbe = $null
-    try
-    {
-        $styleProbe = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0 -ErrorAction Stop
-    }
-    catch
-    {
-        Write-Host ("ERROR: ImportExcel preflight failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
-    }
-    # New-ExcelStyle returns a PSBoundParametersDictionary on healthy installs,
-    # so check for the HorizontalAlignment key (not a declared property). On a
-    # broken install the cmdlet returns $null or an object missing the key.
-    $styleProbeOk = $false
-    if ($null -ne $styleProbe)
-    {
-        try
-        {
-            $styleProbeOk = ($styleProbe['HorizontalAlignment'] -eq 'Center')
-        }
-        catch
-        {
-            $styleProbeOk = $false
-        }
-    }
-    if (-not $styleProbeOk)
-    {
-        Write-Host "ERROR: ImportExcel module is in a broken state (New-ExcelStyle returned an unusable object)." -ForegroundColor Red
-        Write-Host "  This usually means the module manifest is present but the bundled EPPlus assemblies are missing or version-mismatched." -ForegroundColor Red
-        Write-Host "  Reinstall with:" -ForegroundColor Red
-        Write-Host "    Get-Module ImportExcel -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
-        Write-Host "    Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
-        Exit-Wrapper -Code 1
-    }
-    Write-Host "ImportExcel health: OK" -ForegroundColor Green
+    # The report format changed from Excel (.xlsx) to a self-contained HTML
+    # report (Extension/Summary.ps1), which has no external module dependency.
+    # There is nothing to preflight here any more. This is the dependency that
+    # previously failed in Cloud Shell when ImportExcel was partially installed.
 
     Write-Host "Pre-flight checks passed." -ForegroundColor Green
     Write-Host ""

@@ -8,7 +8,7 @@ This tool leverages read-only integrations with Azure APIs and Azure Monitor. Ou
 
 **Key Features:**
 - Read-only Azure API integration
-- Automated Excel and JSON report generation
+- Automated self-contained HTML and JSON report generation (no Excel/ImportExcel dependency)
 - 31-day historical metrics collection
 - Parallel processing for improved performance
 - Support for [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell") and local PowerShell environments
@@ -82,7 +82,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 - Browser-based, no setup
 - Pre-authenticated to your Azure tenant
-- `Az` and `ImportExcel` modules pre-installed by Microsoft
+- `Az` module pre-installed by Microsoft
 - Access at [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell")
 - Sessions are ephemeral by default. Mount a storage account (Cloud Shell Settings > Reset User Settings > Mount storage account) if you need outputs to persist across sessions or want to use `-Resume` on a follow-up session.
 
@@ -91,7 +91,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
 - [Azure CLI Account Extension](https://learn.microsoft.com/en-us/cli/azure/azure-cli-extensions-overview)
 - Azure CLI Resource-Graph Extension (auto-installed by script)
-- **Az PowerShell module** and **ImportExcel module** (install before running — see below)
+- **Az PowerShell module** (install before running — see below)
 
 > **Note:** Install the Account Extension before running the script:
 > ```powershell
@@ -100,16 +100,17 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 ##### Installing the required PowerShell modules
 
-> **Cloud Shell users:** Both `Az` and `ImportExcel` are pre-installed by Microsoft. Skip this section entirely.
+> **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-The script needs both `Az` and `ImportExcel` modules. Install them once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
+The script needs the `Az` module. Install it once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
 
 ```powershell
 Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
-Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
 
-The script no longer installs these modules for you while it runs. Doing the install inside a script that's already loading the same module is unreliable. You can end up with a half-installed module that looks fine to PowerShell but fails much later in the run with confusing errors like "no consumption records" or "Cannot find type [OfficeOpenXml.ExcelPackage]". Installing the modules once, by hand, before the first run avoids the whole class of problem.
+The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
+
+The script no longer installs the `Az` module for you while it runs. Doing the install inside a script that's already loading the same module is unreliable. You can end up with a half-installed module that looks fine to PowerShell but fails much later in the run with confusing errors like "no consumption records". Installing the module once, by hand, before the first run avoids the whole class of problem.
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
@@ -328,7 +329,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
-| `ResourcesReport_(date).xlsx` | Consolidated Excel report |
+| `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
 | `Transcript_Log_<ReportName>_(date).txt` | Plaintext transcript of script activity (excluded from the zip when `-Obfuscate` is used) |
 | `ResourcesReport_(date).zip` | All files compressed |
 
@@ -390,6 +391,36 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
+| `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
+
+### Metrics Lookback Window
+
+`MetricsLookbackDays` shortens the history window for the **trend / utilization**
+metrics only. Lowering it (e.g. 31 → 14 or 7) reduces both run time and memory
+use, which helps on large estates that time out or hit out-of-memory errors
+during the metrics phase. It does **not** change which resources are found, and
+it does **not** affect cost/consumption data (that phase uses its own fixed
+window).
+
+The tradeoff is right-sizing accuracy: a shorter window samples fewer
+peaks/cycles, so utilization-based sizing is based on a smaller sample. For
+migration assessments prefer **14 over 7** so at least one full weekly cycle is
+captured.
+
+**Group A — bound to the lookback window. These DO shrink when you go 31 → 7/14:**
+
+| Metric | Resource | Granularity |
+|--------|----------|-------------|
+| Percentage CPU | VMs, VMSS | 15-min (VM) / 1-hr (VMSS) |
+| Available Memory Bytes | VMs, VMSS | 15-min / 1-hr |
+| cpu_percent, memory_percent | SQL, MariaDB, MySQL(+Flexible), PostgreSQL(+Flexible) | 30-min / 1-hr |
+| cpu_used, dtu_used | SQL DB | 30-min |
+| physical_data_read_percent, log_write_percent | SQL DB | 1-hr |
+| FunctionExecutionCount/Units | Functions | daily |
+
+Capacity and point-in-time metrics (storage used, limits, CosmosDB throughput,
+ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
+**not** affected by this setting.
 
 ### Privacy & Obfuscation Parameters
 
@@ -453,10 +484,6 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
 - The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
 - Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
-
-**ImportExcel `'HorizontalAlignment' cannot be found` error:**
-- Same partial-install pattern as the `Az` module. The wrapper preflight catches this at startup now, but if you see it mid-run on an older code branch, fix it with: `Get-Module ImportExcel -ListAvailable | Uninstall-Module -Force; Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
-- Then re-run with `-Resume` to retry only the failed subs.
 
 **Cloud Shell session ended mid-run:**
 - Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.

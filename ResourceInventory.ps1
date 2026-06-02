@@ -196,73 +196,12 @@ Function RunInventorySetup()
         }
 
 
-        Write-Log -Message ('Checking ImportExcel Module...') -Severity 'Info'
-
-        $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-    
-        if ($null -ne $VarExcel)
-        {
-            Write-Log -Message ('ImportExcel Module Version: {0}' -f $VarExcel.Version) -Severity 'Success'
-        }
-        else
-        {
-            # Behaviour change (deliberate): do not Install-Module ImportExcel
-            # from inside this script. Same rationale as the Az module check
-            # above - in-process module installs into a script that's already
-            # importing the same module produce silent broken installs that
-            # only surface much later. Fail loud here with a clear command.
-            Write-Log -Message ('ImportExcel Module not found.') -Severity 'Error'
-            Write-Log -Message ('Install it manually before re-running this script. From an elevated PowerShell 7 prompt:') -Severity 'Error'
-            Write-Log -Message ('  Install-Module -Name ImportExcel -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
-            throw 'ImportExcel module is required and was not found. See log above for installation instructions.'
-        }
-
-        # Eagerly import ImportExcel so its bundled EPPlus assembly is loaded into the
-        # current AppDomain before any code path constructs OfficeOpenXml types via
-        # New-Object. -ListAvailable (above) only confirms the module exists; it does
-        # not load it. Without this explicit import, scripts further down the call
-        # chain (notably Extension/Summary.ps1, which is invoked in a child scope via
-        # `& $SummaryPath ...`) fail with:
-        #
-        #   Cannot find type [OfficeOpenXml.ExcelPackage]: verify that the
-        #   assembly containing this type is loaded.
-        #
-        # The failure surfaces especially on Windows PowerShell Desktop in
-        # multi-subscription runs where the auto-import behavior across iterations
-        # can lose the loaded assembly's reference. Importing once here is idempotent
-        # and inexpensive.
-        try {
-            Import-Module ImportExcel -ErrorAction Stop -Force -DisableNameChecking | Out-Null
-            if (-not ([System.Management.Automation.PSTypeName]'OfficeOpenXml.ExcelPackage').Type) {
-                Write-Log -Message ('ImportExcel imported but OfficeOpenXml.ExcelPackage type is not loadable. The Excel report step will fail.') -Severity 'Error'
-            }
-
-            # New-ExcelStyle health probe.
-            #
-            # On a partially-installed ImportExcel (manifest present but bundled
-            # EPPlus assemblies missing or version-mismatched), New-ExcelStyle
-            # returns $null instead of an OfficeOpenXml.Style.ExcelStyle. That
-            # $null then flows into ~30 collectors under Services\* and crashes
-            # deep inside Set-ExcelRange.ps1 with a confusing 'HorizontalAlignment
-            # cannot be found' error - long after the user has waited through
-            # resource enumeration. Catch it here with one actionable message.
-            # See ARI issue #17 for upstream context.
-            $rdaStyleProbe = $null
-            try { $rdaStyleProbe = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0 -ErrorAction Stop }
-            catch { Write-Log -Message ('New-ExcelStyle probe threw: {0}' -f $_.Exception.Message) -Severity 'Error' }
-            $rdaStyleProbeOk = $false
-            if ($null -ne $rdaStyleProbe) {
-                try { $rdaStyleProbeOk = ($rdaStyleProbe['HorizontalAlignment'] -eq 'Center') }
-                catch { $rdaStyleProbeOk = $false }
-            }
-            if (-not $rdaStyleProbeOk) {
-                Write-Log -Message ('ImportExcel module is in a broken state - New-ExcelStyle returned an unusable object. This usually means manifest is present but bundled EPPlus assemblies are missing or version-mismatched. Reinstall with: Get-Module ImportExcel -ListAvailable | Uninstall-Module -Force; Install-Module -Name ImportExcel -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser') -Severity 'Error'
-                throw 'ImportExcel preflight failed - reinstall the module and re-run.'
-            }
-        } catch {
-            Write-Log -Message ('Import-Module ImportExcel failed: {0}' -f $_.Exception.Message) -Severity 'Error'
-            throw
-        }
+        # NOTE: The ImportExcel / EPPlus preflight that used to live here was
+        # removed when the report format changed from Excel (.xlsx) to a
+        # self-contained HTML report (Extension/Summary.ps1). The HTML report
+        # has no external module dependency, so there is nothing to preflight.
+        # This is the dependency that previously failed in Cloud Shell when the
+        # module was partially installed.
     }
     
     function CheckPowerShell() 
@@ -716,7 +655,7 @@ function ExecuteInventoryProcessing()
     function InitializeInventoryProcessing()
     {   
         $Global:ZipOutputFile = ($DefaultPath + $Global:ReportName + "_" + $CurrentDateTime + ".zip")
-        $Global:File = ($DefaultPath + $Global:ReportName + "_" + $CurrentDateTime + ".xlsx")
+        $Global:HtmlFile = ($DefaultPath + $Global:ReportName + "_" + $CurrentDateTime + ".html")
         $Global:AllResourceFile = ($DefaultPath + "Full_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:JsonFile = ($DefaultPath + "Inventory_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
@@ -726,7 +665,7 @@ function ExecuteInventoryProcessing()
         $Global:LogFile = ($DefaultPath + "Logs_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
     
 
-        Write-Log -Message ('Report Excel File: {0}' -f $File) -Severity 'Info'
+        Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
 
     function Test-DataPlaneAuthReady([string]$Phase)
@@ -1030,32 +969,11 @@ function ExecuteInventoryProcessing()
     {
         Write-Log -Message ("Starting Reporting Phase.") -Severity 'Info'
 
-        $Services = @()
-
-        if($PSScriptRoot -like '*\*')
-        {
-            $Services = Get-ChildItem -Path ($PSScriptRoot + '\Services\*.ps1') -Recurse
-        }
-        else
-        {
-            $Services = Get-ChildItem -Path ($PSScriptRoot + '/Services/*.ps1') -Recurse
-        }
-
-        Write-Log -Message ('Services Found: ' + $Services.Count) -Severity 'Info'
-        $Lops = $Services.count
-        $ReportCounter = 0
-
-        foreach ($Service in $Services) 
-        {
-            $c = (($ReportCounter / $Lops) * 100)
-            $c = [math]::Round($c)
-            
-            Write-Log -Message ("Running Services: $Service") -Severity 'Info'
-            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
-
-            $ReportCounter++
-        }
-
+        # The Inventory JSON is the report's single source of truth. It is
+        # built entirely from $Global:SmaResources, which the Processing phase
+        # (CreateResourceJobs) already populated. The HTML report (Summary.ps1)
+        # renders from this JSON. There is no per-collector Excel-writing pass
+        # any more - the Excel/EPPlus dependency has been removed.
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
@@ -1380,7 +1298,14 @@ function FinalizeOutputs
             $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
         }
 
-        $ChartsRun = & $SummaryPath -File $file -TableStyle $TableStyle -PlatOS $PlatformOS -Subscriptions $Subscriptions -Resources $Resources -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -RunLite $false -Version $Global:Version
+        # Tenant ID is shown in the report header for reference, but it is a
+        # real Azure identifier and must NOT appear in an obfuscated (shareable)
+        # report. Pass it only when NOT obfuscating; the obfuscated HTML then
+        # carries no tenant GUID, consistent with the four obfuscation
+        # dictionaries that scrub every other identifier.
+        $reportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
+        $reportTitle = ('Azure Resource Inventory - {0}' -f $Global:ReportName)
+        $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS
     }
 
     ProcessSummary
@@ -1618,7 +1543,7 @@ if($Obfuscate.IsPresent)
     # Exclude dictionary and transcript from zip - use specific json files only
     $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
-        Path = @($Global:File, $Global:ConsumptionFileCsv) + $jsonFiles
+        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
@@ -1627,7 +1552,7 @@ if($Obfuscate.IsPresent)
 else
 {
     $compressionOutput = @{
-        Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
+        Path = $Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }

@@ -25,9 +25,9 @@ AfterAll {
 }
 
 Describe "Zip File Contents" {
-    It "Should contain an Excel report file" {
-        $xlsx = $script:AllFiles | Where-Object { $_.Extension -eq '.xlsx' }
-        $xlsx | Should -Not -BeNullOrEmpty
+    It "Should contain an HTML report file" {
+        $html = $script:AllFiles | Where-Object { $_.Extension -eq '.html' }
+        $html | Should -Not -BeNullOrEmpty
     }
 
     It "Should contain an inventory JSON file" {
@@ -46,7 +46,7 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
-        $allowedExtensions = @('.xlsx', '.json', '.csv')
+        $allowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles) {
             $file.Extension | Should -BeIn $allowedExtensions -Because "File '$($file.Name)' has unexpected extension"
         }

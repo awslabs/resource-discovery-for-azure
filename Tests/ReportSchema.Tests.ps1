@@ -1,26 +1,15 @@
 # Report Schema Validation Tests
-# Validates that the Excel report has correct worksheet names and column headers
+# Validates that the HTML report is present and structurally correct, and that
+# every inventory resource type with data surfaces as a section in the report.
+#
+# The report format changed from Excel (.xlsx worksheets) to a self-contained
+# HTML file produced by Extension/Summary.ps1. These tests therefore validate
+# the HTML structure (service <details> sections keyed by id="svc-<slug>")
+# instead of worksheet names/columns. Column-level schema correctness is now
+# covered by the inventory-JSON-driven tests (the JSON is the source the HTML
+# renders from).
+#
 # Run with: Invoke-Pester ./Tests/ReportSchema.Tests.ps1 -Output Detailed
-
-$ExpectedSchema = @{
-    'Virtual Machines' = @('Subscription', 'ResourceGroup', 'Name', 'Size', 'CPU', 'Memory', 'Location', 'OS', 'OSName', 'OSVersion', 'ImageReference', 'ImageVersion', 'ImageSku', 'ImageOffer', 'OSDisk', 'OSDiskSizeGB', 'HybridBenefit', 'PowerState', 'AvailabilitySet', 'CreatedTime')
-    'AKS' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Sku', 'SkuTier', 'KubernetesVersion', 'LoadBalancerSku', 'NodePoolName', 'PoolProfileType', 'PoolMode', 'PoolOS', 'NodeSize', 'OSDiskSize', 'Nodes', 'Autoscale', 'AutoscaleMax', 'AutoscaleMin', 'MaxPodsPerNode', 'OrchestratorVersion')
-    'Containers' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Sku', 'InstanceOSType', 'ContainerName', 'ContainerState', 'ContainerImage', 'RestartCount', 'StartTime', 'Command', 'RequestCPU', 'RequestMemoryGB')
-    'Registries' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'State', 'Encryption', 'CreatedTime')
-    'VM Scale Sets' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKUTier', 'VMSize', 'vCPUs', 'RAM', 'License', 'Instances', 'AutoscaleEnabled', 'VMOS', 'OSImage', 'ImageVersion', 'DiskSizeGB', 'StorageAccountType', 'AcceleratedNetworkingEnabled', 'CreatedTime')
-    'SQL DBs' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'StorageAccountType', 'DatabaseServer', 'SecondaryLocation', 'Status', 'Type', 'Tier', 'ComputeTier', 'Sku', 'License', 'Capacity', 'DataMaxSizeGB', 'ZoneRedundant', 'CatalogCollation', 'ReadReplicaCount', 'ElasticPoolID')
-    'SQL Servers' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Kind', 'State', 'Version', 'ZoneRedundant')
-    'Runbooks' = @('Subscription', 'ResourceGroup', 'AutomationAccountName', 'AutomationAccountState', 'AutomationAccountSKU', 'AutomationAccountCreatedTime', 'Location', 'RunbookName', 'LastModifiedTime', 'RunbookState', 'RunbookType', 'RunbookDescription')
-    'Availability Sets' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'FaultDomains', 'UpdateDomains', 'VirtualMachines')
-    'FrontDoor' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Type', 'State', 'WebApplicationFirewall')
-    'Key Vaults' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKUFamily', 'SKU')
-    'Service BUS' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'Status', 'GeoRep', 'ThroughputUnits', 'CreatedTime')
-    'Load Balancers' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'SKUTier', 'RuleCount')
-    'Public IPs' = @('Subscription', 'ResourceGroup', 'Name', 'SKU', 'Location', 'AllocationType', 'Version', 'ProvisioningState', 'Use', 'AssociatedResource', 'AssociatedResourceType')
-    'Data Explorer Clusters' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'ComputeSpecifications', 'InstanceCount', 'State', 'StateReason', 'DiskEncryption', 'StreamingIngestion', 'OptimizedAutoscale', 'OptimizedAutoscaleMin', 'OptimizedAutoscaleMax')
-    'Storage Acc' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'Tier', 'Kind', 'AccessTier', 'PrimaryLocation', 'StatusOfPrimary', 'HierarchicalNamespace', 'CreatedTime')
-    'Disks' = @('Subscription', 'ResourceGroup', 'Name', 'Tier', 'State', 'AssociatedResource', 'SKU', 'Size', 'Location', 'OSType', 'DiskIOPS', 'DiskMBps', 'CreatedTime')
-}
 
 Describe 'Report Schema Validation' {
     BeforeAll {
@@ -38,22 +27,29 @@ Describe 'Report Schema Validation' {
         New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
         Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
 
-        $script:XlsxFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.xlsx' | Select-Object -First 1
+        $script:HtmlFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.html' | Select-Object -First 1
+        $script:HtmlContent = if ($script:HtmlFile) { Get-Content $script:HtmlFile.FullName -Raw } else { '' }
 
-        $script:ExcelData = @{}
-        if ($script:XlsxFile) {
-            $worksheets = Get-ExcelSheetInfo -Path $script:XlsxFile.FullName
-            foreach ($ws in $worksheets) {
-                try {
-                    $data = Import-Excel -Path $script:XlsxFile.FullName -WorksheetName $ws.Name
-                    if ($data) {
-                        $script:ExcelData[$ws.Name] = @($data[0].PSObject.Properties.Name)
-                    }
-                } catch {
-                    # Sheets like Overview have no standard headers
-                }
-            }
+        # Extract the service-section slugs the report emitted. Summary.ps1
+        # builds one <details class="service-section" id="svc-<slug>"> per
+        # populated service, where <slug> is the service/JSON key lowercased
+        # with non-alphanumerics replaced by '-'.
+        $script:SectionSlugs = @()
+        if ($script:HtmlContent) {
+            $svcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
+            $script:SectionSlugs = @($svcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
         }
+
+        # Helper mirroring Summary.ps1's slug rule so tests can map a service
+        # name to its expected section id.
+        function script:Get-ServiceSlug([string]$Name) {
+            return ($Name -replace '[^a-zA-Z0-9]', '-').ToLower()
+        }
+
+        $invFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $script:InventoryJson = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
+
+        $script:ObfuscationSectionPattern = '^(prod|nonprod)-(databricks-|aks-|vmss-)?[0-9a-f]{8}-'
     }
 
     AfterAll {
@@ -62,162 +58,75 @@ Describe 'Report Schema Validation' {
         }
     }
 
-    It 'Should contain an xlsx file in the zip' {
-        $script:XlsxFile | Should -Not -BeNullOrEmpty
+    It 'Should contain an HTML report file in the zip' {
+        $script:HtmlFile | Should -Not -BeNullOrEmpty
     }
 
-    $testCases = $ExpectedSchema.Keys | ForEach-Object { @{ WorksheetName = $_; ExpectedColumns = $ExpectedSchema[$_] } }
+    It 'HTML report should be a self-contained document (no external CDN/script/style references)' {
+        if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
+        $script:HtmlContent | Should -Match '<!DOCTYPE html>' -Because 'the report must be a complete HTML document'
+        # No external resource references - the report must render offline.
+        $script:HtmlContent | Should -Not -Match 'src\s*=\s*"https?://' -Because 'no external script/image sources allowed'
+        $script:HtmlContent | Should -Not -Match '<link[^>]+href\s*=\s*"https?://' -Because 'no external stylesheet links allowed'
+    }
 
-    It "Worksheet [<WorksheetName>] should have correct columns" -TestCases $testCases {
-        param($WorksheetName, $ExpectedColumns)
+    It 'HTML report should not reference Excel/EPPlus artifacts' {
+        if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
+        $script:HtmlContent | Should -Not -Match 'OfficeOpenXml' -Because 'the HTML report has no Excel dependency'
+    }
 
-        if (-not $script:ExcelData -or -not $script:ExcelData.ContainsKey($WorksheetName)) {
-            Set-ItResult -Skipped -Because "Worksheet '$WorksheetName' not present in this report"
-            return
-        }
-        $actual = $script:ExcelData[$WorksheetName]
-
-        # All actual columns must exist in expected schema (no unknown columns)
-        foreach ($col in $actual) {
-            $col | Should -BeIn $ExpectedColumns -Because "Column '$col' in '$WorksheetName' must be in the expected schema"
-        }
-
-        # Actual columns must be in the same relative order as expected
-        $expectedOrder = $ExpectedColumns | Where-Object { $_ -in $actual }
-        $actual | Should -Be $expectedOrder -Because "Columns in '$WorksheetName' must maintain expected order"
+    It 'HTML report should declare a Total Resources figure' {
+        if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
+        $script:HtmlContent | Should -Match 'Total Resources' -Because 'the header summarises the run'
     }
 }
 
-
 # ============================================================
-# Generic worksheet invariants (covers every emitted worksheet,
-# including the 40+ that don't have a hand-maintained schema in
-# $ExpectedSchema above). Catches broad correctness regressions
-# without requiring per-collector column lists.
+# Section / inventory parity. Every inventory JSON resource type with data
+# should surface as a service section in the HTML report. This replaces the
+# old "every populated worksheet exists" invariant.
 # ============================================================
-Describe 'Generic worksheet invariants' {
+Describe 'HTML section invariants' {
     BeforeAll {
-        # If outer BeforeAll did not run because the zip was missing, skip.
-        $script:GenericReady = $script:XlsxFile -and $script:ExcelData -and ($script:ExcelData.Count -gt 0)
-
-        $script:InventoryJsonPath = $null
-        if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) {
-            $invFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($invFile) {
-                $script:InventoryJsonPath = $invFile.FullName
-                $script:InventoryJson     = Get-Content $invFile.FullName -Raw | ConvertFrom-Json
-            }
-        }
-
-        $script:ObfuscationColumnPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-'
+        # "Fixture present" depends only on having an HTML report + inventory to
+        # compare - NOT on the section count. If we folded SectionSlugs.Count
+        # into this gate, a regression where Summary.ps1 emits an HTML with zero
+        # sections (while the inventory has data) would SKIP the parity test
+        # instead of failing it. We want that case to fail loudly.
+        $script:FixtureReady = [bool]$script:HtmlFile -and -not [string]::IsNullOrWhiteSpace($script:HtmlContent)
     }
 
-    It 'Every populated worksheet should have at least Subscription, ResourceGroup, and Name columns (or be Overview)' {
-        if (-not $script:GenericReady) { Set-ItResult -Skipped -Because 'no fixture'; return }
-        foreach ($ws in $script:ExcelData.Keys) {
-            if ($ws -eq 'Overview' -or $ws -like '_*' -or $ws -like '*Recommendations*') { continue }
-            $cols = $script:ExcelData[$ws]
-            # Allow Bastion / Snapshots / etc. that historically may not include all three.
-            # The minimum invariant: at least ONE of the three core fields present.
-            $hasCore = ($cols -contains 'Subscription') -or ($cols -contains 'ResourceGroup') -or ($cols -contains 'Name')
-            $hasCore | Should -BeTrue -Because "Worksheet '$ws' has columns [$($cols -join ', ')] - none are Subscription/ResourceGroup/Name"
-        }
-    }
-
-    It 'No column name in any worksheet should match the obfuscation pattern' {
-        # The obfuscator runs on VALUES, never on COLUMN NAMES. If a column name
-        # ever ended up obfuscated, every consumer of the report would be confused.
-        if (-not $script:GenericReady) { Set-ItResult -Skipped -Because 'no fixture'; return }
-        foreach ($ws in $script:ExcelData.Keys) {
-            $cols = $script:ExcelData[$ws]
-            foreach ($col in $cols) {
-                $col | Should -Not -Match $script:ObfuscationColumnPattern -Because "Column '$col' in worksheet '$ws' was obfuscated; column names must remain literal"
-            }
-        }
-    }
-
-    It 'Every inventory JSON resource type with data should have a corresponding worksheet' {
-        if (-not $script:GenericReady -or $null -eq $script:InventoryJson) {
-            Set-ItResult -Skipped -Because 'no inventory JSON in fixture'
+    It 'Every inventory resource type with data should have a corresponding HTML section' {
+        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) {
+            Set-ItResult -Skipped -Because 'no HTML or inventory JSON in fixture'
             return
         }
-        # Map of inventory JSON keys to worksheet names. This is sparse on
-        # purpose: only collectors whose JSON key differs from worksheet name
-        # need entries here. The list is short (worksheet names are usually
-        # close to the collector class name).
-        $jsonKeyToWorksheet = @{
-            VirtualMachines     = 'Virtual Machines'
-            VMSS                = 'VM Scale Sets'
-            ComputeSnapshots    = 'VM Snapshots'
-            VMDisk              = 'Disks'
-            StorageAcc          = 'Storage Acc'
-            ARCServers          = 'ARC Servers'
-            AppServicePlan      = 'App Service Plan'
-            AppServices         = 'App Services'
-            AppGW               = 'App Gateway'
-            APIM                = 'APIM'
-            ServiceBUS          = 'Service BUS'
-            EvtHub              = 'Event Hubs'
-            IOTHubs             = 'IOTHubs'
-            AppInsights         = 'AppInsights'
-            LoadBalancer        = 'Load Balancers'
-            VNETGTW             = 'VNET Gateways'
-            ExpressRoute        = 'Express Route'
-            VirtualWAN          = 'Virtual WAN'
-            AzureFirewall       = 'Azure Firewall'
-            PublicIP            = 'Public IPs'
-            TrafficManager      = 'Traffic Manager'
-            PublicDNS           = 'Public DNS'
-            NATGateway          = 'NAT Gateway'
-            DataExplorerCluster = 'Data Explorer Clusters'
-            NetApp              = 'NetApp'
-            CloudServices       = 'CloudServices'
-            REGISTRIES          = 'Registries'
-            CONTAINER           = 'Containers'
-            BASTION             = 'Bastion Hosts'
-            RecoveryVault       = 'Recovery Vaults'
-            AutomationAcc       = 'Runbooks'
-            AvSet               = 'Availability Sets'
-            Vault               = 'Key Vaults'
-            RedisCache          = 'Redis Cache'
-            PostgreSQLflexible  = 'PostgreSQL Flexible'
-            POSTGRE             = 'PostgreSQL'
-            MySQLflexible       = 'MySQL Flexible'
-            MySQL               = 'MySQL'
-            MariaDB             = 'MariaDB'
-            CosmosDB            = 'Cosmos DB'
-            SQLDB               = 'SQL DBs'
-            SQLSERVER           = 'SQL Servers'
-            SQLPOOL             = 'SQL Pools'
-            SQLMI               = 'SQL MI'
-            SQLMIDB             = 'SQL MI DBs'
-            SQLVM               = 'SQL VMs'
-            Purview             = 'Purview'
-            WrkSpace            = 'Workspaces'
-            Synapse             = 'Synapse'
-            Databricks          = 'Databricks'
-            MachineLearning     = 'Machine Learning'
-            Streamanalytics     = 'Stream Analytics Jobs'
-            ARO                 = 'ARO'
-            VMWare              = 'VMWare'
-            AVD                 = 'AVD'
-            AKS                 = 'AKS'
-            FRONTDOOR           = 'FrontDoor'
-        }
-
         $script:InventoryJson.PSObject.Properties |
             Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 } |
             ForEach-Object {
-                $jsonKey = $_.Name
-                # If the inventory has resources for this key, check that the
-                # corresponding worksheet exists. Some inventory keys do not
-                # produce a worksheet by design (rare); tolerate that with a
-                # soft warning rather than a fail.
-                if ($jsonKeyToWorksheet.ContainsKey($jsonKey)) {
-                    $expectedWs = $jsonKeyToWorksheet[$jsonKey]
-                    $script:ExcelData.ContainsKey($expectedWs) |
-                        Should -BeTrue -Because "Inventory key '$jsonKey' has resources but worksheet '$expectedWs' is missing"
-                }
+                $expectedSlug = script:Get-ServiceSlug $_.Name
+                $script:SectionSlugs | Should -Contain $expectedSlug `
+                    -Because "inventory key '$($_.Name)' has resources but HTML section 'svc-$expectedSlug' is missing"
             }
+    }
+
+    It 'No HTML section id should itself be obfuscated' {
+        # The obfuscator runs on resource VALUES, never on service/type names.
+        # A section slug is derived from the service key (e.g. "VirtualMachines"
+        # -> "virtualmachines"), so it must never look like an obfuscated token.
+        if (-not $script:FixtureReady) { Set-ItResult -Skipped -Because 'no fixture'; return }
+        foreach ($slug in $script:SectionSlugs) {
+            $slug | Should -Not -Match $script:ObfuscationSectionPattern -Because "section slug '$slug' looks obfuscated; service names must remain literal"
+        }
+    }
+
+    It 'Report should contain at least one populated service section' {
+        # Fail (not skip) when an HTML fixture exists with a populated inventory
+        # but rendered zero sections - that is the regression this guards.
+        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) { Set-ItResult -Skipped -Because 'no fixture'; return }
+        $populatedCount = @($script:InventoryJson.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
+        if ($populatedCount -eq 0) { Set-ItResult -Skipped -Because 'inventory has no populated resource types'; return }
+        $script:SectionSlugs.Count | Should -BeGreaterThan 0 -Because 'a populated inventory must render at least one service section'
     }
 }

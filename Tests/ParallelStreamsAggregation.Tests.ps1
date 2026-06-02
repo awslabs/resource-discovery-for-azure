@@ -1,8 +1,8 @@
 # Parallel-Streams Aggregation Tests
 # Validates that a parallel run (-ParallelStreams N) produces structurally
 # equivalent output to a sequential run (single sub-folder per subscription,
-# matching XLSX sheet sets, matching Inventory JSON keys, matching consumption
-# record counts, matching obfuscated-ID universes when -Obfuscate is set).
+# matching HTML service-section sets, matching Inventory JSON keys, matching
+# consumption record counts, matching obfuscated-ID universes when -Obfuscate is set).
 #
 # These tests are the drift-prevention guard for the parallel-streams feature.
 # Any change to the wrapper, the worker, or the per-sub folder convention that
@@ -65,7 +65,7 @@ BeforeAll {
     }
 
     function Get-PerSubArtifacts($subDir) {
-        $xlsxFile = Get-ChildItem -Path $subDir -Filter 'ResourcesReport_*.xlsx' | Select-Object -First 1
+        $htmlFile = Get-ChildItem -Path $subDir -Filter 'ResourcesReport_*.html' | Select-Object -First 1
         $invFile  = Get-ChildItem -Path $subDir -Filter 'Inventory_*.json'      | Select-Object -First 1
         $metFile  = Get-ChildItem -Path $subDir -Filter 'Metrics_*.json'        | Select-Object -First 1
         $conFile  = Get-ChildItem -Path $subDir -Filter 'Consumption_*.csv'     | Select-Object -First 1
@@ -99,7 +99,7 @@ BeforeAll {
         }
 
         return [pscustomobject]@{
-            XlsxPath        = if ($xlsxFile) { $xlsxFile.FullName } else { $null }
+            HtmlPath        = if ($htmlFile) { $htmlFile.FullName } else { $null }
             InventoryPath   = if ($invFile)  { $invFile.FullName }  else { $null }
             MetricsPath     = if ($metFile)  { $metFile.FullName }  else { $null }
             ConsumptionPath = if ($conFile)  { $conFile.FullName }  else { $null }
@@ -111,23 +111,19 @@ BeforeAll {
         }
     }
 
-    function Get-XlsxSheetNames($xlsxPath) {
-        # Read xl/workbook.xml from the .xlsx (which is itself a zip) to enumerate
-        # sheet names without depending on ImportExcel being available in the test env.
-        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue | Out-Null
+    function Get-HtmlSectionSlugs($htmlPath) {
+        # Enumerate the service-section slugs the HTML report emitted, without
+        # depending on any module. Summary.ps1 emits one
+        # <details class="service-section" id="svc-<slug>"> per populated
+        # service, where <slug> is the service key lowercased with
+        # non-alphanumerics replaced by '-'. This is the HTML analogue of the
+        # old XLSX worksheet-name set.
         $names = @()
-        $arch = [System.IO.Compression.ZipFile]::OpenRead($xlsxPath)
-        try {
-            $entry = $arch.Entries | Where-Object { $_.FullName -eq 'xl/workbook.xml' } | Select-Object -First 1
-            if (-not $entry) { return $names }
-            $reader = New-Object System.IO.StreamReader($entry.Open())
-            try { $xml = $reader.ReadToEnd() } finally { $reader.Dispose() }
-            $matches = [regex]::Matches($xml, '<sheet[^/]*name="([^"]+)"')
-            foreach ($m in $matches) { $names += $m.Groups[1].Value }
-        } finally {
-            $arch.Dispose()
-        }
-        return $names | Sort-Object
+        if (-not $htmlPath -or -not (Test-Path $htmlPath)) { return $names }
+        $content = Get-Content $htmlPath -Raw
+        $svcMatches = [regex]::Matches($content, 'id="svc-([a-z0-9-]+)"')
+        foreach ($m in $svcMatches) { $names += $m.Groups[1].Value }
+        return $names | Sort-Object -Unique
     }
 
     $bundles = $null
@@ -187,18 +183,18 @@ Describe 'Bundle-level structure' {
         $script:Sequential.Inner.Count | Should -BeGreaterThan 0
     }
 
-    It 'Each inner per-sub directory contains an XLSX, Inventory JSON, Metrics JSON, and Consumption CSV (sequential)' {
+    It 'Each inner per-sub directory contains an HTML report, Inventory JSON, Metrics JSON, and Consumption CSV (sequential)' {
         foreach ($a in $script:SeqArtifacts) {
-            $a.XlsxPath        | Should -Not -BeNullOrEmpty -Because 'XLSX is the primary output artifact'
+            $a.HtmlPath        | Should -Not -BeNullOrEmpty -Because 'HTML report is the primary output artifact'
             $a.InventoryPath   | Should -Not -BeNullOrEmpty
             $a.MetricsPath     | Should -Not -BeNullOrEmpty
             $a.ConsumptionPath | Should -Not -BeNullOrEmpty
         }
     }
 
-    It 'Each inner per-sub directory contains an XLSX, Inventory JSON, Metrics JSON, and Consumption CSV (parallel)' {
+    It 'Each inner per-sub directory contains an HTML report, Inventory JSON, Metrics JSON, and Consumption CSV (parallel)' {
         foreach ($a in $script:ParArtifacts) {
-            $a.XlsxPath        | Should -Not -BeNullOrEmpty
+            $a.HtmlPath        | Should -Not -BeNullOrEmpty
             $a.InventoryPath   | Should -Not -BeNullOrEmpty
             $a.MetricsPath     | Should -Not -BeNullOrEmpty
             $a.ConsumptionPath | Should -Not -BeNullOrEmpty
@@ -248,26 +244,26 @@ Describe 'Sequential vs parallel: per-sub equivalence' {
     }
 }
 
-Describe 'XLSX worksheet equivalence' {
+Describe 'HTML section equivalence' {
     BeforeEach { if (-not $script:HaveFixture) { Set-ItResult -Skipped -Because 'set $env:TEST_SEQUENTIAL_BUNDLE and $env:TEST_PARALLEL_BUNDLE to enable' } }
-    It 'Each sub has the same set of worksheets in sequential vs parallel' {
+    It 'Each sub has the same set of HTML service sections in sequential vs parallel' {
         # Match per-sub by population signature (count + types) so the comparison
         # is robust to subscription ordering differences between modes.
         foreach ($key in $script:SeqBySig.Keys) {
             $script:ParBySig.ContainsKey($key) | Should -BeTrue `
                 -Because "no parallel-side counterpart found for sequential sub with signature '$key'"
-            $seqSheets = Get-XlsxSheetNames $script:SeqBySig[$key].XlsxPath
-            $parSheets = Get-XlsxSheetNames $script:ParBySig[$key].XlsxPath
-            ($parSheets -join ',') | Should -Be ($seqSheets -join ',') `
-                -Because "worksheet set diverged for sub signature '$key'"
+            $seqSections = Get-HtmlSectionSlugs $script:SeqBySig[$key].HtmlPath
+            $parSections = Get-HtmlSectionSlugs $script:ParBySig[$key].HtmlPath
+            ($parSections -join ',') | Should -Be ($seqSections -join ',') `
+                -Because "HTML service-section set diverged for sub signature '$key'"
         }
     }
 
-    It 'Overview sheet exists in every per-sub XLSX (both modes)' {
+    It 'Every per-sub HTML report has at least one service section (both modes)' {
         foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts)) {
-            $sheets = Get-XlsxSheetNames $a.XlsxPath
-            $sheets | Should -Contain 'Overview' `
-                -Because 'the dashboard depends on the Overview sheet existing'
+            $sections = @(Get-HtmlSectionSlugs $a.HtmlPath | Where-Object { $_ })
+            $sections.Count | Should -BeGreaterThan 0 `
+                -Because 'a populated subscription must render at least one service section'
         }
     }
 }

@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param($Subscriptions, $Resources, $Task ,$File, $Metrics, $TableStyle, $ConcurrencyLimit, $FilePath, $ResourceIdDictionary, $ResourceNameDictionary, [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, $Obfuscate, $MetricsLookbackDays = 31)
+param($Subscriptions, $Resources, $Task, $ConcurrencyLimit, $FilePath, $ResourceIdDictionary, $ResourceNameDictionary, [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, $Obfuscate, $MetricsLookbackDays = 31)
 
 if ($Task -eq 'Processing')
 {
@@ -637,23 +637,4 @@ if ($Task -eq 'Processing')
     $WarningPreference = "Continue"
 
     $metricDefs = $null;
-}
-else 
-{
-    $TableName = ('Metrics_' + $Metrics.Metrics.Count)
-    $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-    
-    $Metrics.Metrics | 
-        ForEach-Object { [PSCustomObject]$_ } | 
-        Select-Object 'Subscription',
-        'ResourceGroup',
-        'Name',
-        'Location',
-        'Service',
-        'Metric',
-        'MetricAggregate',
-        'MetricMeasure',
-        'MetricTimeGrain',
-        'MetricValue',
-        'MetricCount'| Export-Excel -Path $File -WorksheetName 'Metrics' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style -Numberformat '0' -MoveToEnd 
 }

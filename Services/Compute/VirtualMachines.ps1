@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
@@ -103,45 +103,4 @@ If ($Task -eq 'Processing')
               
         $tmp
     }            
-}
-else
-{
-    if($SmaResources.VirtualMachines)
-    {
-        $TableName = 'VMTable_' + ($SmaResources.VirtualMachines |
-            Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' } |
-            Select-Object -ExpandProperty ID -Unique |
-            Measure-Object |
-            Select-Object -ExpandProperty Count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0' -VerticalAlignment Center
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Size')
-        $Exc.Add('CPU')
-        $Exc.Add('Memory')
-        $Exc.Add('Location')
-        $Exc.Add('OS')
-        $Exc.Add('OSName')
-        $Exc.Add('OSVersion')
-        $Exc.Add('ImageReference')
-        $Exc.Add('ImageVersion')
-        $Exc.Add('ImageSku')
-        $Exc.Add('ImageOffer')
-        $Exc.Add('OSDisk')
-        $Exc.Add('OSDiskSizeGB')
-        $Exc.Add('HybridBenefit')
-        $Exc.Add('PowerState')
-        $Exc.Add('AvailabilitySet')
-        $Exc.Add('CreatedTime')     
-
-        # Filter: only include VMs that are not SQLVMs
-        $ExcelVar = $SmaResources.VirtualMachines | Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' }
-                    
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Virtual Machines' -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Style $Style
-    }             
 }

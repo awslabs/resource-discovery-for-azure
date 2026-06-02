@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -67,37 +67,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.AutomationAcc)
-    {
-
-        $TableName = ('AutAccTable_'+($SmaResources.AutomationAcc.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-        $StyleExt = New-ExcelStyle -HorizontalAlignment Left -Range K:K -Width 80 -WrapText 
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('AutomationAccountName')
-        $Exc.Add('AutomationAccountState')
-        $Exc.Add('AutomationAccountSKU')
-        $Exc.Add('AutomationAccountCreatedTime')
-        $Exc.Add('Location')
-        $Exc.Add('RunbookName')
-        $Exc.Add('LastModifiedTime')
-        $Exc.Add('RunbookState')
-        $Exc.Add('RunbookType')
-        $Exc.Add('RunbookDescription')
-
-        $ExcelVar = $SmaResources.AutomationAcc  
-            
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Runbooks' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style, $StyleExt
     }
 }

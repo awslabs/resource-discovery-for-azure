@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -79,38 +79,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.AVD) 
-    {
-        $TableName = ('AVD_'+($SmaResources.AVD.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')             
-        $Exc.Add('Location')                
-        $Exc.Add('HostPoolType')
-        $Exc.Add('LoadBalancer')
-        $Exc.Add('MaxSessionLimit')
-        $Exc.Add('PreferredAppGroup')
-        $Exc.Add('AVDAgentVersion')  
-        $Exc.Add('AllowNewSession')
-        $Exc.Add('UpdateStatus')      
-        $Exc.Add('Hostname')           
-        $Exc.Add('VMSize')            
-        $Exc.Add('OSType')           
-        $Exc.Add('VMDiskType')
-        $Exc.Add('HostStatus')        
-        $Exc.Add('OSVersion')
-
-        $ExcelVar = $SmaResources.AVD
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'AVD' -AutoSize -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Style $Style    
     }
 }

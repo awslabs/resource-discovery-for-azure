@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -38,35 +38,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.StorageAcc) 
-    {
-        $TableName = ('StorAccTable_'+($SmaResources.StorageAcc.id | Select-Object -Unique).count)
-        $Style = @()
-        
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-        $Exc.Add('Tier')
-        $Exc.Add('Kind')
-        $Exc.Add('AccessTier')
-        $Exc.Add('PrimaryLocation')
-        $Exc.Add('StatusOfPrimary')
-        $Exc.Add('HierarchicalNamespace')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.StorageAcc
-
-        $ExcelVar |
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc |
-        Export-Excel -Path $File -WorksheetName 'Storage Acc' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

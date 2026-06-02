@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -38,35 +38,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.VMDisk)
-    {
-        $TableName = ('VMDiskT_'+($SmaResources.VMDisk.id | Select-Object -Unique).count)
-        $condtxt = @()
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Tier')
-        $Exc.Add('State')
-        $Exc.Add('AssociatedResource')        
-        $Exc.Add('SKU')
-        $Exc.Add('Size')
-        $Exc.Add('Location')
-        $Exc.Add('OSType')        
-        $Exc.Add('DiskIOPS')
-        $Exc.Add('DiskMBps')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.VMDisk
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Disks' -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

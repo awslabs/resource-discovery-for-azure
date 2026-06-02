@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task , $File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary) 
+param($Sub, $Resources, $Task, $ResourceIdDictionary) 
 
 if ($Task -eq 'Processing') 
 {
@@ -51,42 +51,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.SQLDB) 
-    {
-        $TableName = ('SQLDBTable_'+($SmaResources.SQLDB.id | Select-Object -Unique).count)
-
-        $Style = @()
-        $Style += New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('StorageAccountType')
-        $Exc.Add('DatabaseServer')
-        $Exc.Add('SecondaryLocation')
-        $Exc.Add('Status')
-        $Exc.Add('Type')
-        $Exc.Add('Tier')
-        $Exc.Add('ComputeTier')
-        $Exc.Add('Sku')
-        $Exc.Add('License')
-        $Exc.Add('Capacity')     
-        $Exc.Add('DataMaxSizeGB')
-        $Exc.Add('ZoneRedundant')
-        $Exc.Add('CatalogCollation')
-        $Exc.Add('ReadReplicaCount')
-        $Exc.Add('ElasticPoolID')
-
-        $ExcelVar = $SmaResources.SQLDB 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'SQL DBs' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

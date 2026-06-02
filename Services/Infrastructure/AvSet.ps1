@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -48,29 +48,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.AvSet)
-    {
-
-        $TableName = ('AvSetTable_'+($SmaResources.AvSet.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-            
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('FaultDomains')
-        $Exc.Add('UpdateDomains')
-        $Exc.Add('VirtualMachines')
-
-        $ExcelVar = $SmaResources.AvSet  
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Availability Sets' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

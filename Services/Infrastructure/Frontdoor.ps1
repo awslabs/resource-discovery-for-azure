@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -87,39 +87,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.FRONTDOOR) 
-    {
-        # Deterministic dedup by composite key so rows with shared/empty IDs aren't silently
-        # dropped. Group-Object keeps the first row for each unique combination.
-        $deduped = $SmaResources.FrontDoor |
-            ForEach-Object { [PSCustomObject]$_ } |
-            Group-Object -Property {
-                '{0}|{1}|{2}|{3}|{4}' -f $_.ID, $_.Name, $_.ResourceGroup, $_.Subscription, $_.Location
-            } |
-            ForEach-Object { $_.Group[0] }
-
-        $uniqueCount = @($deduped).Count
-        $TableName = ('FRONTDOORTable_' + $uniqueCount)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Type')
-        $Exc.Add('State')
-        $Exc.Add('ResourceType')
-        $Exc.Add('WebApplicationFirewall')
-
-        $deduped |
-            Select-Object $Exc |
-            Export-Excel -Path $File -WorksheetName 'FrontDoor' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

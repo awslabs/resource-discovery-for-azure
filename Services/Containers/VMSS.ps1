@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -83,41 +83,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.VMSS)
-    {
-        $TableName = ('VMSSTable_'+($SmaResources.VMSS.id | Select-Object -Unique).count)
-        $Style = @()        
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('AKS')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKUTier')
-        $Exc.Add('VMSize')
-        $Exc.Add('vCPUs')
-        $Exc.Add('RAM')
-        $Exc.Add('License')
-        $Exc.Add('Instances')
-        $Exc.Add('AutoscaleEnabled')
-        $Exc.Add('VMOS')
-        $Exc.Add('OSImage')
-        $Exc.Add('ImageVersion')                        
-        $Exc.Add('DiskSizeGB')
-        $Exc.Add('StorageAccountType')
-        $Exc.Add('AcceleratedNetworkingEnabled')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.VMSS 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'VM Scale Sets' -AutoSize -MaxAutoSizeRows 50 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

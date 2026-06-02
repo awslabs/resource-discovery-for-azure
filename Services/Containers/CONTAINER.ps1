@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -38,35 +38,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.CONTAINER)
-    {
-        $TableName = ('ContsTable_'+($SmaResources.CONTAINER.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Sku')
-        $Exc.Add('InstanceOSType')
-        $Exc.Add('ContainerName')
-        $Exc.Add('ContainerState')
-        $Exc.Add('ContainerImage')
-        $Exc.Add('RestartCount')
-        $Exc.Add('StartTime')
-        $Exc.Add('Command')
-        $Exc.Add('RequestCPU')
-        $Exc.Add('RequestMemoryGB')
-
-        $ExcelVar = $SmaResources.CONTAINER 
-            
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Containers' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

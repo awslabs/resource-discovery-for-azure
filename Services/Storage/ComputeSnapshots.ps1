@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task, $File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -35,34 +35,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.ComputeSnapshots) 
-    {
-        $TableName = ('ComputeSnapsTable_'+($SmaResources.ComputeSnapshots.id | Select-Object -Unique).count)
-        $Style = @()
-        
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Size')
-        $Exc.Add('Sku')
-        $Exc.Add('State')
-        $Exc.Add('OS')
-        $Exc.Add('Incremental')
-        $Exc.Add('CreatedTime')
-        $Exc.Add('SourceResourceId')
-
-        $ExcelVar = $SmaResources.ComputeSnapshots
-
-        $ExcelVar |
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc |
-        Export-Excel -Path $File -WorksheetName 'VM Snapshots' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

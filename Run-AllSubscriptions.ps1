@@ -224,7 +224,8 @@ function Invoke-PreFlightChecks {
     # A 100+ subscription run can produce 200-500 MB of zips and intermediate
     # files; if free space is already low (typically because something else
     # is filling the home directory) the run will fail late with a confusing
-    # "There is not enough space" somewhere deep in EPPlus. Catch it now.
+    # "There is not enough space" during report generation or zip packaging.
+    # Catch it now.
     try {
         $rootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
         $drive = $rootItem.PSDrive
@@ -747,9 +748,9 @@ foreach ($sub in $subscriptions) {
             Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
         }
     } catch {
-        # Surface the full exception chain so failures (e.g. EPPlus Save errors,
-        # OOM in long CloudShell runs, file-handle leaks) are diagnosable instead
-        # of being summarised to a single line. See #16.
+        # Surface the full exception chain so failures (e.g. report/JSON write
+        # errors, OOM in long CloudShell runs, file-handle leaks) are
+        # diagnosable instead of being summarised to a single line. See #16.
         $errRecord = $_
         Write-Host "ERROR processing subscription $($sub.Name): $errRecord" -ForegroundColor Red
 

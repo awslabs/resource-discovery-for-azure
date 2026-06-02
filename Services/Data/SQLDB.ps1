@@ -1,4 +1,4 @@
-param($Sub, $Resources, $Task, $ResourceIdDictionary) 
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {

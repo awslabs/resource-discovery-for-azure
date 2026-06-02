@@ -82,9 +82,15 @@ BeforeAll {
         # Resource type names that have data (non-null arrays). Excludes Version key.
         $populatedTypes = @()
         if ($inv) {
+            # "Populated" means the resource type actually has rows. Every
+            # collector emits a (possibly empty) array, so a non-null check
+            # alone would treat all ~57 types as populated even for an empty
+            # subscription. Require Count > 0 so this matches what the HTML
+            # report renders (one section per type with rows) and what an
+            # empty subscription legitimately produces (none).
             $populatedTypes = @(
                 $inv.PSObject.Properties |
-                    Where-Object { $_.Name -ne 'Version' -and $null -ne $_.Value } |
+                    Where-Object { $_.Name -ne 'Version' -and $null -ne $_.Value -and @($_.Value).Count -gt 0 } |
                     ForEach-Object { $_.Name }
             ) | Sort-Object
         }
@@ -259,11 +265,24 @@ Describe 'HTML section equivalence' {
         }
     }
 
-    It 'Every per-sub HTML report has at least one service section (both modes)' {
+    It 'Each per-sub HTML renders a section for every populated resource type (empty subs render none)' {
+        # The correct invariant ties HTML sections to the sub's OWN inventory:
+        # a populated sub must render >=1 section, and a legitimately empty sub
+        # (0 populated resource types - e.g. an empty subscription) must render
+        # 0 sections. Asserting "every sub has >=1 section" was wrong: it
+        # false-fails on tenants that contain an empty subscription. Compare the
+        # rendered section count to the populated-type count instead.
         foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts)) {
             $sections = @(Get-HtmlSectionSlugs $a.HtmlPath | Where-Object { $_ })
-            $sections.Count | Should -BeGreaterThan 0 `
-                -Because 'a populated subscription must render at least one service section'
+            $populatedCount = @($a.PopulatedTypes).Count
+            if ($populatedCount -eq 0) {
+                $sections.Count | Should -Be 0 `
+                    -Because 'an empty subscription (no populated resource types) must render no service sections'
+            }
+            else {
+                $sections.Count | Should -BeGreaterThan 0 `
+                    -Because 'a populated subscription must render at least one service section'
+            }
         }
     }
 }

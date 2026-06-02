@@ -185,17 +185,27 @@ try
         $realFailures = @($res.Failed)
 
         # A container (test file) can fail at DISCOVERY time - e.g. code in a
-        # Describe body throwing before any It runs. That produces zero failed
-        # tests (the assertions never execute) so FailedCount stays 0 and the
-        # scenario would otherwise look green while a whole block is broken.
-        # Detect failed containers explicitly and force the scenario red.
-        $failedContainers = @($res.Containers | Where-Object { $_.Result -eq 'Failed' })
-        if ($failedContainers.Count -gt 0) {
-            $failed = $failed + $failedContainers.Count
-            foreach ($c in $failedContainers) {
+        # Describe body throwing before any It runs. The assertions in that
+        # block never execute, so FailedCount stays 0 and the scenario would
+        # otherwise look green while a whole block is silently broken.
+        #
+        # The reliable signal for a discovery problem is a non-empty
+        # $container.ErrorRecord. This is distinct from a RUNTIME test failure:
+        #   - runtime failure  -> Container.Result='Failed', ErrorRecord empty
+        #                         (already counted in FailedCount / handled by
+        #                          the reclassification below)
+        #   - discovery crash  -> ErrorRecord populated, even when other blocks
+        #                         in the same file ran and the container's own
+        #                         Result reports 'Passed' (a partial crash)
+        # So we key off ErrorRecord, NOT Result, and NOT TotalCount (a partial
+        # crash still executes some tests, so TotalCount > 0).
+        $discoveryFailures = @($res.Containers | Where-Object { @($_.ErrorRecord).Count -gt 0 })
+        if ($discoveryFailures.Count -gt 0) {
+            $failed = $failed + $discoveryFailures.Count
+            foreach ($c in $discoveryFailures) {
                 $itemName = if ($c.Item) { $c.Item.ToString() } else { 'unknown container' }
-                $errText  = if ($c.ErrorRecord) { ($c.ErrorRecord | Select-Object -First 1) } else { 'discovery/container error' }
-                Write-Host ("    CONTAINER FAILED: {0} - {1}" -f $itemName, $errText) -ForegroundColor Red
+                $errText  = ($c.ErrorRecord | Select-Object -First 1)
+                Write-Host ("    CONTAINER FAILED (discovery): {0} - {1}" -f $itemName, $errText) -ForegroundColor Red
             }
         }
 

@@ -13,7 +13,7 @@ This tool leverages read-only integrations with Azure APIs and Azure Monitor. Ou
 > ```
 > Then update the TenantID and ReportName below and run:
 > ```powershell
-> ./Run-AllSubscriptions.ps1 -TenantID "<your-tenant-id>" -ReportName "YourCompanyName"
+> ./Run-AllSubscriptions.ps1 -TenantID "<your-tenant-id>"
 > ```
 
 **Key Features:**
@@ -118,7 +118,7 @@ cd resource-discovery-for-azure
 Run the script with your tenant ID and organization name:
 
 ```powershell
-./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -ReportName "YourCompanyName"
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
 ```
 
 This will:

@@ -245,7 +245,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|---------|
 | TenantID | String | **Required.** Target Azure tenant ID | `-TenantID "12345678-1234-1234-1234-123456789012"` |
-| ReportName | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
+
 
 All additional parameters supported by `ResourceInventory.ps1` (below) are passed through to each subscription run.
 

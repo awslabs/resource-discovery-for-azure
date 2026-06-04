@@ -1540,8 +1540,13 @@ $jsonWildCard = $DefaultPath + "*.json"
 
 if($Obfuscate.IsPresent)
 {
-    # Exclude dictionary and transcript from zip - use specific json files only
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
+    # Exclude dictionary, transcript, and logs from the obfuscated zip - the
+    # log file (Logs_*.json, written when -EnableLogs is passed) captures the
+    # Write-Log stream, which contains REAL identifiers (auth UPN, tenant GUID,
+    # subscription names) that the obfuscation layer never touches. The
+    # transcript is excluded separately below (it is not a .json). Use a
+    # specific json file list so only the safe, obfuscated json files ship.
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Logs_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
         Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'

@@ -381,8 +381,9 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 |-----------|------|-------------|----------|
 | `ReportName` | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
 | `TenantID` | String | Target specific Azure tenant | `-TenantID "12345678-1234-1234-1234-123456789012"` |
-| `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "87654321-4321-4321-4321-210987654321"` |
+| `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
 | `ResourceGroup` | String | Scan specific resource group only | `-ResourceGroup "Production-RG"` |
+| `OutputDirectory` | String | Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
 
 ### Performance Parameters
 
@@ -444,12 +445,14 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 
 ### Run-AllSubscriptions Wrapper Parameters
 
-These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`, `-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
+These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`, 
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
 
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|---------|
 | `TenantID` | String | **Required.** Azure tenant GUID or verified domain. The wrapper resolves a domain to its GUID via OIDC discovery before authenticating. | — | `-TenantID "contoso.onmicrosoft.com"` |
 | `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
+| `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
 | `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
@@ -496,10 +499,10 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Consider targeting specific subscriptions or resource groups
 - For tenants with many subscriptions, use `-ParallelStreams` (see the Cloud Shell sizing table above).
 
-**Excel Formatting (Azure Cloud Shell):**
-- Auto-fit columns may not work in Cloud Shell
-- Warning messages are expected and don't affect data accuracy
-- Download and open locally for proper formatting
+**HTML Report:**
+- The report is a single self-contained `.html` file — open it in any browser. No Excel or ImportExcel module is required.
+- It works the same in Azure Cloud Shell and locally; nothing extra to install.
+- For a PDF, open the report and use your browser's Print > Save as PDF (the report has a print-friendly layout that expands every section).
 
 ### Important Notes
 

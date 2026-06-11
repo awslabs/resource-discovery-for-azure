@@ -7,7 +7,6 @@ param ($TenantID,
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
         [switch]$DeviceLogin,
-        [switch]$EnableLogs,
         [switch]$Obfuscate,
         [switch]$RunAllSubs,
         $ConcurrencyLimit = 6,
@@ -25,11 +24,6 @@ Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", e
 Function Write-Log([string]$Message, [string]$Severity)
 {
    $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
-
-   if($EnableLogs.IsPresent)
-   {
-        $Global:Logging.Logs.Add([PSCustomObject]@{ Date = $DateTime; Message = $Message; Severity = $Severity })
-   }
 
    switch ($Severity) 
    {
@@ -63,10 +57,6 @@ function Variables
     $Global:Subscriptions = ''
     $Global:ReportName = $ReportName   
     $Global:Version = GetLocalVersion
-
-    $Global:Logging = New-Object PSObject
-    $Global:Logging | Add-Member -MemberType NoteProperty -Name Logs -Value NotSet
-    $Global:Logging.Logs = [System.Collections.Generic.List[object]]::new()
 
     $Global:ResourceIdDictionary = $null
     $Global:ResourceNameDictionary = $null
@@ -659,11 +649,7 @@ function ExecuteInventoryProcessing()
         $Global:AllResourceFile = ($DefaultPath + "Full_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:JsonFile = ($DefaultPath + "Inventory_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
-        $Global:ConsumptionFile = ($DefaultPath + "Consumption_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_"+ $Global:ReportName + "_" + $CurrentDateTime + ".csv")
-
-        $Global:LogFile = ($DefaultPath + "Logs_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
-    
 
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
@@ -899,6 +885,26 @@ function ExecuteInventoryProcessing()
                 foreach ($resourceItem in $result) 
                 {
                     $origID = $resourceItem.ID
+
+                    # A null/empty ID would throw on the dictionary key ASSIGNMENT
+                    # in the else branches below (Dictionary[string,string] rejects
+                    # a null key with "the array index evaluated to null"). Give the
+                    # row a deterministic-within-run fallback and skip the dictionary
+                    # lookups so one malformed collector row cannot abort processing.
+                    if ([string]::IsNullOrEmpty($origID))
+                    {
+                        $fallback = 'obfuscated_' + [guid]::NewGuid().ToString()
+                        $resourceItem.ID = $fallback
+                        $resourceItem.Name = $fallback
+                        $resourceItem.Subscription = $fallback
+                        $resourceItem.ResourceGroup = $fallback
+                        # Still scrub tags before skipping - a malformed null-ID row
+                        # must not carry real tag values into the obfuscated output
+                        # just because it bypassed the dictionary path below.
+                        if($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
+                        if($resourceItem.ContainsKey('Tags')) { $resourceItem.Tags = $null }
+                        continue
+                    }
 
                     if ($ResourceIdDictionary.ContainsKey($origID)) {
                         $obfuscatedID = $ResourceIdDictionary[$origID]
@@ -1210,11 +1216,25 @@ function ExecuteInventoryProcessing()
                             # to a stable token rather than emitting the raw value. Use
                             # the local name cache so the obfuscation dictionary file
                             # only ever contains real-Azure-ID -> obfuscated mappings.
-                            if (-not $script:ConsumptionNameCache.ContainsKey($rawUri))
+                            # A null/empty resourceUri is legitimate for some meters
+                            # (marketplace purchases, certain reservations, tenant-level
+                            # charges). hashtable.ContainsKey($null) THROWS, which the
+                            # per-subscription catch below would swallow - aborting the
+                            # rest of that subscription's consumption collection. Guard
+                            # the null/empty case explicitly so one such meter row can
+                            # never truncate the consumption data (obfuscate-only bug).
+                            if ([string]::IsNullOrEmpty($rawUri))
                             {
-                                $script:ConsumptionNameCache[$rawUri] = $prefix + [guid]::NewGuid().ToString()
+                                $obfuscatedUri = 'obfuscated'
                             }
-                            $obfuscatedUri = $script:ConsumptionNameCache[$rawUri]
+                            else
+                            {
+                                if (-not $script:ConsumptionNameCache.ContainsKey($rawUri))
+                                {
+                                    $script:ConsumptionNameCache[$rawUri] = $prefix + [guid]::NewGuid().ToString()
+                                }
+                                $obfuscatedUri = $script:ConsumptionNameCache[$rawUri]
+                            }
                         }
 
                         $usageDataExport[$item].ResourceId = $obfuscatedUri
@@ -1233,8 +1253,6 @@ function ExecuteInventoryProcessing()
 
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
                 }
-
-                #$newUsageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
 
                 $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
@@ -1480,11 +1498,6 @@ if($Obfuscate.IsPresent)
     Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
 }
 
-if($EnableLogs.IsPresent)
-{
-    $Global:Logging | ConvertTo-Json -depth 5 -compress | Out-File $Global:LogFile
-} 
-
 if($SkipMetrics.IsPresent)
 {
     @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
@@ -1540,13 +1553,13 @@ $jsonWildCard = $DefaultPath + "*.json"
 
 if($Obfuscate.IsPresent)
 {
-    # Exclude dictionary, transcript, and logs from the obfuscated zip - the
-    # log file (Logs_*.json, written when -EnableLogs is passed) captures the
-    # Write-Log stream, which contains REAL identifiers (auth UPN, tenant GUID,
+    # Exclude the obfuscation dictionary and transcript from the obfuscated zip.
+    # The dictionary maps obfuscated values back to REAL identifiers, and the
+    # transcript captures the raw Write-Log stream (auth UPN, tenant GUID,
     # subscription names) that the obfuscation layer never touches. The
     # transcript is excluded separately below (it is not a .json). Use a
     # specific json file list so only the safe, obfuscated json files ship.
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Logs_*" } | Select-Object -ExpandProperty FullName
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
         Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'

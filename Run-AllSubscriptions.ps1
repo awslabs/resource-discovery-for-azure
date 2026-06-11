@@ -9,12 +9,16 @@ param (
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$Resume,
-    # Retry only previously-failed subscriptions. Reads FailedAttempts from the
-    # resume-state file and processes ONLY those, skipping both completed AND
-    # never-attempted subs. Implies -Resume's "skip completed" semantics and
-    # narrows further. If the FailedAttempts list is empty (clean prior run or
-    # no prior run), prints "Nothing to retry" and exits 0. Combines naturally
-    # with -ParallelStreams: the failed-only filter is applied before slicing.
+    # Retry only the subscriptions that failed on a previous run: the script
+    # processes exactly the failures recorded in the resume-state file and
+    # nothing else. Handy for troubleshooting - when a large run finishes with
+    # a few failures (e.g. transient throttling or an auth blip on specific
+    # subs), use this to re-run just those without walking the whole tenant
+    # again. (Use -Resume instead to continue an interrupted run - that covers
+    # both failures and subscriptions not yet reached.) If there are no recorded
+    # failures, prints "Nothing to retry" and exits 0. Works with
+    # -ParallelStreams; the failed-only filter is applied before the
+    # subscriptions are split across streams.
     [switch]$ResumeFailedOnly,
     [switch]$IncludeDisabled,
 

@@ -501,3 +501,4 @@ ObfuscationDictionary_*
 docs/components/
 .scrub-review/
 testResults.xml
+Tests/test-summary.txt

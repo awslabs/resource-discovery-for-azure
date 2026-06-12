@@ -1323,7 +1323,7 @@ function FinalizeOutputs
         # dictionaries that scrub every other identifier.
         $reportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
         $reportTitle = ('Azure Resource Inventory - {0}' -f $Global:ReportName)
-        $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS
+        $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
     }
 
     ProcessSummary

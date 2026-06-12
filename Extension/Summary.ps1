@@ -49,7 +49,20 @@ param(
     $ReportingRunTime,
 
     # Environment label (e.g. 'Azure CloudShell', 'PowerShell Unix'). Display only.
-    $PlatOS
+    $PlatOS,
+
+    # Path to the Consumption_*.csv produced by the consumption phase (input,
+    # optional). When supplied and non-empty, the report cross-checks the count
+    # of running VMs in the inventory against the count of VMs that produced a
+    # compute-usage record. A large shortfall indicates consumption data was
+    # incomplete for some subscriptions. Omitted on standalone runs and when
+    # -SkipConsumption was used; the check is silently skipped in that case.
+    $ConsumptionFile,
+
+    # Minimum running-VM-vs-billed shortfall (count) required before the VM
+    # billing-coverage banner is shown. Default 0 means any shortfall is
+    # surfaced; raise it to suppress small billing-lag noise.
+    [int]$VmBillingGapThreshold = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +123,60 @@ if ($samples.Count -gt 0)
     if ($obfHits -gt ($samples.Count * 0.7))
     {
         $ObfuscationStatus = 'obfuscated'
+    }
+}
+
+# VM billing-coverage check. The inventory (ARM/Resource Graph) lists every VM
+# that EXISTS; the consumption CSV lists VMs that produced a compute-usage
+# record in the billing window. A running VM with no compute-usage record is an
+# anomaly - it usually means consumption data was incomplete for that VM's
+# subscription (auth / billing-scope gap), not that the VM is idle. We compare
+# COUNTS only (not identities): the inventory and consumption files obfuscate
+# resource ids through different dictionaries, so a per-VM join is impossible in
+# an obfuscated report. Counts of distinct tokens are preserved either way.
+$VmBilling = $null
+if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $ConsumptionFile -PathType Leaf))
+{
+    $runningVmCount = 0
+    $vmRecords = $Inventory.VirtualMachines
+    if ($vmRecords)
+    {
+        $runningVmCount = @($vmRecords | Where-Object { $_.PowerState -match 'running' }).Count
+    }
+
+    # Count distinct VM-meter resources in the consumption CSV. A header-only or
+    # empty CSV (zero-billing subscription, or -SkipConsumption safety net) has
+    # no data rows at all; in that case consumption coverage is unknown, so the
+    # check is skipped rather than reporting a false 100% gap. A CSV that DOES
+    # have rows but none in the 'Virtual Machines' meter is a legitimate zero -
+    # the gap then reflects a real coverage shortfall.
+    $billedVmCount = 0
+    $hasConsumptionData = $false
+    try
+    {
+        $consumption = @(Import-Csv -Path $ConsumptionFile -ErrorAction Stop)
+        $hasConsumptionData = ($consumption.Count -gt 0)
+        $billedVmCount = (@($consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
+    }
+    catch
+    {
+        # Unreadable CSV: leave the check disabled so no banner is rendered.
+        $hasConsumptionData = $false
+    }
+
+    if ($hasConsumptionData -and $runningVmCount -gt 0)
+    {
+        $gap = $runningVmCount - $billedVmCount
+        if ($gap -gt $VmBillingGapThreshold)
+        {
+            $gapPct = [math]::Round((100.0 * $gap / $runningVmCount), 1)
+            $VmBilling = [pscustomobject]@{
+                Running = $runningVmCount
+                Billed  = $billedVmCount
+                Gap     = $gap
+                GapPct  = $gapPct
+            }
+        }
     }
 }
 
@@ -285,7 +352,11 @@ function New-ServiceTable
 {
     param(
         [Parameter(Mandatory)] [string]$ServiceName,
-        [Parameter(Mandatory)] $Records
+        [Parameter(Mandatory)] $Records,
+        # When the report is obfuscated, certain columns carry only opaque
+        # pseudonym GUIDs (the resource ID and the scale-set reference) and add
+        # no analytical value, so they are dropped to reduce horizontal width.
+        [string]$ObfuscationStatus = 'identifiable'
     )
 
     $records = @($Records)
@@ -357,6 +428,16 @@ function New-ServiceTable
         $columnsClean += $col
     }
     $columns = $columnsClean
+
+    # When the report is obfuscated, drop columns that carry only opaque
+    # pseudonym GUIDs and add no analytical value (the full resource ID and the
+    # scale-set reference). Identity columns (Name/Subscription/ResourceGroup)
+    # are kept because they still let rows be correlated.
+    if ($ObfuscationStatus -eq 'obfuscated')
+    {
+        $obfuscatedNoiseColumns = @('ID', 'Set')
+        $columns = $columns | Where-Object { $obfuscatedNoiseColumns -notcontains $_ }
+    }
 
     # Cap column count to keep the table readable. 12 is a soft limit that
     # fits the most informative columns without horizontal scroll on most
@@ -436,7 +517,7 @@ $serviceSectionsHtml = New-Object System.Text.StringBuilder
 foreach ($svc in $ServiceSummary)
 {
     $records = $Inventory.($svc.Service)
-    [void]$serviceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $records))
+    [void]$serviceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $records -ObfuscationStatus $ObfuscationStatus))
 }
 
 $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
@@ -486,7 +567,8 @@ body {
     font-size: 14px;
     line-height: 1.5;
 }
-.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+.container { max-width: 1800px; margin: 0 auto; padding: 24px; }
+@media (min-width: 1980px) { .container { max-width: 95%; } }
 header {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -565,6 +647,13 @@ header h1 { margin: 0 0 8px 0; font-size: 22px; }
     font-family: inherit;
 }
 .table-scroll { overflow-x: auto; }
+/* Force a visible horizontal scrollbar even on macOS (which hides overlay
+   scrollbars until scroll). Insurance for narrow screens / wide tables. */
+.table-scroll { scrollbar-width: thin; scrollbar-color: #b0b6bd transparent; }
+.table-scroll::-webkit-scrollbar { height: 10px; }
+.table-scroll::-webkit-scrollbar-track { background: var(--row-alt); border-radius: 5px; }
+.table-scroll::-webkit-scrollbar-thumb { background: #b0b6bd; border-radius: 5px; }
+.table-scroll::-webkit-scrollbar-thumb:hover { background: #8a9099; }
 .svc-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .svc-table th, .svc-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .svc-table th { background: var(--row-alt); font-weight: 600; cursor: pointer; user-select: none; }
@@ -605,6 +694,20 @@ footer {
 }
 .privacy-banner b { font-weight: 600; }
 .privacy-icon { font-size: 16px; }
+.coverage-banner {
+    border-radius: 6px;
+    padding: 10px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    color: #856404;
+}
+.coverage-banner b { font-weight: 600; }
+.coverage-icon { font-size: 16px; }
 @media print {
     body { background: white; font-size: 11px; }
     .container { max-width: none; padding: 12px; }
@@ -703,6 +806,26 @@ else
     $privacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
 }
 
+# VM billing-coverage banner. Rendered only when the inventory shows materially
+# more running VMs than the consumption data billed for (see the $VmBilling
+# detection above). Frames the inventory as authoritative and points at
+# consumption-collection completeness, not at the report being inaccurate. In
+# an obfuscated report the per-VM identities cannot be joined (separate
+# dictionaries), so this is a count-level signal; the wording reflects that.
+$coverageBanner = ''
+if ($null -ne $VmBilling)
+{
+    $idNote = if ($ObfuscationStatus -eq 'obfuscated')
+    {
+        ' Per-VM identification is unavailable in an obfuscated report; re-run without <code>-Obfuscate</code> (locally) to list the specific VMs.'
+    }
+    else
+    {
+        ''
+    }
+    $coverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct, $idNote)
+}
+
 $html = @"
 <!DOCTYPE html>
 <html lang="en">
@@ -733,6 +856,8 @@ $platBlock
 </header>
 
 $privacyBanner
+
+$coverageBanner
 
 <div class="charts">
 <section class="card">

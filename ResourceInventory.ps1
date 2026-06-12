@@ -1,8 +1,10 @@
 param ($TenantID,
         $Appid,
-        $SubscriptionID,
-        $Secret, 
-        $ResourceGroup, 
+        [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', ErrorMessage = 'Invalid SubscriptionID; must be a GUID')]
+        [string]$SubscriptionID,
+        [securestring]$Secret, 
+        [ValidatePattern('^[A-Za-z0-9._()-]{1,90}$', ErrorMessage = 'Invalid resource group name; must match ^[A-Za-z0-9._()-]{1,90}$')]
+        [string]$ResourceGroup, 
         [switch]$Debug, 
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
@@ -425,9 +427,14 @@ Function RunInventorySetup()
               elseif ($Appid -and $Secret -and $tenantid)
               {
                 Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
-                az login --service-principal -u $appid -p $secret -t $TenantID | Out-Null
-                $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
-                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
+                # Authenticate the az CLI without putting the secret on the command
+                # line (it would otherwise appear in the process list and transcript).
+                # Pipe the plaintext to --password-stdin; the plaintext lives only in
+                # this local variable for the duration of the call.
+                $unsecuredSecret = [System.Net.NetworkCredential]::new('', $Secret).Password
+                $unsecuredSecret | az login --service-principal -u $appid --tenant $TenantID --password-stdin --only-show-errors | Out-Null
+                Remove-Variable -Name unsecuredSecret -ErrorAction SilentlyContinue
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
                 Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
               }
               else
@@ -690,8 +697,7 @@ function ExecuteInventoryProcessing()
             if ($Appid -and $Secret -and $TenantID)
             {
                 Write-Log -Message ("{0}: reconnecting via Service Principal." -f $Phase) -Severity 'Info'
-                $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
-                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
                 Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID -ErrorAction Stop | Out-Null
             }
             elseif ($RunAllSubs.IsPresent)
@@ -1569,11 +1575,16 @@ if($Obfuscate.IsPresent)
 }
 else
 {
+    # Exclude the PowerShell transcript from the default zip too. It captures
+    # the authenticated account UPN, tenant/subscription IDs, and local paths
+    # from Start-Transcript onward - data customers don't expect in the shared
+    # bundle. Keep it on disk locally for debugging (same as the obfuscate path).
     $compressionOutput = @{
-        Path = $Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
+        Path = $Global:HtmlFile, $Global:ConsumptionFileCsv, $jsonWildCard
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
+    Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
 try 

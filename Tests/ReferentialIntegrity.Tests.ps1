@@ -59,6 +59,23 @@ Describe "AVD HostId to VM Cross-Reference" {
     }
 }
 
+Describe "SQL VM to VM Cross-Reference" {
+    It "Every SQL VM ParentVirtualMachine should match a VM ID (or be a tolerated sentinel)" {
+        $sqlvms = @($script:Inventory.SQLVM)
+        $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        # Sentinels the collector emits when the parent VM is out of scope or absent:
+        #   'obfuscated' (obfuscation on, parent id not indexed) / 'None' (no parent id).
+        $tolerated = @('obfuscated', 'None')
+        foreach ($sqlvm in $sqlvms) {
+            if ($null -ne $sqlvm -and ![string]::IsNullOrEmpty($sqlvm.ParentVirtualMachine)) {
+                if ($sqlvm.ParentVirtualMachine -notin $tolerated) {
+                    $sqlvm.ParentVirtualMachine | Should -BeIn $vmIds -Because "SQL VM '$($sqlvm.ID)' ParentVirtualMachine should reference a known VM's obfuscated ID"
+                }
+            }
+        }
+    }
+}
+
 Describe "Obfuscated ID Uniqueness" {
     It "Every obfuscated ID should be unique across all resources" {
         $idCounts = $script:AllIds | Group-Object | Where-Object { $_.Count -gt 1 }

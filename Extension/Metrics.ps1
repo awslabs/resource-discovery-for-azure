@@ -473,6 +473,15 @@ if ($Task -eq 'Processing')
                         throw ("Get-AzMetric failed after {0} attempt(s): {1}" -f $callAttempts, $lastError)
                     }
 
+                    # Total interval count Azure Monitor returned for this metric,
+                    # including intervals that carry no datapoint. This is the
+                    # denominator for coverage / %TimeOn-style derivations: for a VM's
+                    # 'Percentage CPU' series, MetricCount / MetricTotalCount * 100 is
+                    # the fraction of the window the VM was actually running (%TimeOn).
+                    # Captured here, before the Measure switch below collapses
+                    # $metricQueryResults to a scalar.
+                    $metricTotalCount = @($metricQuery.Data).Count
+
                     $metricQueryResults = 0
                     $metricTimeSeries = 0
             
@@ -534,6 +543,7 @@ if ($Task -eq 'Processing')
                 {
                     $metricQueryResults = 0
                     $metricQueryResultsCount = 0
+                    $metricTotalCount = 0
                     $metricPercentileIndex = 0
                     $metricPercentile = 0
     
@@ -572,6 +582,7 @@ if ($Task -eq 'Processing')
                     'MetricPercentile'     = $metricPercentile;
                     'MetricValue'          = $metricQueryResults;
                     'MetricCount'          = $metricQueryResultsCount;
+                    'MetricTotalCount'     = $metricTotalCount;
                     'MetricSeries'         = $metricTimeSeries;
                     'MetricError'          = $metricError;
                 }
@@ -581,6 +592,7 @@ if ($Task -eq 'Processing')
                 $metricQuery = $null
                 $metricQueryResults = $null
                 $metricQueryResultsCount = $null
+                $metricTotalCount = $null
                 $metricTimeSeries = $null
                 $metricQueryResultsSorted = $null
                 $metricPercentile = $null;

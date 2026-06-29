@@ -59,6 +59,35 @@ if ($Task -eq 'Processing')
         }
     }
 
+    # Define Managed Disk Metrics
+    #
+    # Actual disk performance (IOPS + throughput) for ATTACHED managed disks.
+    # VMDisk.ps1 already records each disk's PROVISIONED ceiling
+    # (diskIOPSReadWrite / diskMBpsReadWrite); these metrics capture what the
+    # disk actually DID, so the two together are what drive storage right-sizing.
+    #
+    # Scoped to attached disks (ManagedBy populated): unattached disks have no
+    # meaningful I/O, and querying them only burns Azure Monitor read budget
+    # against the ~12k reads/hour/subscription ceiling. The 'Composite Disk ...'
+    # names are the per-disk composite metrics Azure Monitor exposes on the
+    # microsoft.compute/disks scope (read+write split). Series='true' so the
+    # engine produces both the 95th-percentile peak (MetricPercentile) and the
+    # average (MetricValue) for each, exactly like the VM CPU/memory series.
+    $managedDisks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' -and -not [string]::IsNullOrEmpty($_.ManagedBy) }
+
+    if($managedDisks)
+    {
+        foreach ($managedDisk in $managedDisks)
+        {
+            $subscription = $subLookup[$managedDisk.subscriptionId]
+
+            $metricDefs.Add([PSCustomObject]@{ MetricIndex = $metricCountId++; MetricName = 'Composite Disk Read Operations/sec';  StartTime = $metricStartTime;  EndTime = $metricEndTime; Interval = '00:15:00';  Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $metricDefs.Add([PSCustomObject]@{ MetricIndex = $metricCountId++; MetricName = 'Composite Disk Write Operations/sec'; StartTime = $metricStartTime;  EndTime = $metricEndTime; Interval = '00:15:00';  Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $metricDefs.Add([PSCustomObject]@{ MetricIndex = $metricCountId++; MetricName = 'Composite Disk Read Bytes/sec';       StartTime = $metricStartTime;  EndTime = $metricEndTime; Interval = '00:15:00';  Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $metricDefs.Add([PSCustomObject]@{ MetricIndex = $metricCountId++; MetricName = 'Composite Disk Write Bytes/sec';      StartTime = $metricStartTime;  EndTime = $metricEndTime; Interval = '00:15:00';  Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+        }
+    }
+
     #Define Storage Account Metrics
 
     $storageAccounts = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }

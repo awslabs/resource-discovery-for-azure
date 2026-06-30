@@ -398,11 +398,18 @@ Describe "Cross-Reference Field Obfuscation" {
         }
     }
 
-    It "VirtualMachines: Tags should be null when obfuscated" {
+    It "VirtualMachines: Tags keys are preserved and values are obfuscated when obfuscated" {
+        $obfPattern = '^(prod|nonprod)_'
         $resources = @($script:Inventory.VirtualMachines)
         foreach ($r in $resources) {
-            if ($null -ne $r) {
-                $r.Tags | Should -BeNullOrEmpty -Because "Tags should be stripped when obfuscating"
+            if ($null -ne $r -and $null -ne $r.Tags) {
+                foreach ($tag in @($r.Tags)) {
+                    if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value)) {
+                        # Key (Name) is kept verbatim; value must be a prod_/nonprod_ token.
+                        $tag.Name  | Should -Not -BeNullOrEmpty -Because "tag keys are preserved for analytics"
+                        $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, not raw"
+                    }
+                }
             }
         }
     }

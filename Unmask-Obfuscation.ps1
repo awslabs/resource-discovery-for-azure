@@ -47,11 +47,11 @@
 
 .PARAMETER Field
     Restrict unmasking to one or more field types. Valid values:
-    Subscription, ResourceGroup, ResourceId, ResourceName. If omitted, ALL four
+    Subscription, ResourceGroup, ResourceId, ResourceName, Tag. If omitted, ALL
     field types are considered. When a specific -Value is also a key in more
     than one map (rare; obfuscated tokens are unique), only the selected
     field types are searched, in the order ResourceGroup, Subscription,
-    ResourceId, ResourceName. With -All, only the selected field types are dumped.
+    ResourceId, ResourceName, Tag. With -All, only the selected field types are dumped.
 
 .PARAMETER All
     Dump every mapping for the selected -Field types (defaults to Subscription
@@ -86,7 +86,7 @@ param(
     [Parameter(ValueFromPipeline = $true)]
     [string[]] $Value,
 
-    [ValidateSet('Subscription', 'ResourceGroup', 'ResourceId', 'ResourceName')]
+    [ValidateSet('Subscription', 'ResourceGroup', 'ResourceId', 'ResourceName', 'Tag')]
     [string[]] $Field,
 
     [switch]   $All,
@@ -117,15 +117,15 @@ begin
         }
     }
 
-    # Which field types are in scope. Empty/absent -Field means all four.
+    # Which field types are in scope. Empty/absent -Field means all of them.
     $SelectedFields = if ($null -eq $Field -or $Field.Count -eq 0)
     {
-        @('ResourceGroup', 'Subscription', 'ResourceId', 'ResourceName')
+        @('ResourceGroup', 'Subscription', 'ResourceId', 'ResourceName', 'Tag')
     }
     else
     {
         # De-dupe while preserving the canonical search precedence.
-        @('ResourceGroup', 'Subscription', 'ResourceId', 'ResourceName') | Where-Object { $Field -contains $_ }
+        @('ResourceGroup', 'Subscription', 'ResourceId', 'ResourceName', 'Tag') | Where-Object { $Field -contains $_ }
     }
     Write-Verbose ("Field types in scope: {0}" -f ($SelectedFields -join ', '))
 
@@ -156,6 +156,10 @@ begin
     # dictionary simply yields an empty table and the GUID/-ResolveSubscriptionName
     # behaviour below is unchanged.
     $SubNameMap = ConvertTo-LookupTable $Dict.SubscriptionNameMap
+    # Optional: maps an obfuscated tag-value token back to the real tag value.
+    # Present in dictionaries from runs where tag obfuscation was active; absent
+    # otherwise, so it is not in the required-map check above.
+    $TagMap = ConvertTo-LookupTable $Dict.TagMap
 
     # Map a field-type label to its lookup table, so -Field selection and the
     # search loop share one source of truth.
@@ -164,6 +168,7 @@ begin
         Subscription  = $SubMap
         ResourceId    = $IdMap
         ResourceName  = $NameMap
+        Tag           = $TagMap
     }
 
     $SubNameCache = @{}
@@ -269,6 +274,18 @@ begin
                     Note            = $null
                 }
             }
+            'Tag'
+            {
+                # TagMap stores token -> real tag VALUE directly (not a resource Id),
+                # so the value passed in is already the real tag value.
+                return [pscustomobject]@{
+                    ObfuscatedValue = $Obf
+                    Type            = 'Tag'
+                    RealValue       = $ResourceId
+                    RealResourceId  = $null
+                    Note            = 'Tag value (key is preserved verbatim in the report).'
+                }
+            }
         }
     }
 
@@ -304,7 +321,7 @@ begin
             }
         }
 
-        $ScopeNote = if ($SelectedFields.Count -lt 4)
+        $ScopeNote = if ($SelectedFields.Count -lt $MapForField.Count)
         {
             ("Not found in selected field(s): {0}. It may belong to a field type you did not select." -f ($SelectedFields -join ', '))
         }

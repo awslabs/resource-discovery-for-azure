@@ -188,11 +188,20 @@ Describe "Non-Sensitive Fields Preserved" {
         }
     }
 
-    It "Tags should be null on all resources" {
+    It "Tag values are obfuscated (no raw values) on all resources" {
+        if (-not $script:IsObfuscated) {
+            Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
+            return
+        }
+        $obfPattern = '^(prod|nonprod)_'
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags') {
-                    $_.Tags | Should -BeNullOrEmpty -Because "Tags should be stripped when obfuscating"
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags' -and $null -ne $_.Tags) {
+                    foreach ($tag in @($_.Tags)) {
+                        if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value)) {
+                            $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, never raw, when obfuscating"
+                        }
+                    }
                 }
             }
         }

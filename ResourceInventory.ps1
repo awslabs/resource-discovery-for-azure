@@ -64,12 +64,18 @@ function Variables
     $Global:ResourceNameDictionary = $null
     $Global:ResourceSubscriptionDictionary = $null
     $Global:ResourceResourceGroupDictionary = $null
+    # Maps a REAL tag value to its deterministic obfuscated token (real -> token).
+    # Tag values are obfuscated like the other identifier classes (same real value
+    # always yields the same token within a run) so the obfuscated report can still
+    # group/correlate by tag value without exposing it. Tag KEYS are kept verbatim.
+    $Global:TagValueDictionary = $null
 
     if ($Obfuscate.IsPresent) {
         $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     }
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
@@ -641,8 +647,12 @@ Function RunInventorySetup()
             $ResourceSubscriptionDictionary[$resourceItem.ID] = $obfuscatedSubscription
             $ResourceResourceGroupDictionary[$resourceItem.ID] = $obfuscatedResourceGroup
 
-            if ($resourceItem.PSObject.Properties['tags']) { $resourceItem.tags = $null }
-            if ($resourceItem.PSObject.Properties['Tags']) { $resourceItem.Tags = $null }
+            # Raw tags are intentionally NOT scrubbed here any more. They must
+            # survive on the in-memory $Global:Resources objects so collectors can
+            # surface them; tag VALUES are then obfuscated deterministically (and
+            # tag KEYS kept) in the per-collector obfuscation loop further below.
+            # $Global:Resources itself is never serialized into the report, so
+            # leaving raw tags on it in memory does not leak.
         }
     }
 }
@@ -955,10 +965,27 @@ function ExecuteInventoryProcessing()
                         $resourceItem.ResourceGroup = $fbRG
                     }
 
-                    if($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
+                    # Collector 'Tags' output is an array of { Name, Value }. Keep the
+                    # KEY (Name) verbatim and obfuscate the VALUE deterministically via
+                    # $Global:TagValueDictionary: the same real value always maps to the
+                    # same prod_/nonprod_ token, so the obfuscated report can still group
+                    # and correlate by tag value without exposing it. Prefix is derived
+                    # from the value so an environment-type signal survives.
                     if($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
                     {
-                        $resourceItem.Tags = $null
+                        foreach ($tag in $resourceItem.Tags)
+                        {
+                            if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
+                            {
+                                $realTagValue = [string]$tag.Value
+                                if (-not $Global:TagValueDictionary.ContainsKey($realTagValue))
+                                {
+                                    $tagPrefix = if ($realTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                                    $Global:TagValueDictionary[$realTagValue] = $tagPrefix + [guid]::NewGuid().ToString()
+                                }
+                                $tag.Value = $Global:TagValueDictionary[$realTagValue]
+                            }
+                        }
                     }
                 }
             }
@@ -1482,6 +1509,10 @@ if($Obfuscate.IsPresent)
         # subscription GUID - never the name - so without this map the only way
         # back to a name was an online Get-AzSubscription call.
         SubscriptionNameMap = @{}
+        # Maps an obfuscated tag-value token back to the REAL tag value, so tag
+        # values (which keep their keys but have obfuscated values) can be
+        # reversed offline like every other obfuscated field.
+        TagMap = @{}
     }
 
     foreach ($key in $ResourceIdDictionary.Keys) {
@@ -1511,6 +1542,14 @@ if($Obfuscate.IsPresent)
             if (-not [string]::IsNullOrEmpty($subName)) {
                 $dictionary.SubscriptionNameMap[$subToken] = $subName
             }
+        }
+    }
+
+    # Invert the tag-value dictionary (real value -> token) into TagMap
+    # (token -> real value) so the unmask helper can reverse tag values.
+    if ($null -ne $Global:TagValueDictionary) {
+        foreach ($realValue in $Global:TagValueDictionary.Keys) {
+            $dictionary.TagMap[$Global:TagValueDictionary[$realValue]] = $realValue
         }
     }
 
@@ -1588,7 +1627,7 @@ if($Obfuscate.IsPresent)
     # subscription names) that the obfuscation layer never touches. The
     # transcript is excluded separately below (it is not a .json). Use a
     # specific json file list so only the safe, obfuscated json files ship.
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
         Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'

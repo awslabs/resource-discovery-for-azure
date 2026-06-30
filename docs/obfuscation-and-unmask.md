@@ -17,7 +17,7 @@ and how the local `Unmask-Obfuscation.ps1` helper reverses it.
 
 ## 1. What gets obfuscated
 
-When `-Obfuscate` is supplied, four identifier classes are replaced everywhere
+When `-Obfuscate` is supplied, five identifier classes are replaced everywhere
 they appear in the report:
 
 | Class | Example real value | Example obfuscated token |
@@ -26,9 +26,26 @@ they appear in the report:
 | Resource Name | `vm01` | `prod_9f8e7d6c-...` |
 | Subscription | `Contoso Production` | `prod_2b2b2b2b-...` |
 | Resource Group | `rg-app` | `prod_4c4c4c4c-...` |
+| Tag value | `payments` | `prod_7e7e7e7e-...` |
 
-Resource **tags are dropped entirely** under obfuscation (they frequently carry
-owner emails, cost-centre codes, and free-text PII).
+### Tags: keys kept, values tokenized
+
+Resource tags are **not dropped**. Instead:
+
+- The tag **key** (e.g. `environment`, `costCenter`, `owner`) is kept
+  **verbatim** — keys are low-risk and are what makes tag-based grouping useful.
+- The tag **value** (which frequently carries owner emails, cost-centre codes,
+  and free-text PII) is replaced with a deterministic `prod_`/`nonprod_` token,
+  exactly like the other identifier classes.
+
+Because tokenization is deterministic within a run, every resource tagged
+`environment = production` shows the **same** value token, so the obfuscated
+report can still group and correlate by tag value without exposing it. The
+real value is recoverable locally via the dictionary's `TagMap` (see §4, §5).
+
+Everything else in a record (location, SKU, sizes, metric values, counts) is
+**not** obfuscated — it carries no customer identity and is what makes the
+report useful for assessment.
 
 Everything else in a record (location, SKU, sizes, metric values, counts) is
 **not** obfuscated — it carries no customer identity and is what makes the
@@ -118,10 +135,11 @@ At the end of an obfuscated run the tool writes:
 ObfuscationDictionary_<ReportName>_<timestamp>.json
 ```
 
-It contains five maps. **A subtlety to understand:** the four core maps resolve a
+It contains six maps. **A subtlety to understand:** the four core maps resolve a
 token back to the real **resource ID** (an ARM path), *not* to a bare name. The
-fifth map, `SubscriptionNameMap`, stores the subscription **display name**
-directly so the subscription can be resolved fully offline:
+`SubscriptionNameMap` stores the subscription **display name** directly so the
+subscription can be resolved fully offline; `TagMap` stores the real **tag
+value** directly (it is not derived from an ID):
 
 ```jsonc
 {
@@ -130,7 +148,8 @@ directly so the subscription can be resolved fully offline:
   "ResourceNameMap":    { "prod_9f8e...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
   "SubscriptionMap":    { "prod_2b2b...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
   "ResourceGroupMap":   { "prod_4c4c...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
-  "SubscriptionNameMap":{ "prod_2b2b...": "Contoso Production" }
+  "SubscriptionNameMap":{ "prod_2b2b...": "Contoso Production" },
+  "TagMap":             { "prod_7e7e...": "payments" }
 }
 ```
 
@@ -141,6 +160,9 @@ That is why unmasking derives the friendly values:
   is recoverable offline; the name then needs `-ResolveSubscriptionName` (online).
 - Resource Name is the last segment of the ID.
 - Resource ID is the ID itself.
+- Tag value is read directly from `TagMap`. Older dictionaries that predate tag
+  obfuscation have no `TagMap` (it is optional, not part of the required-map
+  check).
 
 ### Handling rules — what is and isn't shareable
 
@@ -171,6 +193,7 @@ friendly name via `-ResolveSubscriptionName`.
 | `Subscription` | the subscription **name** | from `SubscriptionNameMap` (offline). Older dictionaries lack it → resolves to the GUID; add `-ResolveSubscriptionName` for the name (online) |
 | `ResourceId` | the full ARM resource ID | returned directly |
 | `ResourceName` | the resource's short name | last `/`-delimited segment of the ID |
+| `Tag` | the real tag **value** | from `TagMap` (offline, exact). The tag key is already verbatim in the report |
 
 ### Non-recoverable (lossy) values
 
@@ -207,8 +230,8 @@ These are *intentionally* not in the dictionary and the script reports them as
   directory).
 - `-Value` — one or more tokens to unmask (accepts pipeline input).
 - `-Field` — restrict to `Subscription`, `ResourceGroup`, `ResourceId`,
-  `ResourceName`. Search precedence is ResourceGroup → Subscription →
-  ResourceId → ResourceName.
+  `ResourceName`, `Tag`. Search precedence is ResourceGroup → Subscription →
+  ResourceId → ResourceName → Tag.
 - `-All` — dump whole maps instead of specific values (defaults to Subscription
   + ResourceGroup when `-Field` is omitted).
 - `-ResolveSubscriptionName` — turn subscription GUIDs into friendly names via
@@ -217,8 +240,8 @@ These are *intentionally* not in the dictionary and the script reports them as
 ### Output shape
 
 Each result is an object with `ObfuscatedValue`, `Type`
-(`ResourceGroup` / `Subscription` / `ResourceId` / `ResourceName` / `Lossy` /
-`NotFound`), `RealValue`, `RealResourceId`, and a `Note`.
+(`ResourceGroup` / `Subscription` / `ResourceId` / `ResourceName` / `Tag` /
+`Lossy` / `NotFound`), `RealValue`, `RealResourceId`, and a `Note`.
 
 ---
 

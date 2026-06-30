@@ -57,6 +57,8 @@ BeforeAll {
     $script:TokRgCase  = 'prod_tok-rg-case'
     $script:TokSub     = 'prod_tok-sub'
     $script:SubName    = 'Contoso Production Sub'   # friendly name persisted in SubscriptionNameMap
+    $script:TokTag     = 'prod_tok-tag-value'
+    $script:TagValue   = 'payments'                 # real tag value behind the token
 
     $dict = [ordered]@{
         GeneratedAt = '2026-06-30 00:00:00'
@@ -74,6 +76,9 @@ BeforeAll {
         }
         SubscriptionNameMap = [ordered]@{
             $script:TokSub = $script:SubName
+        }
+        TagMap = [ordered]@{
+            $script:TokTag = $script:TagValue
         }
         ResourceGroupMap = [ordered]@{
             $script:TokRgApp  = $script:IdVm     # rg-app (also covers vm02 determinism conceptually)
@@ -172,6 +177,12 @@ Describe "Unmask-Obfuscation field resolution" {
         $r = Invoke-Unmask -Value $script:TokNameVmss
         $r.Type      | Should -Be 'ResourceName'
         $r.RealValue | Should -Be 'vmss01'
+    }
+
+    It "resolves a Tag token to the real tag value" {
+        $r = Invoke-Unmask -Value $script:TokTag -Field Tag
+        $r.Type      | Should -Be 'Tag'
+        $r.RealValue | Should -Be $script:TagValue
     }
 }
 

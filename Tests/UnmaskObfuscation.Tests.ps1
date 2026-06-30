@@ -5,9 +5,11 @@
 # These build a SYNTHETIC ObfuscationDictionary fixture in a temp file (no real
 # Azure data, no network) that mirrors the real dictionary shape produced by
 # ResourceInventory.ps1 -Obfuscate:
-#   - four maps (ResourceIdMap / ResourceNameMap / SubscriptionMap /
+#   - four core maps (ResourceIdMap / ResourceNameMap / SubscriptionMap /
 #     ResourceGroupMap), each keyed by an obfuscated prod_/nonprod_ token and
 #     valued with the REAL resource Id (an ARM path) the token came from.
+#   - SubscriptionNameMap: obfuscated subscription token -> real subscription
+#     display name (lets the subscription name resolve fully offline).
 #   - a GeneratedAt stamp.
 #
 # The fixture deliberately exercises the edge cases observed in real output:
@@ -54,6 +56,7 @@ BeforeAll {
     $script:TokRgAks   = 'prod_tok-rg-aks'
     $script:TokRgCase  = 'prod_tok-rg-case'
     $script:TokSub     = 'prod_tok-sub'
+    $script:SubName    = 'Contoso Production Sub'   # friendly name persisted in SubscriptionNameMap
 
     $dict = [ordered]@{
         GeneratedAt = '2026-06-30 00:00:00'
@@ -68,6 +71,9 @@ BeforeAll {
         }
         SubscriptionMap = [ordered]@{
             $script:TokSub = $script:IdVm
+        }
+        SubscriptionNameMap = [ordered]@{
+            $script:TokSub = $script:SubName
         }
         ResourceGroupMap = [ordered]@{
             $script:TokRgApp  = $script:IdVm     # rg-app (also covers vm02 determinism conceptually)
@@ -116,15 +122,32 @@ Describe "Unmask-Obfuscation field resolution" {
         $r.RealValue | Should -Be 'RG-APP'
     }
 
-    It "resolves a Subscription token to the subscription GUID" {
+    It "resolves a Subscription token to the friendly name offline from SubscriptionNameMap" {
         $r = Invoke-Unmask -Value $script:TokSub
         $r.Type      | Should -Be 'Subscription'
-        $r.RealValue | Should -Be '12345678-1234-1234-1234-123456789012'
+        $r.RealValue | Should -Be $script:SubName
+        $r.Note      | Should -Match 'offline'
     }
 
-    It "notes that -ResolveSubscriptionName is needed for the friendly name" {
-        $r = Invoke-Unmask -Value $script:TokSub
-        $r.Note | Should -Match 'ResolveSubscriptionName'
+    It "falls back to the subscription GUID for older dictionaries without SubscriptionNameMap" {
+        # Backward-compat: a dictionary written before SubscriptionNameMap existed
+        # must still load (no throw) and resolve the subscription to its GUID,
+        # with the note pointing at -ResolveSubscriptionName.
+        $legacyDir = Join-Path $script:TmpDir 'legacy'
+        New-Item -ItemType Directory -Path $legacyDir -Force | Out-Null
+        $legacyPath = Join-Path $legacyDir 'ObfuscationDictionary_Legacy.json'
+        [ordered]@{
+            GeneratedAt      = '2026-06-30 00:00:00'
+            ResourceIdMap    = [ordered]@{ $script:TokIdVm   = $script:IdVm }
+            ResourceNameMap  = [ordered]@{ $script:TokNameVm = $script:IdVm }
+            SubscriptionMap  = [ordered]@{ $script:TokSub    = $script:IdVm }
+            ResourceGroupMap = [ordered]@{ $script:TokRgApp  = $script:IdVm }
+        } | ConvertTo-Json -Depth 5 | Set-Content -Path $legacyPath -Encoding utf8
+
+        $r = & $script:UnmaskScript -DictionaryPath $legacyPath -Value $script:TokSub
+        $r.Type      | Should -Be 'Subscription'
+        $r.RealValue | Should -Be '12345678-1234-1234-1234-123456789012'
+        $r.Note      | Should -Match 'ResolveSubscriptionName'
     }
 
     It "resolves a ResourceId token to the full ARM Id" {

@@ -8,22 +8,27 @@
 
 .DESCRIPTION
     When ResourceInventory.ps1 runs with -Obfuscate it writes a local
-    ObfuscationDictionary_*.json. Every one of its four maps resolves an
-    obfuscated value to the REAL Azure RESOURCE ID it came from (an ARM path),
-    NOT to a bare name:
+    ObfuscationDictionary_*.json. Its four core maps resolve an obfuscated value
+    to the REAL Azure RESOURCE ID it came from (an ARM path), NOT to a bare name:
 
         ResourceIdMap     obfuscatedId   -> real resource Id
         ResourceNameMap   obfuscatedName -> real resource Id
         SubscriptionMap   obfuscatedSub  -> real resource Id
         ResourceGroupMap  obfuscatedRg   -> real resource Id
 
+    Newer dictionaries also include a fifth map that stores the friendly name
+    directly, so the subscription name resolves fully offline:
+
+        SubscriptionNameMap  obfuscatedSub -> real subscription display name
+
     Therefore:
       - Resource Group NAME is parsed from '/resourceGroups/<name>' in the Id
         (exact, offline).
-      - Subscription resolves to the subscription GUID parsed from
-        '/subscriptions/<guid>'. The friendly subscription NAME is not stored in
-        the dictionary; pass -ResolveSubscriptionName to look it up online via
-        Get-AzSubscription (requires the Az module and an authenticated session).
+      - Subscription NAME is read from SubscriptionNameMap when present (offline).
+        For older dictionaries that lack it, the subscription resolves only to
+        the GUID parsed from '/subscriptions/<guid>'; pass -ResolveSubscriptionName
+        to look the name up online via Get-AzSubscription (requires the Az module
+        and an authenticated session).
 
     LOCAL USE ONLY. This script and the dictionary it reads must stay with the
     customer. Never share the dictionary or this script's output externally.
@@ -54,7 +59,9 @@
 
 .PARAMETER ResolveSubscriptionName
     For Subscription matches, call Get-AzSubscription to turn the GUID into its
-    friendly name. Requires the Az module and an authenticated session.
+    friendly name. Only needed for OLDER dictionaries that lack SubscriptionNameMap;
+    when that map is present the friendly name is resolved offline and this switch
+    is ignored. Requires the Az module and an authenticated session.
 
 .EXAMPLE
     ./Unmask-Obfuscation.ps1 -DictionaryPath ./ObfuscationDictionary_Contoso_2026...json -Value 'prod_8f...'
@@ -143,6 +150,12 @@ begin
     $SubMap  = ConvertTo-LookupTable $Dict.SubscriptionMap
     $IdMap   = ConvertTo-LookupTable $Dict.ResourceIdMap
     $NameMap = ConvertTo-LookupTable $Dict.ResourceNameMap
+    # Optional: friendly subscription names persisted by newer -Obfuscate runs.
+    # Absent from dictionaries written by older versions (which is why it is NOT
+    # in the required-map check above), so this is backward-compatible: an old
+    # dictionary simply yields an empty table and the GUID/-ResolveSubscriptionName
+    # behaviour below is unchanged.
+    $SubNameMap = ConvertTo-LookupTable $Dict.SubscriptionNameMap
 
     # Map a field-type label to its lookup table, so -Field selection and the
     # search loop share one source of truth.
@@ -212,7 +225,14 @@ begin
                 $SubGuid = Get-SubGuidFromResourceId $ResourceId
                 $Real    = $SubGuid
                 $Note    = "Dictionary yields the subscription GUID. Use -ResolveSubscriptionName for the friendly name."
-                if ($ResolveSubscriptionName)
+                if ($null -ne $SubNameMap -and $SubNameMap.ContainsKey($Obf) -and -not [string]::IsNullOrEmpty($SubNameMap[$Obf]))
+                {
+                    # Newer dictionaries persist the friendly name, so resolve it
+                    # fully offline (no Azure call) - this is the preferred path.
+                    $Real = $SubNameMap[$Obf]
+                    $Note = ("Subscription GUID: {0} (name resolved offline from dictionary)" -f $SubGuid)
+                }
+                elseif ($ResolveSubscriptionName)
                 {
                     $ResolvedName = Resolve-SubName $SubGuid
                     if (-not [string]::IsNullOrEmpty($ResolvedName))

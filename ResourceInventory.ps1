@@ -1476,6 +1476,12 @@ if($Obfuscate.IsPresent)
         ResourceNameMap = @{}
         SubscriptionMap = @{}
         ResourceGroupMap = @{}
+        # Maps an obfuscated subscription token to the REAL subscription display
+        # name, so Unmask-Obfuscation.ps1 can resolve the friendly name fully
+        # offline. The other maps store ARM resource Ids, which only contain the
+        # subscription GUID - never the name - so without this map the only way
+        # back to a name was an online Get-AzSubscription call.
+        SubscriptionNameMap = @{}
     }
 
     foreach ($key in $ResourceIdDictionary.Keys) {
@@ -1489,6 +1495,23 @@ if($Obfuscate.IsPresent)
     }
     foreach ($key in $ResourceResourceGroupDictionary.Keys) {
         $dictionary.ResourceGroupMap[$ResourceResourceGroupDictionary[$key]] = $key
+    }
+
+    # Populate token -> real subscription name. The dictionary key ($key) is the
+    # real resource Id, which embeds the subscription GUID; resolve that GUID to
+    # its display name via the already-loaded $Global:Subscriptions. Uses only
+    # in-memory data (no extra Azure calls); skips entries whose name cannot be
+    # resolved so the map only ever holds genuine names.
+    foreach ($key in $ResourceSubscriptionDictionary.Keys) {
+        $subToken = $ResourceSubscriptionDictionary[$key]
+        if ($dictionary.SubscriptionNameMap.ContainsKey($subToken)) { continue }
+        $subGuid = if ($key -match '(?i)/subscriptions/([^/]+)') { $Matches[1] } else { $null }
+        if (-not [string]::IsNullOrEmpty($subGuid)) {
+            $subName = ($Global:Subscriptions | Where-Object { $_.id -eq $subGuid } | Select-Object -First 1).name
+            if (-not [string]::IsNullOrEmpty($subName)) {
+                $dictionary.SubscriptionNameMap[$subToken] = $subName
+            }
+        }
     }
 
     $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8

@@ -118,23 +118,27 @@ At the end of an obfuscated run the tool writes:
 ObfuscationDictionary_<ReportName>_<timestamp>.json
 ```
 
-It contains four maps. **A subtlety to understand:** every map resolves a token
-back to the real **resource ID** (an ARM path), *not* to a bare name:
+It contains five maps. **A subtlety to understand:** the four core maps resolve a
+token back to the real **resource ID** (an ARM path), *not* to a bare name. The
+fifth map, `SubscriptionNameMap`, stores the subscription **display name**
+directly so the subscription can be resolved fully offline:
 
 ```jsonc
 {
   "GeneratedAt": "2026-06-30 12:00:00",
-  "ResourceIdMap":   { "prod_a1b2...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
-  "ResourceNameMap": { "prod_9f8e...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
-  "SubscriptionMap": { "prod_2b2b...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
-  "ResourceGroupMap":{ "prod_4c4c...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" }
+  "ResourceIdMap":      { "prod_a1b2...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
+  "ResourceNameMap":    { "prod_9f8e...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
+  "SubscriptionMap":    { "prod_2b2b...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
+  "ResourceGroupMap":   { "prod_4c4c...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
+  "SubscriptionNameMap":{ "prod_2b2b...": "Contoso Production" }
 }
 ```
 
-That is why unmasking derives the friendly values *from the ID*:
-- Resource Group name is parsed from `/resourceGroups/<name>`.
-- Subscription is parsed to its `/subscriptions/<guid>` GUID (the friendly name
-  is not stored — it must be looked up online).
+That is why unmasking derives the friendly values:
+- Resource Group name is parsed from `/resourceGroups/<name>` in the ID.
+- Subscription name is read from `SubscriptionNameMap` when present (offline). For
+  older dictionaries that predate this map, only the `/subscriptions/<guid>` GUID
+  is recoverable offline; the name then needs `-ResolveSubscriptionName` (online).
 - Resource Name is the last segment of the ID.
 - Resource ID is the ID itself.
 
@@ -155,15 +159,16 @@ Delete the dictionary and transcript when they are no longer needed.
 
 `Unmask-Obfuscation.ps1` is a **local, offline** reverse-lookup helper. It reads
 an `ObfuscationDictionary_*.json` and resolves tokens back to real values. It
-does not contact Azure at all unless you ask it to resolve a subscription GUID
-to its friendly name.
+does not contact Azure at all — unless you point it at an *older* dictionary
+(without `SubscriptionNameMap`) and ask it to resolve a subscription GUID to its
+friendly name via `-ResolveSubscriptionName`.
 
 ### How it resolves each field
 
 | Token type | Resolves to | Source |
 |---|---|---|
 | `ResourceGroup` | the RG name | parsed from `/resourceGroups/<name>` in the ID (offline, exact) |
-| `Subscription` | the subscription **GUID** | parsed from `/subscriptions/<guid>`; friendly name needs `-ResolveSubscriptionName` (online) |
+| `Subscription` | the subscription **name** | from `SubscriptionNameMap` (offline). Older dictionaries lack it → resolves to the GUID; add `-ResolveSubscriptionName` for the name (online) |
 | `ResourceId` | the full ARM resource ID | returned directly |
 | `ResourceName` | the resource's short name | last `/`-delimited segment of the ID |
 

@@ -40,6 +40,7 @@ BeforeAll {
     $script:TokRgAks  = 'prod_'    + [guid]::NewGuid().ToString()
     $script:TokRgCase = 'prod_'    + [guid]::NewGuid().ToString()
     $script:TokTag    = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokFree   = 'prod_'    + [guid]::NewGuid().ToString()
 
     # Real values behind the tokens. Subscription name deliberately contains a
     # comma and an ampersand to exercise CSV quoting and HTML encoding.
@@ -48,6 +49,7 @@ BeforeAll {
     $script:RealRgCase   = 'RG-APP'                   # casing must be preserved
     $script:RealSubName  = 'Contoso, Inc. (Prod) & Co'
     $script:RealTagVal   = 'payments'
+    $script:RealFreeText = 'data-platform workspace for the analytics team'
 
     $idVm   = "$base/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
     $idAks  = "$base/$($script:RealRgAks)/providers/Microsoft.Compute/virtualMachines/aksnode0"
@@ -66,6 +68,7 @@ BeforeAll {
         }
         SubscriptionNameMap = [ordered]@{ $script:TokSub  = $script:RealSubName }
         TagMap              = [ordered]@{ $script:TokTag  = $script:RealTagVal }
+        FreeTextMap         = [ordered]@{ $script:TokFree = $script:RealFreeText }
     }
 
     # ---- Synthetic obfuscated report members ----
@@ -80,6 +83,7 @@ BeforeAll {
                 Subscription  = $script:TokSub
                 ResourceGroup = $script:TokRg
                 Set           = 'obfuscated'
+                Description   = $script:TokFree
                 Tags          = @( [ordered]@{ Name = 'environment'; Value = $script:TokTag } )
             }
             [ordered]@{
@@ -201,6 +205,10 @@ Describe "Reveal-Obfuscation default fields (ResourceGroup + Subscription)" {
         $script:R.Inventory.VirtualMachines[0].Set | Should -Be 'obfuscated'
     }
 
+    It "leaves free-text fields masked when FreeText is not selected" {
+        $script:R.Inventory.VirtualMachines[0].Description | Should -Be $script:TokFree
+    }
+
     It "HTML-encodes a revealed value containing special characters in the HTML report" {
         # RealSubName has an '&'; the HTML branch must emit the '&amp;' entity.
         $script:R.Html | Should -Match 'Contoso, Inc\. \(Prod\) &amp; Co'
@@ -275,8 +283,44 @@ Describe "Reveal-Obfuscation -All full reveal" {
         $script:RA.Inventory.VirtualMachines[0].Tags[0].Value | Should -Be $script:RealTagVal
     }
 
+    It "reveals free-text fields" {
+        $script:RA.Inventory.VirtualMachines[0].Description | Should -Be $script:RealFreeText
+    }
+
     It "leaves the lossy 'obfuscated' sentinel untouched (not recoverable)" {
         $script:RA.Inventory.VirtualMachines[0].Set | Should -Be 'obfuscated'
+    }
+}
+
+Describe "Reveal-Obfuscation -Fields FreeText" {
+
+    It "reveals free-text fields when FreeText is selected" {
+        $r = Invoke-Reveal -Fields @('FreeText')
+        $r.Inventory.VirtualMachines[0].Description | Should -Be $script:RealFreeText
+    }
+
+    It "leaves the resource group masked when only FreeText is selected" {
+        $r = Invoke-Reveal -Fields @('FreeText')
+        $r.Inventory.VirtualMachines[0].ResourceGroup | Should -Be $script:TokRg
+    }
+
+    It "is a no-op for free-text when the dictionary has no FreeTextMap" {
+        $noFreeDir = Join-Path $script:TmpDir ("nofree_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        New-Item -ItemType Directory -Path $noFreeDir -Force | Out-Null
+        $noFreeDict = Join-Path $noFreeDir 'ObfuscationDictionary_NoFree.json'
+        [ordered]@{
+            GeneratedAt      = '2026-06-30 00:00:00'
+            ResourceIdMap    = [ordered]@{ $script:TokId  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceNameMap  = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            SubscriptionMap  = [ordered]@{ $script:TokSub  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceGroupMap = [ordered]@{ $script:TokRg   = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $noFreeDict -Encoding utf8
+
+        # Pair FreeText with a resolvable dimension so the run has something to do;
+        # FreeText must be a no-op (Description stays a token) when no FreeTextMap.
+        $r = Invoke-Reveal -Fields @('ResourceGroup','FreeText') -DictPath $noFreeDict
+        $r.Inventory.VirtualMachines[0].Description | Should -Be $script:TokFree
+        $r.Inventory.VirtualMachines[0].ResourceGroup | Should -Be $script:RealRgName
     }
 }
 

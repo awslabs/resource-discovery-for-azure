@@ -69,6 +69,13 @@ function Variables
     # always yields the same token within a run) so the obfuscated report can still
     # group/correlate by tag value without exposing it. Tag KEYS are kept verbatim.
     $Global:TagValueDictionary = $null
+    # Maps a REAL free-text / identity value (resource Description, FriendlyName,
+    # CreatedBy, RoleName, container image, etc.) to its deterministic obfuscated
+    # token. These fields are free-form text - previously they were dropped (nulled
+    # or stamped with the literal 'obfuscated') and so were unrecoverable. Tokenizing
+    # them (same real value -> same token within a run) keeps them out of the shared
+    # report while letting Reveal-Obfuscation.ps1 restore them locally via FreeTextMap.
+    $Global:FreeTextDictionary = $null
 
     if ($Obfuscate.IsPresent) {
         $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
@@ -76,10 +83,31 @@ function Variables
         $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     }
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
+}
+
+# Deterministically tokenize a free-text / identity value into
+# $Global:FreeTextDictionary and return the token, so collectors can replace
+# free-form fields (Description, FriendlyName, CreatedBy, RoleName, container
+# image, etc.) with a reversible token instead of dropping them. Same real value
+# always yields the same prod_/nonprod_ token within a run. Null/empty input
+# returns $null (preserving the previous "absent" shape); when obfuscation is off
+# the dictionary is $null and the original value is returned unchanged. Defined
+# Global so it is reachable from the collectors invoked via '& $Module'.
+Function Global:Protect-FreeTextValue([string]$Value)
+{
+    if ([string]::IsNullOrEmpty($Value)) { return $null }
+    if ($null -eq $Global:FreeTextDictionary) { return $Value }
+    if (-not $Global:FreeTextDictionary.ContainsKey($Value))
+    {
+        $tfPrefix = if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+        $Global:FreeTextDictionary[$Value] = $tfPrefix + [guid]::NewGuid().ToString()
+    }
+    return $Global:FreeTextDictionary[$Value]
 }
 
 Function RunInventorySetup()
@@ -1513,6 +1541,10 @@ if($Obfuscate.IsPresent)
         # values (which keep their keys but have obfuscated values) can be
         # reversed offline like every other obfuscated field.
         TagMap = @{}
+        # Maps an obfuscated free-text/identity token back to the REAL value
+        # (Description, FriendlyName, CreatedBy, RoleName, container image, etc.)
+        # so Reveal-Obfuscation.ps1 can restore these free-form fields offline.
+        FreeTextMap = @{}
     }
 
     foreach ($key in $ResourceIdDictionary.Keys) {
@@ -1550,6 +1582,15 @@ if($Obfuscate.IsPresent)
     if ($null -ne $Global:TagValueDictionary) {
         foreach ($realValue in $Global:TagValueDictionary.Keys) {
             $dictionary.TagMap[$Global:TagValueDictionary[$realValue]] = $realValue
+        }
+    }
+
+    # Invert the free-text dictionary (real value -> token) into FreeTextMap
+    # (token -> real value) so Reveal-Obfuscation.ps1 can restore free-form
+    # fields (Description, FriendlyName, CreatedBy, etc.).
+    if ($null -ne $Global:FreeTextDictionary) {
+        foreach ($realValue in $Global:FreeTextDictionary.Keys) {
+            $dictionary.FreeTextMap[$Global:FreeTextDictionary[$realValue]] = $realValue
         }
     }
 

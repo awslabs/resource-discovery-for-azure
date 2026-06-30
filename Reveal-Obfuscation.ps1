@@ -25,6 +25,9 @@
       - Tag           : token -> real tag value (OFF unless requested)
       - ResourceName  : token -> real resource short name (OFF unless requested)
       - ResourceId    : token -> real full ARM resource Id (OFF unless requested)
+      - FreeText      : token -> real free-form value, e.g. Description,
+                        FriendlyName, CreatedBy, RoleName, container image
+                        (OFF unless requested)
 
     By DEFAULT only ResourceGroup and Subscription are revealed; everything else
     stays masked until you name it in -Fields. Note that revealing ResourceId
@@ -55,13 +58,14 @@
 
 .PARAMETER Fields
     Which dimensions to reveal. Valid values: ResourceGroup, Subscription, Tag,
-    ResourceName, ResourceId. Defaults to ResourceGroup and Subscription.
-    Anything not listed stays masked. Ignored when -All is supplied.
+    ResourceName, ResourceId, FreeText. Defaults to ResourceGroup and
+    Subscription. Anything not listed stays masked. Ignored when -All is supplied.
 
 .PARAMETER All
     Reveal every dimension the dictionary can reverse (ResourceGroup,
-    Subscription, Tag, ResourceName, ResourceId) - a full un-obfuscate, as if
-    the report had been produced without -Obfuscate. Overrides -Fields.
+    Subscription, Tag, ResourceName, ResourceId, FreeText) - a full
+    un-obfuscate, as if the report had been produced without -Obfuscate.
+    Overrides -Fields.
 
     This is NOT a perfect byte-for-byte undo: fields that obfuscation DESTROYS
     rather than tokenizes are not recoverable - notably any value nulled at
@@ -97,7 +101,7 @@ param(
     [string]   $DictionaryPath,
     [string]   $SearchDirectory = '.',
 
-    [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId')]
+    [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')]
     [string[]] $Fields = @('ResourceGroup', 'Subscription'),
 
     [switch]   $All,
@@ -137,7 +141,7 @@ if ([string]::IsNullOrEmpty($OutputZip))
 # time and cannot be restored. Everything stored in the dictionary comes back.
 if ($All)
 {
-    $Fields = @('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId')
+    $Fields = @('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')
 }
 
 Write-Host ("Input zip   : {0}" -f $InputZip)
@@ -168,6 +172,7 @@ $SubNameMap = ConvertTo-LookupTable $Dict.SubscriptionNameMap
 $TagMap     = ConvertTo-LookupTable $Dict.TagMap
 $IdMap      = ConvertTo-LookupTable $Dict.ResourceIdMap
 $NameMap    = ConvertTo-LookupTable $Dict.ResourceNameMap
+$FreeTextMap = ConvertTo-LookupTable $Dict.FreeTextMap
 
 function Get-RgNameFromResourceId
 {
@@ -250,6 +255,16 @@ if ($Fields -contains 'ResourceId')
     foreach ($token in $IdMap.Keys)
     {
         if (-not [string]::IsNullOrEmpty($IdMap[$token])) { $Replacements[$token] = $IdMap[$token] }
+    }
+}
+
+if ($Fields -contains 'FreeText')
+{
+    # FreeTextMap stores token -> the real free-form value (Description,
+    # FriendlyName, CreatedBy, RoleName, container image, etc.).
+    foreach ($token in $FreeTextMap.Keys)
+    {
+        if (-not [string]::IsNullOrEmpty($FreeTextMap[$token])) { $Replacements[$token] = $FreeTextMap[$token] }
     }
 }
 

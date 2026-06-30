@@ -49,6 +49,18 @@ Everything else in a record (location, SKU, sizes, metric values, counts) is
 **not** obfuscated — it carries no customer identity and is what makes the
 report useful for assessment.
 
+### Free-text / identity fields: tokenized, not dropped
+
+Free-form fields that can carry arbitrary PII — resource `Description`,
+`FriendlyName`, `CreatedBy` (user identity), `RoleName`, container image/name,
+IoT host/endpoint, automation account/runbook names, and similar — were
+previously dropped under obfuscation (set to `null` or the literal
+`obfuscated`), which made them unrecoverable. They are now tokenized
+deterministically into `$Global:FreeTextDictionary` (same real value → same
+`prod_`/`nonprod_` token within a run) and recorded in the dictionary's
+`FreeTextMap`, so `Reveal-Obfuscation.ps1` can restore them locally
+(`-Fields FreeText` or `-All`). They remain masked in the shared report.
+
 ---
 
 ## 2. Token format: `prod_` / `nonprod_` + GUID
@@ -136,11 +148,12 @@ At the end of an obfuscated run the tool writes:
 ObfuscationDictionary_<ReportName>_<timestamp>.json
 ```
 
-It contains six maps. **A subtlety to understand:** the four core maps resolve a
+It contains seven maps. **A subtlety to understand:** the four core maps resolve a
 token back to the real **resource ID** (an ARM path), *not* to a bare name. The
 `SubscriptionNameMap` stores the subscription **display name** directly so the
 subscription can be resolved fully offline; `TagMap` stores the real **tag
-value** directly (it is not derived from an ID):
+value** directly; and `FreeTextMap` stores the real **free-text value**
+(Description, FriendlyName, CreatedBy, etc.) directly:
 
 ```jsonc
 {
@@ -150,7 +163,8 @@ value** directly (it is not derived from an ID):
   "SubscriptionMap":    { "prod_2b2b...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
   "ResourceGroupMap":   { "prod_4c4c...": "/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01" },
   "SubscriptionNameMap":{ "prod_2b2b...": "Contoso Production" },
-  "TagMap":             { "prod_7e7e...": "payments" }
+  "TagMap":             { "prod_7e7e...": "payments" },
+  "FreeTextMap":        { "prod_3d3d...": "Enterprise data catalog" }
 }
 ```
 
@@ -206,6 +220,7 @@ ZIP (Inventory/Metrics JSON, Consumption CSV, the HTML report).
 | `Tag` | real tag value (from `TagMap`) | off — must be requested |
 | `ResourceName` | real resource short name | off — must be requested |
 | `ResourceId` | full real ARM resource Id | off — must be requested |
+| `FreeText` | real free-form values (Description, FriendlyName, CreatedBy, RoleName, container image, etc.) | off — must be requested |
 
 By default only `ResourceGroup` and `Subscription` are revealed; anything you do
 not name in `-Fields` stays masked. Tokens that are not part of a selected
@@ -248,7 +263,7 @@ comma, or a free-text tag value) cannot corrupt the output:
 - `-SearchDirectory` — where to auto-discover the dictionary (default: current
   directory).
 - `-Fields` — dimensions to reveal: `ResourceGroup`, `Subscription`, `Tag`,
-  `ResourceName`, `ResourceId`. Defaults to `ResourceGroup, Subscription`.
+  `ResourceName`, `ResourceId`, `FreeText`. Defaults to `ResourceGroup, Subscription`.
 - `-All` — reveal every dimension the dictionary can reverse (overrides
   `-Fields`); a full un-obfuscate. Fields destroyed at obfuscation time (nulled
   values, `obfuscated` sentinels) are still not recoverable.

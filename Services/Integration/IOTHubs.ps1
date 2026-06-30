@@ -27,9 +27,9 @@ if ($Task -eq 'Processing')
                     'State'                             = $data.state;
                     'EventRetentionTimeInDays'          = [string]$data.eventHubEndpoints.events.retentionTimeInDays;
                     'EventPartitionCount'               = [string]$data.eventHubEndpoints.events.partitionCount;
-                    'EventsPath'                        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$data.eventHubEndpoints.events.path };
+                    'EventsPath'                        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue ([string]$data.eventHubEndpoints.events.path) } else { [string]$data.eventHubEndpoints.events.path };
                     'MaxDeliveryCount'                  = [string]$data.cloudToDevice.maxDeliveryCount;
-                    'HostName'                          = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.hostName };
+                    'HostName'                          = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.hostName } else { $data.hostName };
                 }
 
                 $tmp += $obj

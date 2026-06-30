@@ -414,11 +414,11 @@ Describe "Cross-Reference Field Obfuscation" {
         }
     }
 
-    It "Purview: CreatedBy should be 'obfuscated' or null" {
+    It "Purview: CreatedBy is obfuscated (tokenized, never raw identity)" {
         $resources = @($script:Inventory.Purview)
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.CreatedBy)) {
-                $r.CreatedBy | Should -Be 'obfuscated' -Because "CreatedBy contains user identity and should be masked"
+                $r.CreatedBy | Should -Match '^(prod|nonprod)_' -Because "CreatedBy contains user identity and must be obfuscated to a token, never raw"
             }
         }
     }
@@ -550,11 +550,11 @@ Describe "Cross-Reference Field Obfuscation" {
         }
     }
 
-    It "Purview: FriendlyName should be obfuscated or null" {
+    It "Purview: FriendlyName is obfuscated (tokenized, never raw)" {
         $resources = @($script:Inventory.Purview)
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.FriendlyName)) {
-                $r.FriendlyName | Should -BeIn @('obfuscated') -Because "Purview FriendlyName should be obfuscated"
+                $r.FriendlyName | Should -Match '^(prod|nonprod)_' -Because "Purview FriendlyName must be obfuscated to a token, never raw"
             }
         }
     }

@@ -42,8 +42,8 @@ If ($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'SKU'                       = $1.sku.name;
-                'FriendlyName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.friendlyName };
-                'Description'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $null } else { $data.description };
+                'FriendlyName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.friendlyName } else { $data.friendlyName };
+                'Description'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.description } else { $data.description };
                 'ContainerRegistry'         = $containerRegistry;
                 'StorageHNSEnabled'         = $data.storageHnsEnabled;
                 'StorageAccount'            = $StorageAcc;

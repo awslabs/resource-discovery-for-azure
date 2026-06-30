@@ -29,7 +29,7 @@ if ($Task -eq 'Processing')
             foreach ($roleProfile in $roles) 
             {
                 $roleProfileObj = @{
-                    'RoleName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $roleProfile.name };
+                    'RoleName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $roleProfile.name } else { $roleProfile.name };
                     'SkuName'     = $roleProfile.sku.name;
                     'SkuTier'     = $roleProfile.sku.tier;
                     'SkuCapacity'     = $roleProfile.sku.capacity;

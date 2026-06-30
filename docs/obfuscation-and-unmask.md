@@ -235,6 +235,9 @@ comma, or a free-text tag value) cannot corrupt the output:
 
 # Explicit output path
 ./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -OutputZip ./report_for_ingest.zip
+
+# Full reveal - un-obfuscate everything the dictionary can reverse (as if -Obfuscate had not been used)
+./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -All
 ```
 
 ### Parameters
@@ -246,6 +249,9 @@ comma, or a free-text tag value) cannot corrupt the output:
   directory).
 - `-Fields` — dimensions to reveal: `ResourceGroup`, `Subscription`, `Tag`,
   `ResourceName`, `ResourceId`. Defaults to `ResourceGroup, Subscription`.
+- `-All` — reveal every dimension the dictionary can reverse (overrides
+  `-Fields`); a full un-obfuscate. Fields destroyed at obfuscation time (nulled
+  values, `obfuscated` sentinels) are still not recoverable.
 - `-OutputZip` — output path (default: the input name with a `_revealed`
   suffix).
 

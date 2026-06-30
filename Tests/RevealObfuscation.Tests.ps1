@@ -129,11 +129,12 @@ BeforeAll {
     # Helper: run reveal into a fresh output zip, extract, return parsed members.
     # -DictPath / -SearchDir let individual tests point at alternate fixtures.
     function Invoke-Reveal {
-        param([string[]]$Fields, [string]$DictPath = $script:DictPath, [string]$SearchDir)
+        param([string[]]$Fields, [string]$DictPath = $script:DictPath, [string]$SearchDir, [switch]$All)
         $out = Join-Path $script:TmpDir ("out_" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".zip")
         $splat = @{ InputZip = $script:InputZip; OutputZip = $out }
         if ($SearchDir) { $splat['SearchDirectory'] = $SearchDir } else { $splat['DictionaryPath'] = $DictPath }
         if ($Fields) { $splat['Fields'] = $Fields }
+        if ($All) { $splat['All'] = $true }
         & $script:RevealScript @splat *>&1 | Out-Null
         $ex = Join-Path $script:TmpDir ("ex_" + [guid]::NewGuid().ToString('N').Substring(0,8))
         Expand-Archive -Path $out -DestinationPath $ex -Force
@@ -247,6 +248,35 @@ Describe "Reveal-Obfuscation opt-in ResourceName / ResourceId" {
     It "leaves the resource Name masked when only ResourceId is selected" {
         $r = Invoke-Reveal -Fields @('ResourceId')
         $r.Inventory.VirtualMachines[0].Name | Should -Be $script:TokName
+    }
+}
+
+Describe "Reveal-Obfuscation -All full reveal" {
+
+    BeforeAll { $script:RA = Invoke-Reveal -All }
+
+    It "reveals the resource group name" {
+        $script:RA.Inventory.VirtualMachines[0].ResourceGroup | Should -Be $script:RealRgName
+    }
+
+    It "reveals the subscription friendly name" {
+        $script:RA.Inventory.VirtualMachines[0].Subscription | Should -Be $script:RealSubName
+    }
+
+    It "reveals the resource short name" {
+        $script:RA.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
+    }
+
+    It "reveals the full ARM resource Id" {
+        $script:RA.Inventory.VirtualMachines[0].ID | Should -Be "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
+    }
+
+    It "reveals the tag value" {
+        $script:RA.Inventory.VirtualMachines[0].Tags[0].Value | Should -Be $script:RealTagVal
+    }
+
+    It "leaves the lossy 'obfuscated' sentinel untouched (not recoverable)" {
+        $script:RA.Inventory.VirtualMachines[0].Set | Should -Be 'obfuscated'
     }
 }
 

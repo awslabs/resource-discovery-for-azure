@@ -56,7 +56,18 @@
 .PARAMETER Fields
     Which dimensions to reveal. Valid values: ResourceGroup, Subscription, Tag,
     ResourceName, ResourceId. Defaults to ResourceGroup and Subscription.
-    Anything not listed stays masked.
+    Anything not listed stays masked. Ignored when -All is supplied.
+
+.PARAMETER All
+    Reveal every dimension the dictionary can reverse (ResourceGroup,
+    Subscription, Tag, ResourceName, ResourceId) - a full un-obfuscate, as if
+    the report had been produced without -Obfuscate. Overrides -Fields.
+
+    This is NOT a perfect byte-for-byte undo: fields that obfuscation DESTROYS
+    rather than tokenizes are not recoverable - notably any value nulled at
+    obfuscation time (e.g. Description) and any cross-reference stamped with the
+    lossy 'obfuscated' / 'obfuscated_<guid>' sentinel (out-of-scope or
+    malformed-row targets). Everything stored in the dictionary is restored.
 
 .PARAMETER OutputZip
     Path for the revealed output zip. Defaults to the input zip name with a
@@ -73,6 +84,10 @@
 .EXAMPLE
     # Explicit output path
     ./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -OutputZip ./report_for_ingest.zip
+
+.EXAMPLE
+    # Full reveal - un-obfuscate everything the dictionary can reverse
+    ./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -All
 #>
 [CmdletBinding()]
 param(
@@ -84,6 +99,8 @@ param(
 
     [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId')]
     [string[]] $Fields = @('ResourceGroup', 'Subscription'),
+
+    [switch]   $All,
 
     [string]   $OutputZip
 )
@@ -113,9 +130,19 @@ if ([string]::IsNullOrEmpty($OutputZip))
     $OutputZip = Join-Path $inDir ($inBase + '_revealed.zip')
 }
 
+# -All is a convenience for a full reveal: expand to every dimension the
+# dictionary can reverse (overriding -Fields). NOTE this is NOT a perfect undo
+# of -Obfuscate: fields that were nulled (e.g. Description) or stamped with the
+# lossy 'obfuscated' / 'obfuscated_<guid>' sentinel are destroyed at obfuscation
+# time and cannot be restored. Everything stored in the dictionary comes back.
+if ($All)
+{
+    $Fields = @('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId')
+}
+
 Write-Host ("Input zip   : {0}" -f $InputZip)
 Write-Host ("Dictionary  : {0}" -f $DictionaryPath)
-Write-Host ("Reveal      : {0}" -f ($Fields -join ', '))
+Write-Host ("Reveal      : {0}{1}" -f ($Fields -join ', '), $(if ($All) { ' (-All: full reveal)' } else { '' }))
 Write-Host ("Output zip  : {0}" -f $OutputZip)
 
 # ---- Load dictionary -------------------------------------------------------
@@ -357,6 +384,10 @@ try
     Write-Host ""
     Write-Host ("Done. Revealed {0} token occurrence(s) across {1} member file(s)." -f $totalHits, @($files).Count) -ForegroundColor Green
     Write-Host ("Output: {0}" -f $OutputZip) -ForegroundColor Green
+    if ($All)
+    {
+        Write-Host "Full reveal: all dictionary-backed dimensions restored. Fields nulled at obfuscation time (e.g. Description) or marked 'obfuscated' are lossy and remain so." -ForegroundColor Yellow
+    }
     Write-Host "This zip contains the real values you chose to reveal - share only with the intended ingestion party."
 }
 finally

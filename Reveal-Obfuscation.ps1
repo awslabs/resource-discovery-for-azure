@@ -23,9 +23,13 @@
       - ResourceGroup : token -> real resource group name (default ON)
       - Subscription  : token -> real subscription DISPLAY NAME (default ON)
       - Tag           : token -> real tag value (OFF unless requested)
+      - ResourceName  : token -> real resource short name (OFF unless requested)
+      - ResourceId    : token -> real full ARM resource Id (OFF unless requested)
 
-    By DEFAULT only ResourceGroup and Subscription are revealed. Resource Ids,
-    Resource Names and (unless you add -Fields Tag) tag values remain masked.
+    By DEFAULT only ResourceGroup and Subscription are revealed; everything else
+    stays masked until you name it in -Fields. Note that revealing ResourceId
+    un-masks the FULL ARM path, which embeds the real subscription GUID and
+    resource group name for that resource.
 
     Reveal mechanism: each selected dimension's tokens are unique
     prod_/nonprod_<guid> strings, so the rewrite is a safe literal
@@ -50,8 +54,9 @@
     Defaults to the current directory.
 
 .PARAMETER Fields
-    Which dimensions to reveal. Valid values: ResourceGroup, Subscription, Tag.
-    Defaults to ResourceGroup and Subscription. Everything else stays masked.
+    Which dimensions to reveal. Valid values: ResourceGroup, Subscription, Tag,
+    ResourceName, ResourceId. Defaults to ResourceGroup and Subscription.
+    Anything not listed stays masked.
 
 .PARAMETER OutputZip
     Path for the revealed output zip. Defaults to the input zip name with a
@@ -77,7 +82,7 @@ param(
     [string]   $DictionaryPath,
     [string]   $SearchDirectory = '.',
 
-    [ValidateSet('ResourceGroup', 'Subscription', 'Tag')]
+    [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId')]
     [string[]] $Fields = @('ResourceGroup', 'Subscription'),
 
     [string]   $OutputZip
@@ -134,6 +139,8 @@ $RgMap      = ConvertTo-LookupTable $Dict.ResourceGroupMap
 $SubMap     = ConvertTo-LookupTable $Dict.SubscriptionMap
 $SubNameMap = ConvertTo-LookupTable $Dict.SubscriptionNameMap
 $TagMap     = ConvertTo-LookupTable $Dict.TagMap
+$IdMap      = ConvertTo-LookupTable $Dict.ResourceIdMap
+$NameMap    = ConvertTo-LookupTable $Dict.ResourceNameMap
 
 function Get-RgNameFromResourceId
 {
@@ -194,6 +201,28 @@ if ($Fields -contains 'Tag')
     foreach ($token in $TagMap.Keys)
     {
         if (-not [string]::IsNullOrEmpty($TagMap[$token])) { $Replacements[$token] = $TagMap[$token] }
+    }
+}
+
+if ($Fields -contains 'ResourceName')
+{
+    # ResourceNameMap stores token -> real resource Id; the short name is the
+    # last '/'-delimited segment of that Id.
+    foreach ($token in $NameMap.Keys)
+    {
+        $name = ($NameMap[$token] -split '/')[-1]
+        if (-not [string]::IsNullOrEmpty($name)) { $Replacements[$token] = $name }
+    }
+}
+
+if ($Fields -contains 'ResourceId')
+{
+    # ResourceIdMap stores token -> the full real ARM resource Id. Revealing this
+    # also exposes the subscription GUID and resource group name embedded in the
+    # path - that is inherent to revealing the Id and is the caller's choice.
+    foreach ($token in $IdMap.Keys)
+    {
+        if (-not [string]::IsNullOrEmpty($IdMap[$token])) { $Replacements[$token] = $IdMap[$token] }
     }
 }
 

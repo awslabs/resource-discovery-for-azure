@@ -4,12 +4,18 @@
 # synthetic obfuscated report bundle (Inventory JSON + Consumption CSV) and a
 # matching ObfuscationDictionary fixture in a temp dir, zip it like an
 # -Obfuscate run would, then run Reveal-Obfuscation.ps1 against it and assert:
-#   - selected dimensions (Resource Group, Subscription name) are revealed
+#   - selected dimensions (Resource Group, Subscription name) are revealed,
+#     including the Resource-Group-name parsing edge cases (AKS MC_ managed
+#     groups, casing preserved) that the reveal tool shares
 #   - UNSELECTED dimensions (Resource Id, Resource Name, and tag values unless
 #     -Fields Tag is passed) stay masked
 #   - the rewritten members are still valid (JSON parses, CSV columns intact
-#     even when a revealed value contains a comma)
-#   - the source zip is never mutated
+#     even when a revealed value contains a comma), and the literal 'obfuscated'
+#     sentinel is left untouched
+#   - older dictionaries (no SubscriptionNameMap) fall back to the sub GUID, and
+#     -Fields Tag is a no-op when the dictionary has no TagMap
+#   - the dictionary auto-discovers via -SearchDirectory, and the source zip is
+#     never mutated
 #
 # The obfuscated tokens are generated at runtime as 'prod_'/'nonprod_' + a fresh
 # GUID, so the tool's token regex matches them while no real GUID literal lives
@@ -27,32 +33,45 @@ BeforeAll {
     $base = "/subscriptions/$subGuid/resourceGroups"
 
     # Runtime-generated obfuscated tokens (GUID-shaped so the tool matches them).
-    $script:TokId   = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokName = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokSub  = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokRg   = 'nonprod_' + [guid]::NewGuid().ToString()
-    $script:TokTag  = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokId     = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokName   = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokSub    = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokRg     = 'nonprod_' + [guid]::NewGuid().ToString()
+    $script:TokRgAks  = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokRgCase = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokTag    = 'prod_'    + [guid]::NewGuid().ToString()
 
     # Real values behind the tokens. Subscription name deliberately contains a
     # comma and an ampersand to exercise CSV quoting and HTML encoding.
-    $script:RealRgName  = 'rg-app'
-    $script:RealSubName = 'Contoso, Inc. (Prod) & Co'
-    $script:RealTagVal  = 'payments'
+    $script:RealRgName   = 'rg-app'
+    $script:RealRgAks    = 'MC_rg-aks_aks01_eastus'   # AKS managed RG
+    $script:RealRgCase   = 'RG-APP'                   # casing must be preserved
+    $script:RealSubName  = 'Contoso, Inc. (Prod) & Co'
+    $script:RealTagVal   = 'payments'
 
-    $idVm = "$base/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
+    $idVm   = "$base/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
+    $idAks  = "$base/$($script:RealRgAks)/providers/Microsoft.Compute/virtualMachines/aksnode0"
+    $idCase = "$base/$($script:RealRgCase)/providers/Microsoft.Storage/storageAccounts/sa01"
 
-    # ---- Dictionary fixture ----
+    # ---- Dictionary fixture (current shape: has SubscriptionNameMap + TagMap) ----
     $dict = [ordered]@{
         GeneratedAt         = '2026-06-30 00:00:00'
         ResourceIdMap       = [ordered]@{ $script:TokId   = $idVm }
         ResourceNameMap     = [ordered]@{ $script:TokName = $idVm }
         SubscriptionMap     = [ordered]@{ $script:TokSub  = $idVm }
-        ResourceGroupMap    = [ordered]@{ $script:TokRg   = $idVm }
+        ResourceGroupMap    = [ordered]@{
+            $script:TokRg     = $idVm
+            $script:TokRgAks  = $idAks
+            $script:TokRgCase = $idCase
+        }
         SubscriptionNameMap = [ordered]@{ $script:TokSub  = $script:RealSubName }
         TagMap              = [ordered]@{ $script:TokTag  = $script:RealTagVal }
     }
 
     # ---- Synthetic obfuscated report members ----
+    # vm01 carries the full set of dimensions; vmAks/vmCase exercise the two RG
+    # name-parsing edge cases. A literal 'obfuscated' sentinel (out-of-scope
+    # cross-ref) sits on vm01 and must survive untouched.
     $inventory = [ordered]@{
         VirtualMachines = @(
             [ordered]@{
@@ -60,7 +79,20 @@ BeforeAll {
                 Name          = $script:TokName
                 Subscription  = $script:TokSub
                 ResourceGroup = $script:TokRg
+                Set           = 'obfuscated'
                 Tags          = @( [ordered]@{ Name = 'environment'; Value = $script:TokTag } )
+            }
+            [ordered]@{
+                ID            = $script:TokId
+                Name          = $script:TokName
+                Subscription  = $script:TokSub
+                ResourceGroup = $script:TokRgAks
+            }
+            [ordered]@{
+                ID            = $script:TokId
+                Name          = $script:TokName
+                Subscription  = $script:TokSub
+                ResourceGroup = $script:TokRgCase
             }
         )
     }
@@ -81,6 +113,11 @@ BeforeAll {
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
     $inventory | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $stageDir 'Inventory_Test.json') -Encoding utf8
     $consumptionRows | Export-Csv -Path (Join-Path $stageDir 'Consumption_Test.csv') -NoTypeInformation -Encoding utf8
+    # A tiny HTML member so the tool's HTML-encode escape branch is exercised:
+    # the revealed subscription name carries an '&', which must come out as the
+    # entity '&amp;' (matching the report's own encoding), not a raw '&'.
+    "<html><body><table><tr><td>$($script:TokSub)</td></tr></table></body></html>" |
+        Set-Content -Path (Join-Path $stageDir 'ResourcesReport_Test.html') -Encoding utf8
 
     $script:InputZip = Join-Path $script:TmpDir 'ResourcesReport_Test.zip'
     Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $script:InputZip -Force
@@ -90,20 +127,24 @@ BeforeAll {
     $dict | ConvertTo-Json -Depth 6 | Set-Content -Path $script:DictPath -Encoding utf8
 
     # Helper: run reveal into a fresh output zip, extract, return parsed members.
+    # -DictPath / -SearchDir let individual tests point at alternate fixtures.
     function Invoke-Reveal {
-        param([string[]]$Fields)
+        param([string[]]$Fields, [string]$DictPath = $script:DictPath, [string]$SearchDir)
         $out = Join-Path $script:TmpDir ("out_" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".zip")
-        $splat = @{ InputZip = $script:InputZip; DictionaryPath = $script:DictPath; OutputZip = $out }
+        $splat = @{ InputZip = $script:InputZip; OutputZip = $out }
+        if ($SearchDir) { $splat['SearchDirectory'] = $SearchDir } else { $splat['DictionaryPath'] = $DictPath }
         if ($Fields) { $splat['Fields'] = $Fields }
         & $script:RevealScript @splat *>&1 | Out-Null
         $ex = Join-Path $script:TmpDir ("ex_" + [guid]::NewGuid().ToString('N').Substring(0,8))
         Expand-Archive -Path $out -DestinationPath $ex -Force
         $invFile = Get-ChildItem $ex -Filter 'Inventory_*.json' | Select-Object -First 1
         $csvFile = Get-ChildItem $ex -Filter 'Consumption_*.csv' | Select-Object -First 1
+        $htmlFile = Get-ChildItem $ex -Filter '*.html' | Select-Object -First 1
         return [pscustomobject]@{
             OutputZip = $out
             Inventory = (Get-Content $invFile.FullName -Raw | ConvertFrom-Json)
             Csv       = @(Import-Csv -Path $csvFile.FullName)
+            Html      = (Get-Content $htmlFile.FullName -Raw)
         }
     }
 }
@@ -120,11 +161,19 @@ Describe "Reveal-Obfuscation default fields (ResourceGroup + Subscription)" {
 
     It "produces valid JSON that re-parses" {
         $script:R.Inventory | Should -Not -BeNullOrEmpty
-        @($script:R.Inventory.VirtualMachines).Count | Should -Be 1
+        @($script:R.Inventory.VirtualMachines).Count | Should -Be 3
     }
 
     It "reveals the resource group name" {
         $script:R.Inventory.VirtualMachines[0].ResourceGroup | Should -Be $script:RealRgName
+    }
+
+    It "reveals an AKS managed (MC_) resource group name" {
+        $script:R.Inventory.VirtualMachines[1].ResourceGroup | Should -Be $script:RealRgAks
+    }
+
+    It "preserves resource-group name casing exactly as it appears in the Id" {
+        $script:R.Inventory.VirtualMachines[2].ResourceGroup | Should -Be $script:RealRgCase
     }
 
     It "reveals the subscription friendly name (offline from SubscriptionNameMap)" {
@@ -145,6 +194,16 @@ Describe "Reveal-Obfuscation default fields (ResourceGroup + Subscription)" {
 
     It "keeps the tag key verbatim" {
         $script:R.Inventory.VirtualMachines[0].Tags[0].Name | Should -Be 'environment'
+    }
+
+    It "leaves the literal 'obfuscated' sentinel untouched" {
+        $script:R.Inventory.VirtualMachines[0].Set | Should -Be 'obfuscated'
+    }
+
+    It "HTML-encodes a revealed value containing special characters in the HTML report" {
+        # RealSubName has an '&'; the HTML branch must emit the '&amp;' entity.
+        $script:R.Html | Should -Match 'Contoso, Inc\. \(Prod\) &amp; Co'
+        $script:R.Html | Should -Not -Match ([regex]::Escape($script:TokSub))
     }
 
     It "keeps the Consumption CSV columns intact despite a comma in the revealed subscription name" {
@@ -168,7 +227,73 @@ Describe "Reveal-Obfuscation with -Fields Tag" {
     }
 }
 
-Describe "Reveal-Obfuscation source safety" {
+Describe "Reveal-Obfuscation opt-in ResourceName / ResourceId" {
+
+    It "reveals the resource short name when ResourceName is selected" {
+        $r = Invoke-Reveal -Fields @('ResourceName')
+        $r.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
+    }
+
+    It "leaves the Resource Id masked when only ResourceName is selected" {
+        $r = Invoke-Reveal -Fields @('ResourceName')
+        $r.Inventory.VirtualMachines[0].ID | Should -Be $script:TokId
+    }
+
+    It "reveals the full ARM resource Id when ResourceId is selected" {
+        $r = Invoke-Reveal -Fields @('ResourceId')
+        $r.Inventory.VirtualMachines[0].ID | Should -Be "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
+    }
+
+    It "leaves the resource Name masked when only ResourceId is selected" {
+        $r = Invoke-Reveal -Fields @('ResourceId')
+        $r.Inventory.VirtualMachines[0].Name | Should -Be $script:TokName
+    }
+}
+
+Describe "Reveal-Obfuscation older / partial dictionaries" {
+
+    It "falls back to the subscription GUID when the dictionary has no SubscriptionNameMap" {
+        # A dictionary written before SubscriptionNameMap existed: the friendly
+        # name is unrecoverable, so the subscription reveals to its GUID instead.
+        $legacyDir = Join-Path $script:TmpDir ("legacy_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        New-Item -ItemType Directory -Path $legacyDir -Force | Out-Null
+        $legacyDict = Join-Path $legacyDir 'ObfuscationDictionary_Legacy.json'
+        [ordered]@{
+            GeneratedAt      = '2026-06-30 00:00:00'
+            ResourceIdMap    = [ordered]@{ $script:TokId  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceNameMap  = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            SubscriptionMap  = [ordered]@{ $script:TokSub = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceGroupMap = [ordered]@{ $script:TokRg  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $legacyDict -Encoding utf8
+
+        $r = Invoke-Reveal -DictPath $legacyDict
+        $r.Inventory.VirtualMachines[0].Subscription | Should -Be '12345678-1234-1234-1234-123456789012'
+    }
+
+    It "leaves tag values masked when -Fields Tag is requested but the dictionary has no TagMap" {
+        $noTagDir = Join-Path $script:TmpDir ("notag_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        New-Item -ItemType Directory -Path $noTagDir -Force | Out-Null
+        $noTagDict = Join-Path $noTagDir 'ObfuscationDictionary_NoTag.json'
+        [ordered]@{
+            GeneratedAt         = '2026-06-30 00:00:00'
+            ResourceIdMap       = [ordered]@{ $script:TokId   = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceNameMap     = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            SubscriptionMap     = [ordered]@{ $script:TokSub  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceGroupMap    = [ordered]@{ $script:TokRg   = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            SubscriptionNameMap = [ordered]@{ $script:TokSub  = $script:RealSubName }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $noTagDict -Encoding utf8
+
+        $r = Invoke-Reveal -Fields @('ResourceGroup','Subscription','Tag') -DictPath $noTagDict
+        $r.Inventory.VirtualMachines[0].Tags[0].Value | Should -Be $script:TokTag
+    }
+}
+
+Describe "Reveal-Obfuscation dictionary handling and source safety" {
+
+    It "auto-discovers the newest dictionary in -SearchDirectory" {
+        $r = Invoke-Reveal -SearchDir $script:TmpDir
+        $r.Inventory.VirtualMachines[0].ResourceGroup | Should -Be $script:RealRgName
+    }
 
     It "does not mutate the input zip" {
         $null = Invoke-Reveal

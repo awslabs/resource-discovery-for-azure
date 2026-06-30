@@ -245,7 +245,80 @@ Each result is an object with `ObfuscatedValue`, `Type`
 
 ---
 
-## 6. Typical workflow
+## 6. Partial reveal for server-side ingestion (`Reveal-Obfuscation.ps1`)
+
+`Unmask-Obfuscation.ps1` answers "what is this one token?". The companion
+`Reveal-Obfuscation.ps1` answers a different need: **take an obfuscated report
+ZIP and produce a NEW ZIP in which only the dimensions you choose are
+un-obfuscated, leaving everything else masked**, so it can be ingested by the
+same pipeline that ingests an obfuscated ZIP (the server reads the JSON
+members) — but now with, say, real resource group and subscription names for
+analytics.
+
+It rewrites the selected dimensions' tokens back to their real values across
+**every** text member of the ZIP (Inventory/Metrics JSON, Consumption CSV, the
+HTML report) and re-packages the result with the **same filenames/structure**
+the `-Obfuscate` run produced.
+
+### Selectable dimensions
+
+| Dimension | Revealed to | Default |
+|---|---|---|
+| `ResourceGroup` | real resource group name | **on** |
+| `Subscription` | real subscription **display name** (from `SubscriptionNameMap`) | **on** |
+| `Tag` | real tag value (from `TagMap`) | off — must be requested |
+
+Everything else — Resource Ids, Resource Names, and (unless you add
+`-Fields Tag`) tag values — **stays masked**. Tokens that are not part of a
+selected dimension are left untouched, so selecting one dimension never bleeds
+another.
+
+### How it stays valid
+
+Replacements are escaped to match each destination format so a revealed value
+with special characters (e.g. a subscription display name containing `&` or a
+comma, or a free-text tag value) cannot corrupt the output:
+- **JSON** members → value is JSON-string-escaped.
+- **CSV** members → revealed in-field then re-written through the CSV writer,
+  so a value with a comma/quote is correctly quoted.
+- **HTML** report → value is HTML-entity encoded (matching the report's own
+  encoding).
+
+### Usage
+
+```powershell
+# Default: reveal Resource Group + Subscription name, leave the rest masked
+./Reveal-Obfuscation.ps1 -InputZip ./ResourcesReport_2026....zip -DictionaryPath ./ObfuscationDictionary_2026....json
+
+# Also reveal tag values
+./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -Fields ResourceGroup,Subscription,Tag
+
+# Explicit output path
+./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -OutputZip ./report_for_ingest.zip
+```
+
+### Parameters
+
+- `-InputZip` — an obfuscated report ZIP from `-Obfuscate` (required).
+- `-DictionaryPath` — the matching `ObfuscationDictionary_*.json`. If omitted,
+  the newest match under `-SearchDirectory` is used.
+- `-SearchDirectory` — where to auto-discover the dictionary (default: current
+  directory).
+- `-Fields` — dimensions to reveal: `ResourceGroup`, `Subscription`, `Tag`.
+  Defaults to `ResourceGroup, Subscription`.
+- `-OutputZip` — output path (default: the input name with a `_revealed`
+  suffix).
+
+> **The output ZIP contains the real values you chose to reveal.** It is no
+> longer fully obfuscated — share it only with the party meant to ingest it. The
+> dictionary and this script stay local. Older dictionaries that predate
+> `SubscriptionNameMap` reveal the subscription **GUID** instead of the name
+> (with a warning); those that predate tag obfuscation have no `TagMap`, so
+> `-Fields Tag` is skipped with a warning.
+
+---
+
+## 7. Typical workflow
 
 1. Run the inventory obfuscated:
    ```powershell
@@ -262,7 +335,7 @@ Each result is an object with `ObfuscatedValue`, `Type`
 
 ---
 
-## 7. Security notes
+## 8. Security notes
 
 - The obfuscation is **one-way for the shared artifact**: the ZIP alone cannot
   be de-obfuscated. Reversal is only possible with the matching dictionary,
@@ -272,6 +345,10 @@ Each result is an object with `ObfuscatedValue`, `Type`
 - Keep the dictionary and `Unmask-Obfuscation.ps1` output out of any public
   surface (commits, PRs, tickets, email). They map tokens straight back to real
   ARM resource IDs.
+- A `Reveal-Obfuscation.ps1` output ZIP is **partially de-obfuscated** by design
+  (it contains the dimensions you chose to reveal). Treat it like the dimensions
+  it exposes — share it only with the intended ingestion party, never on a
+  public surface.
 
 *All identifiers in this document are illustrative placeholders, not real
 Azure values.*

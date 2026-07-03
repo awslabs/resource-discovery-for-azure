@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing') 
 {
@@ -12,7 +12,21 @@ If ($Task -eq 'Processing')
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            
+
+            # The parent compute VM that this SQL VM resource sits on. Azure exposes
+            # it as properties.virtualMachineResourceId (the ARM id of the underlying
+            # microsoft.compute/virtualmachines resource). In obfuscated mode the
+            # VirtualMachines collector indexes that same id into $ResourceIdDictionary,
+            # so resolving the cross-reference here yields the SAME obfuscated token,
+            # preserving the SQL-VM -> compute-VM link. Falls back to 'obfuscated' when
+            # obfuscation is on but the parent id was not indexed (e.g. out-of-scope VM),
+            # matching the convention used by the other collectors.
+            $ParentVM = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
+                if (![string]::IsNullOrEmpty($data.virtualMachineResourceId) -and $ResourceIdDictionary.ContainsKey($data.virtualMachineResourceId)) { $ResourceIdDictionary[$data.virtualMachineResourceId] } else { 'obfuscated' }
+            } else {
+                if (![string]::IsNullOrEmpty($data.virtualMachineResourceId)) { $data.virtualMachineResourceId } else { 'None' }
+            }
+
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;
@@ -20,6 +34,7 @@ If ($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'Zone'                      = if ($null -ne $1.ZONES) { $1.ZONES } else { 'None' }
+                'ParentVirtualMachine'      = $ParentVM;
                 'SQLServerLicenseType'      = $data.sqlServerLicenseType;
                 'SQLImage'                  = $data.sqlImageOffer;
                 'SQLManagement'             = $data.sqlManagement;
@@ -30,31 +45,5 @@ If ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.SQLVM) 
-    {
-        $TableName = ('SQLVMTable_'+($SmaResources.SQLVM.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Zone')
-        $Exc.Add('SQLServerLicenseType')
-        $Exc.Add('SQLImage')
-        $Exc.Add('SQLManagement')
-        $Exc.Add('SQLImageSku')
-
-        $ExcelVar = $SmaResources.SQLVM 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'SQL VMs' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
-
     }
 }

@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
@@ -26,38 +26,12 @@ If ($Task -eq 'Processing')
                 'AvailabilityState'             = $data.availabilityState;
                 'SiteProperties'                = $data.siteProperties;          
                 'ContainerSize'                 = $data.containerSize;
-                'ServerFarmId'                  = $data.serverFarmId;
+                'ServerFarmId'                  = if (![string]::IsNullOrEmpty($data.serverFarmId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.serverFarmId)) { $ResourceIdDictionary[$data.serverFarmId] } else { 'obfuscated' } } else { $data.serverFarmId };
             }
 
             $tmp += $obj
         }
         
         $tmp
-    }
-}
-Else
-{
-    if($SmaResources.AppServices)
-    {
-        $TableName = ('AppSvcsTable_'+($SmaResources.AppServices.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('AppType')
-        $Exc.Add('Location')
-        $Exc.Add('Enabled')
-        $Exc.Add('State')
-        $Exc.Add('SKU')
-        $Exc.Add('AvailabilityState')             
-        $Exc.Add('ContainerSize')
-        
-        $ExcelVar = $SmaResources.AppServices 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'App Services' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
@@ -9,11 +9,20 @@ If ($Task -eq 'Processing')
 
     foreach($location in ($virtualMachines | Select-Object -ExpandProperty location -Unique))
     {
-        foreach ($vmsize in ( az vm list-sizes -l $location | ConvertFrom-Json))
+        $savedDebugPref = $DebugPreference
+        $DebugPreference = 'SilentlyContinue'
+        $skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        $DebugPreference = $savedDebugPref
+
+        foreach ($vmsize in $skus)
         {
-            $vmsizemap[$vmsize.name] = @{
-                CPU = $vmSize.numberOfCores
-                RAM = [math]::Max($vmSize.memoryInMB / 1024, 0) 
+            $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
+            $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
+            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name)) {
+                $vmsizemap[$vmsize.Name] = @{
+                    CPU = [int]$cpuCap
+                    RAM = [math]::Max([decimal]$memCap, 0)
+                }
             }
         }
     }
@@ -61,6 +70,8 @@ If ($Task -eq 'Processing')
 
             $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
 
+            $obfuscatedId = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id } } else { $null }
+
             $obj = @{
                 'ID'                            = $vm.id;
                 'Subscription'                  = $sub1.Name;
@@ -71,7 +82,7 @@ If ($Task -eq 'Processing')
                 'Size'                          = $data.hardwareProfile.vmSize;
                 'CPU'                           = $cpus;
                 'Memory'                        = $ram;
-                'Set'                           = $data.virtualMachineScaleSet.id;
+                'Set'                           = $obfuscatedId;
                 'ImageReference'                = $data.storageProfile.imageReference.publisher;
                 'ImageVersion'                  = $data.storageProfile.imageReference.exactVersion;
                 'ImageSku'                      = $data.storageProfile.imageReference.sku;
@@ -93,46 +104,4 @@ If ($Task -eq 'Processing')
               
         $tmp
     }            
-}
-else
-{
-    if($SmaResources.VirtualMachines)
-    {
-        $TableName = 'VMTable_' + ($SmaResources.VirtualMachines |
-            Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' } |
-            Select-Object -ExpandProperty ID -Unique |
-            Measure-Object |
-            Select-Object -ExpandProperty Count)
-
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0' -VerticalAlignment Center
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Size')
-        $Exc.Add('CPU')
-        $Exc.Add('Memory')
-        $Exc.Add('Location')
-        $Exc.Add('OS')
-        $Exc.Add('OSName')
-        $Exc.Add('OSVersion')
-        $Exc.Add('ImageReference')
-        $Exc.Add('ImageVersion')
-        $Exc.Add('ImageSku')
-        $Exc.Add('ImageOffer')
-        $Exc.Add('OSDisk')
-        $Exc.Add('OSDiskSizeGB')
-        $Exc.Add('HybridBenefit')
-        $Exc.Add('PowerState')
-        $Exc.Add('AvailabilitySet')
-        $Exc.Add('CreatedTime')     
-
-         # Filter: only include VMs that are not SQLVMs
-        $ExcelVar = $SmaResources.VirtualMachines | Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' }
-                    
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Virtual Machines' -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Style $Style
-    }             
 }

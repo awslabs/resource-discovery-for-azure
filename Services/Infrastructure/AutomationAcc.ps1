@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -29,16 +29,16 @@ if ($Task -eq 'Processing')
                         'ID'                            = $1.id;
                         'Subscription'                  = $sub1.Name;
                         'ResourceGroup'                 = $0.RESOURCEGROUP;
-                        'AutomationAccountName'         = $0.NAME;
+                        'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $0.NAME } else { $0.NAME };
                         'AutomationAccountState'        = $0.properties.State;
                         'AutomationAccountSKU'          = $0.properties.sku.name;
                         'AutomationAccountCreatedTime'  = $timecreated;   
                         'Location'                      = $0.LOCATION;
-                        'RunbookName'                   = $1.Name;
+                        'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
                         'LastModifiedTime'              = ([datetime]$data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
                         'RunbookState'                  = $data.state;
                         'RunbookType'                   = $data.runbookType;
-                        'RunbookDescription'            = $data.description;
+                        'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.description } else { $data.description };
                     }
 
                     $tmp += $obj
@@ -47,10 +47,10 @@ if ($Task -eq 'Processing')
             else 
             {
                 $obj = @{
-                    'ID'                            = $1.id;
+                    'ID'                            = $0.id;
                     'Subscription'                  = $sub1.name;
                     'ResourceGroup'                 = $0.RESOURCEGROUP;
-                    'AutomationAccountName'         = $0.NAME;
+                    'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $0.NAME } else { $0.NAME };
                     'AutomationAccountState'        = $0.properties.State;
                     'AutomationAccountSKU'          = $0.properties.sku.name;
                     'AutomationAccountCreatedTime'  = $timecreated;   
@@ -67,37 +67,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.AutomationAcc)
-    {
-
-        $TableName = ('AutAccTable_'+($SmaResources.AutomationAcc.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-        $StyleExt = New-ExcelStyle -HorizontalAlignment Left -Range K:K -Width 80 -WrapText 
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('AutomationAccountName')
-        $Exc.Add('AutomationAccountState')
-        $Exc.Add('AutomationAccountSKU')
-        $Exc.Add('AutomationAccountCreatedTime')
-        $Exc.Add('Location')
-        $Exc.Add('RunbookName')
-        $Exc.Add('LastModifiedTime')
-        $Exc.Add('RunbookState')
-        $Exc.Add('RunbookType')
-        $Exc.Add('RunbookDescription')
-
-        $ExcelVar = $SmaResources.AutomationAcc  
-            
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Runbooks' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style, $StyleExt
     }
 }

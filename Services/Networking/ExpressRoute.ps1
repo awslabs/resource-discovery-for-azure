@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'BillingModel'          = $sku.family;
                 'CircuitStatus'         = $data.circuitProvisioningState;
                 'ProviderStatus'        = $data.serviceProviderProvisioningState;
-                'Provider'              = $data.serviceProviderProperties.serviceProviderName;
+                'Provider'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.serviceProviderProperties.serviceProviderName };
                 'Bandwidth'             = $data.bandwidthInMbps;
                 'ERLocation'            = $data.peeringLocation;
                 'GlobalReachEnabled'    = $data.globalReachEnabled;
@@ -34,34 +34,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.expressroute)
-    {
-        $TableName = ('ERs_'+($SmaResources.expressroute.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Tier')
-        $Exc.Add('BillingModel')
-        $Exc.Add('CircuitStatus')
-        $Exc.Add('ProviderStatus')
-        $Exc.Add('Provider')
-        $Exc.Add('Bandwidth')
-        $Exc.Add('ERLocation')
-        $Exc.Add('GlobalReachEnabled')
-
-
-        $ExcelVar = $SmaResources.expressroute  
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Express Route' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

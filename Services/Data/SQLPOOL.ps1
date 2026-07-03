@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -36,36 +36,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.SQLPOOL) 
-    {
-        $TableName = ('SqlPoolTable_'+($SmaResources.SQLPOOL.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Capacity')
-        $Exc.Add('Sku')
-        $Exc.Add('Size')
-        $Exc.Add('Tier')
-        $Exc.Add('ReplicaCount')
-        $Exc.Add('License')
-        $Exc.Add('MinCapacity')
-        $Exc.Add('MaxSizeGB')
-        $Exc.Add('DBMinCapacity')
-        $Exc.Add('DBMaxCapacity')
-        $Exc.Add('ZoneRedundant')        
-
-        $ExcelVar = $SmaResources.SQLPOOL 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'SQL Pools' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

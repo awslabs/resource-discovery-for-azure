@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -31,27 +31,4 @@ if ($Task -eq 'Processing')
         
         $tmp
     }
-}
-else 
-{
-    if ($SmaResources.LoadBalancer) 
-    {
-        $TableName = ('LBTable_'+($SmaResources.LoadBalancer.id | Select-Object -Unique).count)                        
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-        $Exc.Add('SKUTier')
-        $Exc.Add('RuleCount')
-
-        $ExcelVar = $SmaResources.LoadBalancer 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Load Balancers' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
-    }  
 }

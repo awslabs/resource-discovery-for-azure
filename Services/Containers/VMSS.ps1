@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -11,11 +11,20 @@ if ($Task -eq 'Processing')
 
     foreach($location in ($vmss | Select-Object -ExpandProperty location -Unique))
     {
-        foreach ($vmsize in (az vm list-sizes -l $location | ConvertFrom-Json))
+        $savedDebugPref = $DebugPreference
+        $DebugPreference = 'SilentlyContinue'
+        $skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        $DebugPreference = $savedDebugPref
+
+        foreach ($vmsize in $skus)
         {
-            $vmsizemap[$vmsize.name] = @{
-                CPU = $vmSize.numberOfCores
-                RAM = [math]::Max($vmSize.memoryInMB / 1024, 0) 
+            $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
+            $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
+            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name)) {
+                $vmsizemap[$vmsize.Name] = @{
+                    CPU = [int]$cpuCap
+                    RAM = [math]::Max([decimal]$memCap, 0)
+                }
             }
         }
     }
@@ -29,12 +38,13 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $OS = $data.virtualMachineProfile.storageProfile.osDisk.osType
-            $RelatedAKS = ($AKS | Where-Object {$_.properties.nodeResourceGroup -eq $1.resourceGroup}).Name
-
-            if([string]::IsNullOrEmpty($RelatedAKS)){$Related = ($SFC | Where-Object {$_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint}).Name}else{$Related = $RelatedAKS}
             $Scaling = ($AutoScale | Where-Object {$_.Properties.targetResourceUri -eq $1.id})
 
             if([string]::IsNullOrEmpty($Scaling)){$AutoSc = $false}else{$AutoSc = $true}
+
+            $RelatedAKSId = ($AKS | Where-Object {$_.properties.nodeResourceGroup -eq $1.resourceGroup}).id
+            if([string]::IsNullOrEmpty($RelatedAKSId)){$RelatedId = ($SFC | Where-Object {$_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint}).id}else{$RelatedId = $RelatedAKSId}
+            $Related = if ([string]::IsNullOrEmpty($RelatedId)) { $RelatedId } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($RelatedId)) { $ResourceIdDictionary[$RelatedId] } else { 'obfuscated' } } else { $RelatedId.split('/')[8] }
 
             $timecreated = $data.timeCreated
             $timecreated = [datetime]$timecreated
@@ -73,41 +83,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.VMSS)
-    {
-        $TableName = ('VMSSTable_'+($SmaResources.VMSS.id | Select-Object -Unique).count)
-        $Style = @()        
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('AKS')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKUTier')
-        $Exc.Add('VMSize')
-        $Exc.Add('vCPUs')
-        $Exc.Add('RAM')
-        $Exc.Add('License')
-        $Exc.Add('Instances')
-        $Exc.Add('AutoscaleEnabled')
-        $Exc.Add('VMOS')
-        $Exc.Add('OSImage')
-        $Exc.Add('ImageVersion')                        
-        $Exc.Add('DiskSizeGB')
-        $Exc.Add('StorageAccountType')
-        $Exc.Add('AcceleratedNetworkingEnabled')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.VMSS 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'VM Scale Sets' -AutoSize -MaxAutoSizeRows 50 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

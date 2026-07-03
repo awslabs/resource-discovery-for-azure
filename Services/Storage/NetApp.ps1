@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -22,9 +22,9 @@ if ($Task -eq 'Processing')
                 'Subscription'                      = $sub1.Name;
                 'ResourceGroup'                     = $1.RESOURCEGROUP;
                 'Location'                          = $1.LOCATION;
-                'NetAppAccount'                     = $NetApp;
-                'CapacityPool'                      = $CapacityPool;
-                'Volume'                            = $Volume;
+                'NetAppAccount'                     = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $NetApp };
+                'CapacityPool'                      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $CapacityPool };
+                'Volume'                            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Volume };
                 'ServiceLevel'                      = $data.serviceLevel;
                 'QuotaTB'                           = [string]$Quota;
                 'Protocol'                          = [string]$data.protocolTypes;
@@ -36,32 +36,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.NetApp) 
-    {
-        $TableName = ('NetAppATable_'+($SmaResources.NetApp.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Location')
-        $Exc.Add('NetAppAccount')
-        $Exc.Add('CapacityPool')
-        $Exc.Add('Volume')
-        $Exc.Add('ServiceLevel')
-        $Exc.Add('QuotaTB')
-        $Exc.Add('Protocol')
-        $Exc.Add('MaxThroughputMiBs')
-        $Exc.Add('LDAP')
-
-        $ExcelVar = $SmaResources.NetApp 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'NetApp' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

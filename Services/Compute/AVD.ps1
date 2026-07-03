@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -30,6 +30,28 @@ if ($Task -eq 'Processing')
             {
                 $vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId}
 
+                # Resolve HostId and Hostname
+                $hostIdValue = $null
+                $hostnameValue = $null
+                if (![string]::IsNullOrEmpty($vmsessionhosts.Id)) {
+                    if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
+                        # Obfuscation ON: never emit the real VM id or name. Use the
+                        # dictionary value when the backing VM was indexed, else the
+                        # lossy 'obfuscated' fallback used elsewhere in the codebase.
+                        $hostIdValue = if ($ResourceIdDictionary.ContainsKey($vmsessionhosts.Id)) { $ResourceIdDictionary[$vmsessionhosts.Id] } else { 'obfuscated' }
+                        # Deterministic hostname: derive from VM ID hash so same input = same output
+                        $hnPrefix = $hostIdValue.Split('_')[0]
+                        $sha = [System.Security.Cryptography.SHA256]::Create()
+                        try {
+                            $hnHash = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($vmsessionhosts.Id + '_hostname'))).Replace('-','').Substring(0,32).ToLower()
+                        } finally { $sha.Dispose() }
+                        $hostnameValue = $hnPrefix + '_' + $hnHash.Substring(0,8) + '-' + $hnHash.Substring(8,4) + '-' + $hnHash.Substring(12,4) + '-' + $hnHash.Substring(16,4) + '-' + $hnHash.Substring(20,12)
+                    } else {
+                        $hostIdValue = $vmsessionhosts.Id
+                        $hostnameValue = $vmsessionhosts.Name
+                    }
+                }
+
                 $obj = @{
                     'ID'                 = $1.id;
                     'Subscription'       = $sub1.Name;
@@ -43,8 +65,8 @@ if ($Task -eq 'Processing')
                     'AVDAgentVersion'    = $2.properties.agentVersion;
                     'AllowNewSession'    = $2.properties.allowNewSession;
                     'UpdateStatus'       = $2.properties.updateState;
-                    'HostId'             = $vmsessionhosts.Id;
-                    'Hostname'           = $vmsessionhosts.name;
+                    'HostId'             = $hostIdValue;
+                    'Hostname'           = $hostnameValue;
                     'VMSize'             = $vmsessionhosts.properties.hardwareProfile.vmsize;
                     'OSType'             = $vmsessionhosts.properties.storageProfile.osdisk.ostype;
                     'VMDiskType'         = $vmsessionhosts.properties.storageProfile.osdisk.managedDisk.storageAccountType;
@@ -57,38 +79,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.AVD) 
-    {
-        $TableName = ('AVD_'+($SmaResources.AVD.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')             
-        $Exc.Add('Location')                
-        $Exc.Add('HostPoolType')
-        $Exc.Add('LoadBalancer')
-        $Exc.Add('MaxSessionLimit')
-        $Exc.Add('PreferredAppGroup')
-        $Exc.Add('AVDAgentVersion')  
-        $Exc.Add('AllowNewSession')
-        $Exc.Add('UpdateStatus')      
-        $Exc.Add('Hostname')           
-        $Exc.Add('VMSize')            
-        $Exc.Add('OSType')           
-        $Exc.Add('VMDiskType')
-        $Exc.Add('HostStatus')        
-        $Exc.Add('OSVersion')
-
-        $ExcelVar = $SmaResources.AVD
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'AVD' -AutoSize -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Style $Style    
     }
 }

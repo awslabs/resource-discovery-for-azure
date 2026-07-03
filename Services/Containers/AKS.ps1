@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -15,6 +15,18 @@ if ($Task -eq 'Processing')
 
             foreach ($2 in $data.agentPoolProfiles) 
             {
+                # Recomputed on every node-pool iteration (not hoisted above this
+                # loop): the cluster's tags are the SAME real values across all of
+                # its node pools, but the obfuscation pass mutates $tag.Value on
+                # the object instance it's given. Sharing one $tags array/element
+                # instance across multiple $obj rows would let a value that was
+                # already tokenized on row 1 be re-read (and re-keyed) as a "real"
+                # value on row 2, corrupting $Global:TagValueDictionary. A fresh
+                # Select-Object projection per row gives each row its own object
+                # instances so the same real tag value still yields the same
+                # token (determinism, P1), without aliasing across rows.
+                $tags = if(![string]::IsNullOrEmpty($1.tags.psobject.properties)){$1.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+
                 $obj = @{
                     'ID'                        = $1.id;
                     'Subscription'              = $sub1.Name;
@@ -25,7 +37,7 @@ if ($Task -eq 'Processing')
                     'SkuTier'                   = $1.sku.tier;
                     'KubernetesVersion'         = $data.kubernetesVersion;
                     'LoadBalancerSku'           = $data.networkProfile.loadBalancerSku;                
-                    'NodePoolName'              = $2.name;
+                    'NodePoolName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $2.name } else { $2.name };
                     'PoolProfileType'           = $2.type;
                     'PoolMode'                  = $2.mode;
                     'PoolOS'                    = $2.osType;
@@ -37,6 +49,7 @@ if ($Task -eq 'Processing')
                     'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' }
                     'MaxPodsPerNode'            = $2.maxPods;
                     'OrchestratorVersion'       = $2.orchestratorVersion;
+                    'Tags'                      = $tags;
                 }
 
                 $tmp += $obj
@@ -44,41 +57,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.AKS)
-    {
-        $TableName = ('AKSTable_'+($SmaResources.AKS.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'   
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('Sku')
-        $Exc.Add('SkuTier')
-        $Exc.Add('KubernetesVersion')
-        $Exc.Add('LoadBalancerSku')
-        $Exc.Add('NodePoolName')
-        $Exc.Add('PoolProfileType')
-        $Exc.Add('PoolMode')
-        $Exc.Add('PoolOS')
-        $Exc.Add('NodeSize')
-        $Exc.Add('OSDiskSize')
-        $Exc.Add('Nodes')
-        $Exc.Add('Autoscale')
-        $Exc.Add('AutoscaleMax')
-        $Exc.Add('AutoscaleMin')
-        $Exc.Add('MaxPodsPerNode')
-        $Exc.Add('OrchestratorVersion')
-
-        $ExcelVar = $SmaResources.AKS 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'AKS' -AutoSize -TableName $TableName -MaxAutoSizeRows 50 -TableStyle $tableStyle -Numberformat '0' -Style $Style            
     }
 }

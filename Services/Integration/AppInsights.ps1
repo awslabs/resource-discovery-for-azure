@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -36,34 +36,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.AppInsights) 
-    {
-        $TableName = ('AppInsightsTable_'+($SmaResources.AppInsights.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('ApplicationType')
-        $Exc.Add('FlowType')
-        $Exc.Add('Version')
-        $Exc.Add('DataSampling')
-        $Exc.Add('RetentionInDays')
-        $Exc.Add('IngestionMode')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.AppInsights 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'AppInsights' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style -ConditionalText $condtxt
     }
 }

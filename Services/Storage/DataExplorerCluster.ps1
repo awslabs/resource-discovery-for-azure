@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 'ComputeSpecifications'     = $sku.name;
                 'InstanceCount'             = $sku.capacity;
                 'State'                     = $data.state;
-                'StateReason'               = $data.stateReason;
+                'StateReason'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $null } else { $data.stateReason };
                 'DiskEncryption'            = $data.enableDiskEncryption;
                 'StreamingIngestion'        = $data.enableStreamingIngest;
                 'OptimizedAutoscale'        = $AutoScale;
@@ -35,36 +35,5 @@ if ($Task -eq 'Processing')
             $tmp += $obj
         }
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.DataExplorerCluster) 
-    {
-        $TableName = ('DTExplTable_'+($SmaResources.DataExplorerCluster.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('ComputeSpecifications')
-        $Exc.Add('InstanceCount')
-        $Exc.Add('State')
-        $Exc.Add('StateReason')
-        $Exc.Add('DiskEncryption')
-        $Exc.Add('StreamingIngestion')
-        $Exc.Add('OptimizedAutoscale')
-        $Exc.Add('OptimizedAutoscaleMin')
-        $Exc.Add('OptimizedAutoscaleMax')
-
-        $ExcelVar = $SmaResources.DataExplorerCluster 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Data Explorer Clusters' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

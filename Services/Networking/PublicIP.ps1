@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -29,8 +29,8 @@ if ($Task -eq 'Processing')
                     'Version'                  = $data.publicIPAddressVersion;
                     'ProvisioningState'        = $data.provisioningState;
                     'Use'                      = $Use;
-                    'AssociatedResource'       = $data.ipConfiguration.id.split('/')[8];
-                    'AssociatedResourceType'   = $data.ipConfiguration.id.split('/')[7];
+                    'AssociatedResource'       = if ([string]::IsNullOrEmpty($data.ipConfiguration.id)) { $null } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.ipConfiguration.id)) { $ResourceIdDictionary[$data.ipConfiguration.id] } else { 'obfuscated' } } else { $data.ipConfiguration.id.split('/')[8] };
+                    'AssociatedResourceType'   = if ([string]::IsNullOrEmpty($data.ipConfiguration.id)) { $null } else { $data.ipConfiguration.id.split('/')[7] };
                 }
 
                 $tmp += $obj
@@ -57,34 +57,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.PublicIP) 
-    {        
-        $TableName = ('PIPTable_'+($SmaResources.PublicIP.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('SKU')
-        $Exc.Add('Location')
-        $Exc.Add('AllocationType')
-        $Exc.Add('Version')
-        $Exc.Add('ProvisioningState')
-        $Exc.Add('Use')
-        $Exc.Add('AssociatedResource')
-        $Exc.Add('AssociatedResourceType')
-
-        $ExcelVar = $SmaResources.PublicIP
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Public IPs' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style -ConditionalText $condtxt  
     }
 }

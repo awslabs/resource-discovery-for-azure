@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task, $File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -29,10 +29,10 @@ if ($Task -eq 'Processing')
                             'ResourceGroup'                 = $1.RESOURCEGROUP;
                             'Name'                          = $1.NAME;
                             'Location'                      = $1.LOCATION;
-                            'HUBName'                       = [string]$2.name;
+                            'HUBName'                       = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$2.name };
                             'HUBLocation'                   = [string]$2.location;
                             'DeviceVendor'                  = [string]$3.properties.deviceProperties.deviceVendor;
-                            'LinkProviderName'              = [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkProviderName;
+                            'LinkProviderName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkProviderName };
                             'LinkSpeedMbps'                 = [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkSpeedInMbps;
                         }
 
@@ -58,30 +58,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.VirtualWAN) 
-    {
-        $TableName = ('VWANTable_'+($SmaResources.VirtualWAN.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')                              
-        $Exc.Add('Location')                                     
-        $Exc.Add('HUBName')                          
-        $Exc.Add('HUBLocation')                                       
-        $Exc.Add('Device Vendor')                     
-        $Exc.Add('LinkProviderName')                
-        $Exc.Add('LinkSpeedMbps')                
-
-        $ExcelVar = $SmaResources.VirtualWAN 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Virtual WAN' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style   
     }
 }

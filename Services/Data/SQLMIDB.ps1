@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;
-                'ManagedInstance'           = $1.id.split("/")[8];
+                'ManagedInstance'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { $miParentId = ($1.id -split '/databases/')[0]; if ($ResourceIdDictionary.ContainsKey($miParentId)) { $ResourceIdDictionary[$miParentId] } else { 'obfuscated' } } else { $1.id.split("/")[8] };
                 'Name'                      = $1.NAME;
                 'Collation'                 = $data.collation;
                 'CreationDate'              = $data.creationDate;
@@ -28,30 +28,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.SQLMIDB) 
-    {
-        $TableName = ('SQLMIDBTable_'+($SmaResources.SQLMIDB.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ManagedInstance')
-        $Exc.Add('Name')
-        $Exc.Add('Collation')
-        $Exc.Add('CreationDate')
-        $Exc.Add('DefaultSecondaryLocation')
-        $Exc.Add('Status')
-
-        $ExcelVar = $SmaResources.SQLMIDB
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'SQL MI DBs' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

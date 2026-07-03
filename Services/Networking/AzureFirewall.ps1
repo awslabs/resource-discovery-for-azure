@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
             $obj = @{
                 'ID'                                = $1.id;
                 'Subscription'                      = $sub1.Name;
-                'Resource Group'                    = $1.RESOURCEGROUP;
+                'ResourceGroup'                     = $1.RESOURCEGROUP;
                 'Name'                              = $1.NAME;
                 'Location'                          = $1.LOCATION;
                 'SKU'                               = $data.sku.tier;
@@ -26,29 +26,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.AzureFirewall) 
-    {
-        $TableName = ('AzFirewallTable_'+($SmaResources.AzureFirewall.id | Select-Object -Unique).count)
-        $condtxt = @()
-
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('Resource Group')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-
-        $ExcelVar = $SmaResources.AzureFirewall 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Azure Firewall' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
-
     }
 }

@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -41,38 +41,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.Streamanalytics) 
-    {
-        $TableName = ('StreamsATable_'+($SmaResources.Streamanalytics.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-        $Exc.Add('CompatibilityLevel')
-        $Exc.Add('ContentStoragePolicy')
-        $Exc.Add('CreatedDate')
-        $Exc.Add('DataLocale')
-        $Exc.Add('LateArrivalMaxDelaySeconds')
-        $Exc.Add('OutofOrderMaxDelaySeconds')
-        $Exc.Add('OutOfOrderPolicy')
-        $Exc.Add('Jobstate')
-        $Exc.Add('JobType')
-        $Exc.Add('LastOutputEventTime')
-        $Exc.Add('OutputStartTime')
-        $Exc.Add('OutputErrorPolicy')
-
-        $ExcelVar = $SmaResources.Streamanalytics 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Stream Analytics Jobs' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

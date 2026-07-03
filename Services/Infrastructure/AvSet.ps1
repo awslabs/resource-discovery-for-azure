@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -13,10 +13,25 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             
-            foreach ($vmid in $data.virtualMachines.id) 
-            {
-                $vmIds = $vmid.split('/')[8]
-                
+            if ($data.virtualMachines.id) {
+                foreach ($vmid in $data.virtualMachines.id) 
+                {
+                    $vmIds = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($vmid)) { $ResourceIdDictionary[$vmid] } else { 'obfuscated' } } else { $vmid.split('/')[8] }
+                    
+                    $obj = @{
+                        'ID'               = $1.id;
+                        'Subscription'     = $sub1.Name;
+                        'ResourceGroup'    = $1.RESOURCEGROUP;
+                        'Name'             = $1.NAME;
+                        'Location'         = $1.LOCATION;
+                        'FaultDomains'     = [string]$data.platformFaultDomainCount;
+                        'UpdateDomains'    = [string]$data.platformUpdateDomainCount;
+                        'VirtualMachines'  = [string]$vmIds;
+                    }
+
+                    $tmp += $obj                 
+                }
+            } else {
                 $obj = @{
                     'ID'               = $1.id;
                     'Subscription'     = $sub1.Name;
@@ -25,37 +40,13 @@ if ($Task -eq 'Processing')
                     'Location'         = $1.LOCATION;
                     'FaultDomains'     = [string]$data.platformFaultDomainCount;
                     'UpdateDomains'    = [string]$data.platformUpdateDomainCount;
-                    'VirtualMachines'  = [string]$vmIds;
+                    'VirtualMachines'  = '';
                 }
 
-                $tmp += $obj                 
+                $tmp += $obj
             }
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.AvSet)
-    {
-
-        $TableName = ('AvSetTable_'+($SmaResources.AvSet.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-            
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('FaultDomains')
-        $Exc.Add('UpdateDomains')
-        $Exc.Add('VirtualMachines')
-
-        $ExcelVar = $SmaResources.AvSet  
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Availability Sets' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

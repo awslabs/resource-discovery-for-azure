@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -21,35 +21,12 @@ if ($Task -eq 'Processing')
                 'Location'                     = $1.LOCATION;
                 'WorkspaceType'                = [string]$data.extraProperties.WorkspaceType;
                 'ManagedVirtualNetwork'        = $data.managedVirtualNetwork;                            
-                'ManagedResourceGroup'         = $data.managedResourceGroupName;
+                'ManagedResourceGroup'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.managedResourceGroupName };
             }
 
             $tmp += $obj
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.Synapse) 
-    {
-        $TableName = ('SynapseTable_'+($SmaResources.Synapse.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('WorkspaceType')
-        $Exc.Add('ManagedVirtualNetwork')
-        $Exc.Add('ManagedResourceGroup')
-
-        $ExcelVar = $SmaResources.Synapse 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Synapse' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

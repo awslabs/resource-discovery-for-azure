@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -40,40 +40,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.PostgreSQLFlexible) 
-    {
-        $TableName = ('PostgrSQLFlexTable_'+($SmaResources.PostgreSQLFlexible.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-        $Exc.Add('Tier')
-        $Exc.Add('Version')
-        $Exc.Add('State')
-        $Exc.Add('Zone')
-        $Exc.Add('StorageSizeGB')
-        $Exc.Add('LimitIOPs')
-        $Exc.Add('AutoGrow')
-        $Exc.Add('StorageSku')
-        $Exc.Add('ReplicationRole')
-        $Exc.Add('ReplicaCapacity')
-        $Exc.Add('BackupRetentionDays')
-        $Exc.Add('GeoRedundantBackup')
-        $Exc.Add('HighAvailability')
-        $Exc.Add('HighAvailabilityState')
-
-        $ExcelVar = $SmaResources.PostgreSQLFlexible 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'PostgreSQL Flexible' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

@@ -8,13 +8,48 @@ This tool leverages read-only integrations with Azure APIs and Azure Monitor. Ou
 
 **Key Features:**
 - Read-only Azure API integration
-- Automated Excel and JSON report generation
+- Automated self-contained HTML and JSON report generation (no Excel/ImportExcel dependency)
 - 31-day historical metrics collection
 - Parallel processing for improved performance
 - Support for [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell") and local PowerShell environments
 
+## Quick Start
+
+For most users, this is everything you need.
+
+**1. Open Azure Cloud Shell** at [shell.azure.com](https://shell.azure.com), or run a local PowerShell 7 prompt with the [prerequisites](#prerequisites) installed.
+
+**2. Download the script:**
+
+```powershell
+git clone https://github.com/awslabs/resource-discovery-for-azure.git
+cd resource-discovery-for-azure
+```
+
+**3. Run it:**
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -ParallelStreams 2
+```
+
+This:
+- Inventories every enabled subscription in the tenant.
+- Obfuscates resource IDs, names, and other identifying details so the report is safe to share.
+- Runs 2 subscriptions at a time (works in both Cloud Shell and on a typical laptop).
+
+The script tracks progress automatically as it goes. If anything interrupts the run (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added and it will skip the subscriptions that already finished and pick up the rest:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -ParallelStreams 2 -Resume
+```
+
+You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. Send that ZIP to the AWS team.
+
+For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) for sizing guidance. For all available options, see the [Run-AllSubscriptions Wrapper Parameters](#run-allsubscriptions-wrapper-parameters).
+
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
@@ -35,17 +70,54 @@ Before running the script, ensure your Azure user account has the following role
 
 ### Environment Options
 
-#### 🚀 Quick Start | Option 1: Azure Cloud Shell (Recommended) ⭐
-- No additional setup required
-- Pre-authenticated environment
-- All dependencies included
+The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pick based on the size of the tenant you're inventorying:
+
+| Tenant size | Use | Why |
+|---|---|---|
+| Up to ~30 subscriptions | **Cloud Shell** | Fastest to start. No setup, pre-authenticated, all dependencies included. |
+| 30–100+ subscriptions | **Either**, with `-ParallelStreams 2 -Resume` on Cloud Shell | Cloud Shell still works, but session timeouts and the 3.5 GB RAM cap start to matter. `-Resume` lets a timed-out session pick up where it left off. |
+| 100+ subscriptions, or metric-heavy tenants | **Local PowerShell 7** | Cloud Shell caps at `-ParallelStreams 2` (only 3.5 GB RAM / 2 vCPU). A local 16 GB / 8-core machine runs at `-ParallelStreams 6`, about 3× faster. Microsoft also warns that long-running parallel work in Cloud Shell can trigger anti-abuse blocking. See [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) below for the full details. |
+
+#### Option 1: Azure Cloud Shell
+
+- Browser-based, no setup
+- Pre-authenticated to your Azure tenant
+- `Az` module pre-installed by Microsoft
 - Access at [Azure Cloud Shell](https://shell.azure.com "Open Azure Cloud Shell")
+- Sessions are ephemeral by default. Mount a storage account (Cloud Shell Settings > Reset User Settings > Mount storage account) if you need outputs to persist across sessions or want to use `-Resume` on a follow-up session.
 
 #### Option 2: Local Environment
-- PowerShell 7 or later
-- Azure CLI
-- Azure CLI Account Extension
+- [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
+- [Azure CLI Account Extension](https://learn.microsoft.com/en-us/cli/azure/azure-cli-extensions-overview)
 - Azure CLI Resource-Graph Extension (auto-installed by script)
+- **Az PowerShell module** (install before running — see below)
+
+> **Note:** Install the Account Extension before running the script:
+> ```powershell
+> az extension add --name account
+> ```
+
+##### Installing the required PowerShell modules
+
+> **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
+
+The script needs the `Az` module. Install it once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
+
+```powershell
+Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+```
+
+The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
+
+The script no longer installs the `Az` module for you while it runs. Doing the install inside a script that's already loading the same module is unreliable. You can end up with a half-installed module that looks fine to PowerShell but fails much later in the run with confusing errors like "no consumption records". Installing the module once, by hand, before the first run avoids the whole class of problem.
+
+If a previous run left a broken `Az` install behind, remove it and reinstall:
+
+```powershell
+Get-Module Az* -ListAvailable | Uninstall-Module -Force
+Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+```
   
 
 
@@ -83,7 +155,7 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 ### Authentication Notes
 
 - **Azure Cloud Shell:** Authentication is automatic
-- **Local PowerShell:** You'll be redirected to Azure sign-in
+- **Local PowerShell:** Run `az login` and `Connect-AzAccount` before executing the script. If you plan to scan all subscriptions in a tenant, use `Run-AllSubscriptions.ps1`, which prompts you to sign in once and then reuses the session for every subscription.
 
 You might get more than one authentication request due to different collector processes running in parallel.
 
@@ -96,7 +168,7 @@ You might get more than one authentication request due to different collector pr
 
 2. **Run the script with your organization name:**
    ```powershell
-   ./ResourceInventory.ps1 -ReportName "YourCompanyName" -ConcurrencyLimit 4
+   ./ResourceInventory.ps1 -ReportName "YourCompanyName" -ConcurrencyLimit 6
    ```
 
 ### Advanced Usage Examples
@@ -116,10 +188,135 @@ You might get more than one authentication request due to different collector pr
 ./ResourceInventory.ps1 -ReportName "CompanyName" -ConcurrencyLimit 8
 ```
 
-**Skip consumption metrics:**
+**Skip consumption:**
 ```powershell
 ./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
 ```
+
+**Skip metrics:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -SkipMetrics
+```
+
+**Generate obfuscated report (mask sensitive data before sharing):**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+```
+
+### Running Across All Subscriptions
+
+Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each subscription in a tenant, instead of the default single consolidated report. The wrapper prompts you to sign in once, then invokes `ResourceInventory.ps1` for each subscription. By default subscriptions are processed sequentially (one at a time); use `-ParallelStreams` to process several concurrently.
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
+```
+
+`-TenantID` accepts either a tenant GUID or a verified domain. When a domain is passed (for example `contoso.onmicrosoft.com`), the wrapper resolves it to the GUID via Microsoft's anonymous OIDC discovery endpoint before doing anything else, so this also works:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
+```
+
+Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery.
+
+#### Subscription state filter
+
+By default, `Run-AllSubscriptions.ps1` only inventories subscriptions whose `State` is `Enabled`. Subscriptions in any other state (`Disabled`, `Warned`, `PastDue`, `Deleted`) are skipped because they return little or no data from Resource Graph and most ARM data-plane calls, so processing them produces near-empty reports while still costing wall-clock time.
+
+To include every subscription regardless of state, pass `-IncludeDisabled`:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -IncludeDisabled
+```
+
+The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
+
+#### Resuming an interrupted run
+
+For tenants with many subscriptions, the run can be cut short by environment-level limits — for example, an Azure Cloud Shell session that ends when a Conditional Access policy enforces a maximum session lifetime. The wrapper supports resuming:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Resume
+```
+
+After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The state file is cleared automatically after a clean run with no failures.
+
+`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription`, and existing state is left untouched.
+
+#### Parallel subscription processing
+
+For large tenants, the slowest part of the run is collecting metrics. Each call to Azure Monitor takes 200–500 ms over the network, and a typical subscription with VMs, SQL DBs, and storage accounts produces thousands of these calls. Done one subscription at a time, that adds up to many hours.
+
+Pass `-ParallelStreams N` to process N subscriptions concurrently in separate `pwsh` background processes:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -ParallelStreams 6
+```
+
+Each stream is a separate background process. They don't share state with each other. Each has its own Azure session, its own progress tracking file, and its own output folder. The wrapper splits your subscription list across the streams in round-robin order so the workload stays balanced even when subscriptions vary in size.
+
+The default is `-ParallelStreams 1` (existing sequential behavior, fully preserved). Pick a higher value based on the environment you're running in. See the table in [Choosing where to run for large tenants](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) below.
+
+`-ParallelStreams` and `-ConcurrencyLimit` compose. `-ConcurrencyLimit` throttles the metrics-collection runspace pool *within* one subscription; `-ParallelStreams` is the count of subscriptions running concurrently. Useful combinations:
+
+| ParallelStreams | ConcurrencyLimit | Concurrent ARM calls (in flight at once) | Verdict |
+|---|---|---|---|
+| 1 | 6 | 6 | Existing default. |
+| 6 | 6 | 36 | Recommended for metric-heavy estates on a 16 GB / 8-core local machine. |
+| 8 | 6 | 48 | Watch for HTTP 429s in per-stream logs. |
+| 6 | 12 | 72 | Aggressive. Expect retry-backoff to eat the gain. |
+
+When you run with `-ParallelStreams`, several things change in the output:
+
+- The wrapper's own narration (which subscription a stream is starting, which one it finished) is prefixed with `[stream-N]`. The inner script's `Write-Host` and `Write-Log` output is **not** prefixed and will interleave across streams in the transcript. Use the per-stream summary at the end of the run, or the per-stream failures log, to disambiguate.
+- Each stream writes its own failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>_stream-<N>.log`. At the end of the run, the wrapper merges those into a single combined failure log so you only have one file to read.
+- Each stream tracks its own progress in a separate resume-state file. When the run finishes, those are merged into the main resume-state file. This means `-Resume` works the same way regardless of whether the previous run was sequential or parallel — but only if the previous run reached the post-aggregation step. If you Ctrl+C a parallel run mid-stream, the per-stream resume files are still on disk; running `-Resume` on the next attempt will read them and skip the subs each stream had already completed.
+
+Authentication only happens once. The wrapper saves the parent process's Az PowerShell context to a file and each stream loads it, so you don't get prompted to sign in again for each parallel worker. The wrapper deletes that snapshot file when the run ends, including if you cancel with Ctrl+C or a stream crashes during startup.
+
+#### Choosing where to run for large tenants: Cloud Shell vs local
+
+Three things constrain how many parallel streams you can usefully run:
+
+- **Azure Resource Manager (ARM) request quota.** ARM is Azure's control-plane API that the script calls to read resource details and metrics. Each subscription is rate-limited to roughly 12,000 read requests per hour. The script's `-ConcurrencyLimit` and `-ParallelStreams` together control how many ARM requests are in flight at once. Stay under about 50 concurrent requests per tenant, or you'll start seeing HTTP 429 ("Too Many Requests") in the per-stream logs and the script will spend more time backing off than working.
+- **CPU cores.** The script is mostly waiting on network responses, not crunching numbers, so it doesn't need many cores. Roughly one core per stream is plenty. Running more streams than cores doesn't make the script faster, the CPU just spends time switching between tasks.
+- **RAM.** Each stream loads the Azure PowerShell modules and holds resource and metric data in memory before writing the output files. Plan for around 500-700 MB peak per stream. Running more streams than your RAM can hold makes the OS swap to disk and slows everything down.
+
+For small to medium tenants (up to a few dozen subscriptions), Cloud Shell is the easiest place to run. For large tenants the resource ceilings on Cloud Shell start to matter.
+
+Verified Cloud Shell limits (measured 2026-05; Microsoft can change these silently):
+
+| Resource | Cloud Shell | Notes |
+|---|---|---|
+| RAM | ~3.5 GB total, ~2.7 GB usable at idle | Each `pwsh` worker peaks at ~500–700 MB during the metrics phase |
+| CPU | 2 vCPUs (Intel Xeon Platinum @ 2.8 GHz) | Shared, so effective throughput is lower under load |
+| Storage | ~50 GB overlay filesystem | Ephemeral by default. See below. |
+| Idle timeout | 20 minutes | Sessions are terminated without warning when this elapses |
+| Concurrent sessions per tenant | 20 | Tenant-wide cap |
+| Sudo / elevation | Not available | Module installs must use `-Scope CurrentUser` |
+
+References: [Cloud Shell features](https://learn.microsoft.com/en-us/azure/cloud-shell/features), [Cloud Shell FAQ](https://learn.microsoft.com/en-us/azure/cloud-shell/faq-troubleshooting).
+
+Recommended `-ParallelStreams` per environment:
+
+| Environment | Recommended | Why |
+|---|---|---|
+| Cloud Shell (ephemeral or with mounted storage) | **2** | Saturates both vCPUs without OOM-killing workers on the 3.5 GB RAM cap |
+| Local PowerShell 7, 8 GB RAM | **2** | RAM is the bottleneck |
+| Local PowerShell 7, 16 GB RAM, 8+ cores | **6** | Recommended for metric-heavy estates |
+| Local PowerShell 7, 32 GB RAM, 12+ cores | **8** | Watch HTTP 429s in per-stream logs. |
+
+**Persistence in Cloud Shell:** Cloud Shell sessions are ephemeral by default. When your session ends, anything in your home directory is deleted, including the script's output and the resume-state file. The wrapper detects this at startup and warns you. To keep outputs across sessions (and to make `-Resume` work after a session times out), attach a storage account: in Cloud Shell, click Settings (the gear icon) > Reset User Settings > Mount storage account.
+
+**Cloud Shell anti-abuse limits:** Microsoft warns that Cloud Shell is "not a general purpose computing platform" and that excessive usage can result in your tenant being blocked from Cloud Shell ([source](https://learn.microsoft.com/en-us/azure/cloud-shell/faq-troubleshooting#terminal-output---sorry-your-cloud-shell-failed-to-provision-codetenantdisabled-)). Long parallel runs against large tenants can trigger this. If you're running RDA across many subscriptions for a few hours at a time, use a local PowerShell 7 install instead. It avoids the risk and is usually faster anyway.
+
+#### Run transcript and failure diagnostics
+
+Every time you run `Run-AllSubscriptions.ps1`, it writes a transcript of the whole run to `InventoryReports/RunAllSubscriptions_transcript_<timestamp>.txt`. This is different from the per-subscription transcripts that the inner script `ResourceInventory.ps1` writes inside each subscription folder. The wrapper transcript covers the run end-to-end: which tenant was resolved, how authentication was handled, any resume-state messages, which subscription is being processed at each step, the final consolidation, and the run summary. You get this file every run, whether you process one subscription or many.
+
+If a subscription fails, the wrapper also writes a structured failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`. This file captures the full exception type, the error message, up to five levels of inner exceptions, the script line number, the stack trace, and a snapshot of how much memory and free disk space the machine had when the failure happened. The final summary points at both files when failures occur.
+
+When reporting an issue, attach both files. They contain enough context to diagnose most failures without a follow-up round trip.
 
 ## Output Files
 
@@ -129,10 +326,11 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).json` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
-| `ResourcesReport_(date).xlsx` | Consolidated Excel report |
+| `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
+| `Transcript_Log_<ReportName>_(date).txt` | Plaintext transcript of script activity (excluded from the zip when `-Obfuscate` is used) |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery
@@ -140,6 +338,33 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 1. **Locate the output:** Check the `InventoryReports` folder
 2. **Rename the ZIP file:** Include your company name (e.g., `CompanyName_ResourcesReport_2024-01-15.zip`)
 3. **Deliver to AWS team:** Send the renamed ZIP file for analysis
+
+### Obfuscation Mode
+
+When using `-Obfuscate`, the following data is masked in all output files:
+
+| Category | What is masked | Masked Format |
+|----------|---------------|---------------|
+| Resource ID | All resource IDs across inventory, metrics, and consumption | `prod_<guid>` or `nonprod_<guid>` |
+| Resource Name | All resource names | `prod_<guid>` or `nonprod_<guid>` |
+| Subscription | Subscription names (deterministic — same real sub always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
+| Resource Group | Resource group names (deterministic — same real RG always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
+| Tags | Tag **keys** kept verbatim; tag **values** tokenized deterministically (same value maps to the same token) | `prod_<guid>` or `nonprod_<guid>` |
+| Cross-references | Fields that reference other resources by name or ID (e.g. DatabaseServer, ManagedInstance, HostId, StorageAccount, KeyVault, WAF policy) | Dictionary lookup or `obfuscated` |
+| Consumption IDs | ReservationId and ReservationOrderId in billing data | `obfuscated` |
+| Free-text / identity | Free-form fields that can carry PII (Description, FriendlyName, CreatedBy, RoleName, container image/name, IoT host/endpoint, automation account/runbook names) — tokenized deterministically, not dropped | `prod_<guid>` or `nonprod_<guid>` |
+
+Resources with names matching dev/test/qa patterns (including short prefixes like `d-`, `t-`, `s-`) get a `nonprod_` prefix; all others get `prod_`. This preserves environment classification without exposing real names.
+
+**Deterministic mapping:** The same real subscription or resource group always maps to the same obfuscated value within a run. This means pivot tables, grouping, and cross-referencing all work correctly in the obfuscated output.
+
+**Reverse-lookup dictionary:** A local `ObfuscationDictionary_*.json` file maps every obfuscated value back to the real value. This file stays with the customer and is never included in the ZIP. Use `Reveal-Obfuscation.ps1` locally to produce a NEW ingestible ZIP (same structure as `-Obfuscate`) with only the dimensions you choose un-masked — `-Fields ResourceGroup,Subscription,Tag,ResourceName,ResourceId,FreeText` for a selective reveal, or `-All` for a full un-obfuscate. See [docs/obfuscation-and-unmask.md](docs/obfuscation-and-unmask.md) for details.
+
+**What is preserved:** Location, SKU, VM size, OS type, disk type, metrics values, consumption quantities, and all technical configuration data needed for analysis.
+
+**What is excluded from the ZIP:**
+- Transcript log (contains raw console output with emails, subscription IDs, file paths)
+- Obfuscation dictionary (contains the real-to-obfuscated mapping)
 
 ### Manual Compression (If Needed)
 
@@ -156,8 +381,9 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 |-----------|------|-------------|----------|
 | `ReportName` | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
 | `TenantID` | String | Target specific Azure tenant | `-TenantID "12345678-1234-1234-1234-123456789012"` |
-| `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "87654321-4321-4321-4321-210987654321"` |
+| `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
 | `ResourceGroup` | String | Scan specific resource group only | `-ResourceGroup "Production-RG"` |
+| `OutputDirectory` | String | Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
 
 ### Performance Parameters
 
@@ -165,6 +391,43 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
+| `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
+
+### Metrics Lookback Window
+
+`MetricsLookbackDays` shortens the history window for the **trend / utilization**
+metrics only. Lowering it (e.g. 31 → 14 or 7) reduces both run time and memory
+use, which helps on large estates that time out or hit out-of-memory errors
+during the metrics phase. It does **not** change which resources are found, and
+it does **not** affect cost/consumption data (that phase uses its own fixed
+window).
+
+The tradeoff is right-sizing accuracy: a shorter window samples fewer
+peaks/cycles, so utilization-based sizing is based on a smaller sample. For
+migration assessments prefer **14 over 7** so at least one full weekly cycle is
+captured.
+
+**Group A — bound to the lookback window. These DO shrink when you go 31 → 7/14:**
+
+| Metric | Resource | Granularity |
+|--------|----------|-------------|
+| Percentage CPU | VMs, VMSS | 15-min (VM) / 1-hr (VMSS) |
+| Available Memory Bytes | VMs, VMSS | 15-min / 1-hr |
+| cpu_percent, memory_percent | SQL, MariaDB, MySQL(+Flexible), PostgreSQL(+Flexible) | 30-min / 1-hr |
+| cpu_used, dtu_used | SQL DB | 30-min |
+| physical_data_read_percent, log_write_percent | SQL DB | 1-hr |
+| FunctionExecutionCount/Units | Functions | daily |
+
+Capacity and point-in-time metrics (storage used, limits, CosmosDB throughput,
+ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
+**not** affected by this setting.
+
+### Privacy & Obfuscation Parameters
+
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|----------|
+| `Obfuscate` | Switch | Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. A reverse-lookup dictionary is saved locally. Reports can be safely shared externally without exposing sensitive Azure environment details. | `-Obfuscate` |
 
 ### Authentication Parameters
 
@@ -180,6 +443,24 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 |-----------|------|-------------|----------|
 | `Debug` | Switch | Enable debug mode output | `-Debug` |
 
+### Run-AllSubscriptions Wrapper Parameters
+
+These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`, 
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
+
+| Parameter | Type | Description | Default | Example |
+|-----------|------|-------------|---------|---------|
+| `TenantID` | String | **Required.** Azure tenant GUID or verified domain. The wrapper resolves a domain to its GUID via OIDC discovery before authenticating. | — | `-TenantID "contoso.onmicrosoft.com"` |
+| `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
+| `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
+| `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
+| `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
+| `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
+| `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
+| `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
+| `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
+
 ## Troubleshooting
 
 ### Common Issues
@@ -194,16 +475,34 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 - Ensure you have the required Azure roles assigned
 - For local environments, run `az login` before executing the script
 - Multiple authentication prompts may appear due to parallel processing
+- "Get-AzSubscription returned no subscriptions" — usually a Conditional Access / MFA gate. Re-run with `-DeviceLogin` to use the browser-based device-code flow.
+- Tenant-domain-style `-TenantID` (e.g. `contoso.onmicrosoft.com`) is resolved via Microsoft's public OIDC discovery endpoint, no sign-in needed. Pass the tenant GUID directly if discovery fails.
+
+**Subscription returned 0 resources:**
+- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
+- Less commonly, the subscription is genuinely empty.
+- Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
+
+**Consumption sheet empty across many subs:**
+- Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
+- The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+
+**Cloud Shell session ended mid-run:**
+- Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.
+- If you mounted storage (Settings > Mount storage account), the resume-state file persists. Re-launch a Cloud Shell and run with `-Resume` to skip already-completed subs.
+- Without mounted storage, all output is lost on session end. Move to a local PowerShell 7 install for runs that may exceed the timeout.
 
 **Performance Issues:**
 - Reduce `ConcurrencyLimit` if experiencing timeouts
 - Use `SkipConsumption` to speed up execution. This is not recommended, as it greatly reduces the usefulness of the report.
 - Consider targeting specific subscriptions or resource groups
+- For tenants with many subscriptions, use `-ParallelStreams` (see the Cloud Shell sizing table above).
 
-**Excel Formatting (Azure Cloud Shell):**
-- Auto-fit columns may not work in Cloud Shell
-- Warning messages are expected and don't affect data accuracy
-- Download and open locally for proper formatting
+**HTML Report:**
+- The report is a single self-contained `.html` file — open it in any browser. No Excel or ImportExcel module is required.
+- It works the same in Azure Cloud Shell and locally; nothing extra to install.
+- For a PDF, open the report and use your browser's Print > Save as PDF (the report has a print-friendly layout that expands every section).
 
 ### Important Notes
 
@@ -211,3 +510,4 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 - Resource-Graph extension installs automatically if missing
 - All operations are read-only and safe to execute
 - Historical data covers the previous 31 days
+

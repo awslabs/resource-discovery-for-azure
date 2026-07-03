@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -16,7 +16,7 @@ if ($Task -eq 'Processing')
                 'ID'                   = $1.id;
                 'Subscription'         = $sub1.Name;
                 'ResourceGroup'        = $1.RESOURCEGROUP;
-                'Clusters'             = $1.NAME;
+                'Clusters'             = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $1.NAME };
                 'Location'             = $1.LOCATION;
                 'AROVersion'           = $data.clusterProfile.version;
                 'OutboundType'         = $data.networkProfile.outboundType;
@@ -31,31 +31,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.ARO) 
-    {
-        $TableName = ('AROTable_'+($SmaResources.ARO.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Clusters')         
-        $Exc.Add('Location')             
-        $Exc.Add('AROVersion')          
-        $Exc.Add('OutboundType')        
-        $Exc.Add('MasterSKU')                            
-        $Exc.Add('WorkerSKU')           
-        $Exc.Add('WorkerDiskSize')        
-        $Exc.Add('TotalWorkerNodes')   
-
-        $ExcelVar = $SmaResources.ARO 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'ARO' -AutoSize -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Numberformat '0' -Style $Style   
     }
 }

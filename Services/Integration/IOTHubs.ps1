@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -13,7 +13,7 @@ if ($Task -eq 'Processing')
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             
-            foreach ($Tag in $Tags) 
+            foreach ($loc in $data.locations) 
             {
                 $obj = @{
                     'ID'                                = $1.id;
@@ -27,9 +27,9 @@ if ($Task -eq 'Processing')
                     'State'                             = $data.state;
                     'EventRetentionTimeInDays'          = [string]$data.eventHubEndpoints.events.retentionTimeInDays;
                     'EventPartitionCount'               = [string]$data.eventHubEndpoints.events.partitionCount;
-                    'EventsPath'                        = [string]$data.eventHubEndpoints.events.path;
+                    'EventsPath'                        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue ([string]$data.eventHubEndpoints.events.path) } else { [string]$data.eventHubEndpoints.events.path };
                     'MaxDeliveryCount'                  = [string]$data.cloudToDevice.maxDeliveryCount;
-                    'HostName'                          = $data.hostName;
+                    'HostName'                          = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.hostName } else { $data.hostName };
                 }
 
                 $tmp += $obj
@@ -37,35 +37,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.IOTHubs) 
-    {
-        $TableName = ('IOTHubsTable_'+($SmaResources.IOTHubs.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-        $Exc.Add('SKUTier')
-        $Exc.Add('Location')
-        $Exc.Add('Role')
-        $Exc.Add('State')
-        $Exc.Add('EventRetentionTimeInDays')
-        $Exc.Add('EventPartitionCount')
-        $Exc.Add('EventsPath')
-        $Exc.Add('MaxDeliveryCount')
-        $Exc.Add('HostName')
-
-        $ExcelVar = $SmaResources.IOTHubs 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'IOTHubs' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
     }
 }

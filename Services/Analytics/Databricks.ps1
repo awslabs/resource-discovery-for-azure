@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if($Task -eq 'Processing') 
 {
@@ -24,8 +24,11 @@ if($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'PricingTier'               = $sku.name;
-                'ManagedResourceGroup'      = $data.managedResourceGroupId.split('/')[4];
-                'StorageAccount'            = $data.parameters.storageAccountName.value;
+                # ManagedResourceGroupId is theoretically always set on a workspace, but
+                # split('/')[4] still fails if the property is missing or malformed.
+                # Guard cheaply rather than crash the whole subscription.
+                'ManagedResourceGroup'      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } elseif ([string]::IsNullOrEmpty($data.managedResourceGroupId)) { $null } else { $data.managedResourceGroupId.split('/')[4] };
+                'StorageAccount'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.parameters.storageAccountName.value };
                 'StorageAccountSKU'         = $data.parameters.storageAccountSkuName.value;
                 'CreatedTime'               = $timecreated;
             }
@@ -34,32 +37,5 @@ if($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else 
-{
-    if($SmaResources.Databricks) 
-    {
-        $TableName = ('DBricksTable_'+($SmaResources.Databricks.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('PricingTier')
-        $Exc.Add('ManagedResourceGroup')
-        $Exc.Add('StorageAccount')
-        $Exc.Add('StorageAccountSKU')
-        $Exc.Add('CreatedTime')  
-
-        $ExcelVar = $SmaResources.Databricks
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Databricks' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

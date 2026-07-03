@@ -1,4 +1,4 @@
-﻿param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'         = $disk.RESOURCEGROUP;
                 'Name'                  = $disk.NAME;
                 'State'                 = $data.diskState;
-                'AssociatedResource'    = $disk.MANAGEDBY.split('/')[8];
+                'AssociatedResource'    = if (![string]::IsNullOrEmpty($disk.MANAGEDBY) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($disk.MANAGEDBY)) { $ResourceIdDictionary[$disk.MANAGEDBY] } else { 'obfuscated' } } else { if(![string]::IsNullOrEmpty($disk.MANAGEDBY)){ $disk.MANAGEDBY.split('/')[8] } else { $null } };
                 'Location'              = $disk.LOCATION;
                 'SKU'                   = $SKU.Name;
                 'Tier'                  = $data.Tier;
@@ -38,35 +38,5 @@ if ($Task -eq 'Processing')
         }
 
         $tmp
-    }
-}
-else
-{
-    if($SmaResources.VMDisk)
-    {
-        $TableName = ('VMDiskT_'+($SmaResources.VMDisk.id | Select-Object -Unique).count)
-        $condtxt = @()
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Tier')
-        $Exc.Add('State')
-        $Exc.Add('AssociatedResource')        
-        $Exc.Add('SKU')
-        $Exc.Add('Size')
-        $Exc.Add('Location')
-        $Exc.Add('OSType')        
-        $Exc.Add('DiskIOPS')
-        $Exc.Add('DiskMBps')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.VMDisk
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Disks' -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

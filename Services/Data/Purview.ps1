@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -24,8 +24,8 @@ if ($Task -eq 'Processing')
                 'Location'            = $1.LOCATION;
                 'SKU'                 = $data.sku.name;
                 'Capacity'            = $data.sku.capacity;
-                'FriendlyName'        = $data.friendlyName;
-                'CreatedBy'           = $data.createdBy;      
+                'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.createdBy } else { $data.createdBy };
+                'FriendlyName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.friendlyName } else { $data.friendlyName };      
                 'CreatedTime'         = $timecreated;                      
             }
 
@@ -33,31 +33,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.Purview) 
-    {
-        $TableName = ('PurviewATable_'+($SmaResources.Purview.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-        
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SKU')
-        $Exc.Add('Capacity')
-        $Exc.Add('FriendlyName')
-        $Exc.Add('CreatedBy')
-        $Exc.Add('CreatedTime')
-
-        $ExcelVar = $SmaResources.Purview 
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Purview' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -Style $Style
-
     }
 }

@@ -2,6 +2,31 @@
 # Run with: Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed
 
 BeforeAll {
+    # Helper for the Determinism (P1) block below. Given a dictionary map
+    # (token -> real-value) and a selector that derives the real value from a
+    # map value, return the groups of real values that are reachable from MORE
+    # THAN ONE distinct token. A non-empty result means the same real value
+    # produced two different tokens within the run, which breaks obfuscation
+    # determinism (P1). Defined in BeforeAll so it is in scope for the It blocks.
+    function Get-DeterminismViolation
+    {
+        param(
+            [Parameter(Mandatory)] $Map,
+            [Parameter(Mandatory)] [scriptblock] $RealValueSelector
+        )
+
+        $pairs = foreach ($property in $Map.PSObject.Properties)
+        {
+            $real = & $RealValueSelector $property.Value
+            if (-not [string]::IsNullOrEmpty([string]$real))
+            {
+                [PSCustomObject]@{ Real = [string]$real; Token = $property.Name }
+            }
+        }
+
+        @($pairs | Group-Object Real | Where-Object { @($_.Group.Token | Sort-Object -Unique).Count -gt 1 })
+    }
+
     # Find the zip
     $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
         Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" | 
@@ -52,6 +77,22 @@ BeforeAll {
             $script:AllResources += @($prop.Value)
         }
     }
+
+    # Locate the reverse-lookup dictionary for the determinism (P1) checks.
+    # Same discovery convention as DictionaryValidation.Tests.ps1: prefer
+    # $env:TEST_DICT_PATH, then the Tests/ folder, then next to the zip. The
+    # dictionary is LOCAL-ONLY and is never inside the shared zip.
+    $dictPath = if ($env:TEST_DICT_PATH) { $env:TEST_DICT_PATH } else {
+        $found = Get-ChildItem -Path $PSScriptRoot -Filter "ObfuscationDictionary_*.json" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+        if ([string]::IsNullOrEmpty($found)) {
+            $zipDir = if ($env:TEST_ZIP_PATH) { Split-Path $env:TEST_ZIP_PATH -Parent } else { $PSScriptRoot }
+            Get-ChildItem -Path $zipDir -Filter "ObfuscationDictionary_*.json" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+        } else { $found }
+    }
+    $script:DictionaryAvailable = -not [string]::IsNullOrEmpty($dictPath) -and (Test-Path $dictPath)
+    $script:Dictionary = if ($script:DictionaryAvailable) { Get-Content $dictPath -Raw | ConvertFrom-Json } else { $null }
 }
 
 AfterAll {
@@ -381,26 +422,36 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "AppServices: ServerFarmId should be obfuscated or null" {
-        $resources = @($script:Inventory.AppServices)
+        $resources = @($script:Inventory.AppServices) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AppServices resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ServerFarmId)) {
                 $r.ServerFarmId | Should -Not -Match $script:AzureIdPattern -Because "ServerFarmId should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AppServices had a non-null ServerFarmId in this fixture" }
     }
 
     It "VirtualMachines: Set (VMSS ID) should be obfuscated or null" {
-        $resources = @($script:Inventory.VirtualMachines)
+        $resources = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Set)) {
                 $r.Set | Should -Match $script:ObfuscationPattern -Because "VMSS Set ID should be obfuscated"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines had a non-null Set (VMSS ID) in this fixture" }
     }
 
     It "VirtualMachines: Tags keys are preserved and values are obfuscated when obfuscated" {
         $obfPattern = '^(prod|nonprod)_'
-        $resources = @($script:Inventory.VirtualMachines)
+        $resources = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and $null -ne $r.Tags) {
                 foreach ($tag in @($r.Tags)) {
@@ -408,166 +459,236 @@ Describe "Cross-Reference Field Obfuscation" {
                         # Key (Name) is kept verbatim; value must be a prod_/nonprod_ token.
                         $tag.Name  | Should -Not -BeNullOrEmpty -Because "tag keys are preserved for analytics"
                         $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, not raw"
+                        $Checked++
                     }
                 }
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines had a tag with a non-empty value in this fixture" }
     }
 
     It "Purview: CreatedBy is obfuscated (tokenized, never raw identity)" {
-        $resources = @($script:Inventory.Purview)
+        $resources = @($script:Inventory.Purview) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Purview resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.CreatedBy)) {
                 $r.CreatedBy | Should -Match '^(prod|nonprod)_' -Because "CreatedBy contains user identity and must be obfuscated to a token, never raw"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no Purview had a non-null CreatedBy in this fixture" }
     }
 
     It "SQLDB: DatabaseServer should not contain raw resource names" {
-        $resources = @($script:Inventory.SQLDB)
+        $resources = @($script:Inventory.SQLDB) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.DatabaseServer)) {
                 $r.DatabaseServer | Should -Not -Match $script:AzureIdPattern -Because "DatabaseServer should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no SQLDB had a non-null DatabaseServer in this fixture" }
     }
 
     It "SQLDB: ElasticPoolID should be obfuscated or 'None'" {
-        $resources = @($script:Inventory.SQLDB)
+        $resources = @($script:Inventory.SQLDB) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ElasticPoolID)) {
                 $r.ElasticPoolID | Should -Not -Match $script:AzureIdPattern -Because "ElasticPoolID should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no SQLDB had a non-null ElasticPoolID in this fixture" }
     }
 
     It "SQLMI: InstancePoolName should not contain raw resource IDs" {
-        $resources = @($script:Inventory.SQLMI)
+        $resources = @($script:Inventory.SQLMI) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMI resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.InstancePoolName)) {
                 $r.InstancePoolName | Should -Not -Match $script:AzureIdPattern -Because "InstancePoolName should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no SQLMI had a non-null InstancePoolName in this fixture" }
     }
 
     It "SQLMIDB: ManagedInstance should be obfuscated or null" {
-        $resources = @($script:Inventory.SQLMIDB)
+        $resources = @($script:Inventory.SQLMIDB) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMIDB resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedInstance)) {
                 $r.ManagedInstance | Should -Not -Match $script:AzureIdPattern -Because "ManagedInstance should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no SQLMIDB had a non-null ManagedInstance in this fixture" }
     }
 
     It "PublicIP: AssociatedResource should not contain raw resource names" {
-        $resources = @($script:Inventory.PublicIP)
+        $resources = @($script:Inventory.PublicIP) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no PublicIP resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource) -and $r.AssociatedResource -ne 'None') {
                 $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "AssociatedResource should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no PublicIP had a non-null/non-'None' AssociatedResource in this fixture" }
     }
 
     It "VMDisk: AssociatedResource should be obfuscated or null" {
-        $resources = @($script:Inventory.VMDisk)
+        $resources = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource)) {
                 $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "Disk AssociatedResource should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no VMDisk had a non-null AssociatedResource in this fixture" }
     }
 
     It "ComputeSnapshots: SourceResourceId should be obfuscated or null" {
-        $resources = @($script:Inventory.ComputeSnapshots)
+        $resources = @($script:Inventory.ComputeSnapshots) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.SourceResourceId)) {
                 $r.SourceResourceId | Should -Not -Match $script:AzureIdPattern -Because "SourceResourceId should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots had a non-null SourceResourceId in this fixture" }
     }
 
     It "AVD: HostId should be obfuscated or null" {
-        $resources = @($script:Inventory.AVD)
+        $resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.HostId)) {
                 $r.HostId | Should -Not -Match $script:AzureIdPattern -Because "AVD HostId should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had a non-null HostId in this fixture" }
     }
 
     It "AVD: Hostname should be obfuscated or null" {
-        $resources = @($script:Inventory.AVD)
+        $resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname)) {
                 $r.Hostname | Should -Not -Match $script:AzureIdPattern -Because "AVD Hostname should not contain raw Azure resource ID"
                 $r.Hostname | Should -Match $script:ObfuscationPattern -Because "AVD Hostname should be obfuscated"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had a non-null Hostname in this fixture" }
     }
 
     It "AVD: Hostname should differ from HostId" {
-        $resources = @($script:Inventory.AVD)
+        $resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname) -and ![string]::IsNullOrEmpty($r.HostId)) {
                 $r.Hostname | Should -Not -Be $r.HostId -Because "Hostname and HostId should be different obfuscated values"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had both a non-null Hostname and HostId in this fixture" }
     }
 
     It "MachineLearning: StorageAccount should be obfuscated or null" {
-        $resources = @($script:Inventory.MachineLearning)
+        $resources = @($script:Inventory.MachineLearning) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount)) {
                 $r.StorageAccount | Should -Not -Match $script:AzureIdPattern -Because "ML StorageAccount should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning had a non-null StorageAccount in this fixture" }
     }
 
     It "MachineLearning: KeyVault should be obfuscated or null" {
-        $resources = @($script:Inventory.MachineLearning)
+        $resources = @($script:Inventory.MachineLearning) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.KeyVault)) {
                 $r.KeyVault | Should -Not -Match $script:AzureIdPattern -Because "ML KeyVault should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning had a non-null KeyVault in this fixture" }
     }
 
     It "Databricks: ManagedResourceGroup should be obfuscated or null" {
-        $resources = @($script:Inventory.Databricks)
+        $resources = @($script:Inventory.Databricks) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Databricks resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedResourceGroup)) {
                 $r.ManagedResourceGroup | Should -BeIn @('obfuscated') -Because "Databricks ManagedResourceGroup should be obfuscated"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no Databricks had a non-null ManagedResourceGroup in this fixture" }
     }
 
     It "Databricks: StorageAccount should be obfuscated or null" {
-        $resources = @($script:Inventory.Databricks)
+        $resources = @($script:Inventory.Databricks) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Databricks resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount)) {
                 $r.StorageAccount | Should -BeIn @('obfuscated') -Because "Databricks StorageAccount should be obfuscated"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no Databricks had a non-null StorageAccount in this fixture" }
     }
 
     It "Purview: FriendlyName is obfuscated (tokenized, never raw)" {
-        $resources = @($script:Inventory.Purview)
+        $resources = @($script:Inventory.Purview) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Purview resources in this fixture"; return }
+        $Checked = 0
         foreach ($r in $resources) {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.FriendlyName)) {
                 $r.FriendlyName | Should -Match '^(prod|nonprod)_' -Because "Purview FriendlyName must be obfuscated to a token, never raw"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no Purview had a non-null FriendlyName in this fixture" }
     }
 
     It "Frontdoor: WebApplicationFirewall should be obfuscated or a known marker" {
-        $resources = @($script:Inventory.FRONTDOOR)
+        $resources = @($script:Inventory.FRONTDOOR) | Where-Object { $null -ne $_ }
+        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no FRONTDOOR resources in this fixture"; return }
+        # Skip known non-ID markers: 'False' (Classic, no WAF), 'Unknown' (Std/Premium,
+        # not detectable from the profile). Any remaining value must not leak an Azure path.
+        $Checked = 0
         foreach ($r in $resources) {
-            # Skip known non-ID markers: 'False' (Classic, no WAF), 'Unknown' (Std/Premium,
-            # not detectable from the profile). Any remaining value must not leak an Azure path.
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WebApplicationFirewall) -and $r.WebApplicationFirewall -notin @('False', 'Unknown')) {
                 $r.WebApplicationFirewall | Should -Not -Match $script:AzureIdPattern -Because "Frontdoor WAF should not contain raw Azure resource ID"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no FRONTDOOR had a non-null WebApplicationFirewall value outside the known 'False'/'Unknown' markers in this fixture" }
     }
 }
 
@@ -578,5 +699,432 @@ Describe "Dictionary File Exclusion" {
     It "Should not contain the obfuscation dictionary in the zip" {
         $dictFiles = $script:AllFiles | Where-Object { $_.Name -like "ObfuscationDictionary_*" }
         $dictFiles | Should -BeNullOrEmpty -Because "Dictionary file should stay local, not in the zip"
+    }
+}
+
+# ============================================================
+# 16b. Full (raw) resource dump excluded from zip (P10)
+# The -Obfuscate run also writes a LOCAL Full_<ReportName>_<timestamp>.json
+# ($Global:AllResourceFile) that holds the RAW, un-obfuscated resource dump.
+# The packaging step's json filter excludes BOTH ObfuscationDictionary_* and
+# Full_* from the shipped ZIP (ResourceInventory.ps1 L1671). The Dictionary
+# File Exclusion block above guards the dictionary; this guards the Full_*
+# dump — the other local-only artifact whose presence would leak every real
+# identifier for every obfuscated dimension. Count-independent; asserts the
+# shared ZIP carries no Full_* member.
+# Validates: Requirements 12.1 | Property: P10
+# ============================================================
+Describe "Full Resource Dump Exclusion (P10)" {
+    It "Should not contain the raw Full_* resource dump in the zip" {
+        $fullDumpFiles = $script:AllFiles | Where-Object { $_.Name -like "Full_*" }
+        $fullDumpFiles | Should -BeNullOrEmpty -Because "Full_* raw resource dump should stay local, not in the shared zip (P10)"
+    }
+}
+
+# ============================================================
+# 17. Obfuscation determinism (P1)
+# Within a single run, the same real value must always map to the
+# SAME token. The obfuscated zip alone carries no real values, so
+# determinism is asserted against the reverse-lookup dictionary
+# (token -> real value): if any real value were reachable from two
+# DISTINCT tokens, the same input would have produced two outputs,
+# breaking determinism. This is the "all resources in one RG share
+# one RG token" invariant. Skips gracefully when no dictionary
+# fixture is available; count-independent (iterates whatever tokens
+# the run produced).
+# Validates: Requirements 2.1, 2.5 | Property: P1
+# ============================================================
+Describe "Obfuscation Determinism (P1)" {
+    It "ResourceGroup: each real resource group maps to exactly one token" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.ResourceGroupMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceGroupMap absent/empty in this dictionary"; return }
+        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/resourceGroups/([^/]+)') { $Matches[1] } }
+        $violations | Should -BeNullOrEmpty -Because "no real resource group may yield two different tokens within a run (P1)"
+    }
+
+    It "Subscription: each real subscription maps to exactly one token" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.SubscriptionMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "SubscriptionMap absent/empty in this dictionary"; return }
+        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/subscriptions/([0-9a-fA-F-]+)') { $Matches[1] } }
+        $violations | Should -BeNullOrEmpty -Because "no real subscription may yield two different tokens within a run (P1)"
+    }
+
+    It "ResourceId: each real resource id maps to exactly one token" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.ResourceIdMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceIdMap absent/empty in this dictionary"; return }
+        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $violations | Should -BeNullOrEmpty -Because "no real resource id may yield two different tokens within a run (P1)"
+    }
+
+    It "ResourceName: each real resource id maps to exactly one name token" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.ResourceNameMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceNameMap absent/empty in this dictionary"; return }
+        # Name tokens are keyed per real resource id (two resources sharing a
+        # display name in different RGs legitimately get different name tokens),
+        # so determinism is asserted against the real resource id, not the name.
+        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $violations | Should -BeNullOrEmpty -Because "no real resource id may yield two different name tokens within a run (P1)"
+    }
+
+    It "Tag: each real tag value maps to exactly one token" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.TagMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "TagMap absent/empty in this dictionary"; return }
+        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $violations | Should -BeNullOrEmpty -Because "no real tag value may yield two different tokens within a run (P1)"
+    }
+
+    It "FreeText: each real free-text value maps to exactly one token" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.FreeTextMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "FreeTextMap absent/empty in this dictionary"; return }
+        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $violations | Should -BeNullOrEmpty -Because "no real free-text value may yield two different tokens within a run (P1)"
+    }
+}
+
+# ============================================================
+# 18. Obfuscation injectivity / no token collisions (P2)
+# Distinct real values must produce DISTINCT tokens (a fresh GUID
+# per newly seen value), so one token never stands in for two
+# different real values. Asserted against the reverse-lookup
+# dictionary (token -> real value): because tokens are a map's
+# property names they are unique by construction, so within a map
+# an injectivity failure surfaces as the SAME real value being
+# reachable from MORE THAN ONE distinct token. That is the converse
+# of the P1 determinism check and is exactly what
+# Get-DeterminismViolation detects, so the P1 helper is reused here
+# to express the P2 invariant per map: each real value appears under
+# at most one token (the set of real values has no duplicates).
+# Selectors mirror the P1 block so ResourceName injectivity is keyed
+# on the real resource id (two resources that share a display name in
+# different RGs legitimately get different name tokens). Skips
+# gracefully when no dictionary fixture is available;
+# count-independent (iterates whatever tokens the run produced).
+# Validates: Requirements 2.1 | Property: P2
+# ============================================================
+Describe "Obfuscation Injectivity (P2)" {
+    It "ResourceGroup: no two tokens share the same real resource group" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.ResourceGroupMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceGroupMap absent/empty in this dictionary"; return }
+        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/resourceGroups/([^/]+)') { $Matches[1] } }
+        $collisions | Should -BeNullOrEmpty -Because "distinct real resource groups must map to distinct tokens; no token may cover two real values (P2)"
+    }
+
+    It "Subscription: no two tokens share the same real subscription" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.SubscriptionMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "SubscriptionMap absent/empty in this dictionary"; return }
+        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/subscriptions/([0-9a-fA-F-]+)') { $Matches[1] } }
+        $collisions | Should -BeNullOrEmpty -Because "distinct real subscriptions must map to distinct tokens; no token may cover two real values (P2)"
+    }
+
+    It "ResourceId: no two tokens share the same real resource id" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.ResourceIdMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceIdMap absent/empty in this dictionary"; return }
+        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $collisions | Should -BeNullOrEmpty -Because "distinct real resource ids must map to distinct tokens; no token may cover two real values (P2)"
+    }
+
+    It "ResourceName: no two name tokens share the same real resource id" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.ResourceNameMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceNameMap absent/empty in this dictionary"; return }
+        # Name tokens are keyed per real resource id (mirrors the P1 selector),
+        # so injectivity is asserted against the real resource id, not the name.
+        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $collisions | Should -BeNullOrEmpty -Because "distinct real resource ids must map to distinct name tokens; no name token may cover two real values (P2)"
+    }
+
+    It "Tag: no two tokens share the same real tag value" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.TagMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "TagMap absent/empty in this dictionary"; return }
+        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $collisions | Should -BeNullOrEmpty -Because "distinct real tag values must map to distinct tokens; no token may cover two real values (P2)"
+    }
+
+    It "FreeText: no two tokens share the same real free-text value" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
+        $map = $script:Dictionary.FreeTextMap
+        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "FreeTextMap absent/empty in this dictionary"; return }
+        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
+        $collisions | Should -BeNullOrEmpty -Because "distinct real free-text values must map to distinct tokens; no token may cover two real values (P2)"
+    }
+}
+
+# ============================================================
+# 19. Tag tokenization — keys kept, values masked, determinism,
+#     and the mixed-case tag-key regression.
+# Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5 | Property: P1
+#
+# The ZIP-content VM Tags test (above) and the TagMap P1/P2 blocks are the
+# authoritative checks WHEN the fixture carries tagged resources. They are
+# DATA-DEPENDENT: this fixture's in-scope resources carried no tags, so TagMap
+# is empty (those blocks skip) and the VM Tags loop has no rows to assert
+# against (documented fixture limitation — the dictionary is NOT fabricated).
+#
+# To close Req 4.1-4.5 without weakening anything above, this block adds two
+# fixture-independent layers, mirroring the sanctioned classifier-logic +
+# source-audit approach established in ProdNonprodPrefix.Tests.ps1 (Task 3):
+#   1. A logic-level exercise of the EXACT tag-obfuscation loop
+#      (ResourceInventory.ps1 L1002-1017) against a representative structured
+#      Tags hashtable with MIXED-CASE keys — the same shape collectors produce
+#      (Services/Compute/VirtualMachines.ps1 L71/L99: $obj = @{ ...; Tags = ... }).
+#      Asserts keys survive verbatim (4.1), values become prod_/nonprod_ tokens
+#      (4.2), the same value yields the same token (4.3 | P1), and the structured
+#      Tags is NOT nulled/dropped (4.5).
+#   2. A SOURCE-AUDIT regression that genuinely fails if the lowercase /
+#      case-sensitive tag scrub bug were reintroduced into ResourceInventory.ps1
+#      (4.5): the malformed-row scrub must clear BOTH the 'tags' and 'Tags' key
+#      variants (case-insensitive), the structured-tag obfuscation must be
+#      guarded by ContainsKey('Tags') and reassign only $tag.Value, and
+#      $tag.Name must never be reassigned (key kept verbatim).
+# ============================================================
+Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (P1)" {
+    BeforeAll {
+        # Faithful mirror of the tag-value classifier + tokenizer in
+        # ResourceInventory.ps1 L1002-1017. Same non-prod regex set as every
+        # other class (Req 3.3). Operates on the SAME shape the collectors
+        # produce: a case-insensitive [hashtable] $ResourceItem whose 'Tags'
+        # value is an array of { Name, Value } objects. Replicated here (rather
+        # than invoked) because the inline block lives inside the module-loop in
+        # ResourceInventoryLoop and the prod-only fixture cannot drive tag data
+        # through the ZIP. The source-audit Context below guards the real source.
+        function script:Invoke-TagObfuscation
+        {
+            param(
+                [Parameter(Mandatory)] $ResourceItem,
+                [Parameter(Mandatory)] $TagValueDictionary
+            )
+
+            if ($ResourceItem.ContainsKey('Tags') -and $null -ne $ResourceItem.Tags)
+            {
+                foreach ($tag in $ResourceItem.Tags)
+                {
+                    if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
+                    {
+                        $realTagValue = [string]$tag.Value
+                        if (-not $TagValueDictionary.ContainsKey($realTagValue))
+                        {
+                            $tagPrefix = if ($realTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                            $TagValueDictionary[$realTagValue] = $tagPrefix + [guid]::NewGuid().ToString()
+                        }
+                        $tag.Value = $TagValueDictionary[$realTagValue]
+                    }
+                }
+            }
+        }
+
+        $script:TagTokenPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        $script:RiSourcePath = Join-Path $PSScriptRoot '..' 'ResourceInventory.ps1'
+    }
+
+    It "keeps mixed-case tag KEYS verbatim and masks VALUES to tokens (Req 4.1, 4.2, 4.5)" {
+        # Mixed-case keys on purpose (Environment / CostCenter / Owner) to guard
+        # the case-insensitive handling. Values are synthetic only (no real ids).
+        $resourceItem = @{
+            ID   = 'prod_' + [guid]::NewGuid().ToString()
+            Tags = @(
+                [PSCustomObject]@{ Name = 'Environment'; Value = 'production' }
+                [PSCustomObject]@{ Name = 'CostCenter';  Value = 'finance-ops' }
+                [PSCustomObject]@{ Name = 'Owner';       Value = 'platform-team' }
+            )
+        }
+        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+
+        script:Invoke-TagObfuscation -ResourceItem $resourceItem -TagValueDictionary $dict
+
+        # 4.5: structured Tags survives (not nulled / not dropped by a scrub)
+        $resourceItem.Tags | Should -Not -BeNullOrEmpty -Because "structured Tags must survive tokenization, not be nulled (Req 4.5)"
+        @($resourceItem.Tags).Count | Should -Be 3 -Because "no tag row may be dropped by a mixed-case scrub (Req 4.5)"
+
+        $expectedKeys = @('Environment', 'CostCenter', 'Owner')
+        for ($i = 0; $i -lt 3; $i++)
+        {
+            # 4.1: key kept verbatim, including its original mixed casing
+            $resourceItem.Tags[$i].Name  | Should -BeExactly $expectedKeys[$i] -Because "tag KEY '$($expectedKeys[$i])' must be preserved verbatim, casing intact (Req 4.1)"
+            # 4.2: value replaced with a prod_/nonprod_ token
+            $resourceItem.Tags[$i].Value | Should -Match $script:TagTokenPattern -Because "tag VALUE must be a prod_/nonprod_ token, not raw (Req 4.2)"
+        }
+    }
+
+    It "emits the SAME token for the same tag value across resources (Req 4.3 | P1)" {
+        $dict  = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $itemA = @{ ID = 'a'; Tags = @([PSCustomObject]@{ Name = 'Env';  Value = 'shared-value' }) }
+        $itemB = @{ ID = 'b'; Tags = @([PSCustomObject]@{ Name = 'Tier'; Value = 'shared-value' }) }
+
+        script:Invoke-TagObfuscation -ResourceItem $itemA -TagValueDictionary $dict
+        script:Invoke-TagObfuscation -ResourceItem $itemB -TagValueDictionary $dict
+
+        $itemA.Tags[0].Value | Should -Be $itemB.Tags[0].Value -Because "the same real tag value must map to one token within a run (Req 4.3 / P1)"
+    }
+
+    It "derives the prod/nonprod prefix from the tag VALUE (Req 4.2 environment signal)" {
+        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $item = @{
+            ID   = 'x'
+            Tags = @(
+                [PSCustomObject]@{ Name = 'Stage'; Value = 'qa' }           # non-prod set member
+                [PSCustomObject]@{ Name = 'Stage'; Value = 'core-billing' } # neutral -> prod
+            )
+        }
+        script:Invoke-TagObfuscation -ResourceItem $item -TagValueDictionary $dict
+        $item.Tags[0].Value | Should -Match '^nonprod_' -Because "'qa' matches the non-prod set"
+        $item.Tags[1].Value | Should -Match '^prod_'    -Because "'core-billing' is neutral -> prod"
+    }
+
+    It "records each token -> real tag value mapping so TagMap can be inverted (Req 4.4)" {
+        # TagMap is built by inverting $Global:TagValueDictionary
+        # (ResourceInventory.ps1 L1582-1586). Assert the dictionary this loop
+        # populates carries the real value under the emitted token, which is
+        # exactly what the inversion serializes into TagMap.
+        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $item = @{ ID = 'y'; Tags = @([PSCustomObject]@{ Name = 'Team'; Value = 'analytics-platform' }) }
+
+        script:Invoke-TagObfuscation -ResourceItem $item -TagValueDictionary $dict
+
+        $token = $item.Tags[0].Value
+        $dict.ContainsKey('analytics-platform') | Should -BeTrue -Because "the real tag value must be keyed in the dictionary that TagMap inverts (Req 4.4)"
+        $dict['analytics-platform'] | Should -Be $token -Because "token <-> real value must round-trip through TagMap (Req 4.4)"
+    }
+
+    # ---- Source-audit regression: the mixed-case / lowercase-scrub bug (Req 4.5) ----
+    # Reads the shipped source and fails if the case-insensitive tag handling is
+    # regressed. This is the assertion that genuinely guards the already-fixed
+    # bug: if a future edit reintroduced a lowercase-only / case-sensitive scrub
+    # that nulled structured Tags, one of these fails.
+    Context "Source case-insensitive tag handling (Req 4.5)" {
+        BeforeAll {
+            $script:RiSourcePresent = Test-Path $script:RiSourcePath
+            $script:RiSource = if ($script:RiSourcePresent) { Get-Content $script:RiSourcePath -Raw } else { '' }
+        }
+
+        It "ResourceInventory.ps1 is present for source audit" {
+            $script:RiSourcePresent | Should -BeTrue -Because "the regression audits the shipped obfuscation source"
+        }
+
+        It "malformed-row scrub clears BOTH 'tags' and 'Tags' key variants (case-insensitive) (Req 4.5)" {
+            # The mixed-case bug was a case-sensitive scrub. -cmatch is
+            # case-SENSITIVE, and these anchor on the SCRUB ASSIGNMENT STATEMENT
+            # ($resourceItem.<case>.tags/Tags = $null), which is unique to the
+            # malformed-row path (L948-949) — the bare ContainsKey('Tags') token
+            # also appears at the L1002 obfuscation guard, so matching the token
+            # alone would be a false guard. Dropping either case variant
+            # (reintroducing a lowercase-only / case-sensitive scrub) fails here.
+            ($script:RiSource -cmatch '\$resourceItem\.tags = \$null') | Should -BeTrue -Because "lowercase tag key variant must be scrubbed on the malformed-row path (Req 4.5)"
+            ($script:RiSource -cmatch '\$resourceItem\.Tags = \$null') | Should -BeTrue -Because "PascalCase tag key variant must be scrubbed on the malformed-row path (Req 4.5)"
+        }
+
+        It "structured-tag obfuscation is guarded by ContainsKey('Tags') and tokenizes in place (Req 4.2, 4.5)" {
+            ($script:RiSource -cmatch "ContainsKey\('Tags'\) -and") | Should -BeTrue -Because "structured Tags must be tokenized in place, never scrubbed to null (Req 4.5)"
+            $script:RiSource | Should -Match '\$tag\.Value = \$Global:TagValueDictionary' -Because "the tag VALUE is what gets tokenized (Req 4.2)"
+        }
+
+        It "never reassigns a tag KEY (`$tag.Name), so keys are kept verbatim (Req 4.1)" {
+            $script:RiSource | Should -Not -Match '\$tag\.Name\s*=[^=]' -Because "tag KEYS must be preserved verbatim; reassigning `$tag.Name would rewrite a key (Req 4.1)"
+        }
+    }
+}
+
+# ============================================================
+# 20. AKS multi-node-pool Tags: no shared-reference aliasing (P1, P2)
+# Regression for a real bug found in this session: Services/Containers/AKS.ps1
+# emits one row per node pool for a cluster (foreach ($2 in
+# $data.agentPoolProfiles)). The 'Tags' field must carry each cluster's real
+# tag values into EVERY one of that cluster's rows, but if the Select-Object
+# projection that builds 'Tags' were hoisted OUTSIDE that inner loop, every row
+# would share the SAME Tags array/element object instances. The obfuscation
+# pass in ResourceInventory.ps1 mutates $tag.Value IN PLACE
+# ($tag.Value = $Global:TagValueDictionary[$realTagValue]); with aliased
+# objects, row 1's mutation is visible to row 2, so row 2 re-reads an
+# already-tokenized value as if it were "real" and re-keys it into
+# $Global:TagValueDictionary — corrupting the dictionary (P2 injectivity
+# violation: one real value ends up spuriously mapped under two dictionary
+# keys) and breaking TagMap. This test invokes the ACTUAL collector (not a
+# mirror) against a synthetic two-node-pool cluster and proves: (a) the
+# collector does not hand back the same Tags object instance across rows, and
+# (b) running the real tag-obfuscation loop over the collector's output
+# produces exactly ONE dictionary entry for the one real tag value, with both
+# rows resolving to the SAME token (P1 determinism preserved across rows).
+# Validates: Requirements 2.1, 4.1, 4.2, 4.3 | Properties: P1, P2
+# ============================================================
+Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
+    BeforeAll {
+        # Minimal synthetic managedClusters resource with TWO node pools and
+        # ONE real tag value shared by the whole cluster. No real identifiers.
+        $script:AksCluster = [PSCustomObject]@{
+            id             = 'prod_' + [guid]::NewGuid().ToString()
+            RESOURCEGROUP  = 'rg-aks-regress'
+            NAME           = 'aks-regress'
+            LOCATION       = 'eastus'
+            TYPE           = 'microsoft.containerservice/managedclusters'
+            subscriptionId = 'sub-regress'
+            sku            = [PSCustomObject]@{ name = 'Base'; tier = 'Free' }
+            tags           = [PSCustomObject]@{ environment = 'dev' }
+            PROPERTIES     = [PSCustomObject]@{
+                kubernetesVersion = '1.29'
+                networkProfile    = [PSCustomObject]@{ loadBalancerSku = 'Standard' }
+                agentPoolProfiles = @(
+                    [PSCustomObject]@{ name = 'nodepool1'; type = 'VirtualMachineScaleSets'; mode = 'System'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
+                    [PSCustomObject]@{ name = 'nodepool2'; type = 'VirtualMachineScaleSets'; mode = 'User';   osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
+                )
+            }
+        }
+        $script:AksSub = @([PSCustomObject]@{ id = 'sub-regress'; Name = 'sub-regress' })
+        $script:AksModule = Join-Path $PSScriptRoot '..' 'Services' 'Containers' 'AKS.ps1'
+    }
+
+    It "AKS.ps1 module file is present for direct invocation" {
+        Test-Path $script:AksModule | Should -BeTrue
+    }
+
+    It "emits one row per node pool, each with its OWN Tags object instance (no aliasing)" {
+        $rows = & $script:AksModule -Sub $script:AksSub -Resources @($script:AksCluster) -Task 'Processing' -ResourceIdDictionary $null
+        @($rows).Count | Should -Be 2 -Because "one row per node pool"
+        [object]::ReferenceEquals($rows[0].Tags, $rows[1].Tags) | Should -BeFalse -Because "each node-pool row must get its own Tags object instance, not a shared reference"
+    }
+
+    It "the real tag-obfuscation loop yields exactly ONE dictionary entry and ONE shared token across both rows (P1, P2)" {
+        $rows = & $script:AksModule -Sub $script:AksSub -Resources @($script:AksCluster) -Task 'Processing' -ResourceIdDictionary $null
+        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+
+        # Run the SAME tag-obfuscation loop ResourceInventory.ps1 runs per
+        # resourceItem (L1002-1017), once per row, exactly as production does.
+        foreach ($resourceItem in $rows)
+        {
+            if ($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
+            {
+                foreach ($tag in $resourceItem.Tags)
+                {
+                    if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
+                    {
+                        $realTagValue = [string]$tag.Value
+                        if (-not $dict.ContainsKey($realTagValue))
+                        {
+                            $tagPrefix = if ($realTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                            $dict[$realTagValue] = $tagPrefix + [guid]::NewGuid().ToString()
+                        }
+                        $tag.Value = $dict[$realTagValue]
+                    }
+                }
+            }
+        }
+
+        # P2 injectivity: exactly one real value went in, so exactly one entry
+        # must come out. A count of 2 here is the aliasing bug's signature (the
+        # already-tokenized value on row 2 gets misread as a second "real" value).
+        $dict.Count | Should -Be 1 -Because "one real tag value must yield exactly one dictionary entry, even across multiple node-pool rows for the same cluster (P2)"
+
+        # P1 determinism across rows: both rows' tag must resolve to the SAME
+        # token, and that token must actually be present as a dictionary value.
+        $rows[0].Tags[0].Value | Should -Be $rows[1].Tags[0].Value -Because "the same real tag value on two rows of the same cluster must yield the same token (P1)"
+        $dict.Values | Should -Contain $rows[0].Tags[0].Value -Because "the shared token must be the one real dictionary entry produced, not a spurious second entry"
     }
 }

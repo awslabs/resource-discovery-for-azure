@@ -91,32 +91,44 @@ Describe "PII Leak Scan" {
 # ============================================================
 Describe "Cross-Reference Integrity" {
     It "Every VMDisk AssociatedResource should match a VM ID or be null" {
-        $disks = @($script:Inventory.VMDisk)
+        $disks = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
+        if ($disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Checked = 0
         foreach ($disk in $disks) {
             if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource)) {
                 $disk.AssociatedResource | Should -BeIn $vmIds -Because "Disk '$($disk.ID)' should reference a known VM"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no VMDisk had a non-null AssociatedResource in this fixture" }
     }
 
     It "Every AVD HostId should match a VM ID or be null" {
-        $avd = @($script:Inventory.AVD)
+        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Checked = 0
         foreach ($item in $avd) {
             if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId)) {
                 $item.HostId | Should -BeIn $vmIds -Because "AVD HostId should reference a known VM"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had a non-null HostId in this fixture" }
     }
 
     It "AVD Hostname should differ from HostId" {
-        $avd = @($script:Inventory.AVD)
+        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Checked = 0
         foreach ($item in $avd) {
             if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId) -and ![string]::IsNullOrEmpty($item.Hostname)) {
                 $item.Hostname | Should -Not -Be $item.HostId -Because "Hostname and HostId should be different values"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had both a non-null Hostname and HostId in this fixture" }
     }
 }
 

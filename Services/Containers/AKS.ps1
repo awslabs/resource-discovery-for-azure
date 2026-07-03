@@ -15,6 +15,18 @@ if ($Task -eq 'Processing')
 
             foreach ($2 in $data.agentPoolProfiles) 
             {
+                # Recomputed on every node-pool iteration (not hoisted above this
+                # loop): the cluster's tags are the SAME real values across all of
+                # its node pools, but the obfuscation pass mutates $tag.Value on
+                # the object instance it's given. Sharing one $tags array/element
+                # instance across multiple $obj rows would let a value that was
+                # already tokenized on row 1 be re-read (and re-keyed) as a "real"
+                # value on row 2, corrupting $Global:TagValueDictionary. A fresh
+                # Select-Object projection per row gives each row its own object
+                # instances so the same real tag value still yields the same
+                # token (determinism, P1), without aliasing across rows.
+                $tags = if(![string]::IsNullOrEmpty($1.tags.psobject.properties)){$1.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+
                 $obj = @{
                     'ID'                        = $1.id;
                     'Subscription'              = $sub1.Name;
@@ -25,7 +37,7 @@ if ($Task -eq 'Processing')
                     'SkuTier'                   = $1.sku.tier;
                     'KubernetesVersion'         = $data.kubernetesVersion;
                     'LoadBalancerSku'           = $data.networkProfile.loadBalancerSku;                
-                    'NodePoolName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $2.name };
+                    'NodePoolName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $2.name } else { $2.name };
                     'PoolProfileType'           = $2.type;
                     'PoolMode'                  = $2.mode;
                     'PoolOS'                    = $2.osType;
@@ -37,6 +49,7 @@ if ($Task -eq 'Processing')
                     'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' }
                     'MaxPodsPerNode'            = $2.maxPods;
                     'OrchestratorVersion'       = $2.orchestratorVersion;
+                    'Tags'                      = $tags;
                 }
 
                 $tmp += $obj

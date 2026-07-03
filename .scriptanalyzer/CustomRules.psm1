@@ -88,13 +88,25 @@ function Measure-VariablePascalCase
         $Name = $Left.VariablePath.UserPath
 
         if ([string]::IsNullOrEmpty($Name)) { continue }
-        if ($AllowList -contains $Name.ToLower()) { continue }
+
+        # VariablePath.UserPath includes the scope prefix (e.g. "script:Foo"
+        # for $script:Foo) in lowercase. Left unstripped, that lowercase
+        # prefix would always fail the uppercase-start check below regardless
+        # of whether the actual variable name is well-cased. Strip the scope
+        # prefix for the casing check/allow-list/suggestion, but keep the
+        # original $Name (with prefix) for the diagnostic message so it still
+        # identifies the full scoped variable that was found.
+        $ScopePrefixPattern = '^(global|local|script|private|using|workflow):'
+        $NameForCasingCheck = $Name -replace $ScopePrefixPattern, ''
+        $ScopePrefix        = if ($Name -match $ScopePrefixPattern) { $Matches[0] } else { '' }
+
+        if ($AllowList -contains $NameForCasingCheck.ToLower()) { continue }
         # Case-sensitive regex: `-match` is case-insensitive by default in
         # PowerShell, which would accept lowercase names. `-cmatch` forces
         # case-sensitive matching so only real PascalCase passes through.
-        if ($Name -cmatch '^[A-Z]') { continue }
+        if ($NameForCasingCheck -cmatch '^[A-Z]') { continue }
 
-        $Suggested = $Name.Substring(0,1).ToUpper() + $Name.Substring(1)
+        $Suggested = $ScopePrefix + $NameForCasingCheck.Substring(0,1).ToUpper() + $NameForCasingCheck.Substring(1)
         $Message   = "Variable '`$$Name' should use PascalCase (e.g. '`$$Suggested')."
 
         # Construct via reflection-friendly form so we don't depend on the

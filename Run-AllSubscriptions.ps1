@@ -1155,28 +1155,35 @@ foreach ($sub in $subscriptions) {
         # subsequent -Resume run picks up correctly. The unified file is also
         # what the existing "clean run -> remove resume state" logic below
         # will look at.
+        # Discover every per-stream resume file on disk for this tenant,
+        # rather than iterating 0..($StreamCount-1). $StreamCount is THIS
+        # run's stream count; if an earlier interrupted run used a LARGER
+        # -ParallelStreams value, its higher-numbered per-stream files would
+        # otherwise never be read here (losing their Completed/FailedAttempts
+        # data) nor deleted below (leaving them as orphans). -Force is
+        # required because these filenames are dot-prefixed and Get-ChildItem
+        # hides dot-files by default on Unix.
+        $AllStreamFiles = @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $TenantID) -File -Force -ErrorAction SilentlyContinue)
         $allCompletedFromStreams = @()
         $allFailedFromStreams    = @()
-        for ($s = 0; $s -lt $StreamCount; $s++) {
-            $perStreamFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $s)
-            if (Test-Path -Path $perStreamFile -PathType Leaf) {
-                try {
-                    $obj = Get-Content -Path $perStreamFile -Raw | ConvertFrom-Json
-                    if ($null -ne $obj.Completed) {
-                        $allCompletedFromStreams += @($obj.Completed)
-                    }
-                    # Per-stream files written by workers also carry their
-                    # FailedAttempts entries. Merge by Id so the unified
-                    # state file reflects every stream's failures, with the
-                    # most-recent attempt's Reason/LastFailedAt winning when
-                    # the same sub appears in multiple streams (which would
-                    # only happen across re-runs with different slicing).
-                    if ($null -ne $obj.FailedAttempts) {
-                        $allFailedFromStreams += @($obj.FailedAttempts)
-                    }
-                } catch {
-                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message)
+        foreach ($StreamFile in $AllStreamFiles) {
+            $perStreamFile = $StreamFile.FullName
+            try {
+                $obj = Get-Content -Path $perStreamFile -Raw | ConvertFrom-Json
+                if ($null -ne $obj.Completed) {
+                    $allCompletedFromStreams += @($obj.Completed)
                 }
+                # Per-stream files written by workers also carry their
+                # FailedAttempts entries. Merge by Id so the unified
+                # state file reflects every stream's failures, with the
+                # most-recent attempt's Reason/LastFailedAt winning when
+                # the same sub appears in multiple streams (which would
+                # only happen across re-runs with different slicing).
+                if ($null -ne $obj.FailedAttempts) {
+                    $allFailedFromStreams += @($obj.FailedAttempts)
+                }
+            } catch {
+                Write-Verbose ("Could not read stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message)
             }
         }
         if ($allCompletedFromStreams.Count -gt 0) {
@@ -1185,14 +1192,14 @@ foreach ($sub in $subscriptions) {
         # Reconcile failed attempts from all streams against the unified list.
         # If a sub now appears in CompletedIds (i.e. a different stream or
         # this run succeeded for it) drop it from FailedAttempts. Otherwise,
-        # keep the entry with the highest Attempts count.
+        # keep the entry with the most recent LastFailedAt.
         if ($allFailedFromStreams.Count -gt 0) {
             $merged = @($FailedAttempts) + $allFailedFromStreams
             $byId = $merged | Where-Object { $_ } | Group-Object -Property Id
             $reconciled = @()
             foreach ($g in $byId) {
                 if ($CompletedIds -contains $g.Name) { continue }
-                $best = $g.Group | Sort-Object -Property @{Expression={[int]($_.Attempts)}} -Descending | Select-Object -First 1
+                $best = $g.Group | Sort-Object -Property @{Expression={[datetime]($_.LastFailedAt)}} -Descending | Select-Object -First 1
                 $reconciled += $best
             }
             $FailedAttempts = $reconciled
@@ -1207,12 +1214,13 @@ foreach ($sub in $subscriptions) {
         }
         # Also delete per-stream resume files now that the unified file holds
         # the truth - this prevents drift if a future run uses a different
-        # stream count.
-        for ($s = 0; $s -lt $StreamCount; $s++) {
-            $perStreamFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $s)
-            if (Test-Path -Path $perStreamFile -PathType Leaf) {
-                try { Remove-Item -Path $perStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message) }
-            }
+        # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
+        # as the merge loop above, so every file that was just merged is also
+        # the one that gets cleaned up here - regardless of this run's
+        # -ParallelStreams value.
+        foreach ($StreamFile in $AllStreamFiles) {
+            $perStreamFile = $StreamFile.FullName
+            try { Remove-Item -Path $perStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message) }
         }
     } finally {
         # Unconditional cleanup of background jobs and the Az context snapshot.

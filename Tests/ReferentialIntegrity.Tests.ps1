@@ -248,19 +248,29 @@ Describe "AvSet to VM Cross-Reference (P8)" {
 }
 
 Describe "VMSS Related-Cluster Cross-Reference (P8)" {
-    It "Every VMSS related-cluster (AKS) value carries the same token its AKS cluster uses (or the 'obfuscated' sentinel)" {
+    It "Every VMSS related-cluster value carries the same token its AKS cluster uses, the out-of-scope sentinel, or a well-formed token for a Service-Fabric-backed scale set" {
         $VmssItems = @($script:Inventory.VMSS) | Where-Object { $null -ne $_ }
         if ($VmssItems.Count -eq 0) { Set-ItResult -Skipped -Because "no VMSS resources in this fixture"; return }
-        # A scale set exposes its related AKS / Service-Fabric cluster via the
-        # 'AKS' field. The collector resolves the cluster's real ID through
-        # $ResourceIdDictionary and emits the SAME token the cluster's own row
-        # uses for its identity (Req 2.2), falling back to the 'obfuscated'
-        # sentinel when the target is out of scope (Req 2.3).
+        # A scale set exposes its related cluster via the 'AKS' field. The
+        # collector (Services/Containers/VMSS.ps1) resolves an AKS cluster
+        # first; if none owns the node pool's resource group it falls back to
+        # a Service Fabric cluster match instead. Either way it resolves the
+        # cluster's real ID through $ResourceIdDictionary and emits the SAME
+        # token the cluster's own row uses for its identity (Req 2.2), or the
+        # 'obfuscated' sentinel when the target is out of scope (Req 2.3).
+        # There is no dedicated Service Fabric collector/inventory bucket, so
+        # a Service-Fabric-backed match can't be looked up against a known-ID
+        # allowlist the way AKS can - instead we accept any well-formed
+        # prod_/nonprod_ token, which the AKS-cluster case already satisfies.
         $ClusterIds = @(@($script:Inventory.AKS) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID })
         $Checked = 0
         foreach ($ss in $VmssItems) {
             if (![string]::IsNullOrEmpty($ss.AKS)) {
-                $ss.AKS | Should -BeIn (@($ClusterIds) + 'obfuscated') -Because "VMSS '$($ss.ID)' related-cluster value should match its AKS cluster's own obfuscated ID (or the out-of-scope sentinel)"
+                $IsKnownClusterId  = $ss.AKS -in $ClusterIds
+                $IsSentinel        = $ss.AKS -eq 'obfuscated'
+                $IsWellFormedToken = $ss.AKS -match $script:TokenPattern
+                ($IsKnownClusterId -or $IsSentinel -or $IsWellFormedToken) | Should -BeTrue `
+                    -Because "VMSS '$($ss.ID)' related-cluster value should match its cluster's own obfuscated ID (AKS or Service Fabric), or be the out-of-scope sentinel"
                 $Checked++
             }
         }

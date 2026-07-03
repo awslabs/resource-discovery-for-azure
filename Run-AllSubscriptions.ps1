@@ -438,6 +438,55 @@ function Remove-FailedAttempt {
     return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
 }
 
+# Discover every per-stream resume-state file on disk for a tenant, rather
+# than iterating 0..($StreamCount-1). $StreamCount reflects THIS run's
+# -ParallelStreams value; if an earlier interrupted run used a LARGER value,
+# its higher-numbered per-stream files would otherwise never be read (losing
+# their Completed/FailedAttempts data) nor cleaned up (leaving them as
+# orphans). -Force is required because these filenames are dot-prefixed and
+# Get-ChildItem hides dot-files by default on Unix. Pulled out to its own
+# function purely so it can be exercised by a Pester test against a temp
+# directory without spinning up any streams.
+function Get-StreamResumeStateFiles {
+    param(
+        [Parameter(Mandatory=$true)][string]$InventoryRoot,
+        [Parameter(Mandatory=$true)][string]$Tenant
+    )
+    return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+}
+
+# Reconcile FailedAttempts entries gathered from multiple streams (plus any
+# pre-existing entries) against the unified CompletedIds list.
+#   - A sub that now appears in CompletedIds (any stream, or a prior run,
+#     succeeded for it) is dropped entirely.
+#   - Otherwise, when the same sub failed in more than one place, the entry
+#     with the most recent LastFailedAt wins - so a stale failure recorded
+#     before a later, more informative failure never shadows it.
+# Pulled out to its own function (previously inlined) so this decision can
+# be unit-tested directly instead of only via full multi-stream runs.
+function Merge-FailedAttempts {
+    param(
+        [System.Collections.IEnumerable]$ExistingFailedAttempts,
+        [System.Collections.IEnumerable]$StreamFailedAttempts,
+        [System.Collections.IEnumerable]$CompletedIds
+    )
+    $CompletedIds = @($CompletedIds)
+    if (@($StreamFailedAttempts).Count -eq 0) {
+        # No new stream failures: still prune any existing entry whose sub
+        # now appears in CompletedIds (a different stream succeeded for it).
+        return @($ExistingFailedAttempts | Where-Object { $_ -and -not ($CompletedIds -contains $_.Id) })
+    }
+    $merged = @($ExistingFailedAttempts) + @($StreamFailedAttempts)
+    $byId = $merged | Where-Object { $_ } | Group-Object -Property Id
+    $reconciled = @()
+    foreach ($g in $byId) {
+        if ($CompletedIds -contains $g.Name) { continue }
+        $best = $g.Group | Sort-Object -Property @{Expression={[datetime]($_.LastFailedAt)}} -Descending | Select-Object -First 1
+        $reconciled += $best
+    }
+    return $reconciled
+}
+
 # Authenticate, but only if needed.
 #
 # In environments like Azure Cloud Shell the shell already has a valid az CLI
@@ -1155,15 +1204,10 @@ foreach ($sub in $subscriptions) {
         # subsequent -Resume run picks up correctly. The unified file is also
         # what the existing "clean run -> remove resume state" logic below
         # will look at.
-        # Discover every per-stream resume file on disk for this tenant,
-        # rather than iterating 0..($StreamCount-1). $StreamCount is THIS
-        # run's stream count; if an earlier interrupted run used a LARGER
-        # -ParallelStreams value, its higher-numbered per-stream files would
-        # otherwise never be read here (losing their Completed/FailedAttempts
-        # data) nor deleted below (leaving them as orphans). -Force is
-        # required because these filenames are dot-prefixed and Get-ChildItem
-        # hides dot-files by default on Unix.
-        $AllStreamFiles = @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $TenantID) -File -Force -ErrorAction SilentlyContinue)
+        # Discover every per-stream resume file on disk for this tenant. See
+        # Get-StreamResumeStateFiles for why this is a full-disk scan rather
+        # than an iteration over 0..($StreamCount-1).
+        $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
         $allCompletedFromStreams = @()
         $allFailedFromStreams    = @()
         foreach ($StreamFile in $AllStreamFiles) {
@@ -1190,25 +1234,8 @@ foreach ($sub in $subscriptions) {
             $CompletedIds = @($CompletedIds + $allCompletedFromStreams | Sort-Object -Unique)
         }
         # Reconcile failed attempts from all streams against the unified list.
-        # If a sub now appears in CompletedIds (i.e. a different stream or
-        # this run succeeded for it) drop it from FailedAttempts. Otherwise,
-        # keep the entry with the most recent LastFailedAt.
-        if ($allFailedFromStreams.Count -gt 0) {
-            $merged = @($FailedAttempts) + $allFailedFromStreams
-            $byId = $merged | Where-Object { $_ } | Group-Object -Property Id
-            $reconciled = @()
-            foreach ($g in $byId) {
-                if ($CompletedIds -contains $g.Name) { continue }
-                $best = $g.Group | Sort-Object -Property @{Expression={[datetime]($_.LastFailedAt)}} -Descending | Select-Object -First 1
-                $reconciled += $best
-            }
-            $FailedAttempts = $reconciled
-        } else {
-            # Even with no new stream failures, prune any FailedAttempts entry
-            # whose sub now appears in CompletedIds (a different stream
-            # succeeded for it).
-            $FailedAttempts = @($FailedAttempts | Where-Object { $_ -and -not ($CompletedIds -contains $_.Id) })
-        }
+        # See Merge-FailedAttempts for the recency/completion rules.
+        $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $allFailedFromStreams -CompletedIds $CompletedIds
         if ($allCompletedFromStreams.Count -gt 0 -or $allFailedFromStreams.Count -gt 0) {
             Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
         }

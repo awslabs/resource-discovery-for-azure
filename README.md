@@ -504,6 +504,27 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - It works the same in Azure Cloud Shell and locally; nothing extra to install.
 - For a PDF, open the report and use your browser's Print > Save as PDF (the report has a print-friendly layout that expands every section).
 
+**Missing resource types in the report ("Collector Failures"):**
+- If a specific resource type (e.g. AKS, VMSS) is unexpectedly absent from a subscription's report even though that resource type exists in Azure, check the run's console output for a `Collector FAILED:` line and the end-of-run "Collector Failures" summary.
+- This means the corresponding `Services/*/*.ps1` collector threw for that subscription — the resource type is **missing because the collector errored**, not because there are genuinely none of that type. The rest of the inventory still completes and the report is still produced.
+- Re-run to retry. If the same collector keeps failing, investigate the error message shown (it is not swallowed).
+- If 5 or more collectors fail back-to-back for the same subscription, the run stops early for that subscription — this pattern almost always means something systemic broke mid-run (auth dropped, network lost, a broken `Az` module), not a bug in one specific collector.
+
+### Exit Codes (Run-AllSubscriptions.ps1)
+
+The wrapper script sets a process exit code so automation/CI can detect problems without parsing console output:
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean run — no failures of any kind. |
+| `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
+| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
+| `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
+| `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
+| `5` | Both `3` and `4` occurred in the same run. |
+
+Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
+
 ### Important Notes
 
 - The script does not upgrade existing PowerShell modules

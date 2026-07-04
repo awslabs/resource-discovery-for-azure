@@ -236,6 +236,12 @@ $Global:ConsumptionFailedSubs  = @()
 # in; read once after the slice loop and reported in the summary JSON.
 $Global:MetricsFailedSubs = @()
 
+# Per-subscription collector failures (#22). ResourceInventory.ps1 appends to
+# $Global:CollectorFailures (in this worker's scope, since it is invoked via `&`)
+# each time one of the Services/*/*.ps1 collectors throws for a subscription.
+# Same reset/aggregate/report lifecycle as $Global:MetricsFailedSubs above.
+$Global:CollectorFailures = @()
+
 $pairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
 for ($i = 0; $i -lt $pairCount; $i++) {
     $subId   = $SubscriptionIds[$i]
@@ -337,6 +343,7 @@ for ($i = 0; $i -lt $pairCount; $i++) {
 $ConsumptionTotal      = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs)  { @($Global:ConsumptionFailedSubs) } else { @() }
 $MetricsFailedSubs     = if ($null -ne $Global:MetricsFailedSubs)      { @($Global:MetricsFailedSubs) } else { @() }
+$CollectorFailures     = if ($null -ne $Global:CollectorFailures)      { @($Global:CollectorFailures) } else { @() }
 
 $summary = [pscustomobject]@{
     StreamId               = $StreamId
@@ -349,6 +356,7 @@ $summary = [pscustomobject]@{
     ConsumptionRecords     = $ConsumptionTotal
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
     MetricsFailedSubs      = @($MetricsFailedSubs)
+    CollectorFailures      = @($CollectorFailures)
 }
 try {
     $summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8

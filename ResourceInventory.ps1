@@ -110,6 +110,65 @@ Function Global:Protect-FreeTextValue([string]$Value)
     return $Global:FreeTextDictionary[$Value]
 }
 
+# Runs `az graph query` and returns the parsed JSON result. Azure CLI
+# failures (expired auth, throttling, a malformed KQL string, a transient
+# ARM error) print to stderr and exit non-zero, but the previous call sites
+# piped stdout straight into ConvertFrom-Json and read a count field off
+# whatever came out - a failed call and a genuinely empty subscription both
+# produced $null/0 with zero indication anything went wrong (see #22). This
+# wrapper checks the actual exit code and throws with the real Azure CLI
+# error text, so a Resource Graph failure surfaces as a loud, actionable
+# subscription failure instead of a silent "0 resources found". -Lowercase
+# preserves the exact `.tolower()` behavior the original data-fetching call
+# sites relied on (collectors compare against lowercase type strings).
+function Invoke-AzGraphQuerySafe
+{
+    param(
+        [Parameter(Mandatory=$true)][string]$Query,
+        [object[]]$ExtraArgs = @(),
+        [switch]$Lowercase
+    )
+
+    $AzArgs = @('graph', 'query', '-q', $Query, '--output', 'json', '--only-show-errors') + $ExtraArgs
+
+    # Capture stdout and stderr separately rather than merging with 2>&1. Some
+    # az CLI versions emit non-suppressible diagnostic text on stderr (extension
+    # auto-install notices, deprecation warnings) even on a successful (exit 0)
+    # call. Merging streams would splice that text into the JSON payload and
+    # cause ConvertFrom-Json to throw a parse error on a call that actually
+    # succeeded - a false failure this rewrite must not introduce. Stdout is
+    # only ever used for the JSON payload; stderr is only used in the error
+    # message when the exit code is actually non-zero.
+    $StdErrFile = [System.IO.Path]::GetTempFileName()
+    try
+    {
+        $StdOut = & az @AzArgs 2>$StdErrFile
+        $ExitCode = $LASTEXITCODE
+        $StdErr = Get-Content -Path $StdErrFile -Raw -ErrorAction SilentlyContinue
+    }
+    finally
+    {
+        Remove-Item -Path $StdErrFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($ExitCode -ne 0)
+    {
+        throw ("az graph query failed (exit code {0}): {1}`nQuery: {2}" -f $ExitCode, $StdErr, $Query)
+    }
+
+    $Text = $StdOut -join "`n"
+    if ($Lowercase) { $Text = $Text.ToLower() }
+
+    try
+    {
+        return ($Text | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch
+    {
+        throw ("az graph query returned output that could not be parsed as JSON: {0}`nRaw output: {1}" -f $_.Exception.Message, $Text)
+    }
+}
+
 Function RunInventorySetup()
 {
     function CheckVersion()
@@ -519,7 +578,7 @@ Function RunInventorySetup()
             $Subscri = $SubscriptionID
 
             $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1) {
@@ -530,7 +589,7 @@ Function RunInventorySetup()
 
                 while ($Looper -lt $Loop) {
                     $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -544,7 +603,7 @@ Function RunInventorySetup()
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = az graph query -q $GraphQuery  --output json --subscriptions $SubscriptionID --only-show-errors | ConvertFrom-Json
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1) {
@@ -555,7 +614,7 @@ Function RunInventorySetup()
 
                 while ($Looper -lt $Loop) {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --subscriptions $SubscriptionID --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -567,7 +626,7 @@ Function RunInventorySetup()
         else 
         {
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = az graph query -q  $GraphQuery --output json --only-show-errors | ConvertFrom-Json
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery
             $EnvSizeCount = $EnvSize.Data.'count_'
             
             Write-Log -Message ("Resources Output: {0} Resources Identified" -f $EnvSizeCount) -Severity 'Success'
@@ -582,7 +641,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop) 
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
                     
                     $Global:Resources += $Resource.Data
                     Start-Sleep 2
@@ -595,7 +654,7 @@ Function RunInventorySetup()
     
     function ResourceInventoryAvd()
     {    
-        $AVDSize = az graph query -q "desktopvirtualizationresources | summarize count()" --output json --only-show-errors | ConvertFrom-Json
+        $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()"
         $AVDSizeCount = $AVDSize.data.'count_'
     
         Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
@@ -610,7 +669,7 @@ Function RunInventorySetup()
             while ($Looper -lt $Loop) 
             {
                 $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
     
                 $Global:Resources += $AVD.data
                 Start-Sleep 2
@@ -916,13 +975,62 @@ function ExecuteInventoryProcessing()
         $Resource = $Resources | Select-Object -First $Resources.count
         #$Resource = ($Resource | ConvertTo-Json -Depth 50)
 
+        # Circuit breaker for collector failures (#22). A single collector
+        # throwing (a null property, a malformed API response, a bug in that
+        # one file) must not silently drop that resource type NOR abort the
+        # whole run - it is recorded loudly and processing continues with the
+        # next collector, exactly like the existing Metrics/Consumption
+        # fail-loud-and-skip-that-phase pattern. But if MANY collectors fail
+        # in a row, the cause is almost never "this one resource type has a
+        # bug" - it is systemic (auth dropped mid-run, network gone, Az
+        # module broken) and every remaining collector is about to fail for
+        # the identical reason. Limping through the rest would just produce
+        # ~50 more identical error lines and an empty report that looks like
+        # "no resources" instead of "the environment broke partway through".
+        # Stop the run once that pattern is detected instead of grinding
+        # through it - the operator gets ONE clear diagnosis instead of a
+        # wall of repeated errors, and can fix the real problem and re-run.
+        $ConsecutiveCollectorFailures = 0
+        $CollectorFailureCircuitBreakerThreshold = 5
+
         foreach ($Module in $Modules) 
         {
             $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
             
             Write-Log -Message ("Service Processing: {0}" -f $ModName) -Severity 'Success'
 
-            $result = & $Module -Sub $Subscriptions -Resources $Resource -Task "Processing" -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+            try
+            {
+                $result = & $Module -Sub $Subscriptions -Resources $Resource -Task "Processing" -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+                $ConsecutiveCollectorFailures = 0
+            }
+            catch
+            {
+                $ConsecutiveCollectorFailures++
+
+                if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
+                $Global:CollectorFailures += [pscustomobject]@{
+                    Id      = $SubscriptionID
+                    Module  = $ModName
+                    Message = $_.Exception.Message
+                }
+
+                Write-Log -Message ("Collector FAILED: {0}: {1}" -f $ModName, $_.Exception.Message) -Severity 'Error'
+                Write-Log -Message ("The rest of the inventory will continue, but the '{0}' resource type is MISSING from this report - not empty because there are none, but because the collector errored. Re-run to retry, or investigate the error above if it repeats." -f $ModName) -Severity 'Error'
+
+                if ($ConsecutiveCollectorFailures -ge $CollectorFailureCircuitBreakerThreshold)
+                {
+                    throw ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Collector failures so far this run: {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
+                }
+
+                # This collector's resource type is missing from the report,
+                # not silently empty-looking-like-none-exist: the Error-severity
+                # log line above and the $Global:CollectorFailures entry are
+                # the loud signal. $result must still become a defined empty
+                # array so $Global:SmaResources.$ModName is a valid (empty)
+                # JSON array rather than an absent/undefined member.
+                $result = @()
+            }
 
             if($Obfuscate.IsPresent)
             {
@@ -1384,7 +1492,27 @@ function FinalizeOutputs
         # dictionaries that scrub every other identifier.
         $reportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
         $reportTitle = ('Azure Resource Inventory - {0}' -f $Global:ReportName)
-        $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+
+        # Unlike a single collector failing (where the rest of the inventory
+        # can still proceed - see CreateResourceJobs), the HTML report IS the
+        # deliverable: there is nothing meaningful to "continue" to after this
+        # fails. Catch here purely to give a clear, loud, specific diagnosis
+        # (which file, which stage) instead of letting a raw exception from
+        # deep inside Summary.ps1 surface as an unqualified PowerShell error,
+        # then re-throw so this subscription is still correctly marked as
+        # failed by the wrapper (same propagation path as every other
+        # uncaught throw in this script - see Az-module-load and pre-flight
+        # checks above).
+        try
+        {
+            $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+        }
+        catch
+        {
+            Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
+            Write-Log -Message ("The Inventory/Metrics/Consumption data files were still written to {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
+            throw
+        }
     }
 
     ProcessSummary

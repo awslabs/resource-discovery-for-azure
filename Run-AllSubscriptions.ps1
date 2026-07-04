@@ -1535,13 +1535,13 @@ if ($metricsFailures.Count -gt 0) {
 # affected subscription's report, not silently empty because none exist.
 # Grouped by subscription so the operator can see exactly which sub(s) and
 # which resource type(s) were affected without hunting through per-sub logs.
-$collectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
-if ($collectorFailures.Count -gt 0) {
+$CollectorFailuresList = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+if ($CollectorFailuresList.Count -gt 0) {
     Write-Host ""
-    Write-Host ("Collector Failures:      {0} failure(s) across {1} subscription(s)" -f $collectorFailures.Count, (@($collectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Yellow
-    foreach ($subGroup in ($collectorFailures | Group-Object -Property Id)) {
-        Write-Host ("  - Subscription {0}:" -f $subGroup.Name) -ForegroundColor Yellow
-        foreach ($f in $subGroup.Group) {
+    Write-Host ("Collector Failures:      {0} failure(s) across {1} subscription(s)" -f $CollectorFailuresList.Count, (@($CollectorFailuresList | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Yellow
+    foreach ($SubGroup in ($CollectorFailuresList | Group-Object -Property Id)) {
+        Write-Host ("  - Subscription {0}:" -f $SubGroup.Name) -ForegroundColor Yellow
+        foreach ($f in $SubGroup.Group) {
             Write-Host ("      {0}: {1}" -f $f.Module, $f.Message) -ForegroundColor Yellow
         }
     }

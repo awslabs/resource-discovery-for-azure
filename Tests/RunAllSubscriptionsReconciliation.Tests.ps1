@@ -1,9 +1,8 @@
 # Run-AllSubscriptions.ps1 Reconciliation Logic Tests
 #
-# Unit-tests the two small resume-state reconciliation functions in
-# Run-AllSubscriptions.ps1 in isolation, without running the wrapper itself
-# (which requires a live Azure session, a tenant, and spins up real -Resume
-# state / background jobs).
+# Unit-tests small, self-contained functions in Run-AllSubscriptions.ps1 in
+# isolation, without running the wrapper itself (which requires a live Azure
+# session, a tenant, and spins up real -Resume state / background jobs).
 #
 #   - Get-StreamResumeStateFiles: discovers every per-stream resume-state
 #     file on disk for a tenant (fixes the "orphaned resume files when
@@ -14,6 +13,12 @@
 #     MOST RECENT LastFailedAt when the same sub Id appears more than once
 #     (fixes the "stale failure metadata won reconciliation" bug: the old
 #     inline code sorted by Attempts count instead of LastFailedAt recency).
+#   - Get-WrapperExitCode: decides the wrapper's machine-facing exit code
+#     (0/3/4/5) from two independent health signals - auth-skip (Metrics
+#     and/or Consumption skipped for lack of a usable Azure token) and
+#     collector failures (#22, a Services/*/*.ps1 collector threw). Guards
+#     against one problem masking the other in the exit code when both occur
+#     in the same run.
 #
 # Run with: Invoke-Pester ./Tests/RunAllSubscriptionsReconciliation.Tests.ps1 -Output Detailed
 #
@@ -21,7 +26,7 @@
 # executes side-effecting code immediately after its param() block (pre-flight
 # checks, tenant resolution, az/Az PowerShell auth). Dot-sourcing the whole
 # file would attempt all of that. Instead, this file parses the script's AST
-# and dot-sources ONLY the two function definitions under test, leaving every
+# and dot-sources ONLY the function definitions under test, leaving every
 # other line - including the side-effecting top-level code - untouched and
 # unexecuted.
 
@@ -38,7 +43,7 @@ BeforeAll {
         throw "Run-AllSubscriptions.ps1 failed to parse: $($ParseErrors | Out-String)"
     }
 
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode')
     $FunctionAsts = $Ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $TargetFunctions
@@ -156,5 +161,28 @@ Describe 'Merge-FailedAttempts' {
     It 'Returns an empty array when there are no existing failures and no stream failures' {
         $Result = @(Merge-FailedAttempts -ExistingFailedAttempts @() -StreamFailedAttempts @() -CompletedIds @())
         $Result.Count | Should -Be 0
+    }
+}
+
+Describe 'Get-WrapperExitCode' {
+    It 'Returns 0 when neither auth-skip nor collector failures occurred' {
+        Get-WrapperExitCode -AuthSkipped $false -CollectorsFailed $false | Should -Be 0
+    }
+
+    It 'Returns 3 when only auth-skip occurred' {
+        Get-WrapperExitCode -AuthSkipped $true -CollectorsFailed $false | Should -Be 3
+    }
+
+    It 'Returns 4 when only collector failures occurred' {
+        Get-WrapperExitCode -AuthSkipped $false -CollectorsFailed $true | Should -Be 4
+    }
+
+    It 'Returns 5 when BOTH auth-skip and collector failures occurred (regression guard for the masking bug)' {
+        # This is the exact case the fix addresses: a plain if/elseif chain
+        # ordered by which code was added first would let 3 mask 4 (or vice
+        # versa) and silently drop one signal from the exit code. Both
+        # problems occurring together must be distinctly detectable by
+        # anything that only checks the exit code.
+        Get-WrapperExitCode -AuthSkipped $true -CollectorsFailed $true | Should -Be 5 -Because 'neither failure signal may be silently dropped when both occur in the same run'
     }
 }

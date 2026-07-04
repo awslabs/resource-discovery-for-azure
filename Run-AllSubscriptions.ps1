@@ -73,6 +73,17 @@ $FailedSubscriptions = @()
 # skipped, and to set the non-zero wrapper exit code. Empty list = no problem.
 $Global:MetricsFailedSubs = @()
 
+# Per-subscription collector failures (#22), aggregated across the whole run.
+# Same pattern and lifecycle as $Global:MetricsFailedSubs above: a list of
+# { Id, Module, Message } objects, one per (subscription, collector) pair
+# where a Services/*/*.ps1 collector threw and was caught by
+# ResourceInventory.ps1's circuit breaker.
+#   - Sequential run: ResourceInventory.ps1 appends entries directly (it runs
+#     in this wrapper's scope).
+#   - Parallel run: each stream worker collects its own list and reports it
+#     in its summary JSON; the aggregation loop below concatenates them.
+$Global:CollectorFailures = @()
+
 # Inventory root (used for resume state, consolidated output, and the wrapper
 # transcript). Computed up front so the transcript can be started before
 # anything else writes to the host.
@@ -1172,6 +1183,11 @@ foreach ($sub in $subscriptions) {
                 $Global:MetricsFailedSubs += @($streamSummary.MetricsFailedSubs)
             }
 
+            if ($streamSummary.CollectorFailures -and $streamSummary.CollectorFailures.Count -gt 0) {
+                if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
+                $Global:CollectorFailures += @($streamSummary.CollectorFailures)
+            }
+
             # If a stream wrote a failures log, add it to the wrapper's diag-file
             # accumulator so the final summary surfaces the path. The wrapper's
             # existing $DiagFile was nullable; using a single concatenated log
@@ -1513,6 +1529,27 @@ if ($metricsFailures.Count -gt 0) {
     Write-Host ""
 }
 
+# Surface collector failures (#22). A Services/*/*.ps1 collector threw for a
+# specific subscription and was caught by ResourceInventory.ps1's circuit
+# breaker (CreateResourceJobs); that resource type is missing from the
+# affected subscription's report, not silently empty because none exist.
+# Grouped by subscription so the operator can see exactly which sub(s) and
+# which resource type(s) were affected without hunting through per-sub logs.
+$collectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+if ($collectorFailures.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Collector Failures:      {0} failure(s) across {1} subscription(s)" -f $collectorFailures.Count, (@($collectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Yellow
+    foreach ($subGroup in ($collectorFailures | Group-Object -Property Id)) {
+        Write-Host ("  - Subscription {0}:" -f $subGroup.Name) -ForegroundColor Yellow
+        foreach ($f in $subGroup.Group) {
+            Write-Host ("      {0}: {1}" -f $f.Module, $f.Message) -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  These resource types are missing (not empty) from the affected subscription's report." -ForegroundColor Yellow
+    Write-Host "  Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 if ($FailedSubscriptions.Count -gt 0) {
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
@@ -1565,6 +1602,24 @@ if ($authSkippedPhases.Count -gt 0) {
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
+# Machine-facing signal for collector failures (#22), distinct from the auth
+# banner above. A collector failure is not an auth problem - it means one or
+# more resource types are silently MISSING from one or more subscriptions'
+# reports because a Services/*/*.ps1 collector threw. This must be
+# machine-detectable (not just console-visible in the summary block above),
+# per the same "do not sweep failures under the rug" requirement that drove
+# the circuit breaker itself - a human-only signal that scrolls past in a
+# large multi-subscription run is not good enough for CI/automation.
+if (@($Global:CollectorFailures).Count -gt 0) {
+    Write-Host ""
+    Write-Host "=================== FAILED (collectors) ===================" -ForegroundColor Red
+    Write-Host ("{0} collector failure(s) across {1} subscription(s) - see 'Collector Failures' above for detail." -f @($Global:CollectorFailures).Count, (@($Global:CollectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Red
+    Write-Host "One or more resource types are MISSING (not empty) from the affected subscription(s)' reports." -ForegroundColor Red
+    Write-Host "Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Red
+    Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    Write-Host "=========================================================" -ForegroundColor Red
+}
+
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted) {
@@ -1573,13 +1628,38 @@ if ($WrapperTranscriptStarted) {
 }
 
 # Machine-facing signal. Exit code 3 == "completed, but a requested data phase
-# was auth-skipped". Distinct from the existing codes (1 = hard pre-flight /
-# auth / setup failure, 2 = per-subscription output verification gap, 0 =
-# clean). Nothing inside this repo consumes the WRAPPER's exit code (it is the
+# was auth-skipped". Exit code 4 == "completed, but one or more collectors
+# failed for one or more subscriptions" (#22). Exit code 5 == BOTH occurred in
+# the same run. A plain if/elseif chain would let 3 mask 4 (or vice versa) when
+# both problems occur together, silently hiding one from any automation that
+# only checks the exit code (the console banners above always print both
+# independently, but the exit code itself must not lose information either -
+# same "do not sweep failures under the rug" requirement as everywhere else in
+# this fix). Distinct from the existing codes (1 = hard pre-flight / auth /
+# setup failure, 2 = per-subscription output verification gap, 0 = clean).
+# Nothing inside this repo consumes the WRAPPER's exit code (it is the
 # top-level entrypoint); the inner ResourceInventory.ps1 exit code is left
 # UNCHANGED because the wrapper treats inner non-zero as "this whole
 # subscription failed" (see the $LASTEXITCODE checks in the run loops).
-if ($authSkippedPhases.Count -gt 0) {
-    exit 3
+#
+# Priority logic pulled into its own function so it is independently
+# unit-testable (see Tests/RunAllSubscriptionsReconciliation.Tests.ps1) without
+# requiring a live wrapper run. Pure function: two booleans in, exit code out.
+function Get-WrapperExitCode {
+    param(
+        [bool]$AuthSkipped,
+        [bool]$CollectorsFailed
+    )
+    if ($AuthSkipped -and $CollectorsFailed) { return 5 }
+    if ($AuthSkipped) { return 3 }
+    if ($CollectorsFailed) { return 4 }
+    return 0
+}
+
+$AuthSkipped      = $authSkippedPhases.Count -gt 0
+$CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
+$WrapperExitCode  = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+if ($WrapperExitCode -ne 0) {
+    exit $WrapperExitCode
 }
 

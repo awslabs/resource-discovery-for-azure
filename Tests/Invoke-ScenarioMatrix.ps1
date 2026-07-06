@@ -260,9 +260,20 @@ finally
 Write-Host ""
 Write-Host "================ SCENARIO MATRIX SUMMARY ================" -ForegroundColor Cyan
 $summary | Format-Table -AutoSize | Out-String | Write-Host
+
+# Guard against a vacuous "pass": if every requested scenario name was invalid
+# (e.g. -Scenarios was passed as a single unsplit "a,b,c" string by a caller's
+# shell), the loop above skips all of them via `continue` and $summary is never
+# populated. An empty collection has zero failures by definition, which would
+# otherwise print "All scenarios passed" and exit 0 despite nothing running.
+if ($summary.Count -eq 0) {
+    Write-Host ("No scenarios were executed (requested: {0}). Valid names: {1}" -f ($Scenarios -join ', '), ($catalog.Keys -join ', ')) -ForegroundColor Red
+    exit 1
+}
+
 $totalFailed = ($summary | Where-Object { $_.Failed -ne 0 }).Count
 if ($totalFailed -eq 0) {
-    Write-Host "All scenarios passed their applicable tests." -ForegroundColor Green
+    Write-Host ("All {0} scenario(s) passed their applicable tests." -f $summary.Count) -ForegroundColor Green
     exit 0
 } else {
     Write-Host ("{0} scenario(s) had failures - review above." -f $totalFailed) -ForegroundColor Red

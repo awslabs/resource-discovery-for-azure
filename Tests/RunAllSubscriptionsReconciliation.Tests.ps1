@@ -22,43 +22,30 @@
 #
 # Run with: Invoke-Pester ./Tests/RunAllSubscriptionsReconciliation.Tests.ps1 -Output Detailed
 #
-# Run-AllSubscriptions.ps1 is a top-level script (not a module) whose body
-# executes side-effecting code immediately after its param() block (pre-flight
-# checks, tenant resolution, az/Az PowerShell auth). Dot-sourcing the whole
-# file would attempt all of that. Instead, this file parses the script's AST
-# and dot-sources ONLY the function definitions under test, leaving every
-# other line - including the side-effecting top-level code - untouched and
-# unexecuted.
+# The functions under test used to be defined inline in Run-AllSubscriptions.ps1,
+# whose body executes side-effecting code immediately after its param() block
+# (pre-flight checks, tenant resolution, az/Az PowerShell auth) - so this test
+# had to AST-parse the script and dot-source only the target functions. They
+# now live in Functions/RunAllSubscriptions.Functions.ps1, a definitions-only
+# file with NO top-level side effects, so we can dot-source it wholesale here.
+# The same file is dot-sourced at runtime by both Run-AllSubscriptions.ps1 and
+# its stream worker, so this test exercises the exact code that ships.
 
 BeforeAll {
-    $script:ScriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
-    if (-not (Test-Path $script:ScriptPath)) {
-        throw "Could not find Run-AllSubscriptions.ps1 at $script:ScriptPath"
+    $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'
+    if (-not (Test-Path $script:FunctionsPath)) {
+        throw "Could not find shared functions file at $script:FunctionsPath"
     }
+    . $script:FunctionsPath
 
-    $Tokens = $null
-    $ParseErrors = $null
-    $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$Tokens, [ref]$ParseErrors)
-    if ($ParseErrors -and $ParseErrors.Count -gt 0) {
-        throw "Run-AllSubscriptions.ps1 failed to parse: $($ParseErrors | Out-String)"
-    }
-
+    # Guard: the functions under test must be defined by the shared file. If a
+    # future change renames or removes one, fail loudly here rather than with a
+    # confusing "command not found" mid-test.
     $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode')
-    $FunctionAsts = $Ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $TargetFunctions
-    }, $true)
-
-    if (@($FunctionAsts).Count -ne $TargetFunctions.Count) {
-        $Found = @($FunctionAsts | ForEach-Object { $_.Name })
-        throw "Expected to find functions [$($TargetFunctions -join ', ')] in Run-AllSubscriptions.ps1, but found [$($Found -join ', ')]. Have they been renamed or removed?"
-    }
-
-    # Dot-source just the extracted function text into this test session.
-    # This never touches the script's mandatory -TenantID param or any of its
-    # top-level auth/pre-flight code.
-    foreach ($Fn in $FunctionAsts) {
-        . ([scriptblock]::Create($Fn.Extent.Text))
+    foreach ($Fn in $TargetFunctions) {
+        if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw "Expected function '$Fn' to be defined by $script:FunctionsPath, but it was not. Has it been renamed or removed?"
+        }
     }
 
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }

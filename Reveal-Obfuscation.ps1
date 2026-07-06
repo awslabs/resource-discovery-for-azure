@@ -109,6 +109,20 @@ param(
     [string]   $OutputZip
 )
 
+# ---------------------------------------------------------------------------
+# Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
+# into this script's scope. Fail loud if the file is missing rather than
+# breaking later with a confusing "command not found".
+# ---------------------------------------------------------------------------
+$FunctionsFile = Join-Path $PSScriptRoot 'Functions/RevealObfuscation.Functions.ps1'
+if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $FunctionsFile
+
 $ErrorActionPreference = 'Stop'
 
 # ---- Resolve inputs --------------------------------------------------------
@@ -152,19 +166,6 @@ Write-Host ("Output zip  : {0}" -f $OutputZip)
 # ---- Load dictionary -------------------------------------------------------
 $Dict = Get-Content -Path $DictionaryPath -Raw | ConvertFrom-Json
 
-function ConvertTo-LookupTable
-{
-    param($MapObject)
-    $Table = @{}
-    if ($null -ne $MapObject)
-    {
-        foreach ($Property in $MapObject.PSObject.Properties)
-        {
-            $Table[$Property.Name] = $Property.Value
-        }
-    }
-    return $Table
-}
 
 $RgMap      = ConvertTo-LookupTable $Dict.ResourceGroupMap
 $SubMap     = ConvertTo-LookupTable $Dict.SubscriptionMap
@@ -174,19 +175,7 @@ $IdMap      = ConvertTo-LookupTable $Dict.ResourceIdMap
 $NameMap    = ConvertTo-LookupTable $Dict.ResourceNameMap
 $FreeTextMap = ConvertTo-LookupTable $Dict.FreeTextMap
 
-function Get-RgNameFromResourceId
-{
-    param([string]$ResourceId)
-    if ($ResourceId -match '(?i)/resourceGroups/([^/]+)') { return $Matches[1] }
-    return $null
-}
 
-function Get-SubGuidFromResourceId
-{
-    param([string]$ResourceId)
-    if ($ResourceId -match '(?i)/subscriptions/([^/]+)') { return $Matches[1] }
-    return $null
-}
 
 # ---- Build the token -> real-value replacement map for the selected fields -
 # Tokens are unique prod_/nonprod_<guid> strings, so a single flat map keyed by
@@ -287,14 +276,6 @@ Write-Host ("Tokens to reveal: {0}" -f $Replacements.Count)
 # dimensions (Resource Id/Name) are left masked.
 $tokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
-function Get-JsonEscaped
-{
-    # Return the input string escaped for placement INSIDE a JSON string literal
-    # (ConvertTo-Json wraps + escapes; strip the surrounding quotes).
-    param([string]$Text)
-    $json = $Text | ConvertTo-Json -Compress
-    return $json.Substring(1, $json.Length - 2)
-}
 
 $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("Reveal_" + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
@@ -303,35 +284,6 @@ try
 {
     Expand-Archive -Path $InputZip -DestinationPath $tmpRoot -Force
 
-    # Reveal selected tokens inside a single string. The replacement value is
-    # escaped to match the destination format so a revealed value containing
-    # special characters (e.g. a subscription display name with '&', or a
-    # free-text tag value) stays valid in that file:
-    #   Json -> escaped for a JSON string literal
-    #   Html -> HTML-entity encoded (the report encodes every rendered value)
-    #   None -> raw (CSV field values are re-quoted by Export-Csv instead)
-    # Tokens not in $Replacements are returned unchanged, so unselected
-    # dimensions stay masked. Increments $script:fileHits per substituted token.
-    function Convert-RevealString
-    {
-        param([string]$Text, [string]$EscapeMode = 'None')
-        return [regex]::Replace($Text, $tokenPattern, {
-                param($m)
-                $tok = $m.Value
-                if ($Replacements.ContainsKey($tok))
-                {
-                    $script:fileHits++
-                    $val = $Replacements[$tok]
-                    switch ($EscapeMode)
-                    {
-                        'Json' { return (Get-JsonEscaped $val) }
-                        'Html' { return [System.Net.WebUtility]::HtmlEncode($val) }
-                        default { return $val }
-                    }
-                }
-                return $tok
-            })
-    }
 
     $totalHits = 0
     $files = Get-ChildItem -Path $tmpRoot -Recurse -File

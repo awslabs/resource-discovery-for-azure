@@ -16,6 +16,20 @@ param ($TenantID,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
 
+# ---------------------------------------------------------------------------
+# Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
+# into this script's scope. Fail loud if the file is missing rather than
+# breaking later with a confusing "command not found".
+# ---------------------------------------------------------------------------
+$FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
+if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $FunctionsFile
+
 
 if ($Debug.IsPresent) {$DebugPreference = 'Continue'}
 
@@ -23,34 +37,7 @@ if ($Debug.IsPresent) {$ErrorActionPreference = "Continue" }Else {$ErrorActionPr
 
 Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
 
-Function Write-Log([string]$Message, [string]$Severity)
-{
-   $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
 
-   switch ($Severity) 
-   {
-        "Info"    { Write-Host $Message -ForegroundColor Cyan }
-        "Warning" { Write-Host $Message -ForegroundColor Yellow }
-        "Error"   { Write-Host $Message -ForegroundColor Red }
-        "Success"   { Write-Host $Message -ForegroundColor Green }
-        default   { Write-Host $Message }
-    }
-}
-
-function GetLocalVersion() 
-{
-    $versionJsonPath = "./Version.json"
-    if (Test-Path $versionJsonPath) 
-    {
-        $localVersionJson = Get-Content $versionJsonPath | ConvertFrom-Json
-        return ('{0}.{1}.{2}' -f $localVersionJson.MajorVersion, $localVersionJson.MinorVersion, $localVersionJson.BuildVersion)
-    } 
-    else 
-    {
-        Write-Host "Local Version.json not found. Clone the repo and execute the script from the root. Exiting." -ForegroundColor Red
-        Exit
-    }
-}
 
 function Variables 
 {
@@ -90,84 +77,7 @@ function Variables
     $Global:TableStyle = "Medium15"
 }
 
-# Deterministically tokenize a free-text / identity value into
-# $Global:FreeTextDictionary and return the token, so collectors can replace
-# free-form fields (Description, FriendlyName, CreatedBy, RoleName, container
-# image, etc.) with a reversible token instead of dropping them. Same real value
-# always yields the same prod_/nonprod_ token within a run. Null/empty input
-# returns $null (preserving the previous "absent" shape); when obfuscation is off
-# the dictionary is $null and the original value is returned unchanged. Defined
-# Global so it is reachable from the collectors invoked via '& $Module'.
-Function Global:Protect-FreeTextValue([string]$Value)
-{
-    if ([string]::IsNullOrEmpty($Value)) { return $null }
-    if ($null -eq $Global:FreeTextDictionary) { return $Value }
-    if (-not $Global:FreeTextDictionary.ContainsKey($Value))
-    {
-        $tfPrefix = if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
-        $Global:FreeTextDictionary[$Value] = $tfPrefix + [guid]::NewGuid().ToString()
-    }
-    return $Global:FreeTextDictionary[$Value]
-}
 
-# Runs `az graph query` and returns the parsed JSON result. Azure CLI
-# failures (expired auth, throttling, a malformed KQL string, a transient
-# ARM error) print to stderr and exit non-zero, but the previous call sites
-# piped stdout straight into ConvertFrom-Json and read a count field off
-# whatever came out - a failed call and a genuinely empty subscription both
-# produced $null/0 with zero indication anything went wrong (see #22). This
-# wrapper checks the actual exit code and throws with the real Azure CLI
-# error text, so a Resource Graph failure surfaces as a loud, actionable
-# subscription failure instead of a silent "0 resources found". -Lowercase
-# preserves the exact `.tolower()` behavior the original data-fetching call
-# sites relied on (collectors compare against lowercase type strings).
-function Invoke-AzGraphQuerySafe
-{
-    param(
-        [Parameter(Mandatory=$true)][string]$Query,
-        [object[]]$ExtraArgs = @(),
-        [switch]$Lowercase
-    )
-
-    $AzArgs = @('graph', 'query', '-q', $Query, '--output', 'json', '--only-show-errors') + $ExtraArgs
-
-    # Capture stdout and stderr separately rather than merging with 2>&1. Some
-    # az CLI versions emit non-suppressible diagnostic text on stderr (extension
-    # auto-install notices, deprecation warnings) even on a successful (exit 0)
-    # call. Merging streams would splice that text into the JSON payload and
-    # cause ConvertFrom-Json to throw a parse error on a call that actually
-    # succeeded - a false failure this rewrite must not introduce. Stdout is
-    # only ever used for the JSON payload; stderr is only used in the error
-    # message when the exit code is actually non-zero.
-    $StdErrFile = [System.IO.Path]::GetTempFileName()
-    try
-    {
-        $StdOut = & az @AzArgs 2>$StdErrFile
-        $ExitCode = $LASTEXITCODE
-        $StdErr = Get-Content -Path $StdErrFile -Raw -ErrorAction SilentlyContinue
-    }
-    finally
-    {
-        Remove-Item -Path $StdErrFile -Force -ErrorAction SilentlyContinue
-    }
-
-    if ($ExitCode -ne 0)
-    {
-        throw ("az graph query failed (exit code {0}): {1}`nQuery: {2}" -f $ExitCode, $StdErr, $Query)
-    }
-
-    $Text = $StdOut -join "`n"
-    if ($Lowercase) { $Text = $Text.ToLower() }
-
-    try
-    {
-        return ($Text | ConvertFrom-Json -ErrorAction Stop)
-    }
-    catch
-    {
-        throw ("az graph query returned output that could not be parsed as JSON: {0}`nRaw output: {1}" -f $_.Exception.Message, $Text)
-    }
-}
 
 Function RunInventorySetup()
 {
@@ -1526,17 +1436,16 @@ function FinalizeOutputs
 # When this script is invoked by Run-AllSubscriptions.ps1 (-RunAllSubs is
 # set), the wrapper has already executed the same checks at its top level,
 # so the entire block is skipped here - otherwise the checks would re-run
-# once per subscription (e.g. 164 times in a 164-sub run), adding noise to
-# the per-subscription transcript without adding safety. Standalone invocation
+# once per subscription in a multi-subscription run, adding noise to the
+# per-subscription transcript without adding safety. Standalone invocation
 # of this script still runs the full block.
 #
-# NOTE: Keep the body of this block in sync with the same block at the top
-# of Run-AllSubscriptions.ps1 (just before its Resolve-TenantId call). They
-# are inlined in both files rather than dot-sourced from a shared file
-# because the dot-source itself is a failure surface (path resolution,
-# missing file) we do not want to add to a script whose entire job is to
-# fail loudly when the environment is wrong. Intentional differences vs the
-# wrapper copy:
+# NOTE: Keep the body of this block in sync with Invoke-PreFlightChecks in
+# Functions/RunAllSubscriptions.Functions.ps1 (which Run-AllSubscriptions.ps1
+# dot-sources). This copy is deliberately kept INLINE here - not shared - so
+# the environment sanity checks have no dependency on locating another file,
+# which matters most in exactly the broken environments these checks exist to
+# catch. Intentional differences vs the wrapper copy:
 #   - This copy honors -OutputDirectory if the caller passed one (the wrapper
 #     does not expose or forward that parameter).
 #   - This copy throws on hard-fail; the wrapper's copy calls Exit-Wrapper.

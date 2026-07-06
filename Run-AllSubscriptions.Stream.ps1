@@ -17,10 +17,11 @@
 #     resource counts, consumption results, and failures into the final
 #     wrapper-level summary.
 #
-# This script is intentionally self-contained (no dot-source from the parent)
-# because Start-Job runs the script block in a fresh runspace where parent
-# functions and variables are not in scope. The wrapper passes everything via
-# explicit parameters.
+# Start-Job runs this script block in a fresh runspace (separate process) where
+# the parent's functions and variables are NOT in scope, so the wrapper passes
+# everything via explicit parameters. Shared helper functions are dot-sourced
+# below from this worker's OWN $PSScriptRoot (Functions/RunAllSubscriptions.Functions.ps1)
+# - the same file the parent loads - rather than inherited from the parent.
 
 param (
     [Parameter(Mandatory=$true)] [string]   $TenantID,
@@ -52,14 +53,24 @@ param (
     [int]    $ConcurrencyLimit = 6
 )
 
+# ---------------------------------------------------------------------------
+# Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
+# into this script's scope. Fail loud if the file is missing rather than
+# breaking later with a confusing "command not found".
+# ---------------------------------------------------------------------------
+$FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
+if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $FunctionsFile
+
 # Tag used to prefix all stdout lines so the parent wrapper can demultiplex
 # interleaved output across streams.
 $Tag = "[stream-$StreamId]"
 
-function Write-Stream {
-    param([string]$Message, [string]$Color = 'Gray')
-    Write-Host ("{0} {1}" -f $Tag, $Message) -ForegroundColor $Color
-}
 
 # Empty slice = nothing to do. Write a minimal "ok with zero subs" summary so
 # the parent's aggregation step (which expects a summary file from every
@@ -124,65 +135,9 @@ try {
 # Each stream owns a separate file. No races, no locking, simple semantics.
 $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId)
 
-function Read-StreamState {
-    param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
-    try {
-        $obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        return @{
-            Completed = if ($null -eq $obj.Completed) { @() } else { @($obj.Completed) }
-            # Backward-compatible: state files written by an older worker had
-            # no FailedAttempts key, so default to @().
-            Failed    = if ($null -eq $obj.FailedAttempts) { @() } else { @($obj.FailedAttempts) }
-        }
-    } catch {
-        Write-Stream ("WARNING: could not read stream state at {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
-        return @{ Completed = @(); Failed = @() }
-    }
-}
 
-function Write-StreamState {
-    param([string]$Path, [string[]]$Completed, $FailedAttempts = @())
-    try {
-        @{
-            Tenant         = $TenantID
-            StreamId       = $StreamId
-            Completed      = $Completed
-            FailedAttempts = @($FailedAttempts)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
-    } catch {
-        Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
-    }
-}
 
-# Per-sub helpers, matching the parent wrapper's Add-FailedAttempt /
-# Remove-FailedAttempt semantics (same shape, same Attempts increment, same
-# id-based dedup). Inlined rather than dot-sourced because workers cannot
-# reach the parent's function table.
-function Add-StreamFailedAttempt {
-    param([System.Collections.IEnumerable]$Existing, [string]$Id, [string]$Name, [string]$Reason)
-    $list = @($Existing | Where-Object { $_ })
-    $existingEntry = $list | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
-    if ($null -ne $existingEntry) {
-        $list = @($list | Where-Object { $_.Id -ne $Id })
-        $attempts = if ($existingEntry.Attempts) { [int]$existingEntry.Attempts + 1 } else { 2 }
-    } else {
-        $attempts = 1
-    }
-    $list += [pscustomobject]@{
-        Id           = $Id
-        Name         = $Name
-        LastFailedAt = (Get-Date).ToString('o')
-        Reason       = $Reason
-        Attempts     = $attempts
-    }
-    return $list
-}
 
-function Remove-StreamFailedAttempt {
-    param([System.Collections.IEnumerable]$Existing, [string]$Id)
-    return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
-}
 
 $CompletedIds   = @()
 $FailedAttempts = @()
@@ -279,7 +234,7 @@ for ($i = 0; $i -lt $pairCount; $i++) {
             $Completed += $subId
             # If this is a retry that finally succeeded, drop the sub from
             # FailedAttempts so the unified resume-state file reflects truth.
-            $FailedAttempts = Remove-StreamFailedAttempt -Existing $FailedAttempts -Id $subId
+            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $subId
             Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
         }
     } catch {
@@ -325,7 +280,7 @@ for ($i = 0; $i -lt $pairCount; $i++) {
         # every failure (rather than only at end-of-stream) means a worker
         # that is killed mid-slice still surfaces its partial failure
         # history to the next -ResumeFailedOnly invocation.
-        $FailedAttempts = Add-StreamFailedAttempt -Existing $FailedAttempts `
+        $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
             -Id $subId -Name $subName -Reason $errRecord.Exception.Message
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
     }

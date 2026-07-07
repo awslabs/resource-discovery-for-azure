@@ -921,16 +921,42 @@ function ExecuteInventoryProcessing()
         $ConsecutiveCollectorFailures = 0
         $CollectorFailureCircuitBreakerThreshold = 5
 
-        # Per-service progress is shown with Write-Progress instead of one
-        # green Write-Log line per collector (~40+ lines per subscription that
-        # scrolled the real errors/warnings off screen). Write-Progress renders
-        # a single updating bar in an interactive host and is a no-op in
-        # non-interactive hosts (parallel runspaces, transcripts, CI), so it
-        # does not pollute the transcript. Collector FAILURES are still logged
-        # loudly (Error severity) in the catch below, so nothing diagnostic is
-        # lost by dropping the per-service success line.
+        # Per-service progress is surfaced two ways, neither of which prints a
+        # per-collector line to the shared console (that green Write-Log line
+        # per collector - ~40+ lines per subscription - scrolled the real
+        # errors/warnings off screen and would repeat once per subscription,
+        # e.g. 164x for a 164-subscription run):
+        #   1. Write-Progress renders a single updating bar in an interactive
+        #      host and is a no-op in non-interactive hosts (parallel runspaces,
+        #      transcripts, CI), so it never pollutes the transcript.
+        #   2. A per-collector heartbeat is appended to a local .log file.
+        #      Because Write-Progress is a no-op in exactly the non-interactive
+        #      contexts the wrapper drives collectors in, a transcript otherwise
+        #      had NO marker between "Starting Service Processing Jobs" and the
+        #      next phase - you could not tell which collector was in flight when
+        #      a run hung. This file restores that "how far did it get / where
+        #      did it hang" trace without adding any console noise. It is a debug
+        #      artifact: named like the transcript (unique per run/process via the
+        #      PID-discriminated $CurrentDateTime), it stays local and is never
+        #      added to the shared zip (a .log matches no packaging pattern).
+        # Collector FAILURES are still logged loudly (Error severity) in the
+        # catch below regardless, so nothing diagnostic depends on this file.
         $ModuleTotal = @($Modules).Count
         $ModuleIndex = 0
+
+        $HeartbeatLogFile = ($Global:DefaultPath + "Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".log")
+        $HeartbeatSubLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(all in-scope subscriptions)' }
+        try
+        {
+            Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing started for {1}: {2} collectors" -f (Get-Date), $HeartbeatSubLabel, $ModuleTotal) -ErrorAction Stop
+        }
+        catch
+        {
+            # The heartbeat is a debug convenience, not part of the report. If the
+            # very first write fails (read-only path, disk full), disable it for
+            # this run and continue - it must never break inventory collection.
+            $HeartbeatLogFile = $null
+        }
 
         foreach ($Module in $Modules) 
         {
@@ -944,14 +970,29 @@ function ExecuteInventoryProcessing()
             }
             Write-Progress -Activity 'Service Processing' -Status ("{0} ({1} of {2})" -f $ModName, $ModuleIndex, $ModuleTotal) -PercentComplete $PercentComplete
 
+            if ($HeartbeatLogFile)
+            {
+                Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] START ({1}/{2}) {3}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName) -ErrorAction SilentlyContinue
+            }
+
             try
             {
                 $result = & $Module -Sub $Subscriptions -Resources $Resource -Task "Processing" -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
                 $ConsecutiveCollectorFailures = 0
+
+                if ($HeartbeatLogFile)
+                {
+                    Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] DONE  ({1}/{2}) {3}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName) -ErrorAction SilentlyContinue
+                }
             }
             catch
             {
                 $ConsecutiveCollectorFailures++
+
+                if ($HeartbeatLogFile)
+                {
+                    Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] FAIL  ({1}/{2}) {3}: {4}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName, $_.Exception.Message) -ErrorAction SilentlyContinue
+                }
 
                 if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
                 $Global:CollectorFailures += [pscustomobject]@{
@@ -1085,6 +1126,11 @@ function ExecuteInventoryProcessing()
         }
 
         Write-Progress -Activity 'Service Processing' -Completed
+
+        if ($HeartbeatLogFile)
+        {
+            Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing complete: {1} collectors" -f (Get-Date), $ModuleTotal) -ErrorAction SilentlyContinue
+        }
     }
 
     function ProcessResourceResult()
@@ -1742,7 +1788,11 @@ if($Obfuscate.IsPresent)
     # subscription names) that the obfuscation layer never touches. The
     # transcript is excluded separately below (it is not a .json). Use a
     # specific json file list so only the safe, obfuscated json files ship.
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" } | Select-Object -ExpandProperty FullName
+    # The Heartbeat_* .log (per-collector debug trace) is not a .json so the
+    # filter already excludes it; the explicit -notlike guard hardens that seam
+    # so it can never ship even if this filter is broadened later - the file
+    # carries a real subscription GUID and must stay local like the transcript.
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
         Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'

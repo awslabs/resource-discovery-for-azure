@@ -98,6 +98,11 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 > az extension add --name account
 > ```
 
+> **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
+> ```powershell
+> .\Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -ParallelStreams 2
+> ```
+
 ##### Installing the required PowerShell modules
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.

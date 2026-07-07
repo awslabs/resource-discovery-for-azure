@@ -1,5 +1,3 @@
-#Requires -Version 7.0
-
 param (
     [Parameter(Mandatory=$true)]
     [string]$TenantID,
@@ -54,6 +52,133 @@ param (
     # start to throttle and provide no further wall-time benefit.
     [int]$ParallelStreams = 1
 )
+
+# ---------------------------------------------------------------------------
+# PowerShell 7 bootstrap. This MUST run before the dot-source below: the helper
+# files this script loads declare "#requires -Version 7.0", which Windows
+# PowerShell 5.1 cannot load. Rather than fail with a blunt version error, this
+# block (written in the 5.1 + 7 common language subset, so 5.1 reaches it
+# instead of choking at parse time) re-launches the run under PowerShell 7,
+# installing it first with consent if it is missing. On PS7+ it is a no-op and
+# the script continues normally.
+#
+# KEEP THIS BLOCK FREE OF PS7-ONLY SYNTAX (no ternary ? :, no ?? / ??=, no
+# && / ||, no ForEach-Object -Parallel). Adding any of those makes 5.1 fail to
+# parse the whole script, and this bootstrap never runs.
+# ---------------------------------------------------------------------------
+if ($PSVersionTable.PSVersion.Major -lt 7)
+{
+    Write-Host ("Detected Windows PowerShell {0}. This tool requires PowerShell 7." -f $PSVersionTable.PSVersion) -ForegroundColor Yellow
+
+    $PwshPath = $null
+    $PwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    # Require major >= 7: a lingering PowerShell 6 'pwsh' on PATH would also fail
+    # the version guard above and could re-exec into itself in a loop.
+    if ($PwshCommand -and $PwshCommand.Version -and $PwshCommand.Version.Major -ge 7)
+    {
+        $PwshPath = $PwshCommand.Source
+    }
+    else
+    {
+        $PwshCandidates = @()
+        if ($env:ProgramFiles)
+        {
+            $PwshCandidates += (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')
+        }
+        $ProgramFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+        if ($ProgramFilesX86)
+        {
+            $PwshCandidates += (Join-Path $ProgramFilesX86 'PowerShell\7\pwsh.exe')
+        }
+        foreach ($PwshCandidate in $PwshCandidates)
+        {
+            if (Test-Path -LiteralPath $PwshCandidate)
+            {
+                $PwshPath = $PwshCandidate
+                break
+            }
+        }
+    }
+
+    if (-not $PwshPath)
+    {
+        $ManualInstallHint = '  Invoke-Expression "& { $(Invoke-RestMethod https://aka.ms/install-powershell.ps1) } -UseMSI"'
+        $IsInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+
+        if (-not $IsInteractive)
+        {
+            Write-Host "PowerShell 7 (pwsh) was not found, and this is a non-interactive session, so I will not prompt to install it." -ForegroundColor Red
+            Write-Host "Install PowerShell 7 and re-run. For example:" -ForegroundColor Yellow
+            Write-Host $ManualInstallHint -ForegroundColor Yellow
+            exit 1
+        }
+
+        Write-Host ""
+        $InstallAnswer = Read-Host "PowerShell 7 is not installed. Install it now? [y/N]"
+        if ($InstallAnswer -notmatch '^(y|yes)$')
+        {
+            Write-Host "Not installing. Install PowerShell 7 manually and re-run:" -ForegroundColor Yellow
+            Write-Host $ManualInstallHint -ForegroundColor Yellow
+            exit 1
+        }
+
+        Write-Host "Installing PowerShell 7 via the official Microsoft installer (this may prompt for elevation)..." -ForegroundColor Cyan
+        try
+        {
+            $InstallScript = Invoke-RestMethod -Uri 'https://aka.ms/install-powershell.ps1'
+            $InstallBlock  = [ScriptBlock]::Create($InstallScript)
+            & $InstallBlock -UseMSI -Quiet
+        }
+        catch
+        {
+            Write-Host ("Automatic install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            Write-Host "Install PowerShell 7 manually from https://aka.ms/powershell-release then re-run." -ForegroundColor Yellow
+            exit 1
+        }
+
+        $PwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+        if ($PwshCommand -and $PwshCommand.Version -and $PwshCommand.Version.Major -ge 7)
+        {
+            $PwshPath = $PwshCommand.Source
+        }
+        elseif ($env:ProgramFiles -and (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')))
+        {
+            $PwshPath = (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')
+        }
+
+        if (-not $PwshPath)
+        {
+            Write-Host "PowerShell 7 was installed but is not visible in this session yet." -ForegroundColor Yellow
+            Write-Host "Close this window, open a new PowerShell 7 (pwsh) prompt, then re-run the same command." -ForegroundColor Yellow
+            exit 1
+        }
+    }
+
+    # Rebuild the original invocation as CLI tokens so `pwsh -File` binds them to
+    # this script's param() exactly as supplied: switches become a bare -Name,
+    # valued params become -Name Value.
+    $ForwardArgs = @()
+    foreach ($BoundParam in $PSBoundParameters.GetEnumerator())
+    {
+        $BoundValue = $BoundParam.Value
+        if ($BoundValue -is [System.Management.Automation.SwitchParameter])
+        {
+            if ($BoundValue.IsPresent)
+            {
+                $ForwardArgs += ('-' + $BoundParam.Key)
+            }
+        }
+        else
+        {
+            $ForwardArgs += ('-' + $BoundParam.Key)
+            $ForwardArgs += [string]$BoundValue
+        }
+    }
+
+    Write-Host ("Re-launching under PowerShell 7: {0}" -f $PwshPath) -ForegroundColor Cyan
+    & $PwshPath -NoLogo -NoProfile -File $PSCommandPath @ForwardArgs
+    exit $LASTEXITCODE
+}
 
 # ---------------------------------------------------------------------------
 # Load shared helper functions. Dot-sourced (NOT invoked via &) so they load

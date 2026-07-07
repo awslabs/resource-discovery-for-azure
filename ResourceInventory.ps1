@@ -172,14 +172,32 @@ Function RunInventorySetup()
             throw 'Azure PowerShell (Az) module is required and was not found. See log above for installation instructions.'
         }
 
-        # Probe that the Az module actually loads. Get-Module -ListAvailable above
-        # only checks for the manifest on disk; it does not validate that the
-        # bundled assemblies (MSAL, Azure.Core, etc.) are present and loadable.
-        # Without this probe a broken install (manifest present, assemblies
-        # missing - a real field-observed scenario) would let the script
-        # continue all the way to the consumption phase before failing.
+        # Load ONLY the Az submodules this tool actually uses, not the full `Az`
+        # rollup. Importing `Az` pulls in ~80 submodules (hundreds of DLLs plus
+        # their format/type data) and stalls for 20-40s on a fresh box with no
+        # output - which looks like a hang right after "Checking Azure PowerShell
+        # Module...". The tool only calls cmdlets from these four:
+        #   Az.Accounts - Connect/Get/Set-AzContext, Get-AzSubscription,
+        #                 Get-AzAccessToken, Save-/Import-AzContext
+        #   Az.Compute  - Get-AzComputeResourceSku
+        #   Az.Monitor  - Get-AzMetric
+        #   Az.Billing  - Get-UsageAggregates
+        # Anything not listed still auto-loads its submodule on first use (the
+        # full rollup is installed, so every submodule is on PSModulePath), so
+        # this is purely a startup speed-up and cannot cause "command not found".
+        #
+        # This import doubles as the broken-install probe. Get-Module
+        # -ListAvailable above only checks the manifest on disk; importing
+        # Az.Accounts actually loads the bundled assemblies (MSAL, Azure.Core),
+        # so a half-installed module (manifest present, assemblies missing - a
+        # real field-observed scenario) fails loudly HERE instead of silently
+        # producing zero data at the consumption phase.
         try {
-            Import-Module Az -ErrorAction Stop -DisableNameChecking | Out-Null
+            foreach ($AzSubModule in @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing'))
+            {
+                Write-Log -Message ('Loading {0}...' -f $AzSubModule) -Severity 'Info'
+                Import-Module $AzSubModule -ErrorAction Stop -DisableNameChecking | Out-Null
+            }
             $Global:AzPowerShellLoaded = $true
         } catch {
             Write-Log -Message ('Azure PowerShell module is present on disk but failed to load: {0}' -f $_.Exception.Message) -Severity 'Error'

@@ -181,6 +181,105 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
 }
 
 # ---------------------------------------------------------------------------
+# Azure CLI bootstrap. The authentication flow and Resource Graph queries shell
+# out to `az`; without it the run fails at auth with a confusing "'az' is not
+# recognized". Mirror the PowerShell 7 bootstrap above: detect az, and if it is
+# missing offer to install it (official Microsoft MSI) when interactive, or fail
+# loud with guidance when non-interactive (never hang on a prompt).
+#
+# This only ever executes under PowerShell 7 (the block above re-launches 5.1
+# before reaching here), but it is still kept in the 5.1 + 7 common syntax
+# subset so the whole file continues to parse under Windows PowerShell 5.1.
+# ---------------------------------------------------------------------------
+function Resolve-AzCli
+{
+    $Cmd = Get-Command az -ErrorAction SilentlyContinue
+    if ($Cmd)
+    {
+        return $Cmd.Source
+    }
+    # az may be installed but not yet on PATH in this session (e.g. immediately
+    # after an MSI install). Probe the default install locations and, if found,
+    # prepend to this process's PATH so `az` is usable without reopening.
+    $WbinDirs = @()
+    if ($env:ProgramFiles)
+    {
+        $WbinDirs += (Join-Path $env:ProgramFiles 'Microsoft SDKs\Azure\CLI2\wbin')
+    }
+    $ProgramFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    if ($ProgramFilesX86)
+    {
+        $WbinDirs += (Join-Path $ProgramFilesX86 'Microsoft SDKs\Azure\CLI2\wbin')
+    }
+    foreach ($WbinDir in $WbinDirs)
+    {
+        if (Test-Path -LiteralPath (Join-Path $WbinDir 'az.cmd'))
+        {
+            $env:PATH = $WbinDir + ';' + $env:PATH
+            return (Join-Path $WbinDir 'az.cmd')
+        }
+    }
+    return $null
+}
+
+$AzCliPath = Resolve-AzCli
+if (-not $AzCliPath)
+{
+    $AzManualHint  = '  https://aka.ms/installazurecliwindows'
+    $AzInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+
+    if (-not $AzInteractive)
+    {
+        Write-Host "Azure CLI (az) was not found, and this is a non-interactive session, so I will not prompt to install it." -ForegroundColor Red
+        Write-Host "Install the Azure CLI and re-run. See:" -ForegroundColor Yellow
+        Write-Host $AzManualHint -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host ""
+    $AzAnswer = Read-Host "Azure CLI (az) is required but not installed. Install it now? [y/N]"
+    if ($AzAnswer -notmatch '^(y|yes)$')
+    {
+        Write-Host "Not installing. Install the Azure CLI and re-run. See:" -ForegroundColor Yellow
+        Write-Host $AzManualHint -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host "Installing the Azure CLI via the official Microsoft MSI (this may prompt for elevation and can take a few minutes)..." -ForegroundColor Cyan
+    try
+    {
+        $AzMsiPath = Join-Path $env:TEMP ('AzureCLI-' + [guid]::NewGuid().ToString() + '.msi')
+        $PriorProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri 'https://aka.ms/installazurecliwindowsx64' -OutFile $AzMsiPath
+        $ProgressPreference = $PriorProgress
+        $MsiProc = Start-Process -FilePath 'msiexec.exe' -ArgumentList ('/i "' + $AzMsiPath + '" /quiet /norestart') -Wait -PassThru
+        Remove-Item -LiteralPath $AzMsiPath -Force -ErrorAction SilentlyContinue
+        # 0 = success; 3010 = success but a reboot is required (az still works in
+        # this session). Anything else is a genuine failure.
+        if ($MsiProc.ExitCode -ne 0 -and $MsiProc.ExitCode -ne 3010)
+        {
+            throw ("msiexec exited with code {0}." -f $MsiProc.ExitCode)
+        }
+    }
+    catch
+    {
+        Write-Host ("Automatic install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host "Install the Azure CLI manually from https://aka.ms/installazurecliwindows then re-run." -ForegroundColor Yellow
+        exit 1
+    }
+
+    $AzCliPath = Resolve-AzCli
+    if (-not $AzCliPath)
+    {
+        Write-Host "Azure CLI was installed but is not visible in this session yet." -ForegroundColor Yellow
+        Write-Host "Close this window, open a new PowerShell 7 (pwsh) prompt, then re-run the same command." -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host ("Azure CLI is now available: {0}" -f $AzCliPath) -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
 # Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
 # into this script's scope. Fail loud if the file is missing rather than
 # breaking later with a confusing "command not found".

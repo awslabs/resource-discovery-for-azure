@@ -519,3 +519,52 @@ function Write-StreamState {
     }
 }
 
+
+# Classify a consumption-probe error message into an access outcome. Pure (no
+# Azure calls) so the classification rules are unit-testable without a live
+# session. Returns:
+#   'Ok'          - no error ($null/empty message): the probe query succeeded.
+#   'Denied'      - the message indicates an authorization/RBAC denial: the
+#                   identity lacks Cost Management / Billing Reader. Because
+#                   consumption was REQUESTED (no -SkipConsumption), the caller
+#                   treats this as a HARD failure - producing a report silently
+#                   missing requested billing data is worse than stopping.
+#   'Unavailable' - any other failure (expired token, Conditional Access, MFA,
+#                   throttling, transient network). NOT a hard failure: this is
+#                   the recoverable class the per-subscription consumption phase
+#                   already detects, retries once, and reports on.
+function Get-ConsumptionAccessOutcome {
+    param([string]$ErrorMessage)
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return 'Ok' }
+    # Authorization / permission denial signatures across ARM + the billing APIs.
+    if ($ErrorMessage -match '(?i)authoriz|forbidden|\b403\b|does not have|AuthorizationFailed|not authorized|insufficient privileg|access is denied|RBAC') {
+        return 'Denied'
+    }
+    return 'Unavailable'
+}
+
+# Probe whether the signed-in identity can actually READ consumption/billing
+# data for a subscription, by issuing the same Get-UsageAggregates call the
+# consumption phase uses (a tiny 1-day window). Returns 'Ok' / 'Denied' /
+# 'Unavailable' via Get-ConsumptionAccessOutcome. A subscription with access but
+# zero usage returns an empty result (not an error) -> 'Ok'. A failure to switch
+# context is treated as 'Unavailable' (a session/token problem, not a
+# consumption-authorization denial).
+function Test-ConsumptionAccess {
+    param([Parameter(Mandatory=$true)][string]$SubscriptionId)
+
+    try {
+        $null = Set-AzContext -Subscription $SubscriptionId -ErrorAction Stop
+    } catch {
+        return 'Unavailable'
+    }
+
+    $probeEnd   = (Get-Date).Date
+    $probeStart = $probeEnd.AddDays(-1)
+    try {
+        $null = Get-UsageAggregates -ReportedStartTime $probeStart -ReportedEndTime $probeEnd -AggregationGranularity 'Daily' -ErrorAction Stop
+        return 'Ok'
+    } catch {
+        return (Get-ConsumptionAccessOutcome -ErrorMessage $_.Exception.Message)
+    }
+}

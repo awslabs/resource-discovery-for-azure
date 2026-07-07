@@ -280,6 +280,83 @@ if (-not $AzCliPath)
 }
 
 # ---------------------------------------------------------------------------
+# Az PowerShell module bootstrap. The wrapper (Connect-AzAccount, Get-AzSubscription)
+# and the inner script (Get-AzMetric, consumption) all require the Az module.
+# Detect it, and if missing offer to install it when interactive, or fail loud
+# when non-interactive - the same pre-flight treatment as PowerShell 7 and az.
+#
+# Why the verify step (below) matters: an earlier version installed Az from
+# INSIDE the inventory run, mid-collection. That produced a half-installed module
+# whose manifests were present (so a naive Get-Module -ListAvailable looked fine)
+# but whose bundled MSAL/Azure.Core assemblies were missing - so the run limped on
+# for ~an hour and silently produced zero consumption records. The safe pattern,
+# used here, is: install BEFORE any Az call, then VERIFY by actually importing
+# Az.Accounts (which loads those assemblies) and fail loud if it cannot load.
+#
+# 5.1 + 7 common syntax subset (only executes under 7, but must parse under 5.1).
+# ---------------------------------------------------------------------------
+$AzModuleAvailable = $null -ne (Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1)
+if (-not $AzModuleAvailable)
+{
+    $AzModuleManualHint = '  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser'
+    $AzModuleInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+
+    if (-not $AzModuleInteractive)
+    {
+        Write-Host "The Az PowerShell module was not found, and this is a non-interactive session, so I will not prompt to install it." -ForegroundColor Red
+        Write-Host "Install it and re-run:" -ForegroundColor Yellow
+        Write-Host $AzModuleManualHint -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host ""
+    $AzModuleAnswer = Read-Host "The Az PowerShell module is required but not installed. Install it now (into your user scope)? [y/N]"
+    if ($AzModuleAnswer -notmatch '^(y|yes)$')
+    {
+        Write-Host "Not installing. Install it and re-run:" -ForegroundColor Yellow
+        Write-Host $AzModuleManualHint -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host "Installing the Az PowerShell module into your user scope (this can take several minutes)..." -ForegroundColor Cyan
+    try
+    {
+        # First-time PowerShellGet use on a fresh box would otherwise interrupt
+        # with a "NuGet provider is required, install it now?" prompt. Bootstrap
+        # the provider non-interactively so the install cannot hang on it.
+        # (-Force on Install-Module below suppresses the untrusted-PSGallery prompt.)
+        $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+        Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Host ("Az module install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host "Install it manually then re-run:" -ForegroundColor Yellow
+        Write-Host $AzModuleManualHint -ForegroundColor Yellow
+        exit 1
+    }
+}
+
+# Verify the module actually LOADS, not just that its manifest is on disk. This
+# catches the half-installed state (manifest present, bundled MSAL/Azure.Core
+# assemblies missing) here - with a clear repair message - rather than an hour
+# into the run as a silent empty-consumption result. Runs whether we just
+# installed Az or found it preinstalled.
+try
+{
+    Import-Module Az.Accounts -ErrorAction Stop
+}
+catch
+{
+    Write-Host ("The Az PowerShell module is present but failed to load: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host "This usually indicates a broken/partial install (manifest present but bundled assemblies missing or unloadable)." -ForegroundColor Yellow
+    Write-Host "Repair it, then re-run:" -ForegroundColor Yellow
+    Write-Host "  Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
+    Write-Host "  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
 # into this script's scope. Fail loud if the file is missing rather than
 # breaking later with a confusing "command not found".
@@ -510,6 +587,38 @@ if ($excluded.Count -gt 0) {
     Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $excluded.Count, ($byState -join ', ')) -ForegroundColor Yellow
 }
 Write-Host ("Subscriptions to process: {0}" -f $subscriptions.Count) -ForegroundColor Cyan
+
+# ---------------------------------------------------------------------------
+# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
+# -SkipConsumption was passed. If the signed-in identity is not authorized to
+# read consumption data, every subscription's consumption phase would fail and
+# the run would produce reports silently missing the billing data the operator
+# explicitly asked for. That is a HARD failure - fail fast, before spending
+# time on inventory and metrics, rather than hand back an incomplete report.
+#
+# Scope note: consumption/billing RBAC is usually uniform across a tenant, so we
+# probe the FIRST eligible subscription as the access signal. We hard-fail ONLY
+# on a clear authorization denial; a transient/token error (Conditional Access,
+# expired token, throttling) is NOT treated as a hard failure here - that is the
+# recoverable class the per-subscription consumption phase already handles and
+# reports. Operators who genuinely have mixed per-subscription billing access
+# can use -SkipConsumption.
+if (-not $SkipConsumption -and $subscriptions.Count -gt 0) {
+    $ConsumptionProbeSub = $subscriptions[0]
+    Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
+    $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
+    if ($ConsumptionAccess -eq 'Denied') {
+        Write-Host ""
+        Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
+        Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
+        Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
+        Exit-Wrapper -Code 1
+    } elseif ($ConsumptionAccess -eq 'Unavailable') {
+        Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
+    } else {
+        Write-Host "Consumption access confirmed." -ForegroundColor Green
+    }
+}
 
 # Always seed $CompletedIds from the existing state file. -Resume only
 # controls whether we *use* that list to skip subscriptions; reading it

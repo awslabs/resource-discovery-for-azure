@@ -43,6 +43,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Normalize $Scenarios. Invoking via `pwsh -File ... -Scenarios a,b` passes the
+# whole thing as the single string 'a,b' (unlike -Command / interactive, which
+# bind it as a 2-element array), which previously caused "Unknown scenario
+# 'a,b'". Split any comma-containing element, trim, and drop empties so the
+# runner behaves identically regardless of how it's launched.
+$Scenarios = @($Scenarios | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
 $RepoRoot       = Split-Path $PSScriptRoot -Parent
 $InventoryPs1   = Join-Path $RepoRoot 'ResourceInventory.ps1'
 $WorkRoot       = Join-Path ([System.IO.Path]::GetTempPath()) ("ScenarioMatrix_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))

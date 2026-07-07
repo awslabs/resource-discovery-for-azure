@@ -41,7 +41,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome')
     foreach ($Fn in $TargetFunctions) {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue)) {
             throw "Expected function '$Fn' to be defined by $script:FunctionsPath, but it was not. Has it been renamed or removed?"
@@ -232,5 +232,32 @@ Describe 'Merge-FailedAttempts single-element handling' {
         $ExistingScalar = [pscustomobject]@{ Id = 'sub-3'; Name = 'Sub Three'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'x'; Attempts = 1 }
         { Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts @() -CompletedIds 'sub-3' } | Should -Not -Throw
         @(Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts @() -CompletedIds 'sub-3').Count | Should -Be 0 -Because 'the completed sub must be pruned'
+    }
+}
+
+Describe 'Get-ConsumptionAccessOutcome classification' {
+    # Drives the up-front consumption (billing) access gate in Run-AllSubscriptions.ps1.
+    # 'Denied' -> hard fail (consumption was requested but the identity lacks access).
+    # 'Unavailable' -> transient/token class; NOT a hard failure (warn + continue).
+    # 'Ok' -> access confirmed.
+
+    It 'Returns Ok for a null/empty message (successful probe)' {
+        Get-ConsumptionAccessOutcome -ErrorMessage $null | Should -Be 'Ok'
+        Get-ConsumptionAccessOutcome -ErrorMessage ''   | Should -Be 'Ok'
+    }
+
+    It 'Classifies authorization / RBAC denials as Denied' {
+        Get-ConsumptionAccessOutcome -ErrorMessage "The client 'x' does not have authorization to perform action 'Microsoft.Commerce/UsageAggregates/read'" | Should -Be 'Denied'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'AuthorizationFailed' | Should -Be 'Denied'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 403 (Forbidden)' | Should -Be 'Denied'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'The user is not authorized to access this resource' | Should -Be 'Denied'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Access is denied' | Should -Be 'Denied'
+    }
+
+    It 'Classifies transient / token / throttle errors as Unavailable (not a hard fail)' {
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Unable to acquire token for tenant; user interaction is required' | Should -Be 'Unavailable'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 429 (TooManyRequests)' | Should -Be 'Unavailable'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'A task was canceled (timeout)' | Should -Be 'Unavailable'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'The remote name could not be resolved' | Should -Be 'Unavailable'
     }
 }

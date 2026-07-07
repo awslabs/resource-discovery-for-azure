@@ -115,7 +115,7 @@ Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublishe
 
 The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
 
-The script no longer installs the `Az` module for you while it runs. Doing the install inside a script that's already loading the same module is unreliable. You can end up with a half-installed module that looks fine to PowerShell but fails much later in the run with confusing errors like "no consumption records". Installing the module once, by hand, before the first run avoids the whole class of problem.
+`Run-AllSubscriptions.ps1` will offer to install the `Az` module for you if it's missing (part of its pre-flight bootstrap, alongside the PowerShell 7 and Azure CLI checks). Crucially, it does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding. That avoids the old failure mode where an in-run install left a half-installed module that looked fine to `Get-Module` but failed much later with confusing errors like "no consumption records"; a broken/partial install is now caught up front with a clear repair message. Installing by hand with the command above still works and skips the prompt.
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
@@ -487,6 +487,11 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
 - Less commonly, the subscription is genuinely empty.
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
+
+**Run stops immediately with "not authorized to read consumption/billing data":**
+- `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the billing data you asked for.
+- Fix: grant the identity **Cost Management Reader** (or **Billing Reader** on the billing scope), then re-run — or re-run with `-SkipConsumption` to inventory without billing data.
+- Note: this is a genuine authorization denial. A transient/token issue (Conditional Access, expired token, throttling) is **not** treated as a hard fail here — it warns and continues, and per-subscription consumption health is still reported at the end of the run.
 
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).

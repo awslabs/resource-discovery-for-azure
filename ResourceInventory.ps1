@@ -921,11 +921,28 @@ function ExecuteInventoryProcessing()
         $ConsecutiveCollectorFailures = 0
         $CollectorFailureCircuitBreakerThreshold = 5
 
+        # Per-service progress is shown with Write-Progress instead of one
+        # green Write-Log line per collector (~40+ lines per subscription that
+        # scrolled the real errors/warnings off screen). Write-Progress renders
+        # a single updating bar in an interactive host and is a no-op in
+        # non-interactive hosts (parallel runspaces, transcripts, CI), so it
+        # does not pollute the transcript. Collector FAILURES are still logged
+        # loudly (Error severity) in the catch below, so nothing diagnostic is
+        # lost by dropping the per-service success line.
+        $ModuleTotal = @($Modules).Count
+        $ModuleIndex = 0
+
         foreach ($Module in $Modules) 
         {
             $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
-            
-            Write-Log -Message ("Service Processing: {0}" -f $ModName) -Severity 'Success'
+            $ModuleIndex++
+
+            $PercentComplete = 0
+            if ($ModuleTotal -gt 0)
+            {
+                $PercentComplete = [int](($ModuleIndex / $ModuleTotal) * 100)
+            }
+            Write-Progress -Activity 'Service Processing' -Status ("{0} ({1} of {2})" -f $ModName, $ModuleIndex, $ModuleTotal) -PercentComplete $PercentComplete
 
             try
             {
@@ -1066,6 +1083,8 @@ function ExecuteInventoryProcessing()
             $result = $null
             [System.GC]::Collect()
         }
+
+        Write-Progress -Activity 'Service Processing' -Completed
     }
 
     function ProcessResourceResult()

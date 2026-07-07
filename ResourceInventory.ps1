@@ -146,15 +146,29 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+        # This tool only calls cmdlets from four Az submodules (see the import
+        # loop below), so it validates and loads exactly those - it does NOT
+        # require the full ~80-submodule `Az` rollup to be installed. A slim
+        # install is sufficient:
+        #   Install-Module Az.Accounts, Az.Compute, Az.Monitor, Az.Billing
+        # The full `Az` rollup also satisfies this check because installing `Az`
+        # lays down each Az.* submodule as its own discoverable module on disk,
+        # so Get-Module -Name Az.Accounts (etc.) finds them either way. Checking
+        # the submodules (not the `Az` umbrella) is what lets the slim install
+        # pass - a slim install has no `Az` meta-module, so the old
+        # Get-Module -Name Az check would have thrown a false "not found".
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
 
-        if ($null -ne $VarAzPs)
+        $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
+
+        if ($MissingAzSubModules.Count -eq 0)
         {
-            Write-Log -Message ('Azure PowerShell Module Version: {0}' -f $VarAzPs.Version) -Severity 'Success'
+            $VarAzPs = Get-Module -Name Az.Accounts -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+            Write-Log -Message ('Azure PowerShell modules present (Az.Accounts {0}); required: {1}' -f $VarAzPs.Version, ($RequiredAzSubModules -join ', ')) -Severity 'Success'
         }
         else
         {
-            # Behaviour change (deliberate): do not Install-Module Az from inside
+            # Behaviour change (deliberate): do not Install-Module from inside
             # this script. A real field run produced a half-installed Az module
             # - .psd1 manifests present so Get-Module -ListAvailable was happy,
             # but the bundled MSAL/Azure.Core assemblies were missing on disk -
@@ -165,26 +179,29 @@ Function RunInventorySetup()
             # the same module are fragile (concurrent install, AppDomain
             # caching, partial download) and the failure mode is a silent broken
             # install rather than a clean error. Failing loudly here is safer.
-            Write-Log -Message ('Azure PowerShell Module not found.') -Severity 'Error'
-            Write-Log -Message ('Install it manually before re-running this script. From an elevated PowerShell 7 prompt:') -Severity 'Error'
-            Write-Log -Message ('  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('Required Azure PowerShell module(s) not found: {0}' -f ($MissingAzSubModules -join ', ')) -Severity 'Error'
+            Write-Log -Message ('This tool needs only these Az submodules. Install them manually before re-running. From an elevated PowerShell 7 prompt:') -Severity 'Error'
+            Write-Log -Message ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck' -f ($RequiredAzSubModules -join ',')) -Severity 'Error'
+            Write-Log -Message ('Or install the full rollup (larger, slower first import): Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
             Write-Log -Message ('Or in Cloud Shell, the Az module is already preinstalled - if it is missing your shell environment is broken.') -Severity 'Error'
-            throw 'Azure PowerShell (Az) module is required and was not found. See log above for installation instructions.'
+            throw ('Required Azure PowerShell submodule(s) not found: {0}. See log above for installation instructions.' -f ($MissingAzSubModules -join ', '))
         }
 
-        # Load ONLY the Az submodules this tool actually uses, not the full `Az`
-        # rollup. Importing `Az` pulls in ~80 submodules (hundreds of DLLs plus
-        # their format/type data) and stalls for 20-40s on a fresh box with no
-        # output - which looks like a hang right after "Checking Azure PowerShell
-        # Module...". The tool only calls cmdlets from these four:
+        # Load ONLY the Az submodules this tool actually uses ($RequiredAzSubModules,
+        # validated above), not the full `Az` rollup. Importing `Az` pulls in ~80
+        # submodules (hundreds of DLLs plus their format/type data) and stalls for
+        # 20-40s on a fresh box with no output - which looks like a hang right
+        # after "Checking Azure PowerShell Module...". The tool only calls cmdlets
+        # from these four:
         #   Az.Accounts - Connect/Get/Set-AzContext, Get-AzSubscription,
         #                 Get-AzAccessToken, Save-/Import-AzContext
         #   Az.Compute  - Get-AzComputeResourceSku
         #   Az.Monitor  - Get-AzMetric
         #   Az.Billing  - Get-UsageAggregates
-        # Anything not listed still auto-loads its submodule on first use (the
-        # full rollup is installed, so every submodule is on PSModulePath), so
-        # this is purely a startup speed-up and cannot cause "command not found".
+        # Because these four are the entire Az cmdlet surface, a slim install of
+        # just them is enough and cannot cause "command not found". If the full
+        # `Az` rollup happens to be installed instead, any other submodule still
+        # auto-loads on first use - but nothing outside these four is ever called.
         #
         # This import doubles as the broken-install probe. Get-Module
         # -ListAvailable above only checks the manifest on disk; importing
@@ -193,7 +210,7 @@ Function RunInventorySetup()
         # real field-observed scenario) fails loudly HERE instead of silently
         # producing zero data at the consumption phase.
         try {
-            foreach ($AzSubModule in @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing'))
+            foreach ($AzSubModule in $RequiredAzSubModules)
             {
                 Write-Log -Message ('Loading {0}...' -f $AzSubModule) -Severity 'Info'
                 Import-Module $AzSubModule -ErrorAction Stop -DisableNameChecking | Out-Null

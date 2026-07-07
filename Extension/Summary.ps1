@@ -391,7 +391,7 @@ function New-ServiceTable
     # Promote a stable preferred-column order for fields that almost every
     # service has, so the most useful columns lead. Anything not in this list
     # falls back to frequency order.
-    $preferredOrder = @('Name', 'Subscription', 'ResourceGroup', 'Location', 'SKU', 'Tier', 'State', 'Status', 'Kind', 'AppType', 'OSType', 'Size')
+    $preferredOrder = @('Name', 'Subscription', 'ResourceGroup', 'Location', 'SKU', 'Tier', 'State', 'Status', 'Kind', 'AppType', 'OSType', 'OS', 'OSName', 'OSVersion', 'Size')
     $columns = @()
     foreach ($p in $preferredOrder)
     {
@@ -403,7 +403,11 @@ function New-ServiceTable
     }
     # Append remaining columns ordered by descending frequency, but skip
     # nested-object fields (they don't render usefully in a table cell).
-    $remaining = $colCounts.GetEnumerator() | Sort-Object -Property Value -Descending | ForEach-Object { $_.Key }
+    # Tie-break on the column name (ascending) so the order is fully
+    # deterministic: without a secondary key, equal-frequency columns fall back
+    # to the enumeration order of an unordered hashtable, which varies run to
+    # run and made columns (e.g. OSName) drift in and out of the 12-column cap.
+    $remaining = $colCounts.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Key'; Descending = $false } | ForEach-Object { $_.Key }
     $columns += $remaining
 
     # Drop columns that always contain a complex object - they render as

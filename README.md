@@ -499,6 +499,11 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Consider targeting specific subscriptions or resource groups
 - For tenants with many subscriptions, use `-ParallelStreams` (see the Cloud Shell sizing table above).
 
+**VM `OSName` shows the image name (or is based on OS type):**
+- `OSName`/`OSVersion` come from the in-guest VM agent, exposed by Azure via `properties.extended.instanceView`. Azure frequently returns these as null — always for stopped/deallocated VMs, and often even for running VMs with a healthy agent (a documented Azure platform limitation, [azure-cli#9284](https://github.com/Azure/azure-cli/issues/9284) / [azure-powershell#9470](https://github.com/Azure/azure-powershell/issues/9470)). A live per-VM instance-view call returns the same nulls, so it is not a reliable source.
+- To keep the column meaningful, when the agent value is absent the report falls back to the VM's source image identity (image offer + SKU, e.g. `WindowsServer 2025-datacenter-azure-edition`), and finally to the OS type (`Windows`/`Linux`). Both of these are always populated by Resource Graph and require no extra calls.
+- `OSVersion` still comes straight from the agent and may be blank when the agent does not report it; the image build is available separately in the `ImageVersion` column.
+
 **HTML Report:**
 - The report is a single self-contained `.html` file — open it in any browser. No Excel or ImportExcel module is required.
 - It works the same in Azure Cloud Shell and locally; nothing extra to install.

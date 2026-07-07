@@ -349,8 +349,16 @@ if ($Task -eq 'Processing')
                 $callMaxRetries       = $using:metricMaxRetries
                 $diagBag              = $using:metricDiagnostics
 
-                Write-Host ("{0}/{1} Processing {2} Metrics: {3}-{4}-{5}-{6}" -f $_.MetricIndex, $totalCount, $_.Service, $_.Name, $_.MetricName, $_.Aggregation, $_.Interval) -BackgroundColor Black -ForegroundColor Green
-    
+                # Per-call progress was previously written to the console with
+                # Write-Host for EVERY metric definition (thousands per sub). From
+                # concurrent runspaces that flood is what made the terminal appear
+                # frozen until a keypress forced a repaint. The per-call outcome
+                # (including this "processing" detail) is still recorded in
+                # $diagBag below and surfaced in the end-of-phase diagnostics
+                # summary, so nothing is lost from the log - only the live console
+                # spam is removed. Warnings (retry) and errors (giving up) below
+                # are intentionally kept on the console.
+
                 #$metricQuery = (az monitor metrics list --resource $_.Id --metric $_.MetricName --start-time $_.StartTime  --end-time $_.EndTime --interval $_.Interval --aggregation $_.Aggregation | ConvertFrom-Json)
     
                 $metricError = $false
@@ -441,7 +449,12 @@ if ($Task -eq 'Processing')
 
                         if ($succeeded)
                         {
-                            Write-Host ("[Metrics]   OK    idx={0} attempt={1} {2}s {3}/{4}/{5}" -f $_.MetricIndex, $callAttempts, [math]::Round($attemptStopwatch.Elapsed.TotalSeconds, 1), $metricService, $metricName, $_.Aggregation) -ForegroundColor DarkGreen
+                            # Per-call success was previously logged to the console
+                            # (one DarkGreen line per metric). Removed to stop the
+                            # concurrent-runspace console flood; the success is still
+                            # recorded in $diagBag below (Outcome='Success') and
+                            # counted in the end-of-phase summary. The break MUST stay
+                            # - it is the retry-loop exit on a successful call.
                             break
                         }
 

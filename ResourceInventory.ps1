@@ -417,9 +417,26 @@ Function RunInventorySetup()
                     $SequenceID ++
                 }
     
-                [int]$SelectTenant = read-host "Select Tenant (Default 1)"
-                $defaultTenant = --$SelectTenant
-                $TenantID = $Tenants[$defaultTenant]
+                # A read-host here blocks until someone types at a console. Under
+                # the wrapper (-RunAllSubs), a parallel worker, an SSM run-command,
+                # or any redirected/CI session there IS no console, so the prompt
+                # would hang the entire run forever with no way to answer it.
+                # Detect a non-interactive session and default to the first tenant
+                # instead (the "Default 1" the prompt always intended); a real
+                # interactive session still gets the picker. Pass -TenantID to
+                # choose a specific tenant and skip this path entirely.
+                $IsInteractiveSession = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+                if ($RunAllSubs.IsPresent -or -not $IsInteractiveSession)
+                {
+                    $TenantID = $Tenants[0]
+                    Write-Log -Message ("Non-interactive session with multiple tenants and no -TenantID: defaulting to the first tenant ({0}). Pass -TenantID to choose explicitly." -f $TenantID) -Severity 'Warning'
+                }
+                else
+                {
+                    [int]$SelectTenant = read-host "Select Tenant (Default 1)"
+                    if ($SelectTenant -lt 1) { $SelectTenant = 1 }
+                    $TenantID = $Tenants[$SelectTenant - 1]
+                }
 
                 if(!$RunAllSubs.IsPresent)
                 {
@@ -961,8 +978,30 @@ function ExecuteInventoryProcessing()
         $ModuleTotal = @($Modules).Count
         $ModuleIndex = 0
 
-        $HeartbeatLogFile = ($Global:DefaultPath + "Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".log")
         $HeartbeatSubLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(all in-scope subscriptions)' }
+        # Where the heartbeat lands has to SURVIVE and be findable to be useful.
+        # Under the wrapper (-RunAllSubs) $DefaultPath is a PER-SUBSCRIPTION
+        # subfolder (<InventoryRoot>\<ReportName><timestamp>\): the wrapper keeps
+        # those folders but only ever consolidates their *.zip, so a heartbeat
+        # buried one-per-sub under a timestamped subfolder is effectively lost for
+        # the "which collector hung across a parallel run" question it exists to
+        # answer. Write it to the PARENT (the InventoryRoot, alongside the wrapper
+        # transcript and failures log) and tag the filename with the SubscriptionID
+        # so per-sub heartbeats are discoverable and never collide. For a
+        # standalone run $DefaultPath IS the single report folder the operator
+        # keeps, so the heartbeat belongs there. Either way the file keeps the
+        # Heartbeat_* prefix (matches the obfuscated-zip exclusion guard) and, as a
+        # .log, is never packaged into any zip.
+        if ($RunAllSubs.IsPresent)
+        {
+            $HeartbeatDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+            $HeartbeatSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+            $HeartbeatLogFile = (Join-Path $HeartbeatDir ("Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $HeartbeatSubTag + ".log"))
+        }
+        else
+        {
+            $HeartbeatLogFile = ($Global:DefaultPath + "Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".log")
+        }
         try
         {
             Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing started for {1}: {2} collectors" -f (Get-Date), $HeartbeatSubLabel, $ModuleTotal) -ErrorAction Stop

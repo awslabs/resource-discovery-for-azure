@@ -41,7 +41,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt')
     foreach ($Fn in $TargetFunctions) {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue)) {
             throw "Expected function '$Fn' to be defined by $script:FunctionsPath, but it was not. Has it been renamed or removed?"
@@ -171,5 +171,66 @@ Describe 'Get-WrapperExitCode' {
         # problems occurring together must be distinctly detectable by
         # anything that only checks the exit code.
         Get-WrapperExitCode -AuthSkipped $true -CollectorsFailed $true | Should -Be 5 -Because 'neither failure signal may be silently dropped when both occur in the same run'
+    }
+}
+
+Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
+    # Regression: -Existing was typed [System.Collections.IEnumerable], but when
+    # the list holds exactly one prior failure PowerShell collapses it to a lone
+    # PSCustomObject at the call site (e.g. $FailedAttempts = Add-FailedAttempt ...).
+    # A PSCustomObject is not IEnumerable, so the second failure threw:
+    # "Cannot process argument transformation on parameter 'Existing'".
+    # The parameter is now [object] and normalized with @(...) internally.
+
+    It 'Add-FailedAttempt accepts a single (scalar) prior entry without throwing' {
+        $First = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first failure'
+        # $First is now a single PSCustomObject (one-element result collapsed).
+        $First -is [System.Collections.IEnumerable] -and -not ($First -is [string]) | Should -BeFalse -Because 'a one-element result collapses to a scalar PSCustomObject - the exact shape that triggered the bug'
+
+        { Add-FailedAttempt -Existing $First -Id 'sub-2' -Name 'Sub Two' -Reason 'second failure' } | Should -Not -Throw
+
+        $Second = Add-FailedAttempt -Existing $First -Id 'sub-2' -Name 'Sub Two' -Reason 'second failure'
+        @($Second).Count | Should -Be 2 -Because 'both failures must be retained'
+    }
+
+    It 'Add-FailedAttempt increments Attempts when the same sub fails again (scalar input)' {
+        $First  = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first'
+        $Second = Add-FailedAttempt -Existing $First -Id 'sub-1' -Name 'Sub One' -Reason 'again'
+        @($Second).Count | Should -Be 1 -Because 'the same sub Id must not be duplicated'
+        @($Second)[0].Attempts | Should -Be 2
+    }
+
+    It 'Remove-FailedAttempt accepts a single (scalar) entry without throwing' {
+        $Only = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'failure'
+        { Remove-FailedAttempt -Existing $Only -Id 'sub-1' } | Should -Not -Throw
+        @(Remove-FailedAttempt -Existing $Only -Id 'sub-1').Count | Should -Be 0 -Because 'removing the only entry yields an empty list'
+    }
+
+    It 'Add-FailedAttempt handles a null existing list' {
+        { Add-FailedAttempt -Existing $null -Id 'sub-1' -Name 'Sub One' -Reason 'failure' } | Should -Not -Throw
+        @(Add-FailedAttempt -Existing $null -Id 'sub-1' -Name 'Sub One' -Reason 'failure').Count | Should -Be 1
+    }
+}
+
+Describe 'Merge-FailedAttempts single-element handling' {
+    # Same bug class as Add-/Remove-FailedAttempt: params were typed
+    # [System.Collections.IEnumerable]. A single existing failure and/or a single
+    # stream failure arrive as scalar PSCustomObjects (not IEnumerable). Params
+    # are now [object]; every use is @()-wrapped internally.
+
+    It 'Accepts single (scalar) existing and stream failures without throwing' {
+        $ExistingScalar = [pscustomobject]@{ Id = 'sub-1'; Name = 'Sub One'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'old'; Attempts = 1 }
+        $StreamScalar   = [pscustomobject]@{ Id = 'sub-2'; Name = 'Sub Two'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'new'; Attempts = 1 }
+
+        { Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts $StreamScalar -CompletedIds @() } | Should -Not -Throw
+
+        $Result = Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts $StreamScalar -CompletedIds @()
+        @($Result).Count | Should -Be 2 -Because 'both distinct failures must be retained'
+    }
+
+    It 'Accepts a scalar CompletedId and prunes the matching failure (no stream failures)' {
+        $ExistingScalar = [pscustomobject]@{ Id = 'sub-3'; Name = 'Sub Three'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'x'; Attempts = 1 }
+        { Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts @() -CompletedIds 'sub-3' } | Should -Not -Throw
+        @(Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts @() -CompletedIds 'sub-3').Count | Should -Be 0 -Because 'the completed sub must be pruned'
     }
 }

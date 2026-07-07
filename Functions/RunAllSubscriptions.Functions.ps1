@@ -297,7 +297,13 @@ function Save-CompletedSubscriptionIds {
 # is responsible for persisting via Save-CompletedSubscriptionIds afterwards.
 function Add-FailedAttempt {
     param(
-        [System.Collections.IEnumerable]$Existing,
+        # [object] rather than [System.Collections.IEnumerable]: when the list
+        # holds exactly one prior failure, PowerShell collapses it to a single
+        # PSCustomObject on assignment at the call site, and a PSCustomObject is
+        # NOT IEnumerable - the stricter type threw a parameter-transformation
+        # error on the second failure. The @(...) normalization below already
+        # handles scalar, $null, and array uniformly.
+        [object]$Existing,
         [string]$Id,
         [string]$Name,
         [string]$Reason
@@ -325,7 +331,10 @@ function Add-FailedAttempt {
 # failures. Caller persists.
 function Remove-FailedAttempt {
     param(
-        [System.Collections.IEnumerable]$Existing,
+        # [object] not [System.Collections.IEnumerable]: same single-element
+        # collapse as Add-FailedAttempt - a lone prior failure arrives as a
+        # scalar PSCustomObject. @(...) below normalizes scalar/$null/array.
+        [object]$Existing,
         [string]$Id
     )
     return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
@@ -359,9 +368,15 @@ function Get-StreamResumeStateFiles {
 # be unit-tested directly instead of only via full multi-stream runs.
 function Merge-FailedAttempts {
     param(
-        [System.Collections.IEnumerable]$ExistingFailedAttempts,
-        [System.Collections.IEnumerable]$StreamFailedAttempts,
-        [System.Collections.IEnumerable]$CompletedIds
+        # [object], not [System.Collections.IEnumerable], for all three: same
+        # single-element-collapse hazard as Add-/Remove-FailedAttempt. When any
+        # of these lists holds exactly one item it arrives as a scalar
+        # PSCustomObject/string, which is not IEnumerable and would throw a
+        # parameter-transformation error. Every use below is already @()-wrapped,
+        # so scalar/$null/array all normalize correctly.
+        [object]$ExistingFailedAttempts,
+        [object]$StreamFailedAttempts,
+        [object]$CompletedIds
     )
     $CompletedIds = @($CompletedIds)
     if (@($StreamFailedAttempts).Count -eq 0) {

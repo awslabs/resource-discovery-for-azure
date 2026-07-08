@@ -234,8 +234,33 @@ function Resolve-AzCli
 $AzCliPath = Resolve-AzCli
 if (-not $AzCliPath)
 {
-    $AzManualHint  = '  https://aka.ms/installazurecliwindows'
+    # Install guidance is platform-specific. The automatic install below uses the
+    # official Windows MSI (msiexec), which only exists on Windows; on macOS/Linux
+    # there is no MSI to run, so point the operator at the correct install docs for
+    # their platform and let them install it, then re-run.
+    if ($IsMacOS)
+    {
+        $AzManualHint = '  macOS: brew install azure-cli   (docs: https://learn.microsoft.com/cli/azure/install-azure-cli-macos)'
+    }
+    elseif ($IsLinux)
+    {
+        $AzManualHint = '  Linux: https://learn.microsoft.com/cli/azure/install-azure-cli-linux'
+    }
+    else
+    {
+        $AzManualHint = '  https://aka.ms/installazurecliwindows'
+    }
     $AzInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+
+    # Automatic install is Windows-only. On macOS/Linux, show the correct link and
+    # exit instead of attempting a Windows MSI install that cannot succeed here.
+    if ($IsMacOS -or $IsLinux)
+    {
+        Write-Host "Azure CLI (az) is required but was not found." -ForegroundColor Red
+        Write-Host "Install the Azure CLI and re-run. See:" -ForegroundColor Yellow
+        Write-Host $AzManualHint -ForegroundColor Yellow
+        exit 1
+    }
 
     if (-not $AzInteractive)
     {

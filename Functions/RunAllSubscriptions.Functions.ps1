@@ -31,6 +31,79 @@ function Exit-Wrapper {
     exit $Code
 }
 
+# Auto-tune parallelism to the current host. Detects logical CPU count and total
+# physical RAM, then recommends a ParallelStreams / ConcurrencyLimit pair using
+# the same guidance documented on Run-AllSubscriptions.ps1's parameters:
+#   - Each stream is a separate pwsh process (~1-1.5 GB resident once Az is
+#     loaded and its metrics runspaces are active), so RAM caps the stream
+#     count; ~2 GB is reserved for the OS.
+#   - One stream per ~2 vCPUs, so each stream still has a core for its own
+#     metrics threads. On a 2-vCPU box this yields 1 (sequential), which is
+#     faster there than two streams fighting over the cores.
+#   - Tenant-scoped Resource Graph limits make more than ~6 streams pointless.
+#   - Metric calls are network-I/O bound, so the per-stream metrics throttle can
+#     oversubscribe the CPU a little: 2x vCPU, bounded to [6,16] (Azure Monitor's
+#     ~12k reads/hour/subscription makes higher concurrency pointless).
+# Returns a PSCustomObject { VCpu, RamGB (0 when undetectable), Streams,
+# Concurrency }. The caller applies these ONLY for parameters the operator did
+# not pass explicitly; the existing clamp to the eligible subscription count
+# still applies on top.
+function Get-RecommendedParallelism
+{
+    $vCpu = [int][Environment]::ProcessorCount
+    if ($vCpu -lt 1) { $vCpu = 1 }
+
+    # Total physical RAM in GB, best-effort and cross-platform. 0 = undetectable.
+    $ramGB = 0.0
+    try
+    {
+        if ($IsWindows)
+        {
+            $bytes = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+            if ($bytes) { $ramGB = [math]::Round([double]$bytes / 1GB, 1) }
+        }
+        elseif ($IsLinux)
+        {
+            $memLine = Select-String -Path '/proc/meminfo' -Pattern '^MemTotal:\s+(\d+)\s+kB' -ErrorAction Stop | Select-Object -First 1
+            if ($memLine) { $ramGB = [math]::Round([double]$memLine.Matches[0].Groups[1].Value / 1MB, 1) }
+        }
+        elseif ($IsMacOS)
+        {
+            $bytes = [double](& sysctl -n hw.memsize 2>$null)
+            if ($bytes) { $ramGB = [math]::Round($bytes / 1GB, 1) }
+        }
+    }
+    catch
+    {
+        $ramGB = 0.0
+    }
+
+    # One stream per ~2 vCPUs, capped at 6 (tenant Resource Graph ceiling).
+    $streams = [int][math]::Floor($vCpu / 2)
+    if ($streams -lt 1) { $streams = 1 }
+    if ($streams -gt 6) { $streams = 6 }
+
+    # RAM cap when known: reserve ~2 GB for the OS, budget ~1.5 GB per stream.
+    if ($ramGB -gt 0)
+    {
+        $streamsByRam = [int][math]::Floor(($ramGB - 2) / 1.5)
+        if ($streamsByRam -lt 1) { $streamsByRam = 1 }
+        if ($streamsByRam -lt $streams) { $streams = $streamsByRam }
+    }
+
+    # Metrics throttle: I/O bound, so 2x vCPU, bounded to [6,16].
+    $concurrency = $vCpu * 2
+    if ($concurrency -lt 6)  { $concurrency = 6 }
+    if ($concurrency -gt 16) { $concurrency = 16 }
+
+    [pscustomobject]@{
+        VCpu        = $vCpu
+        RamGB       = $ramGB
+        Streams     = [int]$streams
+        Concurrency = [int]$concurrency
+    }
+}
+
 # Classify a subscription that returned 0 resources as either a genuine
 # permission gap (the signed-in identity has NO role on the subscription) or a
 # genuinely empty subscription. This distinction is impossible to make from the

@@ -28,10 +28,20 @@ param (
     # without hitting Azure Monitor's 12,000 reads/hour/subscription ceiling.
     # Don't go above ~24 in a single tenant - tenant-scoped Resource Graph
     # rate limits start to bite.
+    #
+    # When OMITTED, this is AUTO-TUNED from the host's CPU/RAM (see
+    # Get-RecommendedParallelism in Functions/RunAllSubscriptions.Functions.ps1):
+    # typically 2x vCPU bounded to [6,16]. The 6 here is only the fallback the
+    # auto path clamps to; passing -ConcurrencyLimit explicitly always overrides
+    # auto-tuning.
     [int]$ConcurrencyLimit = 6,
 
     # Number of parallel "streams" that process subscriptions concurrently.
-    # Default 1 = current sequential behavior, no change. Each stream is a
+    # When OMITTED, this is AUTO-TUNED from the host's CPU/RAM (see
+    # Get-RecommendedParallelism in Functions/RunAllSubscriptions.Functions.ps1):
+    # small boxes run sequentially (1), larger boxes scale to one stream per
+    # ~2 vCPUs (RAM-capped), never above 6. Passing -ParallelStreams explicitly
+    # always overrides auto-tuning; pass 1 to force sequential. Each stream is a
     # separate `pwsh` background process with its own Az PowerShell context
     # and its own resume-state file (.resume-state-<TenantID>-stream-<N>.json),
     # so they cannot race on the shared Az static state or the resume file.
@@ -669,6 +679,29 @@ if ($ResumeFailedOnly) {
         Exit-Wrapper -Code 0
     }
 }
+
+# ---------------------------------------------------------------------------
+# Auto-tune parallelism to the host (dummy-proof defaults).
+#
+# When the operator does not pass -ParallelStreams / -ConcurrencyLimit, size them
+# from the detected CPU/RAM so an out-of-the-box run does the sensible thing on
+# this machine - e.g. a small 2 vCPU / 4 GB box runs sequentially, which is
+# faster there than two streams fighting over the cores. Advanced users keep
+# full control: any value passed explicitly is honored as-is and only the omitted
+# one is auto-filled. $PSBoundParameters is a reliable "did the operator set
+# this?" test here because the PS7 relaunch above forwards only bound params.
+# The existing clamp to the eligible subscription count still applies below.
+$autoTune        = Get-RecommendedParallelism
+$streamsAuto     = -not $PSBoundParameters.ContainsKey('ParallelStreams')
+$concurrencyAuto = -not $PSBoundParameters.ContainsKey('ConcurrencyLimit')
+if ($streamsAuto)     { $ParallelStreams  = $autoTune.Streams }
+if ($concurrencyAuto) { $ConcurrencyLimit = $autoTune.Concurrency }
+
+$ramLabel       = if ($autoTune.RamGB -gt 0) { '{0} GB RAM' -f $autoTune.RamGB } else { 'RAM undetected' }
+$streamsSrc     = if ($streamsAuto)     { 'auto' } else { 'explicit' }
+$concurrencySrc = if ($concurrencyAuto) { 'auto' } else { 'explicit' }
+Write-Host ("Host: {0} vCPU / {1}." -f $autoTune.VCpu, $ramLabel) -ForegroundColor DarkGray
+Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $streamsSrc, $ConcurrencyLimit, $concurrencySrc) -ForegroundColor DarkGray
 
 # Build passthrough hashtable for optional switches
 $InventoryPassthrough = @{}

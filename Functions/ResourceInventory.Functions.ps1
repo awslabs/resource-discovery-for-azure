@@ -17,6 +17,18 @@ Function Write-Log([string]$Message, [string]$Severity)
 {
    $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
 
+   # Tag each line with the current subscription (first 8 chars of its GUID) when
+   # one is in scope. Every -RunAllSubs child is invoked with -SubscriptionID, and
+   # under -ParallelStreams the separate stream processes interleave their output
+   # on one console; the tag makes each line attributable to a subscription, e.g.
+   # "[12345678] Verifying Azure CLI Extension...". Read via Get-Variable so it
+   # resolves the script-scope $SubscriptionID up the call chain without throwing
+   # when no subscription is in scope (e.g. a standalone full-tenant run) - in
+   # that case no tag is added and the output is byte-for-byte unchanged.
+   $SubId  = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
+   $SubTag = if (-not [string]::IsNullOrEmpty($SubId)) { '[{0}] ' -f $SubId.Substring(0, [Math]::Min(8, $SubId.Length)) } else { '' }
+   $Message = $SubTag + $Message
+
    switch ($Severity) 
    {
         "Info"    { Write-Host $Message -ForegroundColor Cyan }

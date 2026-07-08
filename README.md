@@ -29,18 +29,18 @@ cd resource-discovery-for-azure
 **3. Run it:**
 
 ```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -ParallelStreams 2
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate
 ```
 
 This:
 - Inventories every enabled subscription in the tenant.
 - Obfuscates resource IDs, names, and other identifying details so the report is safe to share.
-- Runs 2 subscriptions at a time (works in both Cloud Shell and on a typical laptop).
+- Automatically tunes how many subscriptions run in parallel to the machine's CPU and memory: small boxes (e.g. 2 vCPU) run one subscription at a time, larger boxes scale up. Add `-ParallelStreams <N>` (and/or `-ConcurrencyLimit <N>`) only if you want to override the auto-detected values.
 
 The script tracks progress automatically as it goes. If anything interrupts the run (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added and it will skip the subscriptions that already finished and pick up the rest:
 
 ```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -ParallelStreams 2 -Resume
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -Resume
 ```
 
 You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. Send that ZIP to the AWS team.

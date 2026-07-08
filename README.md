@@ -89,31 +89,25 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
-- [Azure CLI Account Extension](https://learn.microsoft.com/en-us/cli/azure/azure-cli-extensions-overview)
 - Azure CLI Resource-Graph Extension (auto-installed by script)
-- **Az PowerShell module** (install before running — see below)
-
-> **Note:** Install the Account Extension before running the script:
-> ```powershell
-> az extension add --name account
-> ```
+- **Az PowerShell module** — only four submodules are needed (install before running — see below)
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
-> .\Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -ParallelStreams 2
+> .\Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate 
 > ```
 
 ##### Installing the required PowerShell modules
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-The script needs the `Az` module. Install it once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
+The script only uses four Az submodules (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) — it does **not** need the full `Az` rollup. Install just those once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
 
 ```powershell
-Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
 
-The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
+The slim set installs and imports much faster than the full `Az` module (the full rollup is ~80 submodules). If you already have the full `Az` installed, that works too — the script validates and loads only the four it needs. The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
 
 `Run-AllSubscriptions.ps1` will offer to install the `Az` module for you if it's missing (part of its pre-flight bootstrap, alongside the PowerShell 7 and Azure CLI checks). Crucially, it does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding. That avoids the old failure mode where an in-run install left a half-installed module that looked fine to `Get-Module` but failed much later with confusing errors like "no consumption records"; a broken/partial install is now caught up front with a clear repair message. Installing by hand with the command above still works and skips the prompt.
 
@@ -121,7 +115,7 @@ If a previous run left a broken `Az` install behind, remove it and reinstall:
 
 ```powershell
 Get-Module Az* -ListAvailable | Uninstall-Module -Force
-Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
   
 
@@ -513,7 +507,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
 - The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
-- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
 
 **Cloud Shell session ended mid-run:**
 - Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.

@@ -104,6 +104,60 @@ function Get-RecommendedParallelism
     }
 }
 
+# Disable the Windows console "QuickEdit Mode" for this session (best-effort).
+#
+# QuickEdit is on by default in conhost. If the user clicks in the window - or it
+# otherwise enters mark/select mode - Windows SUSPENDS the process the instant it
+# next writes to the console, until a key is pressed (Enter/Esc). During a long
+# run (especially -ParallelStreams, where the wrapper continuously writes collated
+# child output) this looks like a random hang that only clears when you press
+# Enter. Clearing ENABLE_QUICK_EDIT_INPUT stops that.
+#
+# Windows-only and interactive-only: on Linux/macOS, or when input/output is
+# redirected (CI, SSM run-command, piped to a file), there is no interactive
+# console mode to change, so this no-ops. Best-effort: any failure is swallowed -
+# tweaking the console must never break a run. The mode is not restored
+# afterwards (it resets when the console window closes); selecting text to copy
+# still works via the terminal's own selection, just not the legacy click-drag
+# mark that caused the freeze.
+function Disable-ConsoleQuickEdit
+{
+    if (-not $IsWindows) { return }
+    if (-not [Environment]::UserInteractive) { return }
+    try { if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { return } } catch { return }
+
+    try
+    {
+        if (-not ('Rda.ConsoleMode' -as [type]))
+        {
+            Add-Type -Namespace 'Rda' -Name 'ConsoleMode' -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll")]
+public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+[DllImport("kernel32.dll")]
+public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+'@ -ErrorAction Stop
+        }
+
+        $STD_INPUT_HANDLE      = -10
+        $ENABLE_QUICK_EDIT     = [uint32]0x0040
+        $ENABLE_EXTENDED_FLAGS = [uint32]0x0080
+
+        $handle = [Rda.ConsoleMode]::GetStdHandle($STD_INPUT_HANDLE)
+        $mode   = [uint32]0
+        if ([Rda.ConsoleMode]::GetConsoleMode($handle, [ref]$mode))
+        {
+            $newMode = ($mode -band (-bnot $ENABLE_QUICK_EDIT)) -bor $ENABLE_EXTENDED_FLAGS
+            [void][Rda.ConsoleMode]::SetConsoleMode($handle, $newMode)
+        }
+    }
+    catch
+    {
+        # Never let console-mode tweaking break a run.
+    }
+}
+
 # Classify a subscription that returned 0 resources as either a genuine
 # permission gap (the signed-in identity has NO role on the subscription) or a
 # genuinely empty subscription. This distinction is impossible to make from the

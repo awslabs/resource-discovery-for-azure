@@ -379,6 +379,12 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 }
 . $FunctionsFile
 
+# Turn off the Windows console QuickEdit mode as early as possible so a stray
+# click in the window cannot suspend the run mid-output (the "stuck until I
+# pressed Enter" freeze). No-ops on non-Windows / non-interactive / redirected
+# sessions and never throws. See Disable-ConsoleQuickEdit for details.
+Disable-ConsoleQuickEdit
+
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 

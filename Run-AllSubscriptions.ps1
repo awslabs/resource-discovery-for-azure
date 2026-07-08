@@ -304,30 +304,39 @@ if (-not $AzCliPath)
 #
 # 5.1 + 7 common syntax subset (only executes under 7, but must parse under 5.1).
 # ---------------------------------------------------------------------------
-$AzModuleAvailable = $null -ne (Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1)
-if (-not $AzModuleAvailable)
+# This tool only calls cmdlets from four Az submodules (Accounts / Compute /
+# Monitor / Billing - the same set the ResourceInventory.ps1 preflight validates),
+# so install and check ONLY those, NOT the full `Az` rollup. Installing `Az` pulls
+# in ~80 submodules (hundreds of DLLs) and takes several minutes plus a 20-40s
+# import on every run; the slim set installs in a fraction of the time and cannot
+# cause "command not found" because nothing outside these four is ever called.
+# Check per-submodule (a slim install has no `Az` meta-module, so the old
+# Get-Module -Name Az check would have false-negatived a perfectly good install).
+$RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
+$MissingAzSubModules  = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
+if ($MissingAzSubModules.Count -gt 0)
 {
-    $AzModuleManualHint = '  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser'
+    $AzModuleManualHint = ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser' -f ($RequiredAzSubModules -join ','))
     $AzModuleInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 
     if (-not $AzModuleInteractive)
     {
-        Write-Host "The Az PowerShell module was not found, and this is a non-interactive session, so I will not prompt to install it." -ForegroundColor Red
-        Write-Host "Install it and re-run:" -ForegroundColor Yellow
+        Write-Host ("Required Az submodule(s) not found ({0}), and this is a non-interactive session, so I will not prompt to install them." -f ($MissingAzSubModules -join ', ')) -ForegroundColor Red
+        Write-Host "Install them and re-run:" -ForegroundColor Yellow
         Write-Host $AzModuleManualHint -ForegroundColor Yellow
         exit 1
     }
 
     Write-Host ""
-    $AzModuleAnswer = Read-Host "The Az PowerShell module is required but not installed. Install it now (into your user scope)? [y/N]"
+    $AzModuleAnswer = Read-Host ("These Az submodules are required but not installed: {0}. Install them now (into your user scope)? [y/N]" -f ($MissingAzSubModules -join ', '))
     if ($AzModuleAnswer -notmatch '^(y|yes)$')
     {
-        Write-Host "Not installing. Install it and re-run:" -ForegroundColor Yellow
+        Write-Host "Not installing. Install them and re-run:" -ForegroundColor Yellow
         Write-Host $AzModuleManualHint -ForegroundColor Yellow
         exit 1
     }
 
-    Write-Host "Installing the Az PowerShell module into your user scope (this can take several minutes)..." -ForegroundColor Cyan
+    Write-Host ("Installing the required Az submodules into your user scope: {0} ..." -f ($MissingAzSubModules -join ', ')) -ForegroundColor Cyan
     try
     {
         # First-time PowerShellGet use on a fresh box would otherwise interrupt
@@ -335,12 +344,13 @@ if (-not $AzModuleAvailable)
         # the provider non-interactively so the install cannot hang on it.
         # (-Force on Install-Module below suppresses the untrusted-PSGallery prompt.)
         $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -ErrorAction SilentlyContinue
-        Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser -ErrorAction Stop
+        # Install only the missing required submodules, not the full Az rollup.
+        Install-Module -Name $MissingAzSubModules -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser -ErrorAction Stop
     }
     catch
     {
-        Write-Host ("Az module install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
-        Write-Host "Install it manually then re-run:" -ForegroundColor Yellow
+        Write-Host ("Az submodule install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host "Install them manually then re-run:" -ForegroundColor Yellow
         Write-Host $AzModuleManualHint -ForegroundColor Yellow
         exit 1
     }
@@ -361,7 +371,7 @@ catch
     Write-Host "This usually indicates a broken/partial install (manifest present but bundled assemblies missing or unloadable)." -ForegroundColor Yellow
     Write-Host "Repair it, then re-run:" -ForegroundColor Yellow
     Write-Host "  Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
-    Write-Host "  Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
+    Write-Host "  Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
     exit 1
 }
 

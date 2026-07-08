@@ -141,19 +141,36 @@ Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublishe
 1. Open PowerShell 7 as Administrator
 2. Ensure Azure CLI is installed and configured
 
-### Step 2: Download the Script
+### Step 2: Get the Script
 
-**Option A: Git Clone**
+**Recommended — Git clone.** This is the smoothest path and sidesteps Windows' security friction entirely. Files created by `git clone` are written locally, so Windows does **not** tag them with the "Mark of the Web," and the scripts run under the default execution policy with **no unblocking and no execution-policy changes**.
+
 ```bash
 git clone https://github.com/awslabs/resource-discovery-for-azure.git
 ```
 
-**Option B: Direct Download**
+> **Fresh Windows box without Git?** Install Git for Windows first, then clone. Downloading the installer with BITS is much faster than `Invoke-WebRequest`:
+> ```powershell
+> # Check https://github.com/git-for-windows/git/releases for the current version.
+> Start-BitsTransfer -Source "https://github.com/git-for-windows/git/releases/download/v2.45.2.windows.1/Git-2.45.2-64-bit.exe" -Destination C:\git-setup.exe
+> Start-Process C:\git-setup.exe -ArgumentList '/VERYSILENT /NORESTART' -Wait
+> # Reopen PowerShell so Git is on PATH, then run the git clone above.
+> ```
+
+**Alternative — Download ZIP.** Works, but every file inside a GitHub ZIP is flagged by Windows as downloaded-from-the-internet (Mark of the Web), so PowerShell refuses to run the scripts until you unblock them or relax the execution policy — an extra step on each new machine.
+
 1. Click the green **Code** button on this repository
 2. Select **Download ZIP**
 3. Extract to your desired directory
+4. Unblock the files before running:
+   ```powershell
+   Get-ChildItem -Path . -Recurse | Unblock-File
+   # or, session-only: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+   ```
 
 ![Zip](./docs/zip_download.png)
+
+**Bottom line: prefer `git clone`** — it "just works" and avoids the execution-policy/unblock dance on every new desktop. See [Troubleshooting](#common-issues) if you must use the ZIP.
 
 ## Usage
 

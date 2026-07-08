@@ -1,7 +1,6 @@
 param (
     [Parameter(Mandatory=$true)]
     [string]$TenantID,
-
     [switch]$DeviceLogin,
     [switch]$Obfuscate,
     [switch]$SkipMetrics,

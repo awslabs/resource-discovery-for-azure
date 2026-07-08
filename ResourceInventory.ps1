@@ -1704,12 +1704,29 @@ $Global:Runtime = Measure-Command -Expression {
     Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
-# Execution and processing of inventory
-$Global:ReportingRunTime = Measure-Command -Expression {
-    ExecuteInventoryProcessing
+# Execution and processing of inventory.
+#
+# Wrap in try/finally so this run's transcript frame is ALWAYS stopped - even if
+# ExecuteInventoryProcessing throws a terminating error (e.g. the collector
+# circuit breaker throwing after repeated failures). PowerShell transcripts are
+# a process-wide STACK, and the -RunAllSubs wrapper invokes this script via & in
+# the SAME process. A frame left open here is orphaned on that stack; the
+# wrapper's own Stop-Transcript at the end then pops THIS orphan instead of the
+# wrapper's frame, leaving the wrapper transcript file held open ("in use",
+# undeletable) for the life of the calling shell. Stopping it here keeps the
+# stack balanced per subscription. The inner try/catch tolerates the rare case
+# where no transcript is active (Start-Transcript above having failed).
+try
+{
+    $Global:ReportingRunTime = Measure-Command -Expression {
+        ExecuteInventoryProcessing
+    }
 }
-
-Stop-Transcript
+finally
+{
+    try { Stop-Transcript }
+    catch { }
+}
 
 # Prepare the summary and outputs
 FinalizeOutputs

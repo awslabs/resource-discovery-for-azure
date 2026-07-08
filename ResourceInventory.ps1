@@ -83,6 +83,19 @@ Function RunInventorySetup()
 {
     function CheckVersion()
     {
+        # Idempotent per PowerShell session. Under -RunAllSubs this script is
+        # invoked via & once per subscription in the SAME process; the version
+        # banner and the GitHub update check (a network round-trip to
+        # RawRepo/Version.json) do not vary by subscription, so run them only once.
+        # Skipping on later subs also removes one WebClient call per subscription
+        # on large tenants. $Global:RdaSessionInitialized is set once at the end of
+        # the first subscription's setup (GetSubscriptionsData). Parallel streams
+        # are separate processes and each performs the check once.
+        if ($Global:RdaSessionInitialized)
+        {
+            return
+        }
+
         Write-Log -Message ('Checking Version') -Severity 'Info'
         Write-Log -Message ('Version: {0}' -f $Global:Version) -Severity 'Info'
 
@@ -115,6 +128,21 @@ Function RunInventorySetup()
 
     function CheckCliRequirements() 
     {        
+        # Idempotent per PowerShell session. Under -RunAllSubs the wrapper invokes
+        # this script via & once per subscription in the SAME process, so the CLI
+        # probe, Resource-Graph extension check, and Az module import only need to
+        # run once: the verified CLI and imported modules persist process-wide.
+        # $Global:AzPowerShellLoaded is set $true at the end of a successful load
+        # (below); when it is already set we skip the whole re-check, which removes
+        # the repeated "Verifying Azure CLI... / Loading Az.* ..." output on every
+        # subscription. Parallel streams run in separate processes, so each stream
+        # still loads once. On a failed load the flag stays $false, so the next
+        # subscription retries the full check.
+        if ($Global:AzPowerShellLoaded)
+        {
+            return
+        }
+
         Write-Log -Message ('Verifying Azure CLI is installed...') -Severity 'Info'
 
         $azCliVersion = az --version
@@ -236,11 +264,49 @@ Function RunInventorySetup()
     
     function CheckPowerShell() 
     {
-        Write-Log -Message ('Checking PowerShell...') -Severity 'Info'
-    
-        $Global:PlatformOS = 'PowerShell Desktop'
-        $cloudShell = try{Get-CloudDrive}catch{}
+        # Session-scoped detection (once per PowerShell session). Under -RunAllSubs
+        # this script runs via & once per subscription in the SAME process, and
+        # Variables() does not reset $Global:PlatformOS, so platform / PS-version
+        # detection and its console output only need to run for the first sub. The
+        # per-subscription timestamp + report-folder computation below still runs
+        # every invocation so each subscription gets its own output folder.
+        if (-not $Global:RdaSessionInitialized)
+        {
+            Write-Log -Message ('Checking PowerShell...') -Severity 'Info'
 
+            $Global:PlatformOS = 'PowerShell Desktop'
+            $cloudShell = try{Get-CloudDrive}catch{}
+
+            if ($cloudShell) 
+            {
+                Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'
+                $Global:PlatformOS = 'Azure CloudShell'
+            }
+            elseif ($PSVersionTable.Platform -eq 'Unix') 
+            {
+                Write-Log -Message ('Identified Environment as PowerShell Unix') -Severity 'Success'
+                $Global:PlatformOS = 'PowerShell Unix'
+            }
+            else 
+            {
+                Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
+                $Global:PlatformOS= 'PowerShell Desktop'
+
+                $psVersion = $PSVersionTable.PSVersion.Major
+                Write-Log -Message ("PowerShell Version {0}" -f $psVersion) -Severity 'Info'
+        
+                if ($PSVersionTable.PSVersion.Major -lt 7) 
+                {
+                    Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
+                    Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
+                    Exit
+                }
+            }
+        }
+
+        # Per-subscription: a fresh report folder every invocation so each sub
+        # writes to its own output folder.
+        #
         # Millisecond precision is required when multiple inner-script invocations
         # can start in the same second (the parallel-streams orchestration in
         # Run-AllSubscriptions.ps1 fans out N child processes that all run this
@@ -256,34 +322,18 @@ Function RunInventorySetup()
         $procDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
         $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $procDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
-        
-        if ($cloudShell) 
-        {
-            Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'
-            $Global:PlatformOS = 'Azure CloudShell'
-            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
-        }
-        elseif ($PSVersionTable.Platform -eq 'Unix') 
-        {
-            Write-Log -Message ('Identified Environment as PowerShell Unix') -Severity 'Success'
-            $Global:PlatformOS = 'PowerShell Unix'
-            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
-        }
-        else 
-        {
-            Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
-            $Global:PlatformOS= 'PowerShell Desktop'
-            $defaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
 
-            $psVersion = $PSVersionTable.PSVersion.Major
-            Write-Log -Message ("PowerShell Version {0}" -f $psVersion) -Severity 'Info'
-        
-            if ($PSVersionTable.PSVersion.Major -lt 7) 
-            {
-                Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
-                Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                Exit
-            }
+        # Base output root depends only on the (already cached) platform, so
+        # recompute the per-sub default path from $Global:PlatformOS without
+        # re-detecting. These strings are byte-for-byte identical to the previous
+        # per-branch assignments so downstream glob/zip path handling is unchanged.
+        if ($Global:PlatformOS -eq 'Azure CloudShell' -or $Global:PlatformOS -eq 'PowerShell Unix')
+        {
+            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
+        }
+        else
+        {
+            $defaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
         }
     
         if ($OutputDirectory) 
@@ -313,17 +363,30 @@ Function RunInventorySetup()
     
   function LoginSession() 
     {        
-        $CloudEnv = az cloud list | ConvertFrom-Json
-        Write-Host "Azure Cloud Environment: " -NoNewline
-    
-        $CurrentCloudEnvName = $CloudEnv | Where-Object {$_.isActive -eq 'True'}
-        Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+        # Display-only banner: the active Azure cloud environment does not change
+        # between subscriptions in a session, so print it once. This also skips a
+        # redundant `az cloud list` per subscription under -RunAllSubs. The auth
+        # logic below (az account show, the Az context check, Connect-AzAccount)
+        # is OUTSIDE this guard and still runs on every invocation, unchanged.
+        if (-not $Global:RdaSessionInitialized)
+        {
+            $CloudEnv = az cloud list | ConvertFrom-Json
+            Write-Host "Azure Cloud Environment: " -NoNewline
+
+            $CurrentCloudEnvName = $CloudEnv | Where-Object {$_.isActive -eq 'True'}
+            Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+        }
 
         # Check if already authenticated
         $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
         if ($null -ne $existingAccount)
         {
-            Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+            # Display-only: report the authenticated identity once per session. The
+            # tenant-context comparison and any reconnect below still run every sub.
+            if (-not $Global:RdaSessionInitialized)
+            {
+                Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+            }
 
             if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
             {
@@ -510,13 +573,30 @@ Function RunInventorySetup()
     {    
         $SubscriptionCount = $Subscriptions.Count
         
-        Write-Log -Message ("Number of Subscriptions Found: {0}" -f $SubscriptionCount) -Severity 'Info'
+        # The subscription count is tenant-wide and does not change between subs,
+        # so under -RunAllSubs (same process) print it only once per session. The
+        # report-folder check/creation below stays per-subscription because each
+        # subscription writes to its own timestamped folder.
+        if (-not $Global:RdaSessionInitialized)
+        {
+            Write-Log -Message ("Number of Subscriptions Found: {0}" -f $SubscriptionCount) -Severity 'Info'
+        }
+
         Write-Log -Message ("Checking report folder: {0}" -f $DefaultPath) -Severity 'Info'
         
         if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false) 
         {
             New-Item -Type Directory -Force -Path $DefaultPath | Out-Null
         }
+
+        # Session init is complete once the first subscription's setup has run.
+        # Subsequent subscriptions in the same PowerShell process now skip the
+        # version check, platform/PS detection, and the subscription-count line
+        # above (see CheckVersion / CheckPowerShell / the guard just above). This
+        # is the single place the flag is set; nothing resets it mid-session
+        # (Variables() does not touch it), and parallel streams are separate
+        # processes that each set it once.
+        $Global:RdaSessionInitialized = $true
     }
     
     function ResourceInventoryLoop()

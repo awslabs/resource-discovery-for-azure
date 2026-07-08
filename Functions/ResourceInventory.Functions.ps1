@@ -25,6 +25,33 @@ Function Write-Log([string]$Message, [string]$Severity)
         "Success"   { Write-Host $Message -ForegroundColor Green }
         default   { Write-Host $Message }
     }
+
+    # Errors-only sink: when an error-log path has been established (set in
+    # InitializeInventoryProcessing) append error-severity messages to a
+    # dedicated, timestamped file.
+    #
+    # IMPORTANT: this log is written LOCALLY ONLY and is deliberately NOT added
+    # to the obfuscated (server-bound) zip. Error-severity messages can
+    # interpolate raw $_.Exception.Message text and local paths (e.g. collector
+    # failures, reconnect failures, HTML-gen failures) that carry real Azure
+    # identifiers the obfuscation layer never touches. Shipping this file would
+    # leak them. Do NOT add $Global:ErrorLogFile to the Compress-Archive Path
+    # array without first scrubbing/obfuscating its contents. It is kept on disk
+    # for local troubleshooting only, at the same trust level as the transcript.
+    # Purely additive: the console output above is unchanged, and nothing is
+    # written until the global path exists, so callers before setup are
+    # unaffected.
+    if ($Severity -eq 'Error' -and -not [string]::IsNullOrEmpty($Global:ErrorLogFile))
+    {
+        try
+        {
+            ('{0} {1}' -f $DateTime, $Message) | Out-File -FilePath $Global:ErrorLogFile -Append -Encoding utf8
+        }
+        catch
+        {
+            # Never let an error-log write failure interrupt the run.
+        }
+    }
 }
 
 function GetLocalVersion() 

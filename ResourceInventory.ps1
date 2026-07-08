@@ -717,6 +717,25 @@ function ExecuteInventoryProcessing()
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_"+ $Global:ReportName + "_" + $CurrentDateTime + ".csv")
 
+        # Local errors-only log (see Write-Log's error sink). Like the transcript
+        # and heartbeat it is a LOCAL debug artifact, NEVER added to the shared
+        # zip. Under the wrapper (-RunAllSubs) $DefaultPath is a per-subscription
+        # subfolder, so writing the error log there buries one per sub. Put it in
+        # the PARENT InventoryRoot (next to the transcript / heartbeat / wrapper
+        # failures log), tagged with the SubscriptionID, so per-sub error logs are
+        # findable at a glance (only subs that actually errored produce one) and
+        # never collide. Standalone runs keep it in the report folder.
+        if ($RunAllSubs.IsPresent)
+        {
+            $ErrorLogDir    = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+            $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+            $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
+        }
+        else
+        {
+            $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+        }
+
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
 
@@ -1777,6 +1796,13 @@ if($Obfuscate.IsPresent)
     Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
     Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
     Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
+    # The error log is created only when an error was logged; it can contain raw
+    # exception text / local paths carrying real identifiers, so it is local-only
+    # (never zipped) and listed here so the operator knows to protect it too.
+    if (![string]::IsNullOrEmpty($Global:ErrorLogFile) -and (Test-Path -LiteralPath $Global:ErrorLogFile))
+    {
+        Write-Log -Message ("  - Error log:  {0}" -f $Global:ErrorLogFile) -Severity 'Warning'
+    }
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
     Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
@@ -1848,7 +1874,7 @@ if($Obfuscate.IsPresent)
     # filter already excludes it; the explicit -notlike guard hardens that seam
     # so it can never ship even if this filter is broadened later - the file
     # carries a real subscription GUID and must stay local like the transcript.
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" } | Select-Object -ExpandProperty FullName
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
         Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'

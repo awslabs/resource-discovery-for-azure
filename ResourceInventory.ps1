@@ -1,18 +1,34 @@
 param ($TenantID,
         $Appid,
-        $SubscriptionID,
-        $Secret, 
-        $ResourceGroup, 
+        [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', ErrorMessage = 'Invalid SubscriptionID; must be a GUID')]
+        [string]$SubscriptionID,
+        [securestring]$Secret, 
+        [ValidatePattern('^[A-Za-z0-9._()-]{1,90}$', ErrorMessage = 'Invalid resource group name; must match ^[A-Za-z0-9._()-]{1,90}$')]
+        [string]$ResourceGroup, 
         [switch]$Debug, 
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
         [switch]$DeviceLogin,
-        [switch]$EnableLogs,
         [switch]$Obfuscate,
         [switch]$RunAllSubs,
         $ConcurrencyLimit = 6,
+        $MetricsLookbackDays = 31,
         $ReportName = 'ResourcesReport', 
         $OutputDirectory)
+
+# ---------------------------------------------------------------------------
+# Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
+# into this script's scope. Fail loud if the file is missing rather than
+# breaking later with a confusing "command not found".
+# ---------------------------------------------------------------------------
+$FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
+if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $FunctionsFile
 
 
 if ($Debug.IsPresent) {$DebugPreference = 'Continue'}
@@ -21,39 +37,7 @@ if ($Debug.IsPresent) {$ErrorActionPreference = "Continue" }Else {$ErrorActionPr
 
 Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
 
-Function Write-Log([string]$Message, [string]$Severity)
-{
-   $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
 
-   if($EnableLogs.IsPresent)
-   {
-        $Global:Logging.Logs.Add([PSCustomObject]@{ Date = $DateTime; Message = $Message; Severity = $Severity })
-   }
-
-   switch ($Severity) 
-   {
-        "Info"    { Write-Host $Message -ForegroundColor Cyan }
-        "Warning" { Write-Host $Message -ForegroundColor Yellow }
-        "Error"   { Write-Host $Message -ForegroundColor Red }
-        "Success"   { Write-Host $Message -ForegroundColor Green }
-        default   { Write-Host $Message }
-    }
-}
-
-function GetLocalVersion() 
-{
-    $versionJsonPath = "./Version.json"
-    if (Test-Path $versionJsonPath) 
-    {
-        $localVersionJson = Get-Content $versionJsonPath | ConvertFrom-Json
-        return ('{0}.{1}.{2}' -f $localVersionJson.MajorVersion, $localVersionJson.MinorVersion, $localVersionJson.BuildVersion)
-    } 
-    else 
-    {
-        Write-Host "Local Version.json not found. Clone the repo and execute the script from the root. Exiting." -ForegroundColor Red
-        Exit
-    }
-}
 
 function Variables 
 {
@@ -63,34 +47,75 @@ function Variables
     $Global:ReportName = $ReportName   
     $Global:Version = GetLocalVersion
 
-    $Global:Logging = New-Object PSObject
-    $Global:Logging | Add-Member -MemberType NoteProperty -Name Logs -Value NotSet
-    $Global:Logging.Logs = [System.Collections.Generic.List[object]]::new()
-
     $Global:ResourceIdDictionary = $null
     $Global:ResourceNameDictionary = $null
     $Global:ResourceSubscriptionDictionary = $null
     $Global:ResourceResourceGroupDictionary = $null
+    # Maps a REAL tag value to its deterministic obfuscated token (real -> token).
+    # Tag values are obfuscated like the other identifier classes (same real value
+    # always yields the same token within a run) so the obfuscated report can still
+    # group/correlate by tag value without exposing it. Tag KEYS are kept verbatim.
+    $Global:TagValueDictionary = $null
+    # Maps a REAL free-text / identity value (resource Description, FriendlyName,
+    # CreatedBy, RoleName, container image, etc.) to its deterministic obfuscated
+    # token. These fields are free-form text - previously they were dropped (nulled
+    # or stamped with the literal 'obfuscated') and so were unrecoverable. Tokenizing
+    # them (same real value -> same token within a run) keeps them out of the shared
+    # report while letting Reveal-Obfuscation.ps1 restore them locally via FreeTextMap.
+    $Global:FreeTextDictionary = $null
 
     if ($Obfuscate.IsPresent) {
         $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     }
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
 }
 
+
+
 Function RunInventorySetup()
 {
     function CheckVersion()
     {
+        # Idempotent per PowerShell session. Under -RunAllSubs this script is
+        # invoked via & once per subscription in the SAME process; the version
+        # banner and the GitHub update check (a network round-trip to
+        # RawRepo/Version.json) do not vary by subscription, so run them only once.
+        # Skipping on later subs also removes one WebClient call per subscription
+        # on large tenants. $Global:RdaSessionInitialized is set once at the end of
+        # the first subscription's setup (GetSubscriptionsData). Parallel streams
+        # are separate processes and each performs the check once.
+        if ($Global:RdaSessionInitialized)
+        {
+            return
+        }
+
         Write-Log -Message ('Checking Version') -Severity 'Info'
         Write-Log -Message ('Version: {0}' -f $Global:Version) -Severity 'Info'
-        
-        $versionJson = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Version.json') | ConvertFrom-Json
+
+        # The version check is best-effort. On corporate networks that block
+        # raw.githubusercontent.com (DNS failure, firewall, or air-gap), this
+        # WebClient call would otherwise raise SocketException and abort the
+        # entire subscription before any inventory work began. A failed update
+        # check is not a reason to skip a subscription's inventory - log a
+        # clear note and continue with the local version. See #18.
+        try
+        {
+            $versionJson = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Version.json') | ConvertFrom-Json
+        }
+        catch
+        {
+            Write-Log -Message ("Could not reach {0}/Version.json to check for an update: {1}" -f $RawRepo, $_.Exception.Message) -Severity 'Warning'
+            Write-Log -Message ('Continuing with local version {0}. If you are on a managed network, this is expected.' -f $Global:Version) -Severity 'Info'
+            return
+        }
+
         $versionNumber = ('{0}.{1}.{2}' -f $versionJson.MajorVersion, $versionJson.MinorVersion, $versionJson.BuildVersion)
 
         if($versionNumber -ne $Global:Version)
@@ -103,6 +128,21 @@ Function RunInventorySetup()
 
     function CheckCliRequirements() 
     {        
+        # Idempotent per PowerShell session. Under -RunAllSubs the wrapper invokes
+        # this script via & once per subscription in the SAME process, so the CLI
+        # probe, Resource-Graph extension check, and Az module import only need to
+        # run once: the verified CLI and imported modules persist process-wide.
+        # $Global:AzPowerShellLoaded is set $true at the end of a successful load
+        # (below); when it is already set we skip the whole re-check, which removes
+        # the repeated "Verifying Azure CLI... / Loading Az.* ..." output on every
+        # subscription. Parallel streams run in separate processes, so each stream
+        # still loads once. On a failed load the flag stays $false, so the next
+        # subscription retries the full check.
+        if ($Global:AzPowerShellLoaded)
+        {
+            return
+        }
+
         Write-Log -Message ('Verifying Azure CLI is installed...') -Severity 'Info'
 
         $azCliVersion = az --version
@@ -134,87 +174,166 @@ Function RunInventorySetup()
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+        # This tool only calls cmdlets from four Az submodules (see the import
+        # loop below), so it validates and loads exactly those - it does NOT
+        # require the full ~80-submodule `Az` rollup to be installed. A slim
+        # install is sufficient:
+        #   Install-Module Az.Accounts, Az.Compute, Az.Monitor, Az.Billing
+        # The full `Az` rollup also satisfies this check because installing `Az`
+        # lays down each Az.* submodule as its own discoverable module on disk,
+        # so Get-Module -Name Az.Accounts (etc.) finds them either way. Checking
+        # the submodules (not the `Az` umbrella) is what lets the slim install
+        # pass - a slim install has no `Az` meta-module, so the old
+        # Get-Module -Name Az check would have thrown a false "not found".
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
 
-        if ($null -ne $VarAzPs)
+        $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
+
+        if ($MissingAzSubModules.Count -eq 0)
         {
-            Write-Log -Message ('Azure PowerShell Module Version: {0}' -f $VarAzPs.Version) -Severity 'Success'
+            $VarAzPs = Get-Module -Name Az.Accounts -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+            Write-Log -Message ('Azure PowerShell modules present (Az.Accounts {0}); required: {1}' -f $VarAzPs.Version, ($RequiredAzSubModules -join ', ')) -Severity 'Success'
         }
         else
         {
-            Write-Log -Message ('Azure PowerShell Module not found. Trying to install...') -Severity 'Warning'
-            Install-Module -Name Az -Repository PSGallery -Force -Scope CurrentUser
-            $VarAzPs = Get-Module -Name Az -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
+            # Behaviour change (deliberate): do not Install-Module from inside
+            # this script. A real field run produced a half-installed Az module
+            # - .psd1 manifests present so Get-Module -ListAvailable was happy,
+            # but the bundled MSAL/Azure.Core assemblies were missing on disk -
+            # and the script then ran for nearly an hour producing zero
+            # consumption data because every Get-AzUsageAggregate call failed
+            # with "Azure PowerShell context has not been properly initialized".
+            # In-process module installs into a script that's already importing
+            # the same module are fragile (concurrent install, AppDomain
+            # caching, partial download) and the failure mode is a silent broken
+            # install rather than a clean error. Failing loudly here is safer.
+            Write-Log -Message ('Required Azure PowerShell module(s) not found: {0}' -f ($MissingAzSubModules -join ', ')) -Severity 'Error'
+            Write-Log -Message ('This tool needs only these Az submodules. Install them manually before re-running. From an elevated PowerShell 7 prompt:') -Severity 'Error'
+            Write-Log -Message ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck' -f ($RequiredAzSubModules -join ',')) -Severity 'Error'
+            Write-Log -Message ('Or install the full rollup (larger, slower first import): Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('Or in Cloud Shell, the Az module is already preinstalled - if it is missing your shell environment is broken.') -Severity 'Error'
+            throw ('Required Azure PowerShell submodule(s) not found: {0}. See log above for installation instructions.' -f ($MissingAzSubModules -join ', '))
         }
 
-        if ($null -eq $VarAzPs) 
-        {
-            Write-Log -Message ('Failed to install Azure PowerShell Module. Press <Enter> to finish script') -Severity 'Error'
-            Read-Host ''
-            Exit
+        # Load ONLY the Az submodules this tool actually uses ($RequiredAzSubModules,
+        # validated above), not the full `Az` rollup. Importing `Az` pulls in ~80
+        # submodules (hundreds of DLLs plus their format/type data) and stalls for
+        # 20-40s on a fresh box with no output - which looks like a hang right
+        # after "Checking Azure PowerShell Module...". The tool only calls cmdlets
+        # from these four:
+        #   Az.Accounts - Connect/Get/Set-AzContext, Get-AzSubscription,
+        #                 Get-AzAccessToken, Save-/Import-AzContext
+        #   Az.Compute  - Get-AzComputeResourceSku
+        #   Az.Monitor  - Get-AzMetric
+        #   Az.Billing  - Get-UsageAggregates
+        # Because these four are the entire Az cmdlet surface, a slim install of
+        # just them is enough and cannot cause "command not found". If the full
+        # `Az` rollup happens to be installed instead, any other submodule still
+        # auto-loads on first use - but nothing outside these four is ever called.
+        #
+        # This import doubles as the broken-install probe. Get-Module
+        # -ListAvailable above only checks the manifest on disk; importing
+        # Az.Accounts actually loads the bundled assemblies (MSAL, Azure.Core),
+        # so a half-installed module (manifest present, assemblies missing - a
+        # real field-observed scenario) fails loudly HERE instead of silently
+        # producing zero data at the consumption phase.
+        try {
+            foreach ($AzSubModule in $RequiredAzSubModules)
+            {
+                Write-Log -Message ('Loading {0}...' -f $AzSubModule) -Severity 'Info'
+                Import-Module $AzSubModule -ErrorAction Stop -DisableNameChecking | Out-Null
+            }
+            $Global:AzPowerShellLoaded = $true
+        } catch {
+            Write-Log -Message ('Azure PowerShell module is present on disk but failed to load: {0}' -f $_.Exception.Message) -Severity 'Error'
+            Write-Log -Message ('This usually indicates a broken install - the module manifest is present but its bundled assemblies (MSAL, Azure.Core, etc.) are missing or unloadable.') -Severity 'Error'
+            Write-Log -Message ('Reinstall with: Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
+            Write-Log -Message ('If the broken install was created by a previous run of this script, also run: Get-Module Az* -ListAvailable | Uninstall-Module -Force') -Severity 'Error'
+            $Global:AzPowerShellLoaded = $false
+            throw "Azure PowerShell (Az) module is broken on disk and cannot be loaded. See log above for remediation."
         }
-        
 
-        Write-Log -Message ('Checking ImportExcel Module...') -Severity 'Info'
-    
-        $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-    
-        if ($null -ne $VarExcel)
-        {
-            Write-Log -Message ('ImportExcel Module Version: {0}' -f $VarExcel.Version) -Severity 'Success'
-        }
-        else
-        {
-            Write-Log -Message ('ImportExcel Module not found. Trying to install...') -Severity 'Warning'
-            Install-Module -Name ImportExcel -Force -Scope CurrentUser
-            $VarExcel = Get-Module -Name ImportExcel -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-        }
-    
-        if ($null -eq $VarExcel) 
-        {
-            Write-Log -Message ('Failed to install ImportExcel Module. Press <Enter> to finish script') -Severity 'Error'
-            Read-Host ''
-            Exit
-        }
+
+        # NOTE: The ImportExcel / EPPlus preflight that used to live here was
+        # removed when the report format changed from Excel (.xlsx) to a
+        # self-contained HTML report (Extension/Summary.ps1). The HTML report
+        # has no external module dependency, so there is nothing to preflight.
+        # This is the dependency that previously failed in Cloud Shell when the
+        # module was partially installed.
     }
     
     function CheckPowerShell() 
     {
-        Write-Log -Message ('Checking PowerShell...') -Severity 'Info'
-    
-        $Global:PlatformOS = 'PowerShell Desktop'
-        $cloudShell = try{Get-CloudDrive}catch{}
+        # Session-scoped detection (once per PowerShell session). Under -RunAllSubs
+        # this script runs via & once per subscription in the SAME process, and
+        # Variables() does not reset $Global:PlatformOS, so platform / PS-version
+        # detection and its console output only need to run for the first sub. The
+        # per-subscription timestamp + report-folder computation below still runs
+        # every invocation so each subscription gets its own output folder.
+        if (-not $Global:RdaSessionInitialized)
+        {
+            Write-Log -Message ('Checking PowerShell...') -Severity 'Info'
 
-        $Global:CurrentDateTime = (get-date -Format "yyyyMMddHHmmss")
-        $Global:FolderName = $Global:ReportName + $CurrentDateTime
-        
-        if ($cloudShell) 
-        {
-            Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'
-            $Global:PlatformOS = 'Azure CloudShell'
-            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
-        }
-        elseif ($PSVersionTable.Platform -eq 'Unix') 
-        {
-            Write-Log -Message ('Identified Environment as PowerShell Unix') -Severity 'Success'
-            $Global:PlatformOS = 'PowerShell Unix'
-            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
-        }
-        else 
-        {
-            Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
-            $Global:PlatformOS= 'PowerShell Desktop'
-            $defaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
+            $Global:PlatformOS = 'PowerShell Desktop'
+            $cloudShell = try{Get-CloudDrive}catch{}
 
-            $psVersion = $PSVersionTable.PSVersion.Major
-            Write-Log -Message ("PowerShell Version {0}" -f $psVersion) -Severity 'Info'
-        
-            if ($PSVersionTable.PSVersion.Major -lt 7) 
+            if ($cloudShell) 
             {
-                Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
-                Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                Exit
+                Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'
+                $Global:PlatformOS = 'Azure CloudShell'
             }
+            elseif ($PSVersionTable.Platform -eq 'Unix') 
+            {
+                Write-Log -Message ('Identified Environment as PowerShell Unix') -Severity 'Success'
+                $Global:PlatformOS = 'PowerShell Unix'
+            }
+            else 
+            {
+                Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
+                $Global:PlatformOS= 'PowerShell Desktop'
+
+                $psVersion = $PSVersionTable.PSVersion.Major
+                Write-Log -Message ("PowerShell Version {0}" -f $psVersion) -Severity 'Info'
+        
+                if ($PSVersionTable.PSVersion.Major -lt 7) 
+                {
+                    Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
+                    Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
+                    Exit
+                }
+            }
+        }
+
+        # Per-subscription: a fresh report folder every invocation so each sub
+        # writes to its own output folder.
+        #
+        # Millisecond precision is required when multiple inner-script invocations
+        # can start in the same second (the parallel-streams orchestration in
+        # Run-AllSubscriptions.ps1 fans out N child processes that all run this
+        # init block concurrently). Without it, two workers compute the same
+        # $Global:CurrentDateTime, point at the same per-sub folder, and the
+        # second worker's Compress-Archive fails with "archive file already
+        # exists". The format change is invisible to every downstream consumer:
+        # all glob filters use `*` wildcards over the timestamp segment.
+        # Append a 4-char per-process discriminator to the timestamp. Two
+        # worker processes that hit the same millisecond still produce
+        # different folder names. Discriminator is hex-only and length-stable
+        # so the existing `*<timestamp>*` glob filters keep matching.
+        $procDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
+        $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $procDiscriminator)
+        $Global:FolderName = $Global:ReportName + $CurrentDateTime
+
+        # Base output root depends only on the (already cached) platform, so
+        # recompute the per-sub default path from $Global:PlatformOS without
+        # re-detecting. These strings are byte-for-byte identical to the previous
+        # per-branch assignments so downstream glob/zip path handling is unchanged.
+        if ($Global:PlatformOS -eq 'Azure CloudShell' -or $Global:PlatformOS -eq 'PowerShell Unix')
+        {
+            $defaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
+        }
+        else
+        {
+            $defaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
         }
     
         if ($OutputDirectory) 
@@ -244,23 +363,48 @@ Function RunInventorySetup()
     
   function LoginSession() 
     {        
-        $CloudEnv = az cloud list | ConvertFrom-Json
-        Write-Host "Azure Cloud Environment: " -NoNewline
-    
-        $CurrentCloudEnvName = $CloudEnv | Where-Object {$_.isActive -eq 'True'}
-        Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+        # Display-only banner: the active Azure cloud environment does not change
+        # between subscriptions in a session, so print it once. This also skips a
+        # redundant `az cloud list` per subscription under -RunAllSubs. The auth
+        # logic below (az account show, the Az context check, Connect-AzAccount)
+        # is OUTSIDE this guard and still runs on every invocation, unchanged.
+        if (-not $Global:RdaSessionInitialized)
+        {
+            $CloudEnv = az cloud list | ConvertFrom-Json
+            Write-Host "Azure Cloud Environment: " -NoNewline
+
+            $CurrentCloudEnvName = $CloudEnv | Where-Object {$_.isActive -eq 'True'}
+            Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+        }
 
         # Check if already authenticated
         $existingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
         if ($null -ne $existingAccount)
         {
-            Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+            # Display-only: report the authenticated identity once per session. The
+            # tenant-context comparison and any reconnect below still run every sub.
+            if (-not $Global:RdaSessionInitialized)
+            {
+                Write-Log -Message ("Already authenticated as: {0}" -f $existingAccount.user.name) -Severity 'Success'
+            }
 
             if (!$TenantID -or $existingAccount.tenantId -eq $TenantID)
             {
-                # Ensure PowerShell Az context is also set
+                # Ensure PowerShell Az context is set for the requested tenant.
+                # We compare the Az PS context's tenant — not its current subscription
+                # — against $existingAccount because the Az PS and az CLI contexts can
+                # have different default subscriptions even when authenticated against
+                # the same tenant. Comparing subscriptions caused a re-Connect-AzAccount
+                # on every iteration of Run-AllSubscriptions.ps1 on PowerShell Desktop,
+                # which prompted the user to log in again for each subscription. Per-
+                # subscription scoping happens later via Set-AzContext / --subscriptions /
+                # resource-id parameters on Get-AzMetric, so the context only needs to
+                # match the tenant.
                 $azContext = Get-AzContext -ErrorAction SilentlyContinue
-                if ($null -eq $azContext -or $azContext.Subscription.Id -ne $existingAccount.id)
+                $needsConnect = $null -eq $azContext -or
+                                [string]::IsNullOrEmpty($azContext.Tenant.Id) -or
+                                $azContext.Tenant.Id -ne $existingAccount.tenantId
+                if ($needsConnect)
                 {
                     Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
                     if($DeviceLogin.IsPresent)
@@ -336,9 +480,26 @@ Function RunInventorySetup()
                     $SequenceID ++
                 }
     
-                [int]$SelectTenant = read-host "Select Tenant (Default 1)"
-                $defaultTenant = --$SelectTenant
-                $TenantID = $Tenants[$defaultTenant]
+                # A read-host here blocks until someone types at a console. Under
+                # the wrapper (-RunAllSubs), a parallel worker, an SSM run-command,
+                # or any redirected/CI session there IS no console, so the prompt
+                # would hang the entire run forever with no way to answer it.
+                # Detect a non-interactive session and default to the first tenant
+                # instead (the "Default 1" the prompt always intended); a real
+                # interactive session still gets the picker. Pass -TenantID to
+                # choose a specific tenant and skip this path entirely.
+                $IsInteractiveSession = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+                if ($RunAllSubs.IsPresent -or -not $IsInteractiveSession)
+                {
+                    $TenantID = $Tenants[0]
+                    Write-Log -Message ("Non-interactive session with multiple tenants and no -TenantID: defaulting to the first tenant ({0}). Pass -TenantID to choose explicitly." -f $TenantID) -Severity 'Warning'
+                }
+                else
+                {
+                    [int]$SelectTenant = read-host "Select Tenant (Default 1)"
+                    if ($SelectTenant -lt 1) { $SelectTenant = 1 }
+                    $TenantID = $Tenants[$SelectTenant - 1]
+                }
 
                 if(!$RunAllSubs.IsPresent)
                 {
@@ -384,9 +545,14 @@ Function RunInventorySetup()
               elseif ($Appid -and $Secret -and $tenantid)
               {
                 Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
-                az login --service-principal -u $appid -p $secret -t $TenantID | Out-Null
-                $SecureSecret = ConvertTo-SecureString $Secret -AsPlainText -Force
-                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $SecureSecret)
+                # Authenticate the az CLI without putting the secret on the command
+                # line (it would otherwise appear in the process list and transcript).
+                # Pipe the plaintext to --password-stdin; the plaintext lives only in
+                # this local variable for the duration of the call.
+                $unsecuredSecret = [System.Net.NetworkCredential]::new('', $Secret).Password
+                $unsecuredSecret | az login --service-principal -u $appid --tenant $TenantID --password-stdin --only-show-errors | Out-Null
+                Remove-Variable -Name unsecuredSecret -ErrorAction SilentlyContinue
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
                 Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
               }
               else
@@ -407,13 +573,30 @@ Function RunInventorySetup()
     {    
         $SubscriptionCount = $Subscriptions.Count
         
-        Write-Log -Message ("Number of Subscriptions Found: {0}" -f $SubscriptionCount) -Severity 'Info'
+        # The subscription count is tenant-wide and does not change between subs,
+        # so under -RunAllSubs (same process) print it only once per session. The
+        # report-folder check/creation below stays per-subscription because each
+        # subscription writes to its own timestamped folder.
+        if (-not $Global:RdaSessionInitialized)
+        {
+            Write-Log -Message ("Number of Subscriptions Found: {0}" -f $SubscriptionCount) -Severity 'Info'
+        }
+
         Write-Log -Message ("Checking report folder: {0}" -f $DefaultPath) -Severity 'Info'
         
         if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false) 
         {
             New-Item -Type Directory -Force -Path $DefaultPath | Out-Null
         }
+
+        # Session init is complete once the first subscription's setup has run.
+        # Subsequent subscriptions in the same PowerShell process now skip the
+        # version check, platform/PS detection, and the subscription-count line
+        # above (see CheckVersion / CheckPowerShell / the guard just above). This
+        # is the single place the flag is set; nothing resets it mid-session
+        # (Variables() does not touch it), and parallel streams are separate
+        # processes that each set it once.
+        $Global:RdaSessionInitialized = $true
     }
     
     function ResourceInventoryLoop()
@@ -437,7 +620,7 @@ Function RunInventorySetup()
             $Subscri = $SubscriptionID
 
             $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = az graph query -q $GraphQuery --subscriptions $Subscri --output json --only-show-errors | ConvertFrom-Json
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1) {
@@ -448,7 +631,7 @@ Function RunInventorySetup()
 
                 while ($Looper -lt $Loop) {
                     $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --subscriptions $Subscri --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -462,7 +645,7 @@ Function RunInventorySetup()
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = az graph query -q $GraphQuery  --output json --subscriptions $SubscriptionID --only-show-errors | ConvertFrom-Json
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1) {
@@ -473,7 +656,7 @@ Function RunInventorySetup()
 
                 while ($Looper -lt $Loop) {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --subscriptions $SubscriptionID --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -485,7 +668,7 @@ Function RunInventorySetup()
         else 
         {
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = az graph query -q  $GraphQuery --output json --only-show-errors | ConvertFrom-Json
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery
             $EnvSizeCount = $EnvSize.Data.'count_'
             
             Write-Log -Message ("Resources Output: {0} Resources Identified" -f $EnvSizeCount) -Severity 'Success'
@@ -500,7 +683,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop) 
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
                     
                     $Global:Resources += $Resource.Data
                     Start-Sleep 2
@@ -513,7 +696,7 @@ Function RunInventorySetup()
     
     function ResourceInventoryAvd()
     {    
-        $AVDSize = az graph query -q "desktopvirtualizationresources | summarize count()" --output json --only-show-errors | ConvertFrom-Json
+        $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()"
         $AVDSizeCount = $AVDSize.data.'count_'
     
         Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
@@ -528,7 +711,7 @@ Function RunInventorySetup()
             while ($Looper -lt $Loop) 
             {
                 $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = (az graph query -q $GraphQuery --skip $Limit --first 1000 --output json --only-show-errors).tolower() | ConvertFrom-Json
+                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
     
                 $Global:Resources += $AVD.data
                 Start-Sleep 2
@@ -593,8 +776,12 @@ Function RunInventorySetup()
             $ResourceSubscriptionDictionary[$resourceItem.ID] = $obfuscatedSubscription
             $ResourceResourceGroupDictionary[$resourceItem.ID] = $obfuscatedResourceGroup
 
-            if ($resourceItem.PSObject.Properties['tags']) { $resourceItem.tags = $null }
-            if ($resourceItem.PSObject.Properties['Tags']) { $resourceItem.Tags = $null }
+            # Raw tags are intentionally NOT scrubbed here any more. They must
+            # survive on the in-memory $Global:Resources objects so collectors can
+            # surface them; tag VALUES are then obfuscated deterministically (and
+            # tag KEYS kept) in the per-collector obfuscation loop further below.
+            # $Global:Resources itself is never serialized into the report, so
+            # leaving raw tags on it in memory does not leak.
         }
     }
 }
@@ -604,17 +791,106 @@ function ExecuteInventoryProcessing()
     function InitializeInventoryProcessing()
     {   
         $Global:ZipOutputFile = ($DefaultPath + $Global:ReportName + "_" + $CurrentDateTime + ".zip")
-        $Global:File = ($DefaultPath + $Global:ReportName + "_" + $CurrentDateTime + ".xlsx")
+        $Global:HtmlFile = ($DefaultPath + $Global:ReportName + "_" + $CurrentDateTime + ".html")
         $Global:AllResourceFile = ($DefaultPath + "Full_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:JsonFile = ($DefaultPath + "Inventory_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
-        $Global:ConsumptionFile = ($DefaultPath + "Consumption_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_"+ $Global:ReportName + "_" + $CurrentDateTime + ".csv")
 
-        $Global:LogFile = ($DefaultPath + "Logs_"+ $Global:ReportName + "_" + $CurrentDateTime + ".json")
-    
+        # Local errors-only log (see Write-Log's error sink). Like the transcript
+        # and heartbeat it is a LOCAL debug artifact, NEVER added to the shared
+        # zip. Under the wrapper (-RunAllSubs) $DefaultPath is a per-subscription
+        # subfolder, so writing the error log there buries one per sub. Put it in
+        # the PARENT InventoryRoot (next to the transcript / heartbeat / wrapper
+        # failures log), tagged with the SubscriptionID, so per-sub error logs are
+        # findable at a glance (only subs that actually errored produce one) and
+        # never collide. Standalone runs keep it in the report folder.
+        if ($RunAllSubs.IsPresent)
+        {
+            $ErrorLogDir    = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+            $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+            $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
+        }
+        else
+        {
+            $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+        }
 
-        Write-Log -Message ('Report Excel File: {0}' -f $File) -Severity 'Info'
+        Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
+    }
+
+    function Test-DataPlaneAuthReady([string]$Phase)
+    {
+        # Verify a live Azure context + token are available before a data-plane
+        # phase (Metrics via Get-AzMetric in parallel runspaces; Consumption via
+        # Get-UsageAggregates). Both silently produce ZERO records when the
+        # context/token is missing. Because the caller did NOT pass the matching
+        # -Skip* switch, the user wants this data - so we detect the gap, attempt
+        # ONE reconnect using the same auth method the script was invoked with,
+        # then re-check. Returns $true only when a usable token is confirmed.
+        #
+        # Reuses the script's existing auth approach (Service Principal /
+        # device / browser); it does not introduce a new auth path. Under
+        # -RunAllSubs the phase may run in a background job where an interactive
+        # prompt cannot reach the user, so interactive reconnect is skipped there
+        # in favour of a loud failure.
+        $tokenOk = {
+            $ctx = $null
+            try { $ctx = Get-AzContext -ErrorAction Stop } catch { return $false }
+            if ($null -eq $ctx -or $null -eq $ctx.Account) { return $false }
+            try
+            {
+                $tok = Get-AzAccessToken -ErrorAction Stop -WarningAction SilentlyContinue
+                return ($null -ne $tok -and -not [string]::IsNullOrWhiteSpace($tok.Token))
+            }
+            catch { return $false }
+        }
+
+        if (& $tokenOk) { return $true }
+
+        Write-Log -Message ("{0}: no usable Azure context/token detected; attempting one reconnect before collecting {0} data." -f $Phase) -Severity 'Warning'
+
+        try
+        {
+            if ($Appid -and $Secret -and $TenantID)
+            {
+                Write-Log -Message ("{0}: reconnecting via Service Principal." -f $Phase) -Severity 'Info'
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
+                Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID -ErrorAction Stop | Out-Null
+            }
+            elseif ($RunAllSubs.IsPresent)
+            {
+                Write-Log -Message ("{0}: running under -RunAllSubs without Service Principal credentials - cannot prompt for interactive login in this context. Authenticate before the run (e.g. Connect-AzAccount) or supply -appid/-secret/-tenant." -f $Phase) -Severity 'Error'
+                return $false
+            }
+            elseif (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected)
+            {
+                # No interactive console available (background job, CI, piped/
+                # redirected input, or a detached process). An interactive
+                # Connect-AzAccount here would block FOREVER waiting on a browser
+                # or device prompt that no one can answer - which manifests as a
+                # silent hang. Fail loud instead so the run does not wedge.
+                Write-Log -Message ("{0}: no usable Azure context and no interactive console to prompt for login (non-interactive session). Authenticate before the run (Connect-AzAccount) or supply -appid/-secret/-tenant, then re-run." -f $Phase) -Severity 'Error'
+                return $false
+            }
+            elseif ($DeviceLogin.IsPresent)
+            {
+                Write-Log -Message ("{0}: reconnecting via device login." -f $Phase) -Severity 'Info'
+                Connect-AzAccount -UseDeviceAuthentication -ErrorAction Stop | Out-Null
+            }
+            else
+            {
+                Write-Log -Message ("{0}: reconnecting via interactive browser login." -f $Phase) -Severity 'Info'
+                Connect-AzAccount -ErrorAction Stop | Out-Null
+            }
+        }
+        catch
+        {
+            Write-Log -Message ("{0}: reconnect attempt failed: {1}" -f $Phase, $_.Exception.Message) -Severity 'Error'
+            return $false
+        }
+
+        return (& $tokenOk)
     }
 
     function CreateMetricsJob()
@@ -623,6 +899,50 @@ function ExecuteInventoryProcessing()
 
         if (!$SkipMetrics.IsPresent) 
         {
+            # -SkipMetrics was NOT passed, so the user wants metrics. Get-AzMetric
+            # runs in parallel runspaces and returns ZERO data (silently) if the
+            # Azure context/token is missing. Detect + attempt recovery first; if
+            # it still cannot authenticate, fail loud and skip ONLY this phase so
+            # the rest of the inventory still completes (the end-of-script
+            # empty-metrics-JSON fallback keeps the output bundle structurally
+            # valid). This is intentionally NOT a silent skip.
+            if (-not (Test-DataPlaneAuthReady -Phase 'Metrics'))
+            {
+                Write-Log -Message ('Metrics: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Metrics were requested (no -SkipMetrics) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+
+                $Global:AzMetrics = New-Object PSObject
+                $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
+                $Global:AzMetrics.Metrics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+
+                # Record per-subscription metrics-phase health so the wrapper's
+                # final summary can name exactly which subs are missing metrics
+                # (mirrors $Global:ConsumptionFailedSubs). Lives in the wrapper's
+                # scope because ResourceInventory.ps1 is invoked via `& <path>`.
+                # Resolve which subscription(s) this skip applies to: when invoked
+                # per-sub (the wrapper passes -SubscriptionID) it is that one sub;
+                # for a standalone all-subs run it is every in-scope subscription.
+                if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+                $metricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                $affectedSubs = @(
+                    if (![string]::IsNullOrEmpty($SubscriptionID)) {
+                        $Global:Subscriptions | Where-Object { $_.id -eq $SubscriptionID }
+                    } else {
+                        $Global:Subscriptions
+                    }
+                )
+                if ($affectedSubs.Count -eq 0) {
+                    # Fallback when the subscription list is unavailable: still
+                    # record one entry so the failure is never silent.
+                    $idLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $idLabel; Message = $metricsSkipMsg }
+                } else {
+                    foreach ($asub in $affectedSubs) {
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $metricsSkipMsg }
+                    }
+                }
+                return
+            }
+
             Write-Log -Message ('Running Metrics Jobs') -Severity 'Success'
 
             if($PSScriptRoot -like '*\*')
@@ -638,7 +958,7 @@ function ExecuteInventoryProcessing()
             
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -File $file -Metrics $null -TableStyle $null -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $metricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays
         }
     }
 
@@ -716,19 +1036,168 @@ function ExecuteInventoryProcessing()
         $Resource = $Resources | Select-Object -First $Resources.count
         #$Resource = ($Resource | ConvertTo-Json -Depth 50)
 
+        # Circuit breaker for collector failures (#22). A single collector
+        # throwing (a null property, a malformed API response, a bug in that
+        # one file) must not silently drop that resource type NOR abort the
+        # whole run - it is recorded loudly and processing continues with the
+        # next collector, exactly like the existing Metrics/Consumption
+        # fail-loud-and-skip-that-phase pattern. But if MANY collectors fail
+        # in a row, the cause is almost never "this one resource type has a
+        # bug" - it is systemic (auth dropped mid-run, network gone, Az
+        # module broken) and every remaining collector is about to fail for
+        # the identical reason. Limping through the rest would just produce
+        # ~50 more identical error lines and an empty report that looks like
+        # "no resources" instead of "the environment broke partway through".
+        # Stop the run once that pattern is detected instead of grinding
+        # through it - the operator gets ONE clear diagnosis instead of a
+        # wall of repeated errors, and can fix the real problem and re-run.
+        $ConsecutiveCollectorFailures = 0
+        $CollectorFailureCircuitBreakerThreshold = 5
+
+        # Per-service progress is surfaced two ways, neither of which prints a
+        # per-collector line to the shared console (that green Write-Log line
+        # per collector - ~40+ lines per subscription - scrolled the real
+        # errors/warnings off screen and would repeat once per subscription,
+        # e.g. 164x for a 164-subscription run):
+        #   1. Write-Progress renders a single updating bar in an interactive
+        #      host and is a no-op in non-interactive hosts (parallel runspaces,
+        #      transcripts, CI), so it never pollutes the transcript.
+        #   2. A per-collector heartbeat is appended to a local .log file.
+        #      Because Write-Progress is a no-op in exactly the non-interactive
+        #      contexts the wrapper drives collectors in, a transcript otherwise
+        #      had NO marker between "Starting Service Processing Jobs" and the
+        #      next phase - you could not tell which collector was in flight when
+        #      a run hung. This file restores that "how far did it get / where
+        #      did it hang" trace without adding any console noise. It is a debug
+        #      artifact: named like the transcript (unique per run/process via the
+        #      PID-discriminated $CurrentDateTime), it stays local and is never
+        #      added to the shared zip (a .log matches no packaging pattern).
+        # Collector FAILURES are still logged loudly (Error severity) in the
+        # catch below regardless, so nothing diagnostic depends on this file.
+        $ModuleTotal = @($Modules).Count
+        $ModuleIndex = 0
+
+        $HeartbeatSubLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(all in-scope subscriptions)' }
+        # Where the heartbeat lands has to SURVIVE and be findable to be useful.
+        # Under the wrapper (-RunAllSubs) $DefaultPath is a PER-SUBSCRIPTION
+        # subfolder (<InventoryRoot>\<ReportName><timestamp>\): the wrapper keeps
+        # those folders but only ever consolidates their *.zip, so a heartbeat
+        # buried one-per-sub under a timestamped subfolder is effectively lost for
+        # the "which collector hung across a parallel run" question it exists to
+        # answer. Write it to the PARENT (the InventoryRoot, alongside the wrapper
+        # transcript and failures log) and tag the filename with the SubscriptionID
+        # so per-sub heartbeats are discoverable and never collide. For a
+        # standalone run $DefaultPath IS the single report folder the operator
+        # keeps, so the heartbeat belongs there. Either way the file keeps the
+        # Heartbeat_* prefix (matches the obfuscated-zip exclusion guard) and, as a
+        # .log, is never packaged into any zip.
+        if ($RunAllSubs.IsPresent)
+        {
+            $HeartbeatDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+            $HeartbeatSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+            $HeartbeatLogFile = (Join-Path $HeartbeatDir ("Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $HeartbeatSubTag + ".log"))
+        }
+        else
+        {
+            $HeartbeatLogFile = ($Global:DefaultPath + "Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".log")
+        }
+        try
+        {
+            Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing started for {1}: {2} collectors" -f (Get-Date), $HeartbeatSubLabel, $ModuleTotal) -ErrorAction Stop
+        }
+        catch
+        {
+            # The heartbeat is a debug convenience, not part of the report. If the
+            # very first write fails (read-only path, disk full), disable it for
+            # this run and continue - it must never break inventory collection.
+            $HeartbeatLogFile = $null
+        }
+
         foreach ($Module in $Modules) 
         {
             $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
-            
-            Write-Log -Message ("Service Processing: {0}" -f $ModName) -Severity 'Success'
+            $ModuleIndex++
 
-            $result = & $Module -SCPath $SCPath -Sub $Subscriptions -Resources $Resource -Task "Processing" -File $file -SmaResources $null -TableStyle $null -Metrics $Global:AzMetrics -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+            $PercentComplete = 0
+            if ($ModuleTotal -gt 0)
+            {
+                $PercentComplete = [int](($ModuleIndex / $ModuleTotal) * 100)
+            }
+            Write-Progress -Activity 'Service Processing' -Status ("{0} ({1} of {2})" -f $ModName, $ModuleIndex, $ModuleTotal) -PercentComplete $PercentComplete
+
+            if ($HeartbeatLogFile)
+            {
+                Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] START ({1}/{2}) {3}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName) -ErrorAction SilentlyContinue
+            }
+
+            try
+            {
+                $result = & $Module -Sub $Subscriptions -Resources $Resource -Task "Processing" -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
+                $ConsecutiveCollectorFailures = 0
+
+                if ($HeartbeatLogFile)
+                {
+                    Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] DONE  ({1}/{2}) {3}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName) -ErrorAction SilentlyContinue
+                }
+            }
+            catch
+            {
+                $ConsecutiveCollectorFailures++
+
+                if ($HeartbeatLogFile)
+                {
+                    Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] FAIL  ({1}/{2}) {3}: {4}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName, $_.Exception.Message) -ErrorAction SilentlyContinue
+                }
+
+                if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
+                $Global:CollectorFailures += [pscustomobject]@{
+                    Id      = $SubscriptionID
+                    Module  = $ModName
+                    Message = $_.Exception.Message
+                }
+
+                Write-Log -Message ("Collector FAILED: {0}: {1}" -f $ModName, $_.Exception.Message) -Severity 'Error'
+                Write-Log -Message ("The rest of the inventory will continue, but the '{0}' resource type is MISSING from this report - not empty because there are none, but because the collector errored. Re-run to retry, or investigate the error above if it repeats." -f $ModName) -Severity 'Error'
+
+                if ($ConsecutiveCollectorFailures -ge $CollectorFailureCircuitBreakerThreshold)
+                {
+                    throw ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Total collector failures across the whole run so far (all subscriptions processed to this point): {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
+                }
+
+                # This collector's resource type is missing from the report,
+                # not silently empty-looking-like-none-exist: the Error-severity
+                # log line above and the $Global:CollectorFailures entry are
+                # the loud signal. $result must still become a defined empty
+                # array so $Global:SmaResources.$ModName is a valid (empty)
+                # JSON array rather than an absent/undefined member.
+                $result = @()
+            }
 
             if($Obfuscate.IsPresent)
             {
                 foreach ($resourceItem in $result) 
                 {
                     $origID = $resourceItem.ID
+
+                    # A null/empty ID would throw on the dictionary key ASSIGNMENT
+                    # in the else branches below (Dictionary[string,string] rejects
+                    # a null key with "the array index evaluated to null"). Give the
+                    # row a deterministic-within-run fallback and skip the dictionary
+                    # lookups so one malformed collector row cannot abort processing.
+                    if ([string]::IsNullOrEmpty($origID))
+                    {
+                        $fallback = 'obfuscated_' + [guid]::NewGuid().ToString()
+                        $resourceItem.ID = $fallback
+                        $resourceItem.Name = $fallback
+                        $resourceItem.Subscription = $fallback
+                        $resourceItem.ResourceGroup = $fallback
+                        # Still scrub tags before skipping - a malformed null-ID row
+                        # must not carry real tag values into the obfuscated output
+                        # just because it bypassed the dictionary path below.
+                        if($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
+                        if($resourceItem.ContainsKey('Tags')) { $resourceItem.Tags = $null }
+                        continue
+                    }
 
                     if ($ResourceIdDictionary.ContainsKey($origID)) {
                         $obfuscatedID = $ResourceIdDictionary[$origID]
@@ -773,19 +1242,49 @@ function ExecuteInventoryProcessing()
                         $resourceItem.ResourceGroup = $fbRG
                     }
 
-                    if($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
+                    # Collector 'Tags' output is an array of { Name, Value }. Keep the
+                    # KEY (Name) verbatim and obfuscate the VALUE deterministically via
+                    # $Global:TagValueDictionary: the same real value always maps to the
+                    # same prod_/nonprod_ token, so the obfuscated report can still group
+                    # and correlate by tag value without exposing it. Prefix is derived
+                    # from the value so an environment-type signal survives.
                     if($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
                     {
-                        $resourceItem.Tags = $null
+                        foreach ($tag in $resourceItem.Tags)
+                        {
+                            if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
+                            {
+                                $realTagValue = [string]$tag.Value
+                                if (-not $Global:TagValueDictionary.ContainsKey($realTagValue))
+                                {
+                                    $tagPrefix = if ($realTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                                    $Global:TagValueDictionary[$realTagValue] = $tagPrefix + [guid]::NewGuid().ToString()
+                                }
+                                $tag.Value = $Global:TagValueDictionary[$realTagValue]
+                            }
+                        }
                     }
                 }
             }
 
             $Global:SmaResources | Add-Member -MemberType NoteProperty -Name $ModName -Value NotSet
-            $Global:SmaResources.$ModName = $result
+            # Wrap with @() so the JSON serializer always emits an array, even
+            # when the collector returns exactly one resource. Without this,
+            # PowerShell unwraps a single-element pipeline result into a scalar
+            # PSCustomObject, ConvertTo-Json emits {...} instead of [{...}],
+            # and downstream parsers that iterate the resource type as an
+            # array silently see zero rows.
+            $Global:SmaResources.$ModName = @($result)
 
             $result = $null
             [System.GC]::Collect()
+        }
+
+        Write-Progress -Activity 'Service Processing' -Completed
+
+        if ($HeartbeatLogFile)
+        {
+            Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing complete: {1} collectors" -f (Get-Date), $ModuleTotal) -ErrorAction SilentlyContinue
         }
     }
 
@@ -793,32 +1292,11 @@ function ExecuteInventoryProcessing()
     {
         Write-Log -Message ("Starting Reporting Phase.") -Severity 'Info'
 
-        $Services = @()
-
-        if($PSScriptRoot -like '*\*')
-        {
-            $Services = Get-ChildItem -Path ($PSScriptRoot + '\Services\*.ps1') -Recurse
-        }
-        else
-        {
-            $Services = Get-ChildItem -Path ($PSScriptRoot + '/Services/*.ps1') -Recurse
-        }
-
-        Write-Log -Message ('Services Found: ' + $Services.Count) -Severity 'Info'
-        $Lops = $Services.count
-        $ReportCounter = 0
-
-        foreach ($Service in $Services) 
-        {
-            $c = (($ReportCounter / $Lops) * 100)
-            $c = [math]::Round($c)
-            
-            Write-Log -Message ("Running Services: $Service") -Severity 'Info'
-            $ProcessResults = & $Service.FullName -SCPath $PSScriptRoot -Sub $null -Resources $null -Task "Reporting" -File $file -SmaResources $Global:SmaResources -TableStyle $Global:TableStyle -Metrics $null -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
-
-            $ReportCounter++
-        }
-
+        # The Inventory JSON is the report's single source of truth. It is
+        # built entirely from $Global:SmaResources, which the Processing phase
+        # (CreateResourceJobs) already populated. The HTML report (Summary.ps1)
+        # renders from this JSON. There is no per-collector Excel-writing pass
+        # any more - the Excel/EPPlus dependency has been removed.
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
@@ -838,6 +1316,27 @@ function ExecuteInventoryProcessing()
 
         $reportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $reportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
+
+        # Consumption was requested (no -SkipConsumption). Get-UsageAggregates
+        # silently returns ZERO records when the Azure context/token is missing,
+        # which would otherwise leave an empty consumption sheet that looks like
+        # "this tenant has no billing data". Detect + attempt one reconnect; if
+        # still unauthenticated, record a loud per-run health entry (reusing the
+        # existing $Global:ConsumptionFailedSubs surfaced by the wrapper summary)
+        # and skip the phase rather than producing silent empty output.
+        if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
+        {
+            Write-Log -Message ('Consumption: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Consumption was requested (no -SkipConsumption) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+
+            if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+            if ($null -eq $Global:ConsumptionFailedSubs)  { $Global:ConsumptionFailedSubs  = @() }
+            $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                Name    = '(all subscriptions)'
+                Id      = '(auth)'
+                Message = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+            }
+            return
+        }
 
         foreach($sub in $Global:Subscriptions)
         {
@@ -859,21 +1358,33 @@ function ExecuteInventoryProcessing()
             Set-AzContext -Subscription $sub.id | Out-Null
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
-            do 
-            {    
-                $params = @{
-                    ReportedStartTime      = $reportedStartTime
-                    ReportedEndTime        = $reportedEndTime
-                    AggregationGranularity = 'Daily'
-                    ShowDetails            = $true
-                }
-    
-                $params.ContinuationToken = $usageData.ContinuationToken
-    
-                $usageData = Get-UsageAggregates @params
-                $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+            # Track consumption health per-subscription so the wrapper can report
+            # at the end whether consumption data was actually collected. Without
+            # this, a broken Az module produces zero consumption records on every
+            # subscription and the run still reports as successful - leaving an
+            # empty consumption sheet in the output that nobody noticed until the
+            # report was reviewed.
+            $consumptionRecordsThisSub = 0
+            $consumptionFailedThisSub = $false
+            $consumptionFailureMessage = $null
 
-                Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
+            try {
+                do
+                {
+                    $params = @{
+                        ReportedStartTime      = $reportedStartTime
+                        ReportedEndTime        = $reportedEndTime
+                        AggregationGranularity = 'Daily'
+                        ShowDetails            = $true
+                    }
+
+                    $params.ContinuationToken = $usageData.ContinuationToken
+
+                    $usageData = Get-UsageAggregates @params -ErrorAction Stop
+                    $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+
+                    Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'
+                    $consumptionRecordsThisSub += $usageDataExport.Count
 
                 $newUsageDataExport = [System.Collections.ArrayList]::new()
 
@@ -922,24 +1433,129 @@ function ExecuteInventoryProcessing()
 
                     if($Obfuscate.IsPresent)
                     {
-                        if (-not $ResourceIdDictionary.ContainsKey($usageDataExport[$item].ResourceId)) 
+                        # Pick a prefix (prod_/nonprod_) based on the original
+                        # resourceUri before any obfuscation, so we cannot match
+                        # against an already-obfuscated value below.
+                        $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+
+                        # Obfuscate the consumption ResourceUri while PRESERVING the
+                        # ARM path STRUCTURE (resourcegroups/<rg>/providers/<rp>/<type>[/...]/<name>).
+                        # The dashboard categorises rows by parsing this path - it
+                        # looks at the resource provider + type to detect AKS, VMSS,
+                        # Container Instances, Container Registry, Kusto, etc., and
+                        # at the `mc_*` resource-group marker to detect AKS-managed
+                        # resources specifically. Replacing the whole URI with a flat
+                        # opaque token (the previous behaviour) destroyed every one
+                        # of those signals and made AKS/VMSS rows invisible on the
+                        # dashboard. We now obfuscate ONLY the identifying segments
+                        # (subscription id, resource group name, resource name) and
+                        # keep the rest of the path intact - including the `mc_`
+                        # prefix on AKS-managed RGs - so the server can still
+                        # categorise without seeing real customer identifiers.
+                        $rawUri = $instanceObject.'Microsoft.Resources'.resourceUri
+                        $obfuscatedUri = $rawUri
+
+                        # Per-run caches keyed by REAL value, so the same real sub
+                        # id / RG / resource name always maps to the same obfuscated
+                        # token within a run (deterministic, per the obfuscation
+                        # rules in steering). Kept separate from $ResourceIdDictionary
+                        # because that dictionary's public contract (the
+                        # ObfuscationDictionary file) maps obfuscated full Azure IDs
+                        # to their real values - we don't want to pollute it with
+                        # per-name-segment entries from consumption ARM-path rebuilds.
+                        if (-not $script:ConsumptionSubCache)  { $script:ConsumptionSubCache  = @{} }
+                        if (-not $script:ConsumptionRgCache)   { $script:ConsumptionRgCache   = @{} }
+                        if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
+
+                        if ($rawUri -match '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
                         {
-                            $prefix = if ($usageDataExport[$item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $usageDataExport[$item].ResourceId -match '(^|/|-)([dts])-') { "nonprod_" } else { "prod_" }
-                            $resId = $usageDataExport[$item].ResourceId
-                            $obfuscatedID = if ($resId -match 'databricks') { $prefix + 'databricks_' + [guid]::NewGuid().ToString() }
-                                elseif ($resId -match '/resourcegroups/mc_') { $prefix + 'aks_' + [guid]::NewGuid().ToString() }
-                                elseif ($resId -match 'virtualmachinescalesets') { $prefix + 'vmss_' + [guid]::NewGuid().ToString() }
-                                else { $prefix + [guid]::NewGuid().ToString() }
-                            $ResourceIdDictionary[$usageDataExport[$item].ResourceId] = $obfuscatedID
-                            $usageDataExport[$item].ResourceId = $obfuscatedID
-                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
-                        } 
-                        else 
-                        {
-                            $obfuscatedID = $ResourceIdDictionary[$usageDataExport[$item].ResourceId]
-                            $usageDataExport[$item].ResourceId = $obfuscatedID
-                            $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedID
+                            $realSub  = $matches[1]
+                            $realRg   = $matches[3]
+                            $realProv = $matches[5]   # e.g. 'microsoft.compute/<type>/<name>[/<subtype>/<name2>]'
+
+                            $obfSub = if ($script:ConsumptionSubCache.ContainsKey($realSub)) { $script:ConsumptionSubCache[$realSub] } else {
+                                $v = $prefix + 'sub_' + [guid]::NewGuid().ToString()
+                                $script:ConsumptionSubCache[$realSub] = $v; $v
+                            }
+
+                            $rebuiltUri = '/subscriptions/' + $obfSub
+
+                            if (-not [string]::IsNullOrEmpty($realRg))
+                            {
+                                $obfRg = if ($script:ConsumptionRgCache.ContainsKey($realRg)) { $script:ConsumptionRgCache[$realRg] } else {
+                                    # Preserve the AKS-managed-RG marker so the dashboard can
+                                    # still detect AKS-managed resources after obfuscation.
+                                    $isMc = $realRg -match '^mc_'
+                                    $tag  = if ($isMc) { 'mc_' } else { '' }
+                                    $v = $prefix + 'rg_' + $tag + [guid]::NewGuid().ToString()
+                                    $script:ConsumptionRgCache[$realRg] = $v; $v
+                                }
+                                $rebuiltUri += '/resourcegroups/' + $obfRg
+                            }
+
+                            if (-not [string]::IsNullOrEmpty($realProv))
+                            {
+                                # $realProv = "<rp>/<type>[/<name>[/<subtype>/<name2>...]]"
+                                # Keep the resource provider (segment 0) and every
+                                # type segment so categorisation works; obfuscate
+                                # only the name segments. After the provider, the
+                                # path alternates type-name-type-name, so within
+                                # the provider-relative index space TYPE segments
+                                # are at indices 1,3,5,... (i.e. odd) and NAME
+                                # segments are at indices 2,4,6,... (i.e. even).
+                                $provParts = $realProv -split '/'
+                                $rebuilt   = @()
+                                for ($pi = 0; $pi -lt $provParts.Count; $pi++)
+                                {
+                                    $part = $provParts[$pi]
+                                    $isNameSegment = ($pi -ge 2 -and ($pi % 2 -eq 0))
+                                    if ($isNameSegment -and -not [string]::IsNullOrEmpty($part) -and $part -ne '$system')
+                                    {
+                                        $obfName = if ($script:ConsumptionNameCache.ContainsKey($part)) { $script:ConsumptionNameCache[$part] } else {
+                                            $v = $prefix + [guid]::NewGuid().ToString()
+                                            $script:ConsumptionNameCache[$part] = $v; $v
+                                        }
+                                        $rebuilt += $obfName
+                                    }
+                                    else
+                                    {
+                                        $rebuilt += $part
+                                    }
+                                }
+                                $rebuiltUri += '/providers/' + ($rebuilt -join '/')
+                            }
+
+                            $obfuscatedUri = $rebuiltUri
                         }
+                        else
+                        {
+                            # Non-ARM-shape uri (e.g. system-namespace placeholder). Hash it
+                            # to a stable token rather than emitting the raw value. Use
+                            # the local name cache so the obfuscation dictionary file
+                            # only ever contains real-Azure-ID -> obfuscated mappings.
+                            # A null/empty resourceUri is legitimate for some meters
+                            # (marketplace purchases, certain reservations, tenant-level
+                            # charges). hashtable.ContainsKey($null) THROWS, which the
+                            # per-subscription catch below would swallow - aborting the
+                            # rest of that subscription's consumption collection. Guard
+                            # the null/empty case explicitly so one such meter row can
+                            # never truncate the consumption data (obfuscate-only bug).
+                            if ([string]::IsNullOrEmpty($rawUri))
+                            {
+                                $obfuscatedUri = 'obfuscated'
+                            }
+                            else
+                            {
+                                if (-not $script:ConsumptionNameCache.ContainsKey($rawUri))
+                                {
+                                    $script:ConsumptionNameCache[$rawUri] = $prefix + [guid]::NewGuid().ToString()
+                                }
+                                $obfuscatedUri = $script:ConsumptionNameCache[$rawUri]
+                            }
+                        }
+
+                        $usageDataExport[$item].ResourceId = $obfuscatedUri
+                        $instanceObject.'Microsoft.Resources'.resourceUri = $obfuscatedUri
 
                         # Obfuscate reservation identifiers (customer purchasing fingerprints)
                         if (![string]::IsNullOrEmpty($usageDataExport[$item].ReservationId)) {
@@ -955,11 +1571,34 @@ function ExecuteInventoryProcessing()
                     $newUsageDataExport.Add($usageDataExport[$item]) | Out-Null
                 }
 
-                #$newUsageDataExport | Export-Csv $Global:ConsumptionFileCsv -Encoding utf-8 -Append
-
                 $newUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
                 
-            } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
+                } while ('ContinuationToken' -in $usageData.psobject.properties.name -and $usageData.ContinuationToken)
+            } catch {
+                # The most common cause is a broken Az module install (manifest
+                # present, MSAL/Azure.Core assemblies missing). The script-level
+                # Import-Module probe should have caught that, but we also catch
+                # here defensively so a transient ARM throttling event or a
+                # subscription the identity cannot bill against does not abort
+                # the entire run for other subscriptions.
+                $consumptionFailedThisSub = $true
+                $consumptionFailureMessage = $_.Exception.Message
+                Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+            }
+
+            # Aggregate per-sub consumption health into globals the wrapper reads
+            # at the end of the run. Globals here live in the wrapper's scope
+            # because ResourceInventory.ps1 is invoked via `& <path>`.
+            if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+            if ($null -eq $Global:ConsumptionFailedSubs)  { $Global:ConsumptionFailedSubs  = @() }
+            $Global:ConsumptionRecordCount += $consumptionRecordsThisSub
+            if ($consumptionFailedThisSub) {
+                $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                    Name    = $sub.Name
+                    Id      = $sub.Id
+                    Message = $consumptionFailureMessage
+                }
+            }
         }
 
         $DebugPreference = "Continue"
@@ -994,27 +1633,180 @@ function FinalizeOutputs
             $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
         }
 
-        $ChartsRun = & $SummaryPath -File $file -TableStyle $TableStyle -PlatOS $PlatformOS -Subscriptions $Subscriptions -Resources $Resources -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -RunLite $false -Version $Global:Version
+        # Tenant ID is shown in the report header for reference, but it is a
+        # real Azure identifier and must NOT appear in an obfuscated (shareable)
+        # report. Pass it only when NOT obfuscating; the obfuscated HTML then
+        # carries no tenant GUID, consistent with the four obfuscation
+        # dictionaries that scrub every other identifier.
+        $reportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
+        $reportTitle = ('Azure Resource Inventory - {0}' -f $Global:ReportName)
+
+        # Unlike a single collector failing (where the rest of the inventory
+        # can still proceed - see CreateResourceJobs), the HTML report IS the
+        # deliverable: there is nothing meaningful to "continue" to after this
+        # fails. Catch here purely to give a clear, loud, specific diagnosis
+        # (which file, which stage) instead of letting a raw exception from
+        # deep inside Summary.ps1 surface as an unqualified PowerShell error,
+        # then re-throw so this subscription is still correctly marked as
+        # failed by the wrapper (same propagation path as every other
+        # uncaught throw in this script - see Az-module-load and pre-flight
+        # checks above).
+        try
+        {
+            $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+        }
+        catch
+        {
+            Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
+            Write-Log -Message ("The Inventory/Metrics/Consumption data files were still written to {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
+            throw
+        }
     }
 
     ProcessSummary
 }
 
-$Global:PowerShellTranscriptFile = ($DefaultPath + "Transcript_Log_"+ $Global:ReportName + "_" + $CurrentDateTime + ".txt")
-Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
+# === Pre-flight checks ===
+#
+# Detect the most common environment problems that make a long run pointless,
+# before transcript start, authentication, or any per-subscription work.
+#
+# When this script is invoked by Run-AllSubscriptions.ps1 (-RunAllSubs is
+# set), the wrapper has already executed the same checks at its top level,
+# so the entire block is skipped here - otherwise the checks would re-run
+# once per subscription in a multi-subscription run, adding noise to the
+# per-subscription transcript without adding safety. Standalone invocation
+# of this script still runs the full block.
+#
+# NOTE: Keep the body of this block in sync with Invoke-PreFlightChecks in
+# Functions/RunAllSubscriptions.Functions.ps1 (which Run-AllSubscriptions.ps1
+# dot-sources). This copy is deliberately kept INLINE here - not shared - so
+# the environment sanity checks have no dependency on locating another file,
+# which matters most in exactly the broken environments these checks exist to
+# catch. Intentional differences vs the wrapper copy:
+#   - This copy honors -OutputDirectory if the caller passed one (the wrapper
+#     does not expose or forward that parameter).
+#   - This copy throws on hard-fail; the wrapper's copy calls Exit-Wrapper.
+#   - This copy is gated on -not $RunAllSubs to avoid duplicate execution
+#     when invoked by the wrapper.
+if (-not $RunAllSubs.IsPresent) {
 
-# Setup and Inventory Gathering
+    # Honor -OutputDirectory when the caller passed one. CheckPowerShell will
+    # re-validate -OutputDirectory itself further down and is the authoritative
+    # gate; we Resolve-Path here defensively so a relative path is checked at
+    # the right location, and fall back to the raw value if it does not yet
+    # resolve (the write probe below will surface the underlying error).
+    $PreFlightInventoryRoot = if ($OutputDirectory) {
+        try { (Resolve-Path $OutputDirectory -ErrorAction Stop).Path }
+        catch { $OutputDirectory }
+    } elseif ($PSVersionTable.Platform -eq 'Unix') {
+        "$HOME/InventoryReports"
+    } else {
+        "C:\InventoryReports"
+    }
+    if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container)) {
+        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null }
+        catch { Write-Verbose ("PreFlightInventoryRoot create failed at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) }
+    }
+
+    Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+    # 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.
+    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+        $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
+        if ($null -eq $CheckCloudDrive) {
+            Write-Host ""
+            Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
+            Write-Host "  Outputs in $PreFlightInventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
+            Write-Host "  To persist outputs, mount a storage account first:" -ForegroundColor Yellow
+            Write-Host "    clouddrive mount" -ForegroundColor Yellow
+            Write-Host "  Continuing in ephemeral mode - download the report ZIP from $PreFlightInventoryRoot before closing the shell." -ForegroundColor Yellow
+            Write-Host ""
+        } else {
+            Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
+        }
+    }
+
+    # 2. Disk space probe.
+    try {
+        $rootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
+        $drive = $rootItem.PSDrive
+        if ($null -ne $drive -and $null -ne $drive.Free) {
+            $freeMB = [math]::Round($drive.Free / 1MB, 0)
+            if ($freeMB -lt 100) {
+                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $freeMB)
+            } elseif ($freeMB -lt 500) {
+                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $freeMB) -ForegroundColor Yellow
+            } else {
+                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+            }
+        }
+    } catch {
+        if ($_.Exception.Message -match '^Pre-flight:') { throw }
+        Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    # 3. Write probe.
+    $probePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
+    try {
+        Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
+        if ($probeRead -notmatch 'preflight write probe') {
+            throw "Write probe content mismatch (read back '$probeRead')"
+        }
+        Remove-Item -Path $probePath -Force -ErrorAction Stop
+        Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
+    } catch {
+        try { if (Test-Path $probePath) { Remove-Item -Path $probePath -Force -ErrorAction SilentlyContinue } }
+        catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $probePath, $_.Exception.Message) }
+        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+    }
+
+    Write-Host "Pre-flight checks passed." -ForegroundColor Green
+    Write-Host ""
+}
+
+# Setup and Inventory Gathering.
+#
+# Variables and RunInventorySetup populate $Global:DefaultPath, $Global:ReportName,
+# and $Global:CurrentDateTime which are required to compute the transcript path.
+# Start-Transcript must therefore run *after* RunInventorySetup, not before.
+# Previously this block placed Start-Transcript above Variables, with the result
+# that $DefaultPath/$ReportName/$CurrentDateTime were all $null at that point and
+# the transcript file landed in the current working directory with the literal
+# name "Transcript_Log__.txt" - two underscores, missing report name and missing
+# timestamp.
 $Global:Runtime = Measure-Command -Expression {
     Variables
     RunInventorySetup
+
+    $Global:PowerShellTranscriptFile = ($Global:DefaultPath + "Transcript_Log_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".txt")
+    Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
-# Execution and processing of inventory
-$Global:ReportingRunTime = Measure-Command -Expression {
-    ExecuteInventoryProcessing
+# Execution and processing of inventory.
+#
+# Wrap in try/finally so this run's transcript frame is ALWAYS stopped - even if
+# ExecuteInventoryProcessing throws a terminating error (e.g. the collector
+# circuit breaker throwing after repeated failures). PowerShell transcripts are
+# a process-wide STACK, and the -RunAllSubs wrapper invokes this script via & in
+# the SAME process. A frame left open here is orphaned on that stack; the
+# wrapper's own Stop-Transcript at the end then pops THIS orphan instead of the
+# wrapper's frame, leaving the wrapper transcript file held open ("in use",
+# undeletable) for the life of the calling shell. Stopping it here keeps the
+# stack balanced per subscription. The inner try/catch tolerates the rare case
+# where no transcript is active (Start-Transcript above having failed).
+try
+{
+    $Global:ReportingRunTime = Measure-Command -Expression {
+        ExecuteInventoryProcessing
+    }
 }
-
-Stop-Transcript
+finally
+{
+    try { Stop-Transcript }
+    catch { }
+}
 
 # Prepare the summary and outputs
 FinalizeOutputs
@@ -1031,6 +1823,20 @@ if($Obfuscate.IsPresent)
         ResourceNameMap = @{}
         SubscriptionMap = @{}
         ResourceGroupMap = @{}
+        # Maps an obfuscated subscription token to the REAL subscription display
+        # name, so Unmask-Obfuscation.ps1 can resolve the friendly name fully
+        # offline. The other maps store ARM resource Ids, which only contain the
+        # subscription GUID - never the name - so without this map the only way
+        # back to a name was an online Get-AzSubscription call.
+        SubscriptionNameMap = @{}
+        # Maps an obfuscated tag-value token back to the REAL tag value, so tag
+        # values (which keep their keys but have obfuscated values) can be
+        # reversed offline like every other obfuscated field.
+        TagMap = @{}
+        # Maps an obfuscated free-text/identity token back to the REAL value
+        # (Description, FriendlyName, CreatedBy, RoleName, container image, etc.)
+        # so Reveal-Obfuscation.ps1 can restore these free-form fields offline.
+        FreeTextMap = @{}
     }
 
     foreach ($key in $ResourceIdDictionary.Keys) {
@@ -1046,6 +1852,40 @@ if($Obfuscate.IsPresent)
         $dictionary.ResourceGroupMap[$ResourceResourceGroupDictionary[$key]] = $key
     }
 
+    # Populate token -> real subscription name. The dictionary key ($key) is the
+    # real resource Id, which embeds the subscription GUID; resolve that GUID to
+    # its display name via the already-loaded $Global:Subscriptions. Uses only
+    # in-memory data (no extra Azure calls); skips entries whose name cannot be
+    # resolved so the map only ever holds genuine names.
+    foreach ($key in $ResourceSubscriptionDictionary.Keys) {
+        $subToken = $ResourceSubscriptionDictionary[$key]
+        if ($dictionary.SubscriptionNameMap.ContainsKey($subToken)) { continue }
+        $subGuid = if ($key -match '(?i)/subscriptions/([^/]+)') { $Matches[1] } else { $null }
+        if (-not [string]::IsNullOrEmpty($subGuid)) {
+            $subName = ($Global:Subscriptions | Where-Object { $_.id -eq $subGuid } | Select-Object -First 1).name
+            if (-not [string]::IsNullOrEmpty($subName)) {
+                $dictionary.SubscriptionNameMap[$subToken] = $subName
+            }
+        }
+    }
+
+    # Invert the tag-value dictionary (real value -> token) into TagMap
+    # (token -> real value) so the unmask helper can reverse tag values.
+    if ($null -ne $Global:TagValueDictionary) {
+        foreach ($realValue in $Global:TagValueDictionary.Keys) {
+            $dictionary.TagMap[$Global:TagValueDictionary[$realValue]] = $realValue
+        }
+    }
+
+    # Invert the free-text dictionary (real value -> token) into FreeTextMap
+    # (token -> real value) so Reveal-Obfuscation.ps1 can restore free-form
+    # fields (Description, FriendlyName, CreatedBy, etc.).
+    if ($null -ne $Global:FreeTextDictionary) {
+        foreach ($realValue in $Global:FreeTextDictionary.Keys) {
+            $dictionary.FreeTextMap[$Global:FreeTextDictionary[$realValue]] = $realValue
+        }
+    }
+
     $dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
     Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
     Write-Log -Message ("") -Severity 'Info'
@@ -1053,25 +1893,66 @@ if($Obfuscate.IsPresent)
     Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
     Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
     Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
+    # The error log is created only when an error was logged; it can contain raw
+    # exception text / local paths carrying real identifiers, so it is local-only
+    # (never zipped) and listed here so the operator knows to protect it too.
+    if (![string]::IsNullOrEmpty($Global:ErrorLogFile) -and (Test-Path -LiteralPath $Global:ErrorLogFile))
+    {
+        Write-Log -Message ("  - Error log:  {0}" -f $Global:ErrorLogFile) -Severity 'Warning'
+    }
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
     Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
     Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
 }
 
-if($EnableLogs.IsPresent)
-{
-    $Global:Logging | ConvertTo-Json -depth 5 -compress | Out-File $Global:LogFile
-} 
-
 if($SkipMetrics.IsPresent)
 {
     @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
 }
+else
+{
+    # Subscriptions with zero metric-eligible resources never enter the
+    # batched-write loop in Extension/Metrics.ps1, so no Metrics_*.json is
+    # produced for them. Downstream consumers that expect *every* per-sub
+    # bundle to contain a Metrics JSON (dashboard ingestion, the
+    # ParallelStreamsAggregation tests) reject the bundle when the file is
+    # missing. Detect that case and emit an empty-but-valid Metrics JSON
+    # at the canonical $Global:MetricsJsonFile path so the bundle is always
+    # structurally complete. Use Get-ChildItem with a wildcard because the
+    # batched writer suffixes filenames with "_<rangeIdx>.json".
+    $metricsPattern = ('Metrics_{0}_{1}*.json' -f $Global:ReportName, $CurrentDateTime)
+    $metricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $metricsPattern -ErrorAction SilentlyContinue)
+    if ($metricsAny.Count -eq 0)
+    {
+        @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+    }
+}
 
 $consumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
 
-if($SkipConsumption.IsPresent -or !$consumptionCreated)
+# A subscription with zero billing records produces an empty (0-byte) CSV
+# rather than a header-only one, because Export-Csv -Append with no input
+# objects writes nothing. Treat 0-byte files as "not created" so the safety
+# net below emits the header. Without this, downstream consumers that parse
+# the CSV by header (dashboard ingestion, the Pester tests) fail on the
+# empty file and reject the entire per-sub bundle.
+$consumptionEmpty = $false
+if ($consumptionCreated)
+{
+    try
+    {
+        $consumptionEmpty = ((Get-Item -Path $Global:ConsumptionFileCsv -ErrorAction Stop).Length -eq 0)
+    }
+    catch
+    {
+        # Treat unreadable as not-created so the header gets written; safer than
+        # leaving an unparseable file in the bundle.
+        $consumptionEmpty = $true
+    }
+}
+
+if($SkipConsumption.IsPresent -or !$consumptionCreated -or $consumptionEmpty)
 {
     "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }
@@ -1080,10 +1961,19 @@ $jsonWildCard = $DefaultPath + "*.json"
 
 if($Obfuscate.IsPresent)
 {
-    # Exclude dictionary and transcript from zip - use specific json files only
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" } | Select-Object -ExpandProperty FullName
+    # Exclude the obfuscation dictionary and transcript from the obfuscated zip.
+    # The dictionary maps obfuscated values back to REAL identifiers, and the
+    # transcript captures the raw Write-Log stream (auth UPN, tenant GUID,
+    # subscription names) that the obfuscation layer never touches. The
+    # transcript is excluded separately below (it is not a .json). Use a
+    # specific json file list so only the safe, obfuscated json files ship.
+    # The Heartbeat_* .log (per-collector debug trace) is not a .json so the
+    # filter already excludes it; the explicit -notlike guard hardens that seam
+    # so it can never ship even if this filter is broadened later - the file
+    # carries a real subscription GUID and must stay local like the transcript.
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
-        Path = @($Global:File, $Global:ConsumptionFileCsv) + $jsonFiles
+        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
@@ -1091,11 +1981,16 @@ if($Obfuscate.IsPresent)
 }
 else
 {
+    # Exclude the PowerShell transcript from the default zip too. It captures
+    # the authenticated account UPN, tenant/subscription IDs, and local paths
+    # from Start-Transcript onward - data customers don't expect in the shared
+    # bundle. Keep it on disk locally for debugging (same as the obfuscate path).
     $compressionOutput = @{
-        Path = $Global:File, $Global:ConsumptionFileCsv, $Global:PowerShellTranscriptFile, $jsonWildCard
+        Path = $Global:HtmlFile, $Global:ConsumptionFileCsv, $jsonWildCard
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
+    Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
 try 

@@ -36,7 +36,7 @@ AfterAll {
 
 Describe "Front Door Collector Schema" {
     It "Should produce entries with all expected fields" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         $expected = @('ID', 'Subscription', 'ResourceGroup', 'Name', 'Location', 'Type', 'State', 'WebApplicationFirewall', 'ResourceType')
         foreach ($fd in $script:FrontDoors) {
             foreach ($field in $expected) {
@@ -48,7 +48,7 @@ Describe "Front Door Collector Schema" {
 
 Describe "Front Door Tier Detection" {
     It "Type field should only contain known tier values" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         $validTypes = @('Classic', 'Standard', 'Premium')
         foreach ($fd in $script:FrontDoors) {
             $fd.Type | Should -BeIn $validTypes -Because "Type should be one of: $($validTypes -join ', ')"
@@ -56,7 +56,7 @@ Describe "Front Door Tier Detection" {
     }
 
     It "Type should not be null or empty on any Front Door" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.Type | Should -Not -BeNullOrEmpty -Because "Type must always be populated"
         }
@@ -65,7 +65,7 @@ Describe "Front Door Tier Detection" {
 
 Describe "Front Door State Field" {
     It "State should not be null (fallback chain must produce a value)" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.State | Should -Not -BeNullOrEmpty -Because "State must fall back to provisioningState or 'Unknown'"
         }
@@ -74,7 +74,7 @@ Describe "Front Door State Field" {
 
 Describe "Front Door WAF Field" {
     It "WebApplicationFirewall field should always be populated" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             # Valid values: 'False' (Classic, no WAF), a WAF policy name (Classic, WAF attached),
             # 'obfuscated' (Classic, obfuscated mode), 'Unknown' (Standard/Premium — security
@@ -84,7 +84,7 @@ Describe "Front Door WAF Field" {
     }
 
     It "WAF value should be a known marker or a non-Azure-path string" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             # Disallow misleading 'Enabled' — Standard/Premium should report 'Unknown' now.
             $fd.WebApplicationFirewall | Should -Not -Be 'Enabled' -Because "Std/Premium WAF attachment is not detectable from the profile; 'Enabled' is misleading"
@@ -92,8 +92,8 @@ Describe "Front Door WAF Field" {
     }
 
     It "WAF value should not contain raw Azure resource paths in obfuscated mode" {
-        if ($script:FrontDoors.Count -eq 0) { return }
-        if (-not $script:IsObfuscated) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
+        if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "non-obfuscated run"; return }
         foreach ($fd in $script:FrontDoors) {
             if (![string]::IsNullOrEmpty([string]$fd.WebApplicationFirewall) -and $fd.WebApplicationFirewall -ne 'False') {
                 [string]$fd.WebApplicationFirewall | Should -Not -Match $script:AzureIdPattern -Because "WAF should not expose Azure resource path in obfuscated mode"
@@ -104,28 +104,28 @@ Describe "Front Door WAF Field" {
 
 Describe "Front Door Non-Sensitive Field Preservation" {
     It "Location should be a real Azure region (not obfuscated)" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.Location | Should -Not -Match '^(prod|nonprod)_' -Because "Location should be a real region like 'global' or 'westeurope'"
         }
     }
 
     It "Type should not be obfuscated" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.Type | Should -Not -Match '^(prod|nonprod)_' -Because "Tier identifier should be preserved for analysis"
         }
     }
 
     It "State should not be obfuscated" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.State | Should -Not -Match '^(prod|nonprod)_' -Because "State should be preserved for analysis"
         }
     }
 
     It "ResourceType should be a valid Azure resource type (not obfuscated)" {
-        if ($script:FrontDoors.Count -eq 0) { return }
+        if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         $validTypes = @('microsoft.network/frontdoors', 'microsoft.cdn/profiles')
         foreach ($fd in $script:FrontDoors) {
             $fd.ResourceType | Should -BeIn $validTypes -Because "ResourceType should be the raw Azure type, not obfuscated"
@@ -135,28 +135,28 @@ Describe "Front Door Non-Sensitive Field Preservation" {
 
 Describe "Front Door Obfuscation in Obfuscated Mode" {
     It "ID should match obfuscation pattern" {
-        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { return }
+        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "non-obfuscated run or no Front Doors"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.ID | Should -Match $script:ObfuscationPattern -Because "Obfuscated mode: ID must be masked"
         }
     }
 
     It "Name should match obfuscation pattern" {
-        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { return }
+        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "non-obfuscated run or no Front Doors"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.Name | Should -Match $script:ObfuscationPattern -Because "Obfuscated mode: Name must be masked"
         }
     }
 
     It "Subscription should match obfuscation pattern" {
-        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { return }
+        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "non-obfuscated run or no Front Doors"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.Subscription | Should -Match $script:ObfuscationPattern -Because "Obfuscated mode: Subscription must be masked"
         }
     }
 
     It "ResourceGroup should match obfuscation pattern" {
-        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { return }
+        if (-not $script:IsObfuscated -or $script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "non-obfuscated run or no Front Doors"; return }
         foreach ($fd in $script:FrontDoors) {
             $fd.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "Obfuscated mode: ResourceGroup must be masked"
         }

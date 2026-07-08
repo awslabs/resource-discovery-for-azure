@@ -24,7 +24,24 @@ BeforeAll {
         $script:AllContent[$file.Name] = Get-Content $file.FullName -Raw
     }
 
-    $script:ObfuscationPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    $script:ObfuscationPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+    # Detect obfuscation mode: if any resource ID matches the obfuscation
+    # pattern, treat the run as obfuscated. The PII-leak Describe later
+    # also depends on this signal.
+    $script:IsObfuscated = $false
+    if ($null -ne $script:Inventory) {
+        $script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object {
+                @($_.Value) | ForEach-Object {
+                    if ($script:IsObfuscated) { return }
+                    if ($null -ne $_ -and $null -ne $_.ID -and $_.ID -match $script:ObfuscationPattern) {
+                        $script:IsObfuscated = $true
+                    }
+                }
+            }
+    }
 }
 
 AfterAll {
@@ -74,32 +91,44 @@ Describe "PII Leak Scan" {
 # ============================================================
 Describe "Cross-Reference Integrity" {
     It "Every VMDisk AssociatedResource should match a VM ID or be null" {
-        $disks = @($script:Inventory.VMDisk)
+        $disks = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
+        if ($disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Checked = 0
         foreach ($disk in $disks) {
             if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource)) {
                 $disk.AssociatedResource | Should -BeIn $vmIds -Because "Disk '$($disk.ID)' should reference a known VM"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no VMDisk had a non-null AssociatedResource in this fixture" }
     }
 
     It "Every AVD HostId should match a VM ID or be null" {
-        $avd = @($script:Inventory.AVD)
+        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Checked = 0
         foreach ($item in $avd) {
             if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId)) {
                 $item.HostId | Should -BeIn $vmIds -Because "AVD HostId should reference a known VM"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had a non-null HostId in this fixture" }
     }
 
     It "AVD Hostname should differ from HostId" {
-        $avd = @($script:Inventory.AVD)
+        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Checked = 0
         foreach ($item in $avd) {
             if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId) -and ![string]::IsNullOrEmpty($item.Hostname)) {
                 $item.Hostname | Should -Not -Be $item.HostId -Because "Hostname and HostId should be different values"
+                $Checked++
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AVD had both a non-null Hostname and HostId in this fixture" }
     }
 }
 
@@ -146,7 +175,11 @@ Describe "Non-Sensitive Fields Preserved" {
     It "VM Size should be a real Azure VM size" {
         foreach ($vm in @($script:Inventory.VirtualMachines)) {
             if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size)) {
-                $vm.Size | Should -Match '^standard_' -Because "VM Size should be a real Azure size"
+                # Azure VM SKUs include Standard_*, Basic_*, M-series (M64s, M128ms),
+                # N-series GPU sizes etc. The invariant is "not obfuscated" - i.e.
+                # the size string was not run through the obfuscator. The actual
+                # SKU shape is not under this script's control.
+                $vm.Size | Should -Not -Match '^(prod|nonprod)_' -Because "VM Size should not be obfuscated"
             }
         }
     }
@@ -167,11 +200,20 @@ Describe "Non-Sensitive Fields Preserved" {
         }
     }
 
-    It "Tags should be null on all resources" {
+    It "Tag values are obfuscated (no raw values) on all resources" {
+        if (-not $script:IsObfuscated) {
+            Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
+            return
+        }
+        $obfPattern = '^(prod|nonprod)_'
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags') {
-                    $_.Tags | Should -BeNullOrEmpty -Because "Tags should be stripped when obfuscating"
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags' -and $null -ne $_.Tags) {
+                    foreach ($tag in @($_.Tags)) {
+                        if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value)) {
+                            $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, never raw, when obfuscating"
+                        }
+                    }
                 }
             }
         }
@@ -220,5 +262,37 @@ Describe "No Null Obfuscated Fields" {
                 }
             }
         }
+    }
+}
+
+
+# ============================================================
+# 6. Generic per-property leak scan
+# ============================================================
+# Walks every property of every resource across all collectors and asserts no
+# value contains a raw Azure resource path. This catches secondary-field leaks
+# that the per-collector specialised tests do not cover (since only ~14 of the
+# 57 collectors have dedicated cross-reference tests).
+Describe "Generic per-property leak scan" {
+    It "No resource property in obfuscated output should contain a raw Azure resource path" {
+        if (-not $script:IsObfuscated) {
+            Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
+            return
+        }
+        $azureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
+        $script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object {
+                $collector = $_.Name
+                @($_.Value) | ForEach-Object {
+                    if ($null -eq $_) { return }
+                    foreach ($prop in $_.PSObject.Properties) {
+                        if ($null -ne $prop.Value -and $prop.Value -is [string] -and $prop.Value -match $azureIdPattern) {
+                            $hint = "[{0}.{1}]" -f $collector, $prop.Name
+                            $prop.Value | Should -Not -Match $azureIdPattern -Because "Field $hint contains raw Azure resource path"
+                        }
+                    }
+                }
+            }
     }
 }

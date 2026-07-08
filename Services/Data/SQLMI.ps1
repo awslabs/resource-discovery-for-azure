@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -40,40 +40,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.SQLMI) 
-    {
-        $TableName = ('SQLMITable_'+($SmaResources.SQLMI.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat 0
-
-        $condtxt = @()
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Location')
-        $Exc.Add('SkuName')
-        $Exc.Add('SkuCapacity')
-        $Exc.Add('SkuTier')
-        $Exc.Add('SkuFamily')
-        $Exc.Add('LicenseType')
-        $Exc.Add('InstancePoolName')
-        $Exc.Add('vCores')
-        $Exc.Add('StorageGB')
-        $Exc.Add('StorageAccountType')
-        $Exc.Add('State')
-        $Exc.Add('ManagedInstanceCreateMode')
-        $Exc.Add('ZoneRedundant')
-        $Exc.Add('Databases')
-
-        $ExcelVar = $SmaResources.SQLMI
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'SQL MI' -AutoSize -MaxAutoSizeRows 100 -TableName $TableName -TableStyle $tableStyle -ConditionalText $condtxt -Style $Style
     }
 }

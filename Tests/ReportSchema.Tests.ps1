@@ -1,26 +1,15 @@
 # Report Schema Validation Tests
-# Validates that the Excel report has correct worksheet names and column headers
+# Validates that the HTML report is present and structurally correct, and that
+# every inventory resource type with data surfaces as a section in the report.
+#
+# The report format changed from Excel (.xlsx worksheets) to a self-contained
+# HTML file produced by Extension/Summary.ps1. These tests therefore validate
+# the HTML structure (service <details> sections keyed by id="svc-<slug>")
+# instead of worksheet names/columns. Column-level schema correctness is now
+# covered by the inventory-JSON-driven tests (the JSON is the source the HTML
+# renders from).
+#
 # Run with: Invoke-Pester ./Tests/ReportSchema.Tests.ps1 -Output Detailed
-
-$ExpectedSchema = @{
-    'Virtual Machines' = @('Subscription', 'ResourceGroup', 'Name', 'Size', 'CPU', 'Memory', 'Location', 'OS', 'OSName', 'OSVersion', 'ImageReference', 'ImageVersion', 'ImageSku', 'ImageOffer', 'OSDisk', 'OSDiskSizeGB', 'HybridBenefit', 'PowerState', 'AvailabilitySet', 'CreatedTime')
-    'AKS' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Sku', 'SkuTier', 'KubernetesVersion', 'LoadBalancerSku', 'NodePoolName', 'PoolProfileType', 'PoolMode', 'PoolOS', 'NodeSize', 'OSDiskSize', 'Nodes', 'Autoscale', 'AutoscaleMax', 'AutoscaleMin', 'MaxPodsPerNode', 'OrchestratorVersion')
-    'Containers' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Sku', 'InstanceOSType', 'ContainerName', 'ContainerState', 'ContainerImage', 'RestartCount', 'StartTime', 'Command', 'RequestCPU', 'RequestMemoryGB')
-    'Registries' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'State', 'Encryption', 'CreatedTime')
-    'VM Scale Sets' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKUTier', 'VMSize', 'vCPUs', 'RAM', 'License', 'Instances', 'AutoscaleEnabled', 'VMOS', 'OSImage', 'ImageVersion', 'DiskSizeGB', 'StorageAccountType', 'AcceleratedNetworkingEnabled', 'CreatedTime')
-    'SQL DBs' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'StorageAccountType', 'DatabaseServer', 'SecondaryLocation', 'Status', 'Type', 'Tier', 'ComputeTier', 'Sku', 'License', 'Capacity', 'DataMaxSizeGB', 'ZoneRedundant', 'CatalogCollation', 'ReadReplicaCount', 'ElasticPoolID')
-    'SQL Servers' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Kind', 'State', 'Version', 'ZoneRedundant')
-    'Runbooks' = @('Subscription', 'ResourceGroup', 'AutomationAccountName', 'AutomationAccountState', 'AutomationAccountSKU', 'AutomationAccountCreatedTime', 'Location', 'RunbookName', 'LastModifiedTime', 'RunbookState', 'RunbookType', 'RunbookDescription')
-    'Availability Sets' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'FaultDomains', 'UpdateDomains', 'VirtualMachines')
-    'FrontDoor' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'Type', 'State', 'WebApplicationFirewall')
-    'Key Vaults' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKUFamily', 'SKU')
-    'Service BUS' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'Status', 'GeoRep', 'ThroughputUnits', 'CreatedTime')
-    'Load Balancers' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'SKUTier', 'RuleCount')
-    'Public IPs' = @('Subscription', 'ResourceGroup', 'Name', 'SKU', 'Location', 'AllocationType', 'Version', 'ProvisioningState', 'Use', 'AssociatedResource', 'AssociatedResourceType')
-    'Data Explorer Clusters' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'ComputeSpecifications', 'InstanceCount', 'State', 'StateReason', 'DiskEncryption', 'StreamingIngestion', 'OptimizedAutoscale', 'OptimizedAutoscaleMin', 'OptimizedAutoscaleMax')
-    'Storage Acc' = @('Subscription', 'ResourceGroup', 'Name', 'Location', 'SKU', 'Tier', 'Kind', 'AccessTier', 'PrimaryLocation', 'StatusOfPrimary', 'HierarchicalNamespace', 'CreatedTime')
-    'Disks' = @('Subscription', 'ResourceGroup', 'Name', 'Tier', 'State', 'AssociatedResource', 'SKU', 'Size', 'Location', 'OSType', 'DiskIOPS', 'DiskMBps', 'CreatedTime')
-}
 
 Describe 'Report Schema Validation' {
     BeforeAll {
@@ -38,22 +27,29 @@ Describe 'Report Schema Validation' {
         New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
         Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
 
-        $script:XlsxFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.xlsx' | Select-Object -First 1
+        $script:HtmlFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.html' | Select-Object -First 1
+        $script:HtmlContent = if ($script:HtmlFile) { Get-Content $script:HtmlFile.FullName -Raw } else { '' }
 
-        $script:ExcelData = @{}
-        if ($script:XlsxFile) {
-            $worksheets = Get-ExcelSheetInfo -Path $script:XlsxFile.FullName
-            foreach ($ws in $worksheets) {
-                try {
-                    $data = Import-Excel -Path $script:XlsxFile.FullName -WorksheetName $ws.Name
-                    if ($data) {
-                        $script:ExcelData[$ws.Name] = @($data[0].PSObject.Properties.Name)
-                    }
-                } catch {
-                    # Sheets like Overview have no standard headers
-                }
-            }
+        # Extract the service-section slugs the report emitted. Summary.ps1
+        # builds one <details class="service-section" id="svc-<slug>"> per
+        # populated service, where <slug> is the service/JSON key lowercased
+        # with non-alphanumerics replaced by '-'.
+        $script:SectionSlugs = @()
+        if ($script:HtmlContent) {
+            $svcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
+            $script:SectionSlugs = @($svcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
         }
+
+        # Helper mirroring Summary.ps1's slug rule so tests can map a service
+        # name to its expected section id.
+        function script:Get-ServiceSlug([string]$Name) {
+            return ($Name -replace '[^a-zA-Z0-9]', '-').ToLower()
+        }
+
+        $invFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $script:InventoryJson = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
+
+        $script:ObfuscationSectionPattern = '^(prod|nonprod)-(databricks-|aks-|vmss-)?[0-9a-f]{8}-'
     }
 
     AfterAll {
@@ -62,28 +58,75 @@ Describe 'Report Schema Validation' {
         }
     }
 
-    It 'Should contain an xlsx file in the zip' {
-        $script:XlsxFile | Should -Not -BeNullOrEmpty
+    It 'Should contain an HTML report file in the zip' {
+        $script:HtmlFile | Should -Not -BeNullOrEmpty
     }
 
-    $testCases = $ExpectedSchema.Keys | ForEach-Object { @{ WorksheetName = $_; ExpectedColumns = $ExpectedSchema[$_] } }
+    It 'HTML report should be a self-contained document (no external CDN/script/style references)' {
+        if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
+        $script:HtmlContent | Should -Match '<!DOCTYPE html>' -Because 'the report must be a complete HTML document'
+        # No external resource references - the report must render offline.
+        $script:HtmlContent | Should -Not -Match 'src\s*=\s*"https?://' -Because 'no external script/image sources allowed'
+        $script:HtmlContent | Should -Not -Match '<link[^>]+href\s*=\s*"https?://' -Because 'no external stylesheet links allowed'
+    }
 
-    It "Worksheet [<WorksheetName>] should have correct columns" -TestCases $testCases {
-        param($WorksheetName, $ExpectedColumns)
+    It 'HTML report should not reference Excel/EPPlus artifacts' {
+        if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
+        $script:HtmlContent | Should -Not -Match 'OfficeOpenXml' -Because 'the HTML report has no Excel dependency'
+    }
 
-        if (-not $script:ExcelData -or -not $script:ExcelData.ContainsKey($WorksheetName)) {
-            Set-ItResult -Skipped -Because "Worksheet '$WorksheetName' not present in this report"
+    It 'HTML report should declare a Total Resources figure' {
+        if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
+        $script:HtmlContent | Should -Match 'Total Resources' -Because 'the header summarises the run'
+    }
+}
+
+# ============================================================
+# Section / inventory parity. Every inventory JSON resource type with data
+# should surface as a service section in the HTML report. This replaces the
+# old "every populated worksheet exists" invariant.
+# ============================================================
+Describe 'HTML section invariants' {
+    BeforeAll {
+        # "Fixture present" depends only on having an HTML report + inventory to
+        # compare - NOT on the section count. If we folded SectionSlugs.Count
+        # into this gate, a regression where Summary.ps1 emits an HTML with zero
+        # sections (while the inventory has data) would SKIP the parity test
+        # instead of failing it. We want that case to fail loudly.
+        $script:FixtureReady = [bool]$script:HtmlFile -and -not [string]::IsNullOrWhiteSpace($script:HtmlContent)
+    }
+
+    It 'Every inventory resource type with data should have a corresponding HTML section' {
+        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) {
+            Set-ItResult -Skipped -Because 'no HTML or inventory JSON in fixture'
             return
         }
-        $actual = $script:ExcelData[$WorksheetName]
+        $script:InventoryJson.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 } |
+            ForEach-Object {
+                $expectedSlug = script:Get-ServiceSlug $_.Name
+                $script:SectionSlugs | Should -Contain $expectedSlug `
+                    -Because "inventory key '$($_.Name)' has resources but HTML section 'svc-$expectedSlug' is missing"
+            }
+    }
 
-        # All actual columns must exist in expected schema (no unknown columns)
-        foreach ($col in $actual) {
-            $col | Should -BeIn $ExpectedColumns -Because "Column '$col' in '$WorksheetName' must be in the expected schema"
+    It 'No HTML section id should itself be obfuscated' {
+        # The obfuscator runs on resource VALUES, never on service/type names.
+        # A section slug is derived from the service key (e.g. "VirtualMachines"
+        # -> "virtualmachines"), so it must never look like an obfuscated token.
+        if (-not $script:FixtureReady) { Set-ItResult -Skipped -Because 'no fixture'; return }
+        foreach ($slug in $script:SectionSlugs) {
+            $slug | Should -Not -Match $script:ObfuscationSectionPattern -Because "section slug '$slug' looks obfuscated; service names must remain literal"
         }
+    }
 
-        # Actual columns must be in the same relative order as expected
-        $expectedOrder = $ExpectedColumns | Where-Object { $_ -in $actual }
-        $actual | Should -Be $expectedOrder -Because "Columns in '$WorksheetName' must maintain expected order"
+    It 'Report should contain at least one populated service section' {
+        # Fail (not skip) when an HTML fixture exists with a populated inventory
+        # but rendered zero sections - that is the regression this guards.
+        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) { Set-ItResult -Skipped -Because 'no fixture'; return }
+        $populatedCount = @($script:InventoryJson.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
+        if ($populatedCount -eq 0) { Set-ItResult -Skipped -Because 'inventory has no populated resource types'; return }
+        $script:SectionSlugs.Count | Should -BeGreaterThan 0 -Because 'a populated inventory must render at least one service section'
     }
 }

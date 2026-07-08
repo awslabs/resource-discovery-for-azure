@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing') 
 {
@@ -29,7 +29,7 @@ if ($Task -eq 'Processing')
             foreach ($roleProfile in $roles) 
             {
                 $roleProfileObj = @{
-                    'RoleName'        = $roleProfile.name;
+                    'RoleName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $roleProfile.name } else { $roleProfile.name };
                     'SkuName'     = $roleProfile.sku.name;
                     'SkuTier'     = $roleProfile.sku.tier;
                     'SkuCapacity'     = $roleProfile.sku.capacity;
@@ -42,25 +42,5 @@ if ($Task -eq 'Processing')
         }
         
         $tmp
-    }
-}
-else 
-{
-    if ($SmaResources.CloudServices) 
-    {
-        $TableName = ('CloudServicesTable_'+($SmaResources.CloudServices.id | Select-Object -Unique).count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0'
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')         
-        $Exc.Add('Location')                 
-
-        $ExcelVar = $SmaResources.CloudServices
-
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'CloudServices' -AutoSize -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Numberformat '0' -Style $Style
     }
 }

@@ -14,10 +14,11 @@ BeforeAll {
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
         } else { $found }
     }
-    if ([string]::IsNullOrEmpty($dictPath) -or -not (Test-Path $dictPath)) {
-        throw "No dictionary file found. Copy an ObfuscationDictionary_*.json to Tests/ or next to the zip, or set `$env:TEST_DICT_PATH"
-    }
-    $script:Dictionary = Get-Content $dictPath -Raw | ConvertFrom-Json
+    # No dictionary fixture is available when the test zip wasn't produced by an
+    # -Obfuscate run. Mark the suite skipped instead of throwing - the rest of
+    # the test framework runs in environments without a dictionary on hand.
+    $script:DictionaryAvailable = -not [string]::IsNullOrEmpty($dictPath) -and (Test-Path $dictPath)
+    $script:Dictionary = if ($script:DictionaryAvailable) { Get-Content $dictPath -Raw | ConvertFrom-Json } else { $null }
 
     # Also load inventory if available
     $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
@@ -34,7 +35,11 @@ BeforeAll {
         if ($invFile) { $script:Inventory = Get-Content $invFile.FullName -Raw | ConvertFrom-Json }
     }
 
-    $script:ObfuscationPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    # The optional type-prefix group (databricks_, aks_, vmss_) covers the
+    # legitimate variants the obfuscator emits for resources whose IDs do not
+    # fit the standard ARM shape. See ResourceInventory.ps1 lines 650-655 and
+    # 1030-1034 for where these are produced.
+    $script:ObfuscationPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     $script:AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
 }
 
@@ -44,6 +49,7 @@ AfterAll {
 
 Describe "Dictionary Structure" {
     It "Should be valid JSON with all four maps" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH or run -Obfuscate first"; return }
         $script:Dictionary | Should -Not -BeNullOrEmpty
         $script:Dictionary.PSObject.Properties.Name | Should -Contain 'ResourceIdMap'
         $script:Dictionary.PSObject.Properties.Name | Should -Contain 'ResourceNameMap'
@@ -52,10 +58,12 @@ Describe "Dictionary Structure" {
     }
 
     It "Should have a GeneratedAt timestamp" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         $script:Dictionary.GeneratedAt | Should -Not -BeNullOrEmpty
     }
 
     It "ResourceIdMap keys should be obfuscated values" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         $keys = $script:Dictionary.ResourceIdMap.PSObject.Properties.Name
         foreach ($key in $keys) {
             $key | Should -Match $script:ObfuscationPattern -Because "Dictionary key '$key' should be an obfuscated ID"
@@ -63,6 +71,7 @@ Describe "Dictionary Structure" {
     }
 
     It "ResourceIdMap values should be real Azure resource IDs" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         $values = $script:Dictionary.ResourceIdMap.PSObject.Properties.Value
         foreach ($val in $values) {
             $val | Should -Match $script:AzureIdPattern -Because "Dictionary value should be a real Azure resource ID"
@@ -72,6 +81,7 @@ Describe "Dictionary Structure" {
 
 Describe "Dictionary Completeness" {
     It "Every obfuscated ID in inventory should have a dictionary entry" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         if ($null -eq $script:Inventory) { Set-ItResult -Skipped -Because "No inventory zip provided"; return }
         $dictKeys = $script:Dictionary.ResourceIdMap.PSObject.Properties.Name
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
@@ -86,6 +96,7 @@ Describe "Dictionary Completeness" {
 
 Describe "No Double Obfuscation" {
     It "No obfuscated value should appear as a dictionary value (real ID)" {
+        if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         $values = $script:Dictionary.ResourceIdMap.PSObject.Properties.Value
         foreach ($val in $values) {
             $val | Should -Not -Match $script:ObfuscationPattern -Because "Real ID '$val' should not look like an obfuscated value"

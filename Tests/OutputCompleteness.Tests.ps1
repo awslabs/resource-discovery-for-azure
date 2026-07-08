@@ -25,9 +25,9 @@ AfterAll {
 }
 
 Describe "Zip File Contents" {
-    It "Should contain an Excel report file" {
-        $xlsx = $script:AllFiles | Where-Object { $_.Extension -eq '.xlsx' }
-        $xlsx | Should -Not -BeNullOrEmpty
+    It "Should contain an HTML report file" {
+        $html = $script:AllFiles | Where-Object { $_.Extension -eq '.html' }
+        $html | Should -Not -BeNullOrEmpty
     }
 
     It "Should contain an inventory JSON file" {
@@ -46,7 +46,7 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
-        $allowedExtensions = @('.xlsx', '.json', '.csv')
+        $allowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles) {
             $file.Extension | Should -BeIn $allowedExtensions -Because "File '$($file.Name)' has unexpected extension"
         }
@@ -118,7 +118,10 @@ Describe "Non-Sensitive Fields Preserved" {
         $vms = @($script:Inventory.VirtualMachines)
         foreach ($vm in $vms) {
             if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size)) {
-                $vm.Size | Should -Match '^standard_' -Because "VM Size should be a real Azure size like standard_d2s_v5"
+                # Same rationale as DataIntegrity.Tests.ps1: VM SKUs include
+                # Standard_*, Basic_*, M*, N* etc. The invariant under test is
+                # "not obfuscated", not a particular naming convention.
+                $vm.Size | Should -Not -Match '^(prod|nonprod)_' -Because "VM Size should not be obfuscated"
             }
         }
     }

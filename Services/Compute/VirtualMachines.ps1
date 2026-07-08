@@ -1,4 +1,4 @@
-param($SCPath, $Sub, $Resources, $Task ,$File, $SmaResources, $TableStyle, $Metrics, $ResourceIdDictionary)
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
@@ -68,6 +68,28 @@ If ($Task -eq 'Processing')
 
             $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }    
 
+            # OSName/OSVersion come from the in-guest VM agent via
+            # properties.extended.instanceView. Azure frequently returns these as
+            # null even for a running VM with a healthy ("Ready") agent - a known
+            # platform limitation (azure-cli#9284 / azure-powershell#9470) - and
+            # always null for stopped/deallocated VMs. When the agent value is
+            # absent, fall back to the source image identity (offer + sku), which
+            # Resource Graph reliably populates, then finally to the OS type. This
+            # keeps the OSName column meaningful without any extra live ARM call.
+            $ReportedOsName = $data.extended.instanceView.osname
+            $ResolvedOsName = if (![string]::IsNullOrEmpty($ReportedOsName))
+            {
+                $ReportedOsName
+            }
+            elseif (![string]::IsNullOrEmpty($data.storageProfile.imageReference.offer) -or ![string]::IsNullOrEmpty($data.storageProfile.imageReference.sku))
+            {
+                (@($data.storageProfile.imageReference.offer, $data.storageProfile.imageReference.sku) | Where-Object { ![string]::IsNullOrEmpty($_) }) -join ' '
+            }
+            else
+            {
+                $data.storageProfile.osDisk.osType
+            }
+
             $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
 
             $obfuscatedId = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id } } else { $null }
@@ -89,13 +111,14 @@ If ($Task -eq 'Processing')
                 'ImageOffer'                    = $data.storageProfile.imageReference.offer;
                 'HybridBenefit'                 = $Lic;
                 'OS'                            = $data.storageProfile.osDisk.osType;
-                'OSName'                        = $data.extended.instanceView.osname;
+                'OSName'                        = $ResolvedOsName;
                 'OSVersion'                     = $data.extended.instanceView.osversion;
                 'OSDisk'                        = $OSDisk;
                 'OSDiskSizeGB'                  = $OSDiskSize;
                 'PowerState'                    = $powerState;
                 'Zones'                         = $vm.zones.count;
                 'CreatedTime'                   = $timecreated;
+                'Tags'                          = $tags;
             }
 
             $tmp += $obj
@@ -103,45 +126,4 @@ If ($Task -eq 'Processing')
               
         $tmp
     }            
-}
-else
-{
-    if($SmaResources.VirtualMachines)
-    {
-        $TableName = 'VMTable_' + ($SmaResources.VirtualMachines |
-            Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' } |
-            Select-Object -ExpandProperty ID -Unique |
-            Measure-Object |
-            Select-Object -ExpandProperty Count)
-        $Style = New-ExcelStyle -HorizontalAlignment Center -AutoSize -NumberFormat '0' -VerticalAlignment Center
-
-        $Exc = New-Object System.Collections.Generic.List[System.Object]
-        $Exc.Add('Subscription')
-        $Exc.Add('ResourceGroup')
-        $Exc.Add('Name')
-        $Exc.Add('Size')
-        $Exc.Add('CPU')
-        $Exc.Add('Memory')
-        $Exc.Add('Location')
-        $Exc.Add('OS')
-        $Exc.Add('OSName')
-        $Exc.Add('OSVersion')
-        $Exc.Add('ImageReference')
-        $Exc.Add('ImageVersion')
-        $Exc.Add('ImageSku')
-        $Exc.Add('ImageOffer')
-        $Exc.Add('OSDisk')
-        $Exc.Add('OSDiskSizeGB')
-        $Exc.Add('HybridBenefit')
-        $Exc.Add('PowerState')
-        $Exc.Add('AvailabilitySet')
-        $Exc.Add('CreatedTime')     
-
-        # Filter: only include VMs that are not SQLVMs
-        $ExcelVar = $SmaResources.VirtualMachines | Where-Object { $_['ImageReference'] -ne 'microsoftsqlserver' }
-                    
-        $ExcelVar | 
-        ForEach-Object { [PSCustomObject]$_ } | Select-Object -Unique $Exc | 
-        Export-Excel -Path $File -WorksheetName 'Virtual Machines' -TableName $TableName -MaxAutoSizeRows 100 -TableStyle $tableStyle -Style $Style
-    }             
 }

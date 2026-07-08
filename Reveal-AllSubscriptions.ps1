@@ -130,7 +130,9 @@ $StagingDirectory = (Resolve-Path -LiteralPath $StagingDirectory).Path
 
 # The output zip must not live inside the staging directory, or it would be
 # swept into itself on the final Compress-Archive.
-$OutputZipParent = Split-Path -LiteralPath $OutputZip -Parent
+# NB: Split-Path's -Parent switch is only valid with -Path, not -LiteralPath
+# (the two are in different parameter sets), so -Path is required here.
+$OutputZipParent = Split-Path -Path $OutputZip -Parent
 if (-not [string]::IsNullOrEmpty($OutputZipParent) -and (Test-Path -LiteralPath $OutputZipParent -PathType Container))
 {
     $OutputZipParent = (Resolve-Path -LiteralPath $OutputZipParent).Path

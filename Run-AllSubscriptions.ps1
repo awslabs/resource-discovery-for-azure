@@ -389,6 +389,16 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 }
 . $FunctionsFile
 
+# Shared cross-cutting helpers (Write-RdaProgress). Same dot-source pattern.
+$CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
+if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $CommonFunctionsFile
+
 # Turn off the Windows console QuickEdit mode as early as possible so a stray
 # click in the window cannot suspend the run mid-output (the "stuck until I
 # pressed Enter" freeze). No-ops on non-Windows / non-interactive / redirected
@@ -744,7 +754,14 @@ $SubResourceCounts = @()
 if ($ParallelStreams -le 1) {
     # === SEQUENTIAL PATH (default) ============================================
     # Original behavior, unchanged. Selected when -ParallelStreams 1 or unset.
+    $SubTotal = @($subscriptions).Count
+    $SubIndex = 0
 foreach ($sub in $subscriptions) {
+    $SubIndex++
+    # Unified progress reporter: interactive bar + non-interactive line. Counts
+    # every subscription (including resume-skipped ones) so the position in the
+    # list is accurate. See Write-RdaProgress in Functions/Common.Functions.ps1.
+    Write-RdaProgress -Activity 'Processing subscriptions' -CurrentItem $sub.Name -Index $SubIndex -Total $SubTotal
     if ($Resume -and ($CompletedIds -contains $sub.Id)) {
         Write-Host ("Skipping (already completed): {0} ({1})" -f $sub.Name, $sub.Id) -ForegroundColor DarkGray
         $SkippedCount++
@@ -881,6 +898,8 @@ foreach ($sub in $subscriptions) {
 
     Write-Host "-----------------------------------" -ForegroundColor Gray
 }
+
+    Write-RdaProgress -Activity 'Processing subscriptions' -Completed
 
 } else {
     # === PARALLEL-STREAMS PATH ================================================

@@ -112,6 +112,15 @@ if (-not (Test-Path -LiteralPath $RevealScript -PathType Leaf))
     throw "Cannot find Reveal-Obfuscation.ps1 next to this script at $RevealScript"
 }
 
+# Shared helper functions (Write-RdaProgress). Dot-sourced so they load into this
+# script's scope. Fail loud if missing rather than a confusing later error.
+$CommonFunctions = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
+if (-not (Test-Path -LiteralPath $CommonFunctions -PathType Leaf))
+{
+    throw "Cannot find shared functions at $CommonFunctions"
+}
+. $CommonFunctions
+
 # Resolve the inventory root (same default Run-AllSubscriptions.ps1 uses).
 if ([string]::IsNullOrEmpty($InventoryRoot))
 {
@@ -208,12 +217,9 @@ $RevealTimeoutSeconds = 20 * 60
 foreach ($Folder in $Folders)
 {
     $FolderIndex++
-    # Progress bar in the same shape as the Service Processing bar in
-    # ResourceInventory.ps1: "<current item> (<index> of <total>)" + percent.
-    # Write-Progress renders a single updating bar in an interactive host and is
-    # a no-op in non-interactive hosts, so it never pollutes a transcript.
-    $PercentComplete = if ($FolderTotal -gt 0) { [int](($FolderIndex / $FolderTotal) * 100) } else { 100 }
-    Write-Progress -Activity 'Revealing per-subscription reports' -Status ("{0} ({1} of {2})" -f $Folder.Name, $FolderIndex, $FolderTotal) -PercentComplete $PercentComplete
+    # Unified progress reporter: interactive bar + non-interactive line + optional
+    # heartbeat. See Write-RdaProgress in Functions/Common.Functions.ps1.
+    Write-RdaProgress -Activity 'Revealing per-subscription reports' -CurrentItem $Folder.Name -Index $FolderIndex -Total $FolderTotal
 
     $Dict = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -316,7 +322,7 @@ foreach ($Folder in $Folders)
     }
 }
 
-Write-Progress -Activity 'Revealing per-subscription reports' -Completed
+Write-RdaProgress -Activity 'Revealing per-subscription reports' -Completed
 
 # Consolidate the revealed per-sub zips into one outer zip for upload.
 $StagedZips = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter '*.zip' -File -ErrorAction SilentlyContinue)

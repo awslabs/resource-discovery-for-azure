@@ -130,9 +130,33 @@ Function RunInventorySetup()
 
         if($versionNumber -ne $Global:Version)
         {
-            Write-Log -Message ('New Version Available: {0}.{1}.{2}' -f $versionJson.MajorVersion, $versionJson.MinorVersion, $versionJson.BuildVersion) -Severity 'Warning'
-            Write-Log -Message ('Download or Clone the latest version and run again: https://github.com/awslabs/resource-discovery-for-azure') -Severity 'Error'
-            Exit
+            # A version difference is informational, not fatal. Aborting the whole
+            # run on any mismatch (the previous behaviour: Write-Log Error + Exit)
+            # blocked users who were only slightly behind or on a managed clone,
+            # and mis-fired for local/dev builds whose version is AHEAD of
+            # upstream. This mirrors the network-failure branch above, which
+            # already chooses "log a clear note and continue" over aborting the
+            # inventory. Compare as semver so the note reflects reality (behind vs
+            # ahead) rather than a plain string inequality.
+            $LocalParsed = $null
+            $UpstreamParsed = $null
+            $HaveSemver = [version]::TryParse($Global:Version, [ref]$LocalParsed) -and `
+                          [version]::TryParse($versionNumber, [ref]$UpstreamParsed)
+
+            if ($HaveSemver -and $LocalParsed -lt $UpstreamParsed)
+            {
+                Write-Log -Message ('A newer version ({0}) is available; you are running {1}. Consider updating: https://github.com/awslabs/resource-discovery-for-azure' -f $versionNumber, $Global:Version) -Severity 'Warning'
+            }
+            elseif ($HaveSemver -and $LocalParsed -gt $UpstreamParsed)
+            {
+                Write-Log -Message ('Running a local/pre-release version ({0}); latest published is {1}.' -f $Global:Version, $versionNumber) -Severity 'Info'
+            }
+            else
+            {
+                Write-Log -Message ('Local version ({0}) differs from the latest published version ({1}).' -f $Global:Version, $versionNumber) -Severity 'Warning'
+            }
+            # Continue the run regardless - a version check must not gate the
+            # inventory (consistent with the network-failure branch above).
         }
     }
 

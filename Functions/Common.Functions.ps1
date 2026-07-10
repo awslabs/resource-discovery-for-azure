@@ -59,6 +59,15 @@ function Write-RdaProgress
         Force emitting the plain-text host line regardless of host detection.
         Useful for child stream processes whose stdout a parent captures.
 
+    .PARAMETER BarOnly
+        Suppress the non-interactive plain-text line entirely - emit only the
+        Write-Progress bar (plus the optional heartbeat log). Use for
+        high-frequency loops that run in non-interactive child processes (e.g.
+        the per-collector Service Processing loop, which runs inside a parallel
+        stream worker), where one line per item would flood the parent's
+        captured stdout. Mirrors the pre-existing Write-Progress-only behavior of
+        those loops while still routing through this single function.
+
     .PARAMETER Completed
         Clears the Write-Progress bar for this -Activity/-Id (and logs a
         completion line when -HeartbeatLogFile is set). Use once after the loop.
@@ -74,6 +83,7 @@ function Write-RdaProgress
         [int]      $Id = 0,
         [string]   $HeartbeatLogFile,
         [switch]   $NonInteractiveLine,
+        [switch]   $BarOnly,
         [switch]   $Completed
     )
 
@@ -107,7 +117,7 @@ function Write-RdaProgress
     # Non-interactive fallback: Write-Progress renders nothing in redirected /
     # non-interactive hosts, so emit a plain line there (or when forced) so a
     # parent process or transcript still sees movement. Skip on -Completed.
-    if (-not $Completed)
+    if (-not $Completed -and -not $BarOnly)
     {
         $HostIsInteractive = ([Environment]::UserInteractive -and -not [Console]::IsOutputRedirected)
         if ($NonInteractiveLine -or -not $HostIsInteractive)

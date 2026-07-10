@@ -1,5 +1,16 @@
 #requires -Version 7.0
-param($Subscriptions, $Resources, $Task, $ConcurrencyLimit, $FilePath, $ResourceIdDictionary, $ResourceNameDictionary, [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, $Obfuscate, $MetricsLookbackDays = 31)
+param(  $Subscriptions, 
+        $Resources, 
+        $Task, 
+        $ConcurrencyLimit, 
+        $FilePath, 
+        $ResourceIdDictionary, 
+        $ResourceNameDictionary, 
+        [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, 
+        [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, 
+        $Obfuscate, 
+        $MetricsLookbackDays = 31
+    )
 
 # Shared cross-cutting helpers (Write-RdaProgress). This extension is invoked via
 # `& $MetricPath` from ResourceInventory.ps1, which already dot-sources this file,
@@ -667,8 +678,8 @@ if ($Task -eq 'Processing')
                 }
             }
 
-            $outputPath = $FilePath + "_" + $rangeIdx + ".json"
-            $tmp | ConvertTo-Json -depth 5 -compress | Out-File $outputPath -Encoding utf8
+            $OutputPath = $FilePath + "_" + $rangeIdx + ".json"
+            $tmp | ConvertTo-Json -depth 5 -compress | Out-File $OutputPath -Encoding utf8
             $tmp.Metrics.Clear()
 
             $rangeIdx++

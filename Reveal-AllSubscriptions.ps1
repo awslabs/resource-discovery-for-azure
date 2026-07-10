@@ -59,9 +59,23 @@
 .PARAMETER RemoveStaging
     Delete the staging directory after the outer zip is successfully created.
 
+.PARAMETER Resume
+    Continue an interrupted run instead of starting fresh. Re-uses a prior run's
+    staging directory (the revealed zips already in it are the record of the
+    folders that completed) and SKIPS any folder whose revealed zip is already
+    present, so a resumed run does not redo completed work - and gets past a
+    folder that previously stalled. With -Resume and no explicit
+    -StagingDirectory, the most recent RevealedStaging_* under the inventory root
+    is auto-detected; if none is found the run stops and asks you to point
+    -StagingDirectory at the folder holding the already-revealed zips.
+
 .EXAMPLE
     # Default: reveal Subscription name + Resource Group across every sub, one outer zip
     ./Reveal-AllSubscriptions.ps1
+
+.EXAMPLE
+    # Continue an interrupted large run (skip folders already revealed last time)
+    ./Reveal-AllSubscriptions.ps1 -Resume
 
 .EXAMPLE
     # Point at a custom root and clean up the staging afterwards
@@ -84,7 +98,9 @@ param(
 
     [string]   $StagingDirectory,
 
-    [switch]   $RemoveStaging
+    [switch]   $RemoveStaging,
+
+    [switch]   $Resume
 )
 
 $ErrorActionPreference = 'Stop'
@@ -117,7 +133,30 @@ if ($All)
 $Timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 if ([string]::IsNullOrEmpty($StagingDirectory))
 {
-    $StagingDirectory = Join-Path $InventoryRoot ("RevealedStaging_" + $Timestamp)
+    if ($Resume)
+    {
+        # Resume re-uses a prior run's staging directory: the revealed zips
+        # already in it are the record of which folders completed. Auto-detect
+        # the most recent RevealedStaging_* under the inventory root. If none is
+        # found we cannot resume, so stop and tell the caller to point
+        # -StagingDirectory at the folder holding the already-revealed zips.
+        $PriorStaging = Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'RevealedStaging_*' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($null -ne $PriorStaging)
+        {
+            $StagingDirectory = $PriorStaging.FullName
+            Write-Host ("Resume: re-using most recent staging directory: {0}" -f $StagingDirectory) -ForegroundColor Cyan
+        }
+        else
+        {
+            throw "-Resume requested but no prior staging directory (RevealedStaging_*) was found under $InventoryRoot. Re-run with -StagingDirectory pointing at the folder that holds the already-revealed zips from the interrupted run."
+        }
+    }
+    else
+    {
+        $StagingDirectory = Join-Path $InventoryRoot ("RevealedStaging_" + $Timestamp)
+    }
 }
 if ([string]::IsNullOrEmpty($OutputZip))
 {
@@ -153,15 +192,28 @@ $Folders = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -ErrorAction S
 
 $PairedCount   = 0
 $RevealedCount = 0
+$ResumedCount  = 0
 $SkippedItems  = @()
 $FailedItems   = @()
 $FolderIndex   = 0
 $FolderTotal   = $Folders.Count
 
+# Hard cap on how long a single folder's reveal may run. A pathological report
+# (e.g. an unusually large or malformed zip) can make Expand-Archive /
+# Compress-Archive run effectively forever; without a cap one bad folder stalls
+# the entire batch. When a folder exceeds this it is abandoned, recorded as a
+# timeout failure, and the run continues with the next folder.
+$RevealTimeoutSeconds = 20 * 60
+
 foreach ($Folder in $Folders)
 {
     $FolderIndex++
-    Write-Progress -Activity 'Revealing per-subscription reports' -Status ("{0} of {1}" -f $FolderIndex, $FolderTotal) -PercentComplete ([int](($FolderIndex / [math]::Max($FolderTotal, 1)) * 100))
+    # Progress bar in the same shape as the Service Processing bar in
+    # ResourceInventory.ps1: "<current item> (<index> of <total>)" + percent.
+    # Write-Progress renders a single updating bar in an interactive host and is
+    # a no-op in non-interactive hosts, so it never pollutes a transcript.
+    $PercentComplete = if ($FolderTotal -gt 0) { [int](($FolderIndex / $FolderTotal) * 100) } else { 100 }
+    Write-Progress -Activity 'Revealing per-subscription reports' -Status ("{0} ({1} of {2})" -f $Folder.Name, $FolderIndex, $FolderTotal) -PercentComplete $PercentComplete
 
     $Dict = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -184,6 +236,16 @@ foreach ($Folder in $Folders)
     # so the consolidated outer zip matches the structure the ingestion server
     # expects from a normal multi-subscription run.
     $OutPath = Join-Path $StagingDirectory $Zip.Name
+
+    if ($Resume -and (Test-Path -LiteralPath $OutPath))
+    {
+        # Already revealed on a prior run: its zip is sitting in staging. Skip so
+        # a resumed run does not redo completed work (and can advance past a
+        # folder that previously stalled the batch).
+        $ResumedCount++
+        continue
+    }
+
     if (Test-Path -LiteralPath $OutPath)
     {
         # Defensive: per-run stamps are unique so this is not expected, but never
@@ -191,14 +253,49 @@ foreach ($Folder in $Folders)
         $OutPath = Join-Path $StagingDirectory ($Folder.Name + '_' + $Zip.Name)
     }
 
+    $RevealJob = $null
     try
     {
-        # In-process call so the [string[]] -Fields array binds correctly (a
-        # 'pwsh -File' child would mis-split it). Reveal-Obfuscation.ps1 raises
-        # terminating errors via throw, so a single bad subscription is caught
-        # here and the run continues with the next one. Its host chatter is
-        # redirected away to keep a large run readable.
-        & $RevealScript -InputZip $Zip.FullName -DictionaryPath $Dict.FullName -Fields $Fields -OutputZip $OutPath *> $null
+        # Run the single-report reveal as a background job bounded by
+        # $RevealTimeoutSeconds. A folder whose zip is pathological (huge or
+        # malformed) can make Expand-Archive / Compress-Archive run effectively
+        # forever; an in-process call would hang the whole batch there with no
+        # way to interrupt it. A job in a child process can be stopped, so one
+        # bad folder becomes a recorded timeout instead of a dead run.
+        #
+        # Arguments are passed via -ArgumentList (object-based), so the
+        # [string[]] $Fields array binds correctly - this does NOT suffer the
+        # 'pwsh -File' string mis-split the in-process call was avoiding.
+        # Reveal-Obfuscation.ps1 raises terminating errors via throw, which
+        # surface as a job failure and are re-thrown by Receive-Job into the
+        # catch below. Host chatter is redirected away to keep a large run
+        # readable.
+        $RevealJob = Start-Job -ScriptBlock {
+            param($RevealScript, $InputZip, $DictionaryPath, $Fields, $OutputZip)
+            & $RevealScript -InputZip $InputZip -DictionaryPath $DictionaryPath -Fields $Fields -OutputZip $OutputZip *> $null
+        } -ArgumentList $RevealScript, $Zip.FullName, $Dict.FullName, $Fields, $OutPath
+
+        $Finished = Wait-Job -Job $RevealJob -Timeout $RevealTimeoutSeconds
+
+        if ($null -eq $Finished)
+        {
+            # Exceeded the per-folder cap. Kill the child process so it cannot
+            # keep the batch hostage, record it, and move on to the next folder.
+            Stop-Job -Job $RevealJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue
+            $RevealJob = $null
+            # A Stop-Job mid-compress can leave a truncated zip at $OutPath.
+            # Delete it so it is neither swept into the consolidated outer zip nor
+            # mistaken for completed work by a later -Resume.
+            Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
+            $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = ("timed out after {0} minutes" -f ($RevealTimeoutSeconds / 60)) }
+            continue
+        }
+
+        # Re-throw any terminating error the child raised into the catch below.
+        Receive-Job -Job $RevealJob -ErrorAction Stop | Out-Null
+        Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue
+        $RevealJob = $null
 
         if (Test-Path -LiteralPath $OutPath)
         {
@@ -211,6 +308,10 @@ foreach ($Folder in $Folders)
     }
     catch
     {
+        if ($null -ne $RevealJob) { Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue }
+        # Drop any partial/truncated output the failed reveal may have left, so it
+        # is not consolidated or treated as done on a later -Resume.
+        Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
         $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = $_.Exception.Message }
     }
 }
@@ -219,9 +320,24 @@ Write-Progress -Activity 'Revealing per-subscription reports' -Completed
 
 # Consolidate the revealed per-sub zips into one outer zip for upload.
 $StagedZips = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter '*.zip' -File -ErrorAction SilentlyContinue)
+$ConsolidationError = $null
 if ($StagedZips.Count -gt 0)
 {
-    Compress-Archive -Path $StagedZips.FullName -DestinationPath $OutputZip -Force
+    try
+    {
+        # -LiteralPath (not -Path): staged names are taken verbatim. -Path treats
+        # each value as a wildcard, so a report name containing '[' or ']' would
+        # silently fail to match and abort the archive.
+        Compress-Archive -LiteralPath $StagedZips.FullName -DestinationPath $OutputZip -Force
+    }
+    catch
+    {
+        # Fail LOUD but do not die here. The revealed per-subscription zips are
+        # already in staging, so the run is recoverable. Record the reason and
+        # fall through to the summary instead of terminating before it prints
+        # (which looked like a silent crash - header shown, no summary).
+        $ConsolidationError = $_.Exception.Message
+    }
 }
 
 # ---- Summary ---------------------------------------------------------------
@@ -230,6 +346,7 @@ Write-Host "================ Reveal Summary ================" -ForegroundColor G
 Write-Host ("Per-subscription folders scanned : {0}" -f $FolderTotal) -ForegroundColor Green
 Write-Host ("Paired (zip + dictionary)        : {0}" -f $PairedCount) -ForegroundColor Green
 Write-Host ("Revealed successfully            : {0}" -f $RevealedCount) -ForegroundColor Green
+Write-Host ("Skipped (already revealed-resume): {0}" -f $ResumedCount) -ForegroundColor $(if ($ResumedCount -gt 0) { 'Cyan' } else { 'Green' })
 Write-Host ("Skipped (missing zip or dict)    : {0}" -f $SkippedItems.Count) -ForegroundColor $(if ($SkippedItems.Count -gt 0) { 'Yellow' } else { 'Green' })
 Write-Host ("Failed during reveal             : {0}" -f $FailedItems.Count) -ForegroundColor $(if ($FailedItems.Count -gt 0) { 'Red' } else { 'Green' })
 
@@ -243,18 +360,30 @@ foreach ($f in $FailedItems)
 }
 
 Write-Host ""
-if ($StagedZips.Count -gt 0 -and (Test-Path -LiteralPath $OutputZip))
+if ($null -eq $ConsolidationError -and $StagedZips.Count -gt 0 -and (Test-Path -LiteralPath $OutputZip))
 {
     Write-Host ("Consolidated {0} revealed report(s) into:" -f $StagedZips.Count) -ForegroundColor Green
     Write-Host ("  {0}" -f $OutputZip) -ForegroundColor Green
     Write-Host "Upload this single zip to the ingestion server." -ForegroundColor Green
+}
+elseif ($null -ne $ConsolidationError)
+{
+    Write-Host ("Revealed {0} report(s), but consolidating them into the outer zip FAILED:" -f $StagedZips.Count) -ForegroundColor Red
+    Write-Host ("  {0}" -f $ConsolidationError) -ForegroundColor Red
+    Write-Host ("The revealed per-subscription zips are intact in staging - re-run or zip them manually:" ) -ForegroundColor Yellow
+    Write-Host ("  {0}" -f $StagingDirectory) -ForegroundColor Yellow
 }
 else
 {
     Write-Host "No revealed reports were produced - nothing to consolidate. Check the SKIP/FAIL list above." -ForegroundColor Red
 }
 
-if ($RemoveStaging -and (Test-Path -LiteralPath $OutputZip))
+# Only tear down staging on a fully CLEAN run (outer zip built, nothing failed
+# or timed out, no consolidation error). If any folder failed/timed out, the
+# staged zips are the only record of what already completed - deleting them
+# would defeat a later -Resume. So keep staging and say why.
+$CleanRun = ($FailedItems.Count -eq 0 -and $null -eq $ConsolidationError)
+if ($RemoveStaging -and $CleanRun -and (Test-Path -LiteralPath $OutputZip))
 {
     try
     {
@@ -266,6 +395,11 @@ if ($RemoveStaging -and (Test-Path -LiteralPath $OutputZip))
         Write-Host ("WARNING: could not remove staging directory {0}: {1}" -f $StagingDirectory, $_.Exception.Message) -ForegroundColor Yellow
     }
 }
+elseif ($RemoveStaging -and -not $CleanRun)
+{
+    Write-Host ("-RemoveStaging skipped: {0} folder(s) failed or timed out. Staging kept so you can recover them with -Resume:" -f $FailedItems.Count) -ForegroundColor Yellow
+    Write-Host ("  {0}" -f $StagingDirectory) -ForegroundColor Yellow
+}
 else
 {
     Write-Host ("Individual revealed zips kept in: {0}" -f $StagingDirectory) -ForegroundColor DarkGray
@@ -274,6 +408,10 @@ else
 # Non-zero exit if nothing was produced, or if any subscription failed to reveal,
 # so an automated/large run surfaces problems instead of looking clean.
 if ($StagedZips.Count -eq 0)
+{
+    exit 1
+}
+if ($null -ne $ConsolidationError)
 {
     exit 1
 }

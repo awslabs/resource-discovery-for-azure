@@ -652,18 +652,22 @@ if ($Task -eq 'Processing')
 
             if($Obfuscate)
             {
-                foreach ($metric in $tmp.Metrics) 
+                foreach ($metric in $tmp.Metrics)
                 {
                     $originalId = $metric.ID
-                    if (![string]::IsNullOrEmpty($originalId) -and $ResourceIdDictionary.ContainsKey($originalId)) {
+                    if (![string]::IsNullOrEmpty($originalId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($originalId))
+                    {
                         $metric.ID = $ResourceIdDictionary[$originalId]
                         $metric.Name = $ResourceNameDictionary[$originalId]
                         $metric.Subscription = $ResourceSubDictionary[$originalId]
                         $metric.ResourceGroup = $ResourceGroupDictionary[$originalId]
-                    } else {
+                    }
+                    else
+                    {
                         # Fallback: resource not in main dictionary (e.g., deleted/transient resource)
                         # Cache the obfuscated value so same resource correlates across metrics
-                        if (![string]::IsNullOrEmpty($originalId)) {
+                        if (![string]::IsNullOrEmpty($originalId))
+                        {
                             $fbPrefix = if ($originalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
                             $ResourceIdDictionary[$originalId] = $fbPrefix + [guid]::NewGuid().ToString()
                             $ResourceNameDictionary[$originalId] = $fbPrefix + [guid]::NewGuid().ToString()

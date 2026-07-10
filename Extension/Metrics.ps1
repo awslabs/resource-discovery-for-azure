@@ -1,6 +1,21 @@
 #requires -Version 7.0
 param($Subscriptions, $Resources, $Task, $ConcurrencyLimit, $FilePath, $ResourceIdDictionary, $ResourceNameDictionary, [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, $Obfuscate, $MetricsLookbackDays = 31)
 
+# Shared cross-cutting helpers (Write-RdaProgress). This extension is invoked via
+# `& $MetricPath` from ResourceInventory.ps1, which already dot-sources this file,
+# so the function is normally in scope. Re-load it here (only if not already
+# defined) so the extension stays self-contained and progress never no-ops just
+# because of how it was invoked. Best-effort: a missing file must not break the
+# metrics phase.
+if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
+{
+    $CommonFunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'
+    if (Test-Path -Path $CommonFunctionsFile -PathType Leaf)
+    {
+        . $CommonFunctionsFile
+    }
+}
+
 if ($Task -eq 'Processing')
 {
     $tmp = New-Object PSObject
@@ -340,7 +355,14 @@ if ($Task -eq 'Processing')
         if($defs.Count -ge $rangeBatch -or $metricsProcessed -ge $metricCount)
         {
             $batchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            Write-Host ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $rangeIdx, $defs.Count, $metricsProcessed, $metricCount) -ForegroundColor Cyan
+            # Bar-only progress: the metrics phase runs inside the non-interactive
+            # parallel stream worker, where one stdout line per batch would clutter
+            # the parent's demuxed output on a large tenant. -BarOnly renders the
+            # Write-Progress bar interactively (no-op otherwise, no stdout line).
+            # The per-batch dispatch detail is preserved as Write-Verbose below and
+            # in the end-of-phase diagnostics summary.
+            Write-RdaProgress -Activity 'Metrics collection' -CurrentItem ("batch {0} ({1} call(s))" -f $rangeIdx, $defs.Count) -Index $metricsProcessed -Total $metricCount -BarOnly
+            Write-Verbose ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $rangeIdx, $defs.Count, $metricsProcessed, $metricCount)
 
             $defs | ForEach-Object -Parallel {
                 $totalCount = $using:metricCount
@@ -615,7 +637,7 @@ if ($Task -eq 'Processing')
             $defs.Clear()
 
             $batchStopwatch.Stop()
-            Write-Host ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $rangeIdx, [math]::Round($batchStopwatch.Elapsed.TotalSeconds, 1), $metricDiagnostics.Count) -ForegroundColor Cyan
+            Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $rangeIdx, [math]::Round($batchStopwatch.Elapsed.TotalSeconds, 1), $metricDiagnostics.Count)
 
             if($Obfuscate)
             {
@@ -652,6 +674,9 @@ if ($Task -eq 'Processing')
             $rangeIdx++
         }
     }
+
+    # Clear the progress bar now that every batch has been dispatched.
+    Write-RdaProgress -Activity 'Metrics collection' -Completed
 
     $phaseStopwatch.Stop()
 

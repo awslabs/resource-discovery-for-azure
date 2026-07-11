@@ -48,6 +48,12 @@ param(
     $ExtractionRunTime,
     $ReportingRunTime,
 
+    # Ordered hashtable of { phase label -> [TimeSpan] } giving a clear per-phase
+    # timing breakdown (metrics / collectors / consumption) for the header, so it
+    # is obvious which phase dominates a long run. Optional; when omitted only the
+    # coarse extraction/total timers are shown.
+    $PhaseTimings,
+
     # Environment label (e.g. 'Azure CloudShell', 'PowerShell Unix'). Display only.
     $PlatOS,
 
@@ -75,6 +81,13 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
 {
     throw "Summary.ps1: -HtmlFile output path is required."
 }
+
+# Self-measure the HTML render (JSON read + all fragment building). Summary CANNOT
+# measure the collection phases - they already ran and are passed in via
+# -PhaseTimings - but it CAN time its own render, so the report shows its own
+# generation cost too. Stopped just before the header is assembled; the final
+# here-string interpolation + file write after that is trivially fast.
+$RenderStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Read input JSON. Top-level keys are service-type names; values are arrays of
 # resource records. No schema validation - a new field simply appears as a new
@@ -443,10 +456,12 @@ function New-ServiceTable
         $columns = $columns | Where-Object { $obfuscatedNoiseColumns -notcontains $_ }
     }
 
-    # Cap column count to keep the table readable. 12 is a soft limit that
-    # fits the most informative columns without horizontal scroll on most
-    # screens.
-    if ($columns.Count -gt 12) { $columns = $columns[0..11] }
+    # A 12-column cap used to be applied here to avoid horizontal scrolling on
+    # narrow screens, but it silently DROPPED genuinely useful collected columns
+    # (e.g. ImageSku = the OS image edition, OSType). Now that every table has a
+    # synced top+bottom horizontal scrollbar (see .table-scroll-top /
+    # setupTopScroll in the CSS/JS), the width is fully navigable, so ALL
+    # collected columns are shown rather than hidden behind a cap.
 
     # Render header
     $sb = New-Object System.Text.StringBuilder
@@ -658,6 +673,16 @@ header h1 { margin: 0 0 8px 0; font-size: 22px; }
 .table-scroll::-webkit-scrollbar-track { background: var(--row-alt); border-radius: 5px; }
 .table-scroll::-webkit-scrollbar-thumb { background: #b0b6bd; border-radius: 5px; }
 .table-scroll::-webkit-scrollbar-thumb:hover { background: #8a9099; }
+/* Synced TOP horizontal scrollbar for wide tables. The native scrollbar sits at
+   the BOTTOM of a tall table (hundreds of rows) and is unreachable without
+   scrolling the whole page down; this mirror sits ABOVE the table so far-right
+   columns can be reached immediately. The element is injected by JS. */
+.table-scroll-top { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #b0b6bd transparent; }
+.table-scroll-top::-webkit-scrollbar { height: 10px; }
+.table-scroll-top::-webkit-scrollbar-track { background: var(--row-alt); border-radius: 5px; }
+.table-scroll-top::-webkit-scrollbar-thumb { background: #b0b6bd; border-radius: 5px; }
+.table-scroll-top::-webkit-scrollbar-thumb:hover { background: #8a9099; }
+.table-scroll-top-inner { height: 1px; }
 .svc-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .svc-table th, .svc-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .svc-table th { background: var(--row-alt); font-weight: 600; cursor: pointer; user-select: none; }
@@ -788,14 +813,64 @@ $js = @'
     if (btnCollapse) btnCollapse.addEventListener('click', function () {
         document.querySelectorAll('.service-section').forEach(function (d) { d.open = false; });
     });
+
+    // Synced TOP horizontal scrollbar for wide tables. The native scrollbar sits
+    // at the BOTTOM of a tall table (e.g. hundreds of VMs) and can't be reached
+    // without scrolling the whole page down; this mirror above the table scrolls
+    // the same content horizontally so far-right columns are reachable at once.
+    // Width is (re)computed when a section is expanded (a collapsed <details> has
+    // no dimensions) and on resize. If JS is off the table still scrolls natively.
+    function setupTopScroll(wrap) {
+        var top = document.createElement('div');
+        top.className = 'table-scroll-top';
+        var inner = document.createElement('div');
+        inner.className = 'table-scroll-top-inner';
+        top.appendChild(inner);
+        wrap.parentNode.insertBefore(top, wrap);
+        function sync() {
+            inner.style.width = wrap.scrollWidth + 'px';
+            top.style.display = (wrap.scrollWidth > wrap.clientWidth + 1) ? 'block' : 'none';
+        }
+        top.addEventListener('scroll', function () { wrap.scrollLeft = top.scrollLeft; });
+        wrap.addEventListener('scroll', function () { top.scrollLeft = wrap.scrollLeft; });
+        var det = wrap.closest('details');
+        if (det) det.addEventListener('toggle', function () { if (det.open) sync(); });
+        window.addEventListener('resize', sync);
+        sync();
+    }
+    document.querySelectorAll('.table-scroll').forEach(setupTopScroll);
 })();
 '@
 
 # Build the full document. Using a here-string so the layout reads top-down.
 $tenantBlock  = if ([string]::IsNullOrWhiteSpace($tenantSafe))  { '' } else { "<div><b>Tenant:</b> $tenantSafe</div>" }
 $versionBlock = if ([string]::IsNullOrWhiteSpace($versionSafe)) { '' } else { "<div><b>RDA version:</b> $versionSafe</div>" }
-$extractBlock = if ([string]::IsNullOrWhiteSpace($extractTimeText)) { '' } else { "<div><b>Extraction time:</b> $extractTimeText</div>" }
-$reportBlock  = if ([string]::IsNullOrWhiteSpace($reportTimeText))  { '' } else { "<div><b>Reporting time:</b> $reportTimeText</div>" }
+$extractBlock = if ([string]::IsNullOrWhiteSpace($extractTimeText)) { '' } else { "<div><b>Setup and resource discovery:</b> $extractTimeText</div>" }
+$reportBlock  = if ([string]::IsNullOrWhiteSpace($reportTimeText))  { '' } else { "<div><b>Total collection (all phases):</b> $reportTimeText</div>" }
+
+# Clear per-phase timing breakdown (metrics / collectors / consumption) from
+# -PhaseTimings, rendered as individual header lines so it is obvious which phase
+# dominates a long run. Labels are our own fixed text; HTML-escaped defensively.
+$phaseBlocks = ''
+if ($PhaseTimings)
+{
+    foreach ($phaseName in $PhaseTimings.Keys)
+    {
+        $phaseSpan = $PhaseTimings[$phaseName]
+        if ($phaseSpan -is [TimeSpan])
+        {
+            $phaseDurText = if ($phaseSpan.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$phaseSpan.TotalSeconds) } else { ('{0} Minutes' -f $phaseSpan.TotalMinutes.ToString('#######.##')) }
+            $phaseBlocks += ("<div><b>{0}:</b> {1}</div>" -f (ConvertTo-HtmlSafe ([string]$phaseName)), $phaseDurText)
+        }
+    }
+}
+
+# Stop the render self-timer now: everything expensive (JSON read + all HTML
+# fragment building) is done; only the final here-string assembly + file write
+# remain, which are trivially fast.
+$RenderStopwatch.Stop()
+$renderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##')) }
+$renderBlock = "<div><b>Report generation (HTML):</b> $renderTimeText</div>"
 $platBlock    = if ([string]::IsNullOrWhiteSpace($platSafe))        { '' } else { "<div><b>Environment:</b> $platSafe</div>" }
 
 # Privacy banner. Obfuscated runs surface a green confirmation; identifiable
@@ -852,7 +927,9 @@ $tenantBlock
 <div><b>Generated:</b> $generated</div>
 $versionBlock
 $extractBlock
+$phaseBlocks
 $reportBlock
+$renderBlock
 $platBlock
 <div><b>Total Resources:</b> $TotalResources</div>
 <div><b>Service Types:</b> $($ServiceSummary.Count)</div>

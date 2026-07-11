@@ -68,28 +68,6 @@ If ($Task -eq 'Processing')
 
             $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }    
 
-            # OSName/OSVersion come from the in-guest VM agent via
-            # properties.extended.instanceView. Azure frequently returns these as
-            # null even for a running VM with a healthy ("Ready") agent - a known
-            # platform limitation (azure-cli#9284 / azure-powershell#9470) - and
-            # always null for stopped/deallocated VMs. When the agent value is
-            # absent, fall back to the source image identity (offer + sku), which
-            # Resource Graph reliably populates, then finally to the OS type. This
-            # keeps the OSName column meaningful without any extra live ARM call.
-            $ReportedOsName = $data.extended.instanceView.osname
-            $ResolvedOsName = if (![string]::IsNullOrEmpty($ReportedOsName))
-            {
-                $ReportedOsName
-            }
-            elseif (![string]::IsNullOrEmpty($data.storageProfile.imageReference.offer) -or ![string]::IsNullOrEmpty($data.storageProfile.imageReference.sku))
-            {
-                (@($data.storageProfile.imageReference.offer, $data.storageProfile.imageReference.sku) | Where-Object { ![string]::IsNullOrEmpty($_) }) -join ' '
-            }
-            else
-            {
-                $data.storageProfile.osDisk.osType
-            }
-
             $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
 
             $obfuscatedId = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id } } else { $null }
@@ -110,8 +88,7 @@ If ($Task -eq 'Processing')
                 'ImageSku'                      = $data.storageProfile.imageReference.sku;
                 'ImageOffer'                    = $data.storageProfile.imageReference.offer;
                 'HybridBenefit'                 = $Lic;
-                'OS'                            = $data.storageProfile.osDisk.osType;
-                'OSName'                        = $ResolvedOsName;
+                'OSType'                        = $data.storageProfile.osDisk.osType;
                 'OSVersion'                     = $data.extended.instanceView.osversion;
                 'OSDisk'                        = $OSDisk;
                 'OSDiskSizeGB'                  = $OSDiskSize;

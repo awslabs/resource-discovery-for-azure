@@ -1789,15 +1789,41 @@ function ExecuteInventoryProcessing()
     }
 
     InitializeInventoryProcessing
+
+    # Per-phase timing for the report header. Stored in $script: scope (NOT a new
+    # $Global:) so it is readable by ProcessSummary later without polluting the
+    # global namespace and without persisting across subscriptions under
+    # -RunAllSubs (each & invocation gets a fresh script scope). The individual
+    # phase calls are timed WITHOUT reordering them - the stopwatches wrap the
+    # existing calls exactly as they were. This replaces the single opaque
+    # "Reporting time" (which bundled metrics + collectors + consumption) with a
+    # clear breakdown so an operator can see which phase dominates a long run.
+    $script:PhaseTimings = [ordered]@{}
+
+    $MetricsPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     CreateMetricsJob
+    $MetricsPhaseTimer.Stop()
+
+    $CollectorPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     CreateResourceJobs   
+    $CollectorPhaseTimer.Stop()
+
     ProcessMetricsResult
     ProcessResourceResult
 
+    if (!$SkipMetrics.IsPresent)
+    {
+        $script:PhaseTimings['Metrics collection (Azure Monitor)'] = $MetricsPhaseTimer.Elapsed
+    }
+    $script:PhaseTimings['Resource detail collection (service collectors)'] = $CollectorPhaseTimer.Elapsed
+
     if(!$SkipConsumption.IsPresent)
     {
+       $ConsumptionPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
        GetResorceConsumption
        #ProcessResourceConsumption
+       $ConsumptionPhaseTimer.Stop()
+       $script:PhaseTimings['Consumption / cost collection (billing)'] = $ConsumptionPhaseTimer.Elapsed
     }
 }
 
@@ -1837,7 +1863,7 @@ function FinalizeOutputs
         # checks above).
         try
         {
-            $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+            $ChartsRun = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $reportTitle -TenantId $reportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
         }
         catch
         {

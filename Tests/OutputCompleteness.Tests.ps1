@@ -129,8 +129,8 @@ Describe "Non-Sensitive Fields Preserved" {
     It "VM OS should be a real OS type" {
         $vms = @($script:Inventory.VirtualMachines)
         foreach ($vm in $vms) {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OS)) {
-                $vm.OS | Should -BeIn @('windows', 'linux') -Because "OS should be windows or linux"
+            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType)) {
+                $vm.OSType | Should -BeIn @('windows', 'linux') -Because "OSType should be windows or linux"
             }
         }
     }

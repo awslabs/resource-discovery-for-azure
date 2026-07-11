@@ -6,6 +6,7 @@ param ($TenantID,
         [ValidatePattern('^[A-Za-z0-9._()-]{1,90}$', ErrorMessage = 'Invalid resource group name; must match ^[A-Za-z0-9._()-]{1,90}$')]
         [string]$ResourceGroup, 
         [string[]]$Service,
+        [string]$ObfuscationDictionary,
         [switch]$Debug, 
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
@@ -770,6 +771,70 @@ Function RunInventorySetup()
         $subLookup = @{}
         $rgLookup  = @{}
 
+        # -ObfuscationDictionary seeding. When a prior run's saved dictionary file
+        # is supplied, preload the obfuscation maps from it so identical real values
+        # yield the SAME prod_/nonprod_ tokens as that earlier run. This is what lets
+        # a scoped recovery run (e.g. -Service <one collector>) be merged back into
+        # the earlier bundle - without it, each run mints fresh random GUID tokens
+        # and the recovered rows would not join. New real values not in the seed
+        # still get fresh tokens below, so determinism is EXTENDED, never broken.
+        # (Pre-flight has already validated the file exists, parses, and -Obfuscate.)
+        #
+        # The saved file stores each map inverted (token -> real):
+        #   - ResourceIdMap / ResourceNameMap: token -> real resource ID. These
+        #     tokens are UNIQUE per resource so the maps are complete; invert them
+        #     back to the in-memory (real ID -> token) form.
+        #   - TagMap / FreeTextMap: token -> real value; the collector loop reuses
+        #     these via ContainsKey, so seeding the real-value-keyed dicts suffices.
+        #   - Subscription / ResourceGroup tokens are SHARED by every resource in a
+        #     sub/RG, so SubscriptionMap/ResourceGroupMap collapse to one
+        #     representative real ID per token and CANNOT be reused ID-keyed. Rebuild
+        #     the real-value-keyed $subLookup/$rgLookup the mint logic consults:
+        #       sub -> SubscriptionNameMap gives token -> real subscription NAME,
+        #              which is exactly the key the mint logic uses.
+        #       rg  -> extract the RG name from each ResourceGroupMap representative
+        #              real ID (/resourcegroups/<name>/); $rgLookup is a
+        #              case-insensitive hashtable so ID-vs-property casing is moot.
+        if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
+        {
+            $SeedDictionary = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
+
+            if ($null -ne $SeedDictionary.ResourceIdMap)
+            {
+                foreach ($SeedProp in $SeedDictionary.ResourceIdMap.PSObject.Properties) { $ResourceIdDictionary[$SeedProp.Value] = $SeedProp.Name }
+            }
+            if ($null -ne $SeedDictionary.ResourceNameMap)
+            {
+                foreach ($SeedProp in $SeedDictionary.ResourceNameMap.PSObject.Properties) { $ResourceNameDictionary[$SeedProp.Value] = $SeedProp.Name }
+            }
+            if ($null -ne $SeedDictionary.TagMap)
+            {
+                foreach ($SeedProp in $SeedDictionary.TagMap.PSObject.Properties) { $Global:TagValueDictionary[$SeedProp.Value] = $SeedProp.Name }
+            }
+            if ($null -ne $SeedDictionary.FreeTextMap)
+            {
+                foreach ($SeedProp in $SeedDictionary.FreeTextMap.PSObject.Properties) { $Global:FreeTextDictionary[$SeedProp.Value] = $SeedProp.Name }
+            }
+            if ($null -ne $SeedDictionary.SubscriptionNameMap)
+            {
+                # property NAME = subscription token, VALUE = real subscription name
+                foreach ($SeedProp in $SeedDictionary.SubscriptionNameMap.PSObject.Properties)
+                {
+                    if (-not [string]::IsNullOrEmpty($SeedProp.Value)) { $subLookup[$SeedProp.Value] = $SeedProp.Name }
+                }
+            }
+            if ($null -ne $SeedDictionary.ResourceGroupMap)
+            {
+                # property NAME = RG token, VALUE = representative real resource ID
+                foreach ($SeedProp in $SeedDictionary.ResourceGroupMap.PSObject.Properties)
+                {
+                    if ($SeedProp.Value -match '(?i)/resourcegroups/([^/]+)') { $rgLookup[$Matches[1]] = $SeedProp.Name }
+                }
+            }
+
+            Write-Log -Message ("Obfuscation dictionary seeded from '{0}': {1} id, {2} name, {3} subscription, {4} resource-group, {5} tag, {6} free-text mappings preloaded; matching real values will reuse their existing tokens." -f $ObfuscationDictionary, @($ResourceIdDictionary.Keys).Count, @($ResourceNameDictionary.Keys).Count, @($subLookup.Keys).Count, @($rgLookup.Keys).Count, @($Global:TagValueDictionary.Keys).Count, @($Global:FreeTextDictionary.Keys).Count) -Severity 'Info'
+        }
+
         foreach ($resourceItem in $Global:Resources) 
         {
             $isNonProd = $resourceItem.name -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $resourceItem.name -match '(^|-)([dts])-'
@@ -805,6 +870,29 @@ Function RunInventorySetup()
                 $rgLookup[$realRG] = $rgPrefix + [guid]::NewGuid().ToString()
             }
             $obfuscatedResourceGroup = $rgLookup[$realRG]
+
+            # Seeded reuse (-ObfuscationDictionary): if this real resource ID was
+            # preloaded from a prior run's dictionary, reuse its per-resource ID and
+            # Name tokens so a scoped recovery run's output lands in the SAME token
+            # space as the bundle it will be merged into. Gated purely on
+            # ContainsKey: on a normal (non-seeded) run the dictionary starts empty
+            # and this loop is what first populates it, so ContainsKey is always
+            # false here and behavior is byte-for-byte unchanged. The ID/Name GUIDs
+            # minted just above are harmless throwaway on a seed hit.
+            #
+            # Subscription and ResourceGroup tokens are deliberately NOT reused from
+            # the ID-keyed dictionaries here: those tokens are SHARED by every
+            # resource in a sub/RG, so the saved SubscriptionMap/ResourceGroupMap
+            # collapse to one representative ID per token and the reseeded ID-keyed
+            # dicts are sparse. Instead they are reused via the real-value-keyed
+            # $subLookup/$rgLookup, which the mint logic above already consulted and
+            # which the seed block populated - so $obfuscatedSubscription /
+            # $obfuscatedResourceGroup are already the seeded tokens at this point.
+            if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
+            {
+                $obfuscatedID   = $ResourceIdDictionary[$resourceItem.ID]
+                $obfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
+            }
 
             $ResourceIdDictionary[$resourceItem.ID] = $obfuscatedID
             $ResourceNameDictionary[$resourceItem.ID] = $obfuscatedName
@@ -1836,6 +1924,36 @@ if (-not $RunAllSubs.IsPresent) {
             exit 1
         }
         Write-Host ("Pre-flight: -Service will collect {0} of {1} collectors: [{2}]" -f @($PreFlightMatchedServices).Count, @($PreFlightAvailableServices).Count, ($PreFlightMatchedServices -join ', ')) -ForegroundColor Green
+    }
+
+    # 0b. -ObfuscationDictionary fast-fail. Seeding only makes sense with
+    # -Obfuscate (the dictionaries are created only then), and a missing or
+    # unreadable seed file must stop the run BEFORE auth rather than silently
+    # minting fresh tokens - which would make a later merge fail to line up.
+    # exit 1 (not throw) for the same reason as the -Service gate above:
+    # $ErrorActionPreference is SilentlyContinue for a normal run.
+    if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
+    {
+        if (-not $Obfuscate.IsPresent)
+        {
+            Write-Host "ERROR: -ObfuscationDictionary requires -Obfuscate (there are no obfuscation dictionaries to seed without it)." -ForegroundColor Red
+            exit 1
+        }
+        if (-not (Test-Path -Path $ObfuscationDictionary -PathType Leaf))
+        {
+            Write-Host ("ERROR: -ObfuscationDictionary file not found: {0}" -f $ObfuscationDictionary) -ForegroundColor Red
+            exit 1
+        }
+        try
+        {
+            $null = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
+        }
+        catch
+        {
+            Write-Host ("ERROR: -ObfuscationDictionary is not valid JSON: {0}" -f $ObfuscationDictionary) -ForegroundColor Red
+            exit 1
+        }
+        Write-Host ("Pre-flight: -ObfuscationDictionary will seed obfuscation tokens from {0}" -f $ObfuscationDictionary) -ForegroundColor Green
     }
 
     # 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.

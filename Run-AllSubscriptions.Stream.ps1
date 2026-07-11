@@ -207,7 +207,7 @@ for ($i = 0; $i -lt $pairCount; $i++) {
         continue
     }
 
-    Write-Stream ("processing: {0} ({1})" -f $subName, $subId) 'Cyan'
+    Write-Stream ("processing ({0} of {1}): {2} ({3})" -f ($i + 1), $pairCount, $subName, $subId) 'Cyan'
 
     try {
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $subId @InventoryPassthrough -RunAllSubs

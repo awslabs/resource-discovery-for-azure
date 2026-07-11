@@ -30,6 +30,16 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 }
 . $FunctionsFile
 
+# Shared cross-cutting helpers (Write-RdaProgress). Same dot-source pattern.
+$CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
+if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $CommonFunctionsFile
+
 
 if ($Debug.IsPresent) {$DebugPreference = 'Continue'}
 
@@ -1118,12 +1128,12 @@ function ExecuteInventoryProcessing()
             $ModName = $Module.Name.Substring(0, $Module.Name.length - ".ps1".length)
             $ModuleIndex++
 
-            $PercentComplete = 0
-            if ($ModuleTotal -gt 0)
-            {
-                $PercentComplete = [int](($ModuleIndex / $ModuleTotal) * 100)
-            }
-            Write-Progress -Activity 'Service Processing' -Status ("{0} ({1} of {2})" -f $ModName, $ModuleIndex, $ModuleTotal) -PercentComplete $PercentComplete
+            # Unified progress bar. -BarOnly keeps the pre-existing behavior for
+            # this high-frequency loop that runs inside non-interactive stream
+            # workers: the Write-Progress bar renders interactively and is a no-op
+            # otherwise, with NO per-collector stdout line (the detailed heartbeat
+            # log below is the durable record). See Functions/Common.Functions.ps1.
+            Write-RdaProgress -Activity 'Service Processing' -CurrentItem $ModName -Index $ModuleIndex -Total $ModuleTotal -BarOnly
 
             if ($HeartbeatLogFile)
             {
@@ -1280,7 +1290,7 @@ function ExecuteInventoryProcessing()
             [System.GC]::Collect()
         }
 
-        Write-Progress -Activity 'Service Processing' -Completed
+        Write-RdaProgress -Activity 'Service Processing' -Completed
 
         if ($HeartbeatLogFile)
         {

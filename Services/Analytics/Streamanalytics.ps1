@@ -12,9 +12,16 @@ if ($Task -eq 'Processing')
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            $CreateDate = (get-date $data.createdDate).ToString("yyyy-MM-dd HH:mm:ss")
-            $LastOutput = (get-date $data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff")
-            $OutputStart = (get-date $data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff")
+            # These timestamps are optional on the Azure resource: a Stream Analytics
+            # job that has never produced output (Created/Stopped, never started) returns
+            # null for lastOutputEventTime / outputStartTime, and createdDate can be absent
+            # too. Get-Date on a null value throws "Cannot bind parameter 'Date' ... Cannot
+            # convert null to type System.DateTime", which previously killed the whole
+            # Stream Analytics collector for the subscription. Guard each one and emit $null
+            # when the source value is missing.
+            $CreateDate = if ([string]::IsNullOrEmpty($data.createdDate)) { $null } else { (get-date $data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") }
+            $LastOutput = if ([string]::IsNullOrEmpty($data.lastOutputEventTime)) { $null } else { (get-date $data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
+            $OutputStart = if ([string]::IsNullOrEmpty($data.outputStartTime)) { $null } else { (get-date $data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
 
             $obj = @{
                 'ID'                               = $1.id;

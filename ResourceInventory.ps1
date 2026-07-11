@@ -1414,7 +1414,36 @@ function ExecuteInventoryProcessing()
 
                     $params.ContinuationToken = $usageData.ContinuationToken
 
-                    $usageData = Get-UsageAggregates @params -ErrorAction Stop
+                    # Bounded retry with exponential backoff around the billing pull.
+                    # On a very large tenant this loop pages through millions of usage
+                    # records; a single transient HTTP failure (e.g. "Error while copying
+                    # content to a stream", a timeout, or 429/503 throttling) would
+                    # otherwise abort the ENTIRE remaining consumption pull for this
+                    # subscription via the outer catch. Retrying the SAME page is safe: a
+                    # failed assignment leaves $usageData holding the previous page's
+                    # ContinuationToken, so the retried call re-requests the same page (no
+                    # duplicate rows, no skipped rows). Mirrors the retry the metrics phase
+                    # already uses. A permanent error simply exhausts the retries and then
+                    # propagates to the outer catch, preserving the existing
+                    # warn-and-continue per-subscription health reporting.
+                    $ConsumptionMaxRetries = 3
+                    $ConsumptionAttempt = 0
+                    while ($true)
+                    {
+                        try
+                        {
+                            $usageData = Get-UsageAggregates @params -ErrorAction Stop
+                            break
+                        }
+                        catch
+                        {
+                            $ConsumptionAttempt++
+                            if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }
+                            $ConsumptionBackoffSeconds = [int][math]::Pow(2, $ConsumptionAttempt)
+                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}): {3}. Retrying in {4}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $_.Exception.Message, $ConsumptionBackoffSeconds) -Severity 'Warning'
+                            Start-Sleep -Seconds $ConsumptionBackoffSeconds
+                        }
+                    }
                     $usageDataExport = $usageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($usageDataExport.Count)...") -Severity 'Info'

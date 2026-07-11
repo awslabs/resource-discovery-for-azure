@@ -5,6 +5,7 @@ param ($TenantID,
         [securestring]$Secret, 
         [ValidatePattern('^[A-Za-z0-9._()-]{1,90}$', ErrorMessage = 'Invalid resource group name; must match ^[A-Za-z0-9._()-]{1,90}$')]
         [string]$ResourceGroup, 
+        [string[]]$Service,
         [switch]$Debug, 
         [switch]$SkipMetrics, 
         [switch]$SkipConsumption, 
@@ -1067,6 +1068,38 @@ function ExecuteInventoryProcessing()
             $Modules = Get-ChildItem -Path ($PSScriptRoot +  '/Services/*.ps1') -Recurse
         }
 
+        # -Service <string[]> targeted collection. When supplied, run ONLY the
+        # named collectors (matched on file base name, case-insensitive) instead
+        # of every file under Services/. This enables fast re-collection of a
+        # single resource type (e.g. recovering one collector that failed for a
+        # subscription) WITHOUT re-running the whole tenant, and is what a scoped
+        # recovery bundle is built from before it is merged back into a prior run.
+        # The metrics/consumption phases are unaffected - they remain governed by
+        # their own -SkipMetrics/-SkipConsumption switches. A requested name that
+        # matches no collector is almost always a typo; we fail loud (rather than
+        # silently producing an empty inventory) so the operator notices before
+        # shipping an incomplete report.
+        if ($Service -and @($Service).Count -gt 0)
+        {
+            $AvailableServices = @($Modules | ForEach-Object { $_.BaseName } | Sort-Object)
+            $Modules = @($Modules | Where-Object { $_.BaseName -in $Service })
+
+            if (@($Modules).Count -eq 0)
+            {
+                Write-Log -Message ("-Service matched no collectors. Requested: [{0}]. Available: [{1}]." -f ($Service -join ', '), ($AvailableServices -join ', ')) -Severity 'Error'
+                throw ("-Service matched no collectors. Requested: [{0}]." -f ($Service -join ', '))
+            }
+
+            $MatchedNames = @($Modules | ForEach-Object { $_.BaseName } | Sort-Object)
+            Write-Log -Message ("-Service filter active: collecting {0} of {1} collectors: [{2}]" -f @($Modules).Count, @($AvailableServices).Count, ($MatchedNames -join ', ')) -Severity 'Info'
+
+            $UnmatchedServices = @($Service | Where-Object { $_ -notin $MatchedNames })
+            if (@($UnmatchedServices).Count -gt 0)
+            {
+                Write-Log -Message ("-Service: these requested names matched nothing and were ignored: [{0}]. Available: [{1}]." -f ($UnmatchedServices -join ', '), ($AvailableServices -join ', ')) -Severity 'Warning'
+            }
+        }
+
         $Resource = $Resources | Select-Object -First $Resources.count
         #$Resource = ($Resource | ConvertTo-Json -Depth 50)
 
@@ -1773,6 +1806,37 @@ if (-not $RunAllSubs.IsPresent) {
     }
 
     Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
+
+    # 0. -Service fast-fail. When -Service is supplied but NONE of the requested
+    # names match a collector under Services/, the run would otherwise
+    # authenticate and extract every resource only to produce an empty inventory
+    # (and, downstream, a failed report) while still exiting 0 - a silent-looking
+    # failure for a scripted recovery workflow. Validate up front, before auth or
+    # any per-subscription work, and hard-fail (exit 1, matching the
+    # functions-file-missing gate near the top of the script) with the full list
+    # of valid collector names so a typo is caught immediately. Partial matches
+    # (some valid, some not) are allowed through here; CreateResourceJobs
+    # surfaces the unmatched names as a Warning.
+    if ($Service -and @($Service).Count -gt 0)
+    {
+        $PreFlightAvailableServices = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object)
+        $PreFlightMatchedServices = @($Service | Where-Object { $_ -in $PreFlightAvailableServices })
+        if (@($PreFlightMatchedServices).Count -eq 0)
+        {
+            # Hard-fail here with exit 1 (NOT throw): $ErrorActionPreference is
+            # 'SilentlyContinue' for a normal run, under which a bare throw at
+            # script scope is swallowed and execution continues - which would
+            # authenticate, extract, then produce an empty report while still
+            # exiting 0. exit 1 is the script's established hard-fail signal (see
+            # the functions-file-missing gate near the top) and is safe here
+            # because this whole block is gated on -not $RunAllSubs, so the
+            # in-process wrapper never reaches it.
+            Write-Host ("ERROR: -Service matched no collectors. Requested: [{0}]." -f ($Service -join ', ')) -ForegroundColor Red
+            Write-Host ("Valid collector names: [{0}]" -f ($PreFlightAvailableServices -join ', ')) -ForegroundColor Yellow
+            exit 1
+        }
+        Write-Host ("Pre-flight: -Service will collect {0} of {1} collectors: [{2}]" -f @($PreFlightMatchedServices).Count, @($PreFlightAvailableServices).Count, ($PreFlightMatchedServices -join ', ')) -ForegroundColor Green
+    }
 
     # 1. Cloud Shell mount detection. See Run-AllSubscriptions.ps1 for the rationale.
     if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {

@@ -1,125 +1,190 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Bulk-reveal every per-subscription obfuscated report under an inventory root
-    and consolidate the results into ONE outer zip ready to upload to the
-    ingestion server.
+    Reveal obfuscated Azure inventory reports back to their real values - either
+    a SINGLE report zip or an entire multi-subscription inventory tree.
 
 .DESCRIPTION
-    A multi-subscription run (Run-AllSubscriptions.ps1 -Obfuscate) leaves, under
-    the inventory root, one folder per subscription. Each folder holds:
-      - an obfuscated report zip : ResourcesReport_<stamp>.zip
-      - its matching dictionary  : ObfuscationDictionary_<ReportName>_<stamp>.json
+    This is the single entry point for the reveal feature. It runs in one of two
+    modes, selected by which parameter you pass:
 
-    This wrapper walks those folders, pairs each obfuscated zip with the
-    dictionary sitting next to it, and runs Reveal-Obfuscation.ps1 on each pair
-    to produce a selectively-revealed copy. By default it reveals ONLY the
-    Subscription name and Resource Group (everything else stays masked). The
-    revealed per-subscription zips are then packaged into a single outer zip
-    with the same shape a normal multi-subscription run produces (an outer zip
-    containing one per-subscription zip each), so the ingestion server consumes
-    it exactly like an -Obfuscate outer zip - just with the chosen dimensions
-    un-masked.
+    SINGLE-REPORT MODE (-InputZip)
+        Reveal one obfuscated report zip against its ObfuscationDictionary and
+        write a selectively-revealed copy. Delegates to the Invoke-RdaReveal
+        engine in Functions/RevealObfuscation.Functions.ps1.
 
-    Pairing is done WITHIN each folder (the dictionary and the report zip live
-    together and share the same <stamp>), so it works regardless of -ReportName
-    and never mismatches one subscription's tokens against another's dictionary.
+    ALL-SUBSCRIPTIONS MODE (-InventoryRoot, or no mode parameter at all)
+        A multi-subscription run (Run-AllSubscriptions.ps1 -Obfuscate) leaves,
+        under the inventory root, one folder per subscription. Each folder holds:
+          - an obfuscated report zip : ResourcesReport_<stamp>.zip
+          - its matching dictionary  : ObfuscationDictionary_<ReportName>_<stamp>.json
+        This mode walks those folders, pairs each obfuscated zip with the
+        dictionary sitting next to it, runs the reveal engine on each pair (in a
+        time-bounded background job so one pathological folder cannot stall the
+        batch), and consolidates the revealed per-subscription zips into ONE
+        outer zip with the same shape a normal multi-subscription run produces,
+        so the ingestion server consumes it exactly like an -Obfuscate outer zip
+        - just with the chosen dimensions un-masked.
 
-    HANDLE WITH CARE. The output zip contains the real values you chose to
-    reveal (subscription names and resource groups by default). Share it only
-    with the party meant to ingest it. The dictionaries and any fully-revealed
-    output stay local.
+    Both modes reveal ONLY the dimensions you select (default: Subscription name
+    + Resource Group); everything else stays masked. Pairing in all-mode is done
+    WITHIN each folder (dictionary and report zip share the same <stamp>), so it
+    works regardless of -ReportName and never crosses one subscription's tokens
+    against another's dictionary.
+
+    HANDLE WITH CARE. The output contains the real values you chose to reveal.
+    Share it only with the party meant to ingest it. Dictionaries and any
+    fully-revealed output stay local.
+
+.PARAMETER InputZip
+    SINGLE-REPORT MODE. Path to one obfuscated report zip to reveal. Presence of
+    this parameter selects single-report mode.
+
+.PARAMETER DictionaryPath
+    SINGLE-REPORT MODE. Path to the ObfuscationDictionary_*.json for -InputZip.
+    If omitted, the newest ObfuscationDictionary_*.json in the current directory
+    is used.
 
 .PARAMETER InventoryRoot
-    Folder that contains the per-subscription output folders. Defaults to
-    C:\InventoryReports on Windows and $HOME/InventoryReports elsewhere - the
-    same default Run-AllSubscriptions.ps1 uses.
-
-.PARAMETER Fields
-    Which dimensions to reveal, passed straight through to Reveal-Obfuscation.ps1.
-    Valid: ResourceGroup, Subscription, Tag, ResourceName, ResourceId, FreeText.
-    Defaults to ResourceGroup + Subscription. Ignored when -All is supplied.
-
-.PARAMETER All
-    Reveal every dimension the dictionaries can reverse (full un-obfuscate).
-    Overrides -Fields. See Reveal-Obfuscation.ps1 for the caveat that this is
-    not a perfect byte-for-byte undo (nulled / 'obfuscated'-sentinel fields do
-    not come back).
-
-.PARAMETER OutputZip
-    Path for the single consolidated outer zip. Defaults to
-    <InventoryRoot>/AllSubscriptions_Revealed_<timestamp>.zip.
+    ALL-SUBSCRIPTIONS MODE. Folder that contains the per-subscription output
+    folders. Defaults to C:\InventoryReports on Windows and
+    $HOME/InventoryReports elsewhere - the same default Run-AllSubscriptions.ps1
+    uses.
 
 .PARAMETER StagingDirectory
-    Where the individual revealed per-subscription zips are written before they
-    are consolidated. Defaults to <InventoryRoot>/RevealedStaging_<timestamp>.
-    Kept after the run (not auto-deleted) so a partial run is recoverable; pass
-    -RemoveStaging to delete it once the outer zip is built.
+    ALL-SUBSCRIPTIONS MODE. Where the individual revealed per-subscription zips
+    are written before consolidation. Defaults to
+    <InventoryRoot>/RevealedStaging_<timestamp>. Kept after the run (not
+    auto-deleted) so a partial run is recoverable; pass -RemoveStaging to delete
+    it once the outer zip is built.
 
 .PARAMETER RemoveStaging
-    Delete the staging directory after the outer zip is successfully created.
+    ALL-SUBSCRIPTIONS MODE. Delete the staging directory after the outer zip is
+    successfully created (only on a fully clean run).
 
 .PARAMETER Resume
-    Continue an interrupted run instead of starting fresh. Re-uses a prior run's
-    staging directory (the revealed zips already in it are the record of the
-    folders that completed) and SKIPS any folder whose revealed zip is already
-    present, so a resumed run does not redo completed work - and gets past a
-    folder that previously stalled. With -Resume and no explicit
-    -StagingDirectory, the most recent RevealedStaging_* under the inventory root
-    is auto-detected; if none is found the run stops and asks you to point
-    -StagingDirectory at the folder holding the already-revealed zips.
+    ALL-SUBSCRIPTIONS MODE. Continue an interrupted run instead of starting
+    fresh. Re-uses a prior run's staging directory and SKIPS any folder whose
+    revealed zip is already present, so a resumed run does not redo completed
+    work - and gets past a folder that previously stalled. With -Resume and no
+    explicit -StagingDirectory, the most recent RevealedStaging_* under the
+    inventory root is auto-detected.
+
+.PARAMETER Fields
+    BOTH MODES. Which dimensions to reveal. Valid: ResourceGroup, Subscription,
+    Tag, ResourceName, ResourceId, FreeText. Defaults to
+    ResourceGroup + Subscription. Ignored when -All is supplied.
+
+.PARAMETER All
+    BOTH MODES. Reveal every dimension the dictionary can reverse (full
+    un-obfuscate). Overrides -Fields. NOTE this is not a perfect byte-for-byte
+    undo: fields nulled or stamped with the lossy 'obfuscated' sentinel at
+    obfuscation time do not come back.
+
+.PARAMETER OutputZip
+    BOTH MODES. Path for the output zip. Single mode defaults to
+    <InputZip>_revealed.zip next to the input; all-mode defaults to
+    <InventoryRoot>/AllSubscriptions_Revealed_<timestamp>.zip.
 
 .EXAMPLE
-    # Default: reveal Subscription name + Resource Group across every sub, one outer zip
-    ./Reveal-AllSubscriptions.ps1
+    # Single report: reveal Subscription name + Resource Group
+    ./Reveal.ps1 -InputZip .\ResourcesReport_2026-01-01.zip
 
 .EXAMPLE
-    # Continue an interrupted large run (skip folders already revealed last time)
-    ./Reveal-AllSubscriptions.ps1 -Resume
+    # Single report: full reveal, explicit dictionary and output
+    ./Reveal.ps1 -InputZip .\report.zip -DictionaryPath .\ObfuscationDictionary_report.json -All -OutputZip .\report_full.zip
 
 .EXAMPLE
-    # Point at a custom root and clean up the staging afterwards
-    ./Reveal-AllSubscriptions.ps1 -InventoryRoot D:\Reports -RemoveStaging
+    # All subscriptions: reveal Subscription name + Resource Group, one outer zip
+    ./Reveal.ps1
 
 .EXAMPLE
-    # Full reveal of every dimension
-    ./Reveal-AllSubscriptions.ps1 -All
+    # All subscriptions: continue an interrupted large run
+    ./Reveal.ps1 -Resume
+
+.EXAMPLE
+    # All subscriptions: custom root, clean up staging, full reveal
+    ./Reveal.ps1 -InventoryRoot D:\Reports -All -RemoveStaging
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'All')]
 param(
+    # ---- Single-report mode ----
+    [Parameter(ParameterSetName = 'Single', Mandatory = $true)]
+    [string]   $InputZip,
+
+    [Parameter(ParameterSetName = 'Single')]
+    [string]   $DictionaryPath,
+
+    [Parameter(ParameterSetName = 'Single')]
+    [string]   $SearchDirectory = '.',
+
+    # ---- All-subscriptions mode ----
+    [Parameter(ParameterSetName = 'All')]
     [string]   $InventoryRoot,
 
+    [Parameter(ParameterSetName = 'All')]
+    [string]   $StagingDirectory,
+
+    [Parameter(ParameterSetName = 'All')]
+    [switch]   $RemoveStaging,
+
+    [Parameter(ParameterSetName = 'All')]
+    [switch]   $Resume,
+
+    # ---- Common to both modes ----
     [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')]
     [string[]] $Fields = @('ResourceGroup', 'Subscription'),
 
     [switch]   $All,
 
-    [string]   $OutputZip,
-
-    [string]   $StagingDirectory,
-
-    [switch]   $RemoveStaging,
-
-    [switch]   $Resume
+    [string]   $OutputZip
 )
 
 $ErrorActionPreference = 'Stop'
 
-# The single-report reveal engine must sit next to this wrapper.
-$RevealScript = Join-Path $PSScriptRoot 'Reveal-Obfuscation.ps1'
-if (-not (Test-Path -LiteralPath $RevealScript -PathType Leaf))
+# Shared functions: Invoke-RdaReveal + its helpers live in
+# RevealObfuscation.Functions.ps1; Write-RdaProgress lives in
+# Common.Functions.ps1. Dot-source both so they load into this script's scope.
+# Fail loud if missing rather than a confusing later error.
+$RevealFunctions = Join-Path $PSScriptRoot 'Functions/RevealObfuscation.Functions.ps1'
+$CommonFunctions = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
+foreach ($FunctionFile in @($RevealFunctions, $CommonFunctions))
 {
-    throw "Cannot find Reveal-Obfuscation.ps1 next to this script at $RevealScript"
+    if (-not (Test-Path -LiteralPath $FunctionFile -PathType Leaf))
+    {
+        throw "Cannot find shared functions at $FunctionFile"
+    }
+    . $FunctionFile
 }
 
-# Shared helper functions (Write-RdaProgress). Dot-sourced so they load into this
-# script's scope. Fail loud if missing rather than a confusing later error.
-$CommonFunctions = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -LiteralPath $CommonFunctions -PathType Leaf))
+# -All is a full reveal: expand to every reversible dimension (overrides
+# -Fields). Done once here so both modes see the expanded list.
+if ($All)
 {
-    throw "Cannot find shared functions at $CommonFunctions"
+    $Fields = @('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')
 }
-. $CommonFunctions
+
+# =============================================================================
+# SINGLE-REPORT MODE - delegate straight to the engine.
+# =============================================================================
+if ($PSCmdlet.ParameterSetName -eq 'Single')
+{
+    $EngineParams = @{
+        InputZip = $InputZip
+        Fields   = $Fields
+    }
+    if (-not [string]::IsNullOrEmpty($DictionaryPath))  { $EngineParams.DictionaryPath = $DictionaryPath }
+    if (-not [string]::IsNullOrEmpty($SearchDirectory)) { $EngineParams.SearchDirectory = $SearchDirectory }
+    if (-not [string]::IsNullOrEmpty($OutputZip))       { $EngineParams.OutputZip = $OutputZip }
+    if ($All)                                           { $EngineParams.All = $true }
+
+    Invoke-RdaReveal @EngineParams
+    return
+}
+
+# =============================================================================
+# ALL-SUBSCRIPTIONS MODE
+# =============================================================================
 
 # Resolve the inventory root (same default Run-AllSubscriptions.ps1 uses).
 if ([string]::IsNullOrEmpty($InventoryRoot))
@@ -133,11 +198,6 @@ if (-not (Test-Path -LiteralPath $InventoryRoot -PathType Container))
 # Canonicalize to an absolute path so the staging-directory exclusion compare
 # below is airtight even when the caller passes a relative -InventoryRoot.
 $InventoryRoot = (Resolve-Path -LiteralPath $InventoryRoot).Path
-
-if ($All)
-{
-    $Fields = @('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')
-}
 
 $Timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 if ([string]::IsNullOrEmpty($StagingDirectory))
@@ -269,17 +329,18 @@ foreach ($Folder in $Folders)
         # way to interrupt it. A job in a child process can be stopped, so one
         # bad folder becomes a recorded timeout instead of a dead run.
         #
-        # Arguments are passed via -ArgumentList (object-based), so the
-        # [string[]] $Fields array binds correctly - this does NOT suffer the
-        # 'pwsh -File' string mis-split the in-process call was avoiding.
-        # Reveal-Obfuscation.ps1 raises terminating errors via throw, which
+        # The job dot-sources the reveal functions file into its own (child
+        # process) scope, then calls Invoke-RdaReveal. Arguments are passed via
+        # -ArgumentList (object-based), so the [string[]] $Fields array binds
+        # correctly. Invoke-RdaReveal raises terminating errors via throw, which
         # surface as a job failure and are re-thrown by Receive-Job into the
         # catch below. Host chatter is redirected away to keep a large run
         # readable.
         $RevealJob = Start-Job -ScriptBlock {
-            param($RevealScript, $InputZip, $DictionaryPath, $Fields, $OutputZip)
-            & $RevealScript -InputZip $InputZip -DictionaryPath $DictionaryPath -Fields $Fields -OutputZip $OutputZip *> $null
-        } -ArgumentList $RevealScript, $Zip.FullName, $Dict.FullName, $Fields, $OutPath
+            param($RevealFunctions, $InputZip, $DictionaryPath, $Fields, $OutputZip)
+            . $RevealFunctions
+            Invoke-RdaReveal -InputZip $InputZip -DictionaryPath $DictionaryPath -Fields $Fields -OutputZip $OutputZip *> $null
+        } -ArgumentList $RevealFunctions, $Zip.FullName, $Dict.FullName, $Fields, $OutPath
 
         $Finished = Wait-Job -Job $RevealJob -Timeout $RevealTimeoutSeconds
 

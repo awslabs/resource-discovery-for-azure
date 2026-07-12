@@ -4,7 +4,7 @@
 #
 # Cross-cutting helper functions shared by the entry-point scripts
 # (Run-AllSubscriptions.ps1, Run-AllSubscriptions.Stream.ps1,
-# ResourceInventory.ps1, Reveal-AllSubscriptions.ps1). Dot-sourced from the top
+# ResourceInventory.ps1, Reveal.ps1). Dot-sourced from the top
 # of each so the functions load into that script's scope. Definitions only -
 # no top-level code.
 # =============================================================================

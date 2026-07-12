@@ -24,9 +24,14 @@
 # =============================================================================
 
 BeforeAll {
-    $script:RevealScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Reveal-Obfuscation.ps1'
+    # The single-report reveal engine now lives in Reveal.ps1 (single mode), which
+    # delegates to Invoke-RdaReveal. Reveal.ps1's single param set accepts the same
+    # arguments the former standalone Reveal-Obfuscation.ps1 did (-InputZip,
+    # -DictionaryPath, -SearchDirectory, -Fields, -All, -OutputZip), so every
+    # invocation below drives it unchanged.
+    $script:RevealScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Reveal.ps1'
     if (-not (Test-Path $script:RevealScript)) {
-        throw "Reveal-Obfuscation.ps1 not found at $script:RevealScript"
+        throw "Reveal.ps1 not found at $script:RevealScript"
     }
 
     $subGuid = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder

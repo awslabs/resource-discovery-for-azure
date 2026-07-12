@@ -1514,10 +1514,16 @@ function ExecuteInventoryProcessing()
             $consumptionRecordsThisSub = 0
             $consumptionFailedThisSub = $false
             $consumptionFailureMessage = $null
+            # Page counter so a mid-pull failure can report exactly where it
+            # stopped (which paged Get-UsageAggregates call) instead of leaving a
+            # silently-truncated CSV that could only be spotted by guessing from
+            # the row count. Incremented once per distinct page attempted.
+            $consumptionPageIndex = 0
 
             try {
                 do
                 {
+                    $consumptionPageIndex++
                     $params = @{
                         ReportedStartTime      = $reportedStartTime
                         ReportedEndTime        = $reportedEndTime
@@ -1757,9 +1763,16 @@ function ExecuteInventoryProcessing()
                 # here defensively so a transient ARM throttling event or a
                 # subscription the identity cannot bill against does not abort
                 # the entire run for other subscriptions.
+                #
+                # Capture WHERE it stopped (page index + records collected so
+                # far) so the truncation is precise and self-evident downstream,
+                # rather than a silently-short CSV that can only be inferred from
+                # a round row count. The rows already written to the CSV up to
+                # this page are valid and kept, but this subscription's
+                # consumption is INCOMPLETE and is reported as such.
                 $consumptionFailedThisSub = $true
-                $consumptionFailureMessage = $_.Exception.Message
-                Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                $consumptionFailureMessage = ("{0} (stopped at consumption page {1}, after {2} record(s); this subscription's consumption is INCOMPLETE)" -f $_.Exception.Message, $consumptionPageIndex, $consumptionRecordsThisSub)
+                Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $consumptionFailureMessage) -Severity 'Warning'
             }
 
             # Aggregate per-sub consumption health into globals the wrapper reads
@@ -1770,9 +1783,12 @@ function ExecuteInventoryProcessing()
             $Global:ConsumptionRecordCount += $consumptionRecordsThisSub
             if ($consumptionFailedThisSub) {
                 $Global:ConsumptionFailedSubs += [pscustomobject]@{
-                    Name    = $sub.Name
-                    Id      = $sub.Id
-                    Message = $consumptionFailureMessage
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $consumptionFailureMessage
+                    Complete         = $false
+                    PageAtFailure    = $consumptionPageIndex
+                    RecordsCollected = $consumptionRecordsThisSub
                 }
             }
         }
@@ -2365,7 +2381,7 @@ if($Obfuscate.IsPresent)
             $diagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$msItem.Id) $diagScrubMap), (Protect-DiagnosticText ([string]$msItem.Message) $diagScrubMap)))
         }
         $diagLines.Add('')
-        $diagLines.Add(('Consumption auth-skipped subscriptions: {0}' -f $consumpSkips.Count))
+        $diagLines.Add(('Consumption failed/incomplete subscriptions: {0}' -f $consumpSkips.Count))
         foreach ($csItem in $consumpSkips)
         {
             $diagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$csItem.Id) $diagScrubMap), (Protect-DiagnosticText ([string]$csItem.Message) $diagScrubMap)))

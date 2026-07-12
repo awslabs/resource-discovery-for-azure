@@ -3,7 +3,7 @@
 # Unit-tests the single, reusable progress reporter (Write-RdaProgress) that
 # every entry-point script routes through: the sequential per-subscription loop
 # (Run-AllSubscriptions.ps1), the reveal per-folder loop and its -Resume variant
-# (Reveal-AllSubscriptions.ps1), the parallel stream per-sub tagged line
+# (Reveal.ps1), the parallel stream per-sub tagged line
 # (Run-AllSubscriptions.Stream.ps1), and the high-frequency non-interactive
 # loops (Service Processing collectors in ResourceInventory.ps1 and the metrics
 # batch loop in Extension/Metrics.ps1, both bar-only).

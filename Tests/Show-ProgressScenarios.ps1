@@ -105,7 +105,7 @@ try
     Write-RdaProgress -Activity 'Discovering resources' -Completed
 
     # -- Scenario 3: Reveal per-folder loop --------------------------------
-    Write-ScenarioHeader -Number '3' -Title 'Reveal per-folder loop' -Caller 'Reveal-AllSubscriptions.ps1'
+    Write-ScenarioHeader -Number '3' -Title 'Reveal per-folder loop' -Caller 'Reveal.ps1'
     $Folders = 1..3 | ForEach-Object { 'RevealedStaging/Sub-Prod-{0:D2}' -f $_ }
     for ($i = 0; $i -lt $Folders.Count; $i++)
     {
@@ -115,7 +115,7 @@ try
     Write-RdaProgress -Activity 'Revealing reports' -Completed
 
     # -- Scenario 4: Reveal -Resume (enriched "already revealed" label) ----
-    Write-ScenarioHeader -Number '4' -Title 'Reveal -Resume (skips already-revealed folders)' -Caller 'Reveal-AllSubscriptions.ps1 -Resume'
+    Write-ScenarioHeader -Number '4' -Title 'Reveal -Resume (skips already-revealed folders)' -Caller 'Reveal.ps1 -Resume'
     $ResumeSet = @(
         @{ Name = 'Sub-Prod-01 (already revealed)' },
         @{ Name = 'Sub-Prod-02 (already revealed)' },

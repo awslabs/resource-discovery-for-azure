@@ -37,11 +37,7 @@ This:
 - Produces a full-fidelity report with real resource names and IDs. If you need to share it externally (e.g. with the AWS team), add `-Obfuscate` to mask identifying details first — see [Obfuscation Mode](#obfuscation-mode).
 - Automatically tunes how many subscriptions run in parallel to the machine's CPU and memory: small boxes (e.g. 2 vCPU) run one subscription at a time, larger boxes scale up. Add `-ParallelStreams <N>` (and/or `-ConcurrencyLimit <N>`) only if you want to override the auto-detected values.
 
-The script tracks progress automatically as it goes. If anything interrupts the run (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added and it will skip the subscriptions that already finished and pick up the rest:
-
-```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Resume
-```
+The script tracks progress automatically as it goes. You don't need `-Resume` on the first run. Only if a run is interrupted (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added — it skips the subscriptions that already finished and picks up the rest. See [Resuming an interrupted run](#resuming-an-interrupted-run) for details.
 
 You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details — see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
 
@@ -102,15 +98,13 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-The script only uses four Az submodules (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) — it does **not** need the full `Az` rollup. Install just those once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
+**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the four Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those four submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the four it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
+
+**Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
 Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
-
-The slim set installs and imports much faster than the full `Az` module (the full rollup is ~80 submodules). If you already have the full `Az` installed, that works too — the script validates and loads only the four it needs. The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
-
-`Run-AllSubscriptions.ps1` will offer to install the `Az` module for you if it's missing (part of its pre-flight bootstrap, alongside the PowerShell 7 and Azure CLI checks). Crucially, it does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding. That avoids the old failure mode where an in-run install left a half-installed module that looked fine to `Get-Module` but failed much later with confusing errors like "no consumption records"; a broken/partial install is now caught up front with a clear repair message. Installing by hand with the command above still works and skips the prompt.
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 

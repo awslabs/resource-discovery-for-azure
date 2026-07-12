@@ -1259,35 +1259,18 @@ function ExecuteInventoryProcessing()
         $ModuleIndex = 0
 
         $HeartbeatSubLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(all in-scope subscriptions)' }
-        # Where the heartbeat lands has to SURVIVE and be findable to be useful.
-        # Under the wrapper (-RunAllSubs) $DefaultPath is a PER-SUBSCRIPTION
-        # subfolder (<InventoryRoot>\<ReportName><timestamp>\): the wrapper keeps
-        # those folders but only ever consolidates their *.zip, so a heartbeat
-        # buried one-per-sub under a timestamped subfolder is effectively lost for
-        # the "which collector hung across a parallel run" question it exists to
-        # answer. Write it to the PARENT (the InventoryRoot, alongside the wrapper
-        # transcript and failures log) and tag the filename with the SubscriptionID
-        # so per-sub heartbeats are discoverable and never collide. For a
-        # standalone run $DefaultPath IS the single report folder the operator
-        # keeps, so the heartbeat belongs there. The consolidated debug log
-        # ($Global:DebugLogFile, established in InitializeInventoryProcessing with
-        # exactly that parent-vs-report-folder + SubscriptionID-tag logic) is that
-        # destination - the heartbeat and the metrics diagnostics now share ONE
-        # DebugLog_* file instead of a separate Heartbeat_* file. It is a .log,
-        # matches the obfuscated-zip exclusion guard, and is never packaged.
-        # $HeartbeatLogFile aliases it so the append calls below are unchanged.
-        $HeartbeatLogFile = $Global:DebugLogFile
-        try
-        {
-            Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing started for {1}: {2} collectors" -f (Get-Date), $HeartbeatSubLabel, $ModuleTotal) -ErrorAction Stop
-        }
-        catch
-        {
-            # The heartbeat is a debug convenience, not part of the report. If the
-            # very first write fails (read-only path, disk full), disable it for
-            # this run and continue - it must never break inventory collection.
-            $HeartbeatLogFile = $null
-        }
+        # The per-collector heartbeat (which collector was in flight when a run
+        # hung) is written through the single shared logger: Write-Log with
+        # -NoConsole (no per-collector console spam - that green line x40+ per sub
+        # scrolled real errors off screen) + -ToDebugLog (append to
+        # $Global:DebugLogFile, the consolidated LOCAL debug log the metrics
+        # diagnostics also use, established in InitializeInventoryProcessing with
+        # the parent-InventoryRoot-vs-report-folder + SubscriptionID-tag placement
+        # so per-sub heartbeats are discoverable, never collide, and are never
+        # packaged). Write-Log's -ToDebugLog is a silent no-op when no debug-log
+        # path exists and never throws, so no separate enable/disable guard is
+        # needed here - a write failure can never break collection.
+        Write-Log -Message ("Service processing started for {0}: {1} collectors" -f $HeartbeatSubLabel, $ModuleTotal) -NoConsole -ToDebugLog
 
         foreach ($Module in $Modules) 
         {
@@ -1301,29 +1284,20 @@ function ExecuteInventoryProcessing()
             # log below is the durable record). See Functions/Common.Functions.ps1.
             Write-RdaProgress -Activity 'Service Processing' -CurrentItem $ModName -Index $ModuleIndex -Total $ModuleTotal -BarOnly
 
-            if ($HeartbeatLogFile)
-            {
-                Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] START ({1}/{2}) {3}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName) -ErrorAction SilentlyContinue
-            }
+            Write-Log -Message ("START ({0}/{1}) {2}" -f $ModuleIndex, $ModuleTotal, $ModName) -NoConsole -ToDebugLog
 
             try
             {
                 $result = & $Module -Sub $Subscriptions -Resources $Resource -Task "Processing" -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null })
                 $ConsecutiveCollectorFailures = 0
 
-                if ($HeartbeatLogFile)
-                {
-                    Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] DONE  ({1}/{2}) {3}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName) -ErrorAction SilentlyContinue
-                }
+                Write-Log -Message ("DONE  ({0}/{1}) {2}" -f $ModuleIndex, $ModuleTotal, $ModName) -NoConsole -ToDebugLog
             }
             catch
             {
                 $ConsecutiveCollectorFailures++
 
-                if ($HeartbeatLogFile)
-                {
-                    Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] FAIL  ({1}/{2}) {3}: {4}" -f (Get-Date), $ModuleIndex, $ModuleTotal, $ModName, $_.Exception.Message) -ErrorAction SilentlyContinue
-                }
+                Write-Log -Message ("FAIL  ({0}/{1}) {2}: {3}" -f $ModuleIndex, $ModuleTotal, $ModName, $_.Exception.Message) -NoConsole -ToDebugLog
 
                 if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
                 $Global:CollectorFailures += [pscustomobject]@{
@@ -1458,10 +1432,7 @@ function ExecuteInventoryProcessing()
 
         Write-RdaProgress -Activity 'Service Processing' -Completed
 
-        if ($HeartbeatLogFile)
-        {
-            Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing complete: {1} collectors" -f (Get-Date), $ModuleTotal) -ErrorAction SilentlyContinue
-        }
+        Write-Log -Message ("Service processing complete: {0} collectors" -f $ModuleTotal) -NoConsole -ToDebugLog
     }
 
     function ProcessResourceResult()

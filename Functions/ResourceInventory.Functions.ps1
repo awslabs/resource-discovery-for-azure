@@ -13,58 +13,12 @@
 # invokes via '& $Module' (a call operator does NOT inherit the caller's
 # non-Global function table). Keep the Global: scope modifier.
 # =============================================================================
-Function Write-Log([string]$Message, [string]$Severity)
-{
-   $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
-
-   # Tag each line with the current subscription (first 8 chars of its GUID) when
-   # one is in scope. Every -RunAllSubs child is invoked with -SubscriptionID, and
-   # under -ParallelStreams the separate stream processes interleave their output
-   # on one console; the tag makes each line attributable to a subscription, e.g.
-   # "[12345678] Verifying Azure CLI Extension...". Read via Get-Variable so it
-   # resolves the script-scope $SubscriptionID up the call chain without throwing
-   # when no subscription is in scope (e.g. a standalone full-tenant run) - in
-   # that case no tag is added and the output is byte-for-byte unchanged.
-   $SubId  = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
-   $SubTag = if (-not [string]::IsNullOrEmpty($SubId)) { '[{0}] ' -f $SubId.Substring(0, [Math]::Min(8, $SubId.Length)) } else { '' }
-   $Message = $SubTag + $Message
-
-   switch ($Severity) 
-   {
-        "Info"    { Write-Host $Message -ForegroundColor Cyan }
-        "Warning" { Write-Host $Message -ForegroundColor Yellow }
-        "Error"   { Write-Host $Message -ForegroundColor Red }
-        "Success"   { Write-Host $Message -ForegroundColor Green }
-        default   { Write-Host $Message }
-    }
-
-    # Errors-only sink: when an error-log path has been established (set in
-    # InitializeInventoryProcessing) append error-severity messages to a
-    # dedicated, timestamped file.
-    #
-    # IMPORTANT: this log is written LOCALLY ONLY and is deliberately NOT added
-    # to the obfuscated (server-bound) zip. Error-severity messages can
-    # interpolate raw $_.Exception.Message text and local paths (e.g. collector
-    # failures, reconnect failures, HTML-gen failures) that carry real Azure
-    # identifiers the obfuscation layer never touches. Shipping this file would
-    # leak them. Do NOT add $Global:ErrorLogFile to the Compress-Archive Path
-    # array without first scrubbing/obfuscating its contents. It is kept on disk
-    # for local troubleshooting only, at the same trust level as the transcript.
-    # Purely additive: the console output above is unchanged, and nothing is
-    # written until the global path exists, so callers before setup are
-    # unaffected.
-    if ($Severity -eq 'Error' -and -not [string]::IsNullOrEmpty($Global:ErrorLogFile))
-    {
-        try
-        {
-            ('{0} {1}' -f $DateTime, $Message) | Out-File -FilePath $Global:ErrorLogFile -Append -Encoding utf8
-        }
-        catch
-        {
-            # Never let an error-log write failure interrupt the run.
-        }
-    }
-}
+# Write-Log moved to Functions/Common.Functions.ps1 (defined Global: there) so a
+# single logger is in scope for every entry script AND the Services/*/*.ps1
+# collectors (reached via '& $Module', which only see Global functions).
+# ResourceInventory.ps1 dot-sources Common.Functions.ps1 at startup, so Write-Log
+# is available here exactly as before. Its default behavior is unchanged; it
+# gained additive -NoConsole / -ToDebugLog switches. See that file for detail.
 
 function GetLocalVersion() 
 {

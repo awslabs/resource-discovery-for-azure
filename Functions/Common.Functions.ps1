@@ -147,3 +147,108 @@ function Write-RdaProgress
         }
     }
 }
+
+# =============================================================================
+# Write-Log
+#
+# The single logging entry point for the whole tool. Moved here (from
+# ResourceInventory.Functions.ps1) and defined Global: so EVERYTHING that logs
+# routes through it - the orchestrator, the wrapper scripts, the metrics
+# extension, and the Services/*/*.ps1 collectors (which run via '& $Module' and
+# therefore only see Global functions, exactly like Protect-FreeTextValue).
+#
+# Default behavior is UNCHANGED from the original: with no switches it writes a
+# severity-colored line to the console and, for Error severity, appends to the
+# local error sink ($Global:ErrorLogFile). The two switches are purely additive
+# so existing callers are byte-for-byte unaffected:
+#   -NoConsole   suppress the console line (for high-volume diagnostics that
+#                must NOT flood the terminal - metrics phase, per-collector
+#                heartbeat). The line still goes to any file sink selected.
+#   -ToDebugLog  also append the line to the consolidated LOCAL debug log
+#                ($Global:DebugLogFile) - the one file the heartbeat and metrics
+#                diagnostics share. Local-only, never zipped.
+#
+# NOTE on scope: the per-line '[<8-char sub>]' tag is read via Get-Variable so it
+# resolves the caller's script-scope $SubscriptionID without throwing when none
+# is set. From a collector invoked via '&' that lookup may not cross the scope
+# boundary, in which case the tag is simply omitted (the debug/error log
+# filenames are already SubscriptionID-tagged, so nothing is lost).
+#
+# Deliberately NOT baked in (kept separate on purpose):
+#   - Progress UI: that is Write-RdaProgress above (a bar, not a log line).
+#   - Obfuscation scrubbing (Protect-DiagnosticText): only the SHAREABLE
+#     Diagnostics_*.log needs scrubbing, and it is built once at packaging time
+#     from aggregated health globals - NOT line-by-line here. Scrubbing every
+#     log line would be slow and would destroy the local logs' raw
+#     troubleshooting value, so it stays out of the hot path.
+#   - Per-call logging from inside ForEach-Object -Parallel workers: concurrent
+#     appends to one file are not safe. Those paths record into a thread-safe
+#     bag and are logged as an aggregated summary on the main thread instead.
+# =============================================================================
+Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsole, [switch]$ToDebugLog)
+{
+    $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
+
+    # Tag each line with the current subscription (first 8 chars of its GUID)
+    # when one is in scope. Read via Get-Variable so it resolves the script-scope
+    # $SubscriptionID up the call chain without throwing when no subscription is
+    # in scope (e.g. a standalone full-tenant run) - in that case no tag is added
+    # and the output is byte-for-byte unchanged.
+    $SubId  = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
+    $SubTag = if (-not [string]::IsNullOrEmpty($SubId)) { '[{0}] ' -f $SubId.Substring(0, [Math]::Min(8, $SubId.Length)) } else { '' }
+    $Message = $SubTag + $Message
+
+    if (-not $NoConsole)
+    {
+        switch ($Severity)
+        {
+            "Info"    { Write-Host $Message -ForegroundColor Cyan }
+            "Warning" { Write-Host $Message -ForegroundColor Yellow }
+            "Error"   { Write-Host $Message -ForegroundColor Red }
+            "Success" { Write-Host $Message -ForegroundColor Green }
+            default   { Write-Host $Message }
+        }
+    }
+
+    # Errors-only local sink: when an error-log path has been established append
+    # error-severity messages to a dedicated, timestamped file.
+    #
+    # IMPORTANT: this log is written LOCALLY ONLY and is deliberately NOT added
+    # to the obfuscated (server-bound) zip. Error-severity messages can
+    # interpolate raw $_.Exception.Message text and local paths (e.g. collector
+    # failures, reconnect failures, HTML-gen failures) that carry real Azure
+    # identifiers the obfuscation layer never touches. Shipping this file would
+    # leak them. Do NOT add $Global:ErrorLogFile to the Compress-Archive Path
+    # array without first scrubbing/obfuscating its contents. It is kept on disk
+    # for local troubleshooting only, at the same trust level as the transcript.
+    if ($Severity -eq 'Error' -and -not [string]::IsNullOrEmpty($Global:ErrorLogFile))
+    {
+        try
+        {
+            ('{0} {1}' -f $DateTime, $Message) | Out-File -FilePath $Global:ErrorLogFile -Append -Encoding utf8
+        }
+        catch
+        {
+            # Never let an error-log write failure interrupt the run.
+        }
+    }
+
+    # Consolidated LOCAL debug log sink (opt-in via -ToDebugLog): the single file
+    # the per-collector heartbeat and the metrics-phase diagnostics share
+    # ($Global:DebugLogFile). Local-only, never zipped - it carries real
+    # service/resource names and, for FAIL lines, raw exception text. Silent
+    # best-effort like the error sink; nothing is written until the global path
+    # exists, so callers before setup (or a standalone extension run) are
+    # unaffected.
+    if ($ToDebugLog -and -not [string]::IsNullOrEmpty($Global:DebugLogFile))
+    {
+        try
+        {
+            ('{0} {1}' -f $DateTime, $Message) | Out-File -FilePath $Global:DebugLogFile -Append -Encoding utf8
+        }
+        catch
+        {
+            # Never let a debug-log write failure interrupt the run.
+        }
+    }
+}

@@ -16,7 +16,34 @@
     ExcludeRules = @(
         # Pre-existing in ResourceInventory.ps1 for Service Principal auth.
         # TODO: replace with an encrypted credential store and re-enable.
-        'PSAvoidUsingConvertToSecureStringWithPlainText'
+        'PSAvoidUsingConvertToSecureStringWithPlainText',
+
+        # Upstream PSScriptAnalyzer bug: this formatting rule throws a
+        # NullReferenceException ("Object reference not set to an instance of an
+        # object") while analyzing ResourceInventory.ps1 and Functions/*, which
+        # aborts the entire -Recurse run (not just that file). The repo never
+        # opted into this rule via the Rules block below — it only ran because
+        # IncludeRules = @('*'). Our hashtable/assignment layouts are valid
+        # PowerShell; the null-ref is inside the rule's own alignment logic, so
+        # excluding the broken rule is the correct fix rather than reshaping
+        # valid code to work around it.
+        'PSAlignAssignmentStatement',
+
+        # Upstream PSScriptAnalyzer bug: this cosmetic cmdlet-casing rule throws
+        # a NullReferenceException inside its own AnalyzeScript ->
+        # CommandInfo.get_Parameters() path when it tries to resolve the
+        # parameter metadata of a command it cannot fully load (ResourceInventory.ps1
+        # is dense with Az cmdlets; CI runs with no Az modules installed, which
+        # makes the null-ref more likely). The exception is thrown on a worker
+        # thread and aborts the whole analyzer process — it is NOT catchable via
+        # -ErrorAction. Captured stack trace:
+        #   System.NullReferenceException
+        #     at CommandInfo.get_Parameters()
+        #     at BuiltinRules.UseCorrectCasing.AnalyzeScript(...)
+        # It only enforces cosmetic casing of cmdlet/keyword names, so excluding
+        # it costs no correctness/security coverage. (The Rules block below no
+        # longer enables it — see the note there.)
+        'PSUseCorrectCasing'
     )
 
     Severity = @('Error', 'Warning', 'Information')
@@ -62,11 +89,14 @@
         }
 
         # ---- Naming -------------------------------------------------------
-        # Parameter names must be PascalCase (built-in rule).
         # Variable PascalCase is enforced by the custom rule below.
-        PSUseCorrectCasing = @{
-            Enable = $true
-        }
+        #
+        # NOTE: PSUseCorrectCasing (cmdlet/keyword casing) is intentionally
+        # NOT enabled here — it is listed in ExcludeRules above because it
+        # throws a process-aborting NullReferenceException on this repo's
+        # Az-cmdlet-heavy files (see the ExcludeRules comment for the captured
+        # stack trace). It only enforced cosmetic cmdlet casing, so nothing of
+        # substance is lost. Re-enable if/when the upstream PSSA bug is fixed.
 
         # Custom rule — see .scriptanalyzer/CustomRules.psm1
         # Flags local variable assignments that don't start with an uppercase

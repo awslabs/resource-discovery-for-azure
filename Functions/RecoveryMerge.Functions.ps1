@@ -6,6 +6,16 @@
 # (incomplete) report bundle and re-package the result as a single clean bundle
 # that looks like the original run completed successfully.
 #
+# Recovers THREE independent dimensions, each from the recovery bundle:
+#   - Inventory service key(s)   : always (selected by -Service; default = all).
+#   - Consumption CSV            : opt-in via -RecoverConsumption (whole-file
+#                                  replace; use when the gap run's consumption is
+#                                  missing/incomplete/truncated).
+#   - Metrics file(s)            : opt-in via -RecoverMetrics (whole-file replace,
+#                                  rebased to the output bundle name).
+# Consumption/metrics default to being carried forward from the gap bundle
+# unchanged (byte-for-byte the prior behaviour) unless their switch is set.
+#
 # Context: when a collector fails (or is intentionally scoped out with -Service)
 # a report bundle is produced that is MISSING one or more service types. Rather
 # than re-run the whole tenant (hours), the operator re-collects only the missing
@@ -40,7 +50,23 @@ function Merge-RecoveryData
         # Optional: which collector key(s) to take from the recovery inventory.
         # Defaults to every service key present in the recovery inventory (i.e.
         # exactly what the scoped recovery run collected), excluding 'Version'.
-        [string[]]$Service
+        [string[]]$Service,
+
+        # Whole-file replace the CONSUMPTION CSV with the recovery bundle's copy
+        # instead of carrying the gap bundle's forward. Use when the gap run's
+        # consumption is missing/incomplete (e.g. truncated by a transient
+        # "copying content to a stream" error). Consumption is a per-subscription
+        # whole file, so this is a clean replace, not a row-merge. The recovery
+        # bundle MUST contain a Consumption_*.csv or the function fails loud.
+        [switch]$RecoverConsumption,
+
+        # Whole-file replace the METRICS file(s) with the recovery bundle's copy
+        # instead of carrying the gap bundle's forward. Use when the gap run's
+        # metrics are missing/incomplete. The recovery bundle MUST contain at
+        # least one Metrics_*.json or the function fails loud. Recovered metrics
+        # files are rebased to the output bundle name so they stay consistent
+        # with the rest of the rebuilt bundle.
+        [switch]$RecoverMetrics
     )
 
     $ErrorActionPreference = 'Stop'
@@ -82,9 +108,27 @@ function Merge-RecoveryData
     {
         $MergeKeys = $RecoveryKeys
     }
+    # Guard an empty inventory splice. Fail-loud rules:
+    #   - If -Service was EXPLICITLY named but matched zero recovery keys, always
+    #     throw - the caller asked for specific inventory that isn't there (a typo
+    #     or the wrong recovery bundle), and silently skipping it would drop a
+    #     dimension they explicitly requested, even if a recover switch is set.
+    #   - Otherwise (no -Service given, so it defaulted to "all recovery keys" and
+    #     that set is empty): throw only when NO recovery action was requested at
+    #     all. When -RecoverConsumption/-RecoverMetrics is set the caller may
+    #     legitimately want to rebuild only those whole files and leave the
+    #     (already-complete) gap inventory untouched, so allow it through.
+    $ServiceExplicit = ($Service -and @($Service).Count -gt 0)
     if (@($MergeKeys).Count -eq 0)
     {
-        throw ("Merge-RecoveryData: nothing to merge - the recovery inventory has no service keys{0}." -f $(if ($Service) { " matching -Service [$($Service -join ', ')]" } else { '' }))
+        if ($ServiceExplicit)
+        {
+            throw ("Merge-RecoveryData: -Service [{0}] matched no service keys in the recovery inventory. Check the names or point at the correct recovery bundle." -f ($Service -join ', '))
+        }
+        if (-not ($RecoverConsumption -or $RecoverMetrics))
+        {
+            throw "Merge-RecoveryData: nothing to merge - the recovery inventory has no service keys."
+        }
     }
 
     # Splice each recovered service key into the gap inventory (add if missing,
@@ -115,34 +159,80 @@ function Merge-RecoveryData
     #    original serialization in ResourceInventory.ps1) ----------------------
     $GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File -FilePath $OutInventoryFile
 
-    # -- Carry consumption + metrics from the gap bundle unchanged. (An inventory
-    #    gap does not affect the whole-subscription consumption/metrics files; a
-    #    consumption/metrics recovery is a separate whole-file replace, handled
-    #    later.) If the gap has none, write a canonical empty file so the bundle
-    #    is structurally complete. --------------------------------------------
-    if ($GapConsumptionFile)
+    # -- Consumption source. By default carry the gap bundle's CSV forward: an
+    #    inventory gap does not affect the whole-subscription consumption file.
+    #    With -RecoverConsumption, whole-file REPLACE it with the recovery
+    #    bundle's CSV instead (used when the gap run's consumption is missing or
+    #    incomplete - e.g. truncated by a transient "copying content to a stream"
+    #    error). Consumption ResourceUris are obfuscated with a per-run scheme
+    #    that is independent of the inventory dictionary (it preserves the ARM
+    #    path structure for categorisation but mints its own sub/rg/name tokens),
+    #    so a replaced consumption file is internally consistent and categorises
+    #    correctly even though its tokens differ from the gap run's. If the chosen
+    #    source has none, write a canonical empty file so the bundle is
+    #    structurally complete. --------------------------------------------------
+    $ConsumptionSource     = 'gap'
+    $ConsumptionSourceFile = $GapConsumptionFile
+    if ($RecoverConsumption)
     {
-        Copy-Item -Path $GapConsumptionFile.FullName -Destination $OutConsumptionFile -Force
+        $RecoveryConsumptionFile = Get-BundleFile -Directory $RecoveryBundlePath -Filter 'Consumption_*.csv' -Optional
+        if (-not $RecoveryConsumptionFile)
+        {
+            throw ("Merge-RecoveryData: -RecoverConsumption was requested but the recovery bundle '{0}' has no Consumption_*.csv. Re-run the recovery WITHOUT -SkipConsumption." -f $RecoveryBundlePath)
+        }
+        $ConsumptionSource     = 'recovery'
+        $ConsumptionSourceFile = $RecoveryConsumptionFile
+    }
+    if ($ConsumptionSourceFile)
+    {
+        Copy-Item -Path $ConsumptionSourceFile.FullName -Destination $OutConsumptionFile -Force
     }
     else
     {
         "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -FilePath $OutConsumptionFile -Encoding utf8
     }
-    # Copy ALL gap Metrics_*.json verbatim. The metrics phase writes one file per
-    # batch (Metrics_<base>_<idx>.json), so picking only the newest would silently
-    # drop batches. They already carry the same <ReportName>_<stamp> base as this
-    # rebuilt bundle. Write a canonical empty file only if the gap has none.
-    $GapMetricsFiles = @(Get-ChildItem -Path $GapBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
-    if ($GapMetricsFiles.Count -gt 0)
+    # -- Metrics source. By default carry ALL gap Metrics_*.json forward verbatim.
+    #    The metrics phase writes one file per batch (Metrics_<base>__<idx>.json),
+    #    so picking only the newest would silently drop batches; the gap files
+    #    already carry this rebuilt bundle's <ReportName>_<stamp> base. With
+    #    -RecoverMetrics, whole-file REPLACE them with the recovery bundle's
+    #    metrics instead, REBASED to the output bundle name so the batch files
+    #    stay consistent with the rest of the bundle. Metrics IDs are obfuscated
+    #    via the seeded ResourceIdMap, so a recovery run seeded with the gap
+    #    dictionary yields metrics tokens that match the merged inventory. Write a
+    #    canonical empty file only if the chosen source has none.
+    if ($RecoverMetrics)
     {
-        foreach ($MetricsFile in $GapMetricsFiles)
+        $RecoveryMetricsFiles = @(Get-ChildItem -Path $RecoveryBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
+        if ($RecoveryMetricsFiles.Count -eq 0)
         {
-            Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $MetricsFile.Name) -Force
+            throw ("Merge-RecoveryData: -RecoverMetrics was requested but the recovery bundle '{0}' has no Metrics_*.json. Re-run the recovery WITHOUT -SkipMetrics." -f $RecoveryBundlePath)
         }
+        # Recovery metrics carry the recovery run's base; rebase to $BundleBase.
+        $RecoveryBase = $RecoveryInventoryFile.BaseName -replace '^Inventory_', ''
+        foreach ($MetricsFile in $RecoveryMetricsFiles)
+        {
+            $Suffix      = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
+            $RebasedName = 'Metrics_' + $BundleBase + $Suffix + '.json'
+            Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $RebasedName) -Force
+        }
+        $MetricsSource = 'recovery'
     }
     else
     {
-        @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -FilePath $OutMetricsFile -Encoding utf8
+        $GapMetricsFiles = @(Get-ChildItem -Path $GapBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
+        if ($GapMetricsFiles.Count -gt 0)
+        {
+            foreach ($MetricsFile in $GapMetricsFiles)
+            {
+                Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $MetricsFile.Name) -Force
+            }
+        }
+        else
+        {
+            @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -FilePath $OutMetricsFile -Encoding utf8
+        }
+        $MetricsSource = 'gap'
     }
 
     # -- Merge the obfuscation dictionaries (LOCAL only, never zipped). Both runs
@@ -202,6 +292,8 @@ function Merge-RecoveryData
     # -- Report what was done -------------------------------------------------
     return [PSCustomObject]@{
         MergedServiceKeys = $MergeKeys
+        ConsumptionSource = $ConsumptionSource
+        MetricsSource     = $MetricsSource
         OutputInventory   = $OutInventoryFile
         OutputHtml        = $OutHtmlFile
         OutputZip         = $OutZipFile

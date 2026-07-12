@@ -939,6 +939,32 @@ function ExecuteInventoryProcessing()
             $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
         }
 
+        # Consolidated LOCAL debug log. One file per run (per-sub under the
+        # wrapper) that collects the per-collector heartbeat trace AND the
+        # metrics-phase diagnostics (previously two separate Heartbeat_* files
+        # plus a flood of [Metrics] Write-Host lines on the terminal). Placed
+        # with the SAME parent-vs-report-folder + SubscriptionID-tag logic as
+        # the error log so it is findable and never collides across a parallel
+        # multi-sub run.
+        #
+        # IMPORTANT: like the transcript and error log this is a LOCAL debug
+        # artifact and is NEVER added to the shared zip - the metrics
+        # diagnostics interpolate REAL service/resource names (the obfuscation
+        # layer does not touch them) and heartbeat FAIL lines can carry raw
+        # $_.Exception.Message text. The DebugLog_* name is excluded by the
+        # Compress-Archive filter's -notlike guard. Do NOT add it to the zip
+        # Path array without scrubbing its contents first.
+        if ($RunAllSubs.IsPresent)
+        {
+            $DebugLogDir    = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+            $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+            $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
+        }
+        else
+        {
+            $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+        }
+
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
 
@@ -1243,19 +1269,14 @@ function ExecuteInventoryProcessing()
         # transcript and failures log) and tag the filename with the SubscriptionID
         # so per-sub heartbeats are discoverable and never collide. For a
         # standalone run $DefaultPath IS the single report folder the operator
-        # keeps, so the heartbeat belongs there. Either way the file keeps the
-        # Heartbeat_* prefix (matches the obfuscated-zip exclusion guard) and, as a
-        # .log, is never packaged into any zip.
-        if ($RunAllSubs.IsPresent)
-        {
-            $HeartbeatDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $HeartbeatSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $HeartbeatLogFile = (Join-Path $HeartbeatDir ("Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $HeartbeatSubTag + ".log"))
-        }
-        else
-        {
-            $HeartbeatLogFile = ($Global:DefaultPath + "Heartbeat_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".log")
-        }
+        # keeps, so the heartbeat belongs there. The consolidated debug log
+        # ($Global:DebugLogFile, established in InitializeInventoryProcessing with
+        # exactly that parent-vs-report-folder + SubscriptionID-tag logic) is that
+        # destination - the heartbeat and the metrics diagnostics now share ONE
+        # DebugLog_* file instead of a separate Heartbeat_* file. It is a .log,
+        # matches the obfuscated-zip exclusion guard, and is never packaged.
+        # $HeartbeatLogFile aliases it so the append calls below are unchanged.
+        $HeartbeatLogFile = $Global:DebugLogFile
         try
         {
             Add-Content -Path $HeartbeatLogFile -Value ("[{0:dd-MM-yyyy} {0:HH:mm:ss}] Service processing started for {1}: {2} collectors" -f (Get-Date), $HeartbeatSubLabel, $ModuleTotal) -ErrorAction Stop
@@ -2171,6 +2192,13 @@ if($Obfuscate.IsPresent)
     {
         Write-Log -Message ("  - Error log:  {0}" -f $Global:ErrorLogFile) -Severity 'Warning'
     }
+    # The consolidated debug log (per-collector heartbeat + metrics diagnostics)
+    # holds real service/resource names and can carry raw exception text, so it
+    # is local-only (never zipped) and flagged here alongside the transcript.
+    if (![string]::IsNullOrEmpty($Global:DebugLogFile) -and (Test-Path -LiteralPath $Global:DebugLogFile))
+    {
+        Write-Log -Message ("  - Debug log:  {0}" -f $Global:DebugLogFile) -Severity 'Warning'
+    }
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
     Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
@@ -2238,11 +2266,13 @@ if($Obfuscate.IsPresent)
     # subscription names) that the obfuscation layer never touches. The
     # transcript is excluded separately below (it is not a .json). Use a
     # specific json file list so only the safe, obfuscated json files ship.
-    # The Heartbeat_* .log (per-collector debug trace) is not a .json so the
-    # filter already excludes it; the explicit -notlike guard hardens that seam
-    # so it can never ship even if this filter is broadened later - the file
-    # carries a real subscription GUID and must stay local like the transcript.
-    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    # The DebugLog_* .log (consolidated heartbeat + metrics diagnostics) and the
+    # legacy Heartbeat_*/ErrorLog_* .log files are not .json so the filter
+    # already excludes them; the explicit -notlike guards harden that seam so
+    # none can ship even if this filter is broadened later - they carry a real
+    # subscription GUID and real service/resource names and must stay local like
+    # the transcript.
+    $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $compressionOutput = @{
         Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
         CompressionLevel = 'Fastest'

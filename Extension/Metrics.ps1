@@ -29,6 +29,38 @@ if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
 
 if ($Task -eq 'Processing')
 {
+    # ---------------------------------------------------------------------
+    # Metrics diagnostics -> consolidated LOCAL debug log, NOT the terminal.
+    # ---------------------------------------------------------------------
+    # On a large multi-subscription run the per-call and end-of-phase [Metrics]
+    # lines flooded the console (and, coming from concurrent runspaces, made it
+    # look frozen until a keypress forced a repaint). Every [Metrics] line now
+    # goes to $Global:DebugLogFile (the same file the per-collector heartbeat
+    # writes, established in ResourceInventory.ps1's InitializeInventoryProcessing)
+    # so the terminal shows only the Write-RdaProgress bar while the full
+    # "where did it get stuck" trace is preserved on disk for troubleshooting.
+    # That file is LOCAL-only and never zipped (it carries real service/resource
+    # names). Falls back to a local .log next to the metrics output when no
+    # debug-log path is in scope (e.g. a standalone invocation of this
+    # extension), so nothing ever lands on the terminal either way.
+    $script:MetricsDiagLog =
+        if (-not [string]::IsNullOrEmpty($Global:DebugLogFile)) { $Global:DebugLogFile }
+        elseif (-not [string]::IsNullOrEmpty($FilePath))        { $FilePath + "_diagnostics.log" }
+        else { $null }
+
+    function Write-MetricsDiag([string]$Line)
+    {
+        if ([string]::IsNullOrEmpty($script:MetricsDiagLog)) { return }
+        try
+        {
+            ('[{0:dd-MM-yyyy} {0:HH:mm:ss}] {1}' -f (Get-Date), $Line) | Out-File -FilePath $script:MetricsDiagLog -Append -Encoding utf8
+        }
+        catch
+        {
+            # A diagnostics-log write failure must never break the metrics phase.
+        }
+    }
+
     $tmp = New-Object PSObject
     $tmp | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
     $tmp.Metrics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
@@ -332,7 +364,7 @@ if ($Task -eq 'Processing')
     {
         # The Azure PowerShell module (Az) has a built-in feature that saves your login tokens to a secure file on your local hard drive. 
         # When a new, blank runspace spins up, Azure PowerShell will automatically look at this local file to log itself in.
-        Write-Host "[Metrics] WARNING: could not capture Az context for parallel runspaces; metric calls will rely on per-runspace context autosave." -ForegroundColor Yellow
+        Write-MetricsDiag "WARNING: could not capture Az context for parallel runspaces; metric calls will rely on per-runspace context autosave."
     }
 
     # Resilience knobs for the per-call Get-AzMetric wrapper. These are stable
@@ -351,7 +383,7 @@ if ($Task -eq 'Processing')
     $metricDiagnostics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
     $phaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host ("[Metrics] Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, lookback={4} day(s)." -f $metricCount, $ConcurrencyLimit, $metricTimeoutSeconds, $metricMaxRetries, [math]::Abs($metricsLookbackPeriodDays)) -ForegroundColor Cyan
+    Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, lookback={4} day(s)." -f $metricCount, $ConcurrencyLimit, $metricTimeoutSeconds, $metricMaxRetries, [math]::Abs($metricsLookbackPeriodDays))
 
     $rangeBatch = [math]::Min($metricCount , 250)
     $rangeIdx = 1
@@ -491,8 +523,13 @@ if ($Task -eq 'Processing')
                             break
                         }
 
-                        # Failed attempt - decide whether to retry.
-                        $reason = if ($timedOut) { 'TIMEOUT' } elseif ($throttled) { 'THROTTLED' } else { 'ERROR' }
+                        # Failed attempt - decide whether to retry. The per-call
+                        # retry / giving-up detail is deliberately NOT written to
+                        # the console: from concurrent runspaces it flooded the
+                        # terminal. The final per-metric Outcome, Attempts and
+                        # Error are recorded in the diagnostics bag below and
+                        # surfaced in the end-of-phase summary (written to the
+                        # debug log), so nothing diagnostic is lost.
                         if ($attempt -lt $callMaxRetries)
                         {
                             # Exponential backoff: 2^attempt seconds, capped, plus
@@ -502,12 +539,10 @@ if ($Task -eq 'Processing')
                             if ($throttled) { $backoff = [math]::Min($backoff * 2, 60) }
                             $jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
                             $sleepSeconds = [math]::Round($backoff + $jitter, 2)
-                            Write-Host ("[Metrics]   {0} idx={1} attempt={2} ({3}) - retrying in {4}s. {5}/{6}" -f $reason, $_.MetricIndex, $callAttempts, $lastError, $sleepSeconds, $metricService, $metricName) -ForegroundColor Yellow
                             Start-Sleep -Seconds $sleepSeconds
                         }
                         else
                         {
-                            Write-Host ("[Metrics]   {0} idx={1} attempt={2} ({3}) - giving up after {4} attempt(s). {5}/{6}" -f $reason, $_.MetricIndex, $callAttempts, $lastError, $callAttempts, $metricService, $metricName) -ForegroundColor Red
                             $callOutcome = if ($timedOut) { 'Timeout' } elseif ($throttled) { 'Throttled' } else { 'Error' }
                         }
 
@@ -596,8 +631,13 @@ if ($Task -eq 'Processing')
                     $metricError = $true
                     if ($callOutcome -eq 'Success') { $callOutcome = 'Error' }
                     $callErrorMsg = $_.Exception.Message
-                    #Write-Error $metricError
-                    Write-Error ("Error collecting Metric: {0}-{1}-{2} ({3})" -f $metricId, $metricService, $metricName, $callErrorMsg)
+                    # No Write-Error here: this runs in a ForEach-Object -Parallel
+                    # worker, so a Write-Error surfaced one error-stream record per
+                    # failed metric - on a large multi-sub run that is exactly the
+                    # noise this change removes. The failure is not lost: it is
+                    # recorded in $diagBag below (Outcome='Error', Error=$callErrorMsg)
+                    # and surfaced in the end-of-phase summary written to the debug
+                    # log, and $metricError still flags the metric record ($obj) below.
                 }
 
                 $callStopwatch.Stop()
@@ -706,25 +746,25 @@ if ($Task -eq 'Processing')
     $throttledCount = @($diagRecords | Where-Object { $_.Outcome -eq 'Throttled' }).Count
     $errorCount     = @($diagRecords | Where-Object { $_.Outcome -eq 'Error' }).Count
 
-    Write-Host ("[Metrics] ===== Metrics phase summary =====") -ForegroundColor Cyan
-    Write-Host ("[Metrics] Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | Elapsed: {5}s" -f $diagRecords.Count, $okCount, $timeoutCount, $throttledCount, $errorCount, [math]::Round($phaseStopwatch.Elapsed.TotalSeconds, 1)) -ForegroundColor Cyan
+    Write-MetricsDiag ("===== Metrics phase summary =====")
+    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | Elapsed: {5}s" -f $diagRecords.Count, $okCount, $timeoutCount, $throttledCount, $errorCount, [math]::Round($phaseStopwatch.Elapsed.TotalSeconds, 1))
 
     if (($timeoutCount + $throttledCount + $errorCount) -gt 0)
     {
-        Write-Host ("[Metrics] Non-success calls (where it got stuck):") -ForegroundColor Yellow
+        Write-MetricsDiag ("Non-success calls (where it got stuck):")
         foreach ($rec in ($diagRecords | Where-Object { $_.Outcome -ne 'Success' } | Sort-Object ElapsedSec -Descending))
         {
-            Write-Host ("[Metrics]   {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error) -ForegroundColor Yellow
+            Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error)
         }
     }
 
     if ($diagRecords.Count -gt 0)
     {
         $slowest = $diagRecords | Sort-Object ElapsedSec -Descending | Select-Object -First 5
-        Write-Host ("[Metrics] Slowest 5 calls:") -ForegroundColor Cyan
+        Write-MetricsDiag ("Slowest 5 calls:")
         foreach ($rec in $slowest)
         {
-            Write-Host ("[Metrics]   {0}s idx={1} {2}/{3}/{4} interval={5} ({6})" -f $rec.ElapsedSec, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Outcome) -ForegroundColor Cyan
+            Write-MetricsDiag ("  {0}s idx={1} {2}/{3}/{4} interval={5} ({6})" -f $rec.ElapsedSec, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Outcome)
         }
     }
 

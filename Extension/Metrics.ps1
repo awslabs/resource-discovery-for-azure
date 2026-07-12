@@ -34,31 +34,19 @@ if ($Task -eq 'Processing')
     # ---------------------------------------------------------------------
     # On a large multi-subscription run the per-call and end-of-phase [Metrics]
     # lines flooded the console (and, coming from concurrent runspaces, made it
-    # look frozen until a keypress forced a repaint). Every [Metrics] line now
-    # goes to $Global:DebugLogFile (the same file the per-collector heartbeat
-    # writes, established in ResourceInventory.ps1's InitializeInventoryProcessing)
-    # so the terminal shows only the Write-RdaProgress bar while the full
-    # "where did it get stuck" trace is preserved on disk for troubleshooting.
-    # That file is LOCAL-only and never zipped (it carries real service/resource
-    # names). Falls back to a local .log next to the metrics output when no
-    # debug-log path is in scope (e.g. a standalone invocation of this
-    # extension), so nothing ever lands on the terminal either way.
-    $script:MetricsDiagLog =
-        if (-not [string]::IsNullOrEmpty($Global:DebugLogFile)) { $Global:DebugLogFile }
-        elseif (-not [string]::IsNullOrEmpty($FilePath))        { $FilePath + "_diagnostics.log" }
-        else { $null }
-
+    # look frozen until a keypress forced a repaint). They now route through the
+    # single shared logger with -NoConsole (off the terminal) + -ToDebugLog
+    # (append to $Global:DebugLogFile, the same file the per-collector heartbeat
+    # writes). Write-MetricsDiag is a THIN wrapper - it only prefixes '[Metrics] '
+    # so the consolidated log stays readable, then delegates to Write-Log; it has
+    # NO independent log-sink logic of its own. Write-Log is Global (defined in
+    # Functions/Common.Functions.ps1) so it is in scope here even though this
+    # extension is invoked via '& $MetricPath'. When no $Global:DebugLogFile is
+    # set (e.g. a standalone extension run) Write-Log's -ToDebugLog is a silent
+    # no-op, so nothing ever lands on the terminal either way.
     function Write-MetricsDiag([string]$Line)
     {
-        if ([string]::IsNullOrEmpty($script:MetricsDiagLog)) { return }
-        try
-        {
-            ('[{0:dd-MM-yyyy} {0:HH:mm:ss}] {1}' -f (Get-Date), $Line) | Out-File -FilePath $script:MetricsDiagLog -Append -Encoding utf8
-        }
-        catch
-        {
-            # A diagnostics-log write failure must never break the metrics phase.
-        }
+        Write-Log -Message ('[Metrics] ' + $Line) -NoConsole -ToDebugLog
     }
 
     $tmp = New-Object PSObject

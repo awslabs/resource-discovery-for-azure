@@ -29,21 +29,21 @@ cd resource-discovery-for-azure
 **3. Run it:**
 
 ```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
 ```
 
 This:
 - Inventories every enabled subscription in the tenant.
-- Obfuscates resource IDs, names, and other identifying details so the report is safe to share.
+- Produces a full-fidelity report with real resource names and IDs. If you need to share it externally (e.g. with the AWS team), add `-Obfuscate` to mask identifying details first — see [Obfuscation Mode](#obfuscation-mode).
 - Automatically tunes how many subscriptions run in parallel to the machine's CPU and memory: small boxes (e.g. 2 vCPU) run one subscription at a time, larger boxes scale up. Add `-ParallelStreams <N>` (and/or `-ConcurrencyLimit <N>`) only if you want to override the auto-detected values.
 
 The script tracks progress automatically as it goes. If anything interrupts the run (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added and it will skip the subscriptions that already finished and pick up the rest:
 
 ```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -Resume
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Resume
 ```
 
-You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. Send that ZIP to the AWS team.
+You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details — see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
 
 For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) for sizing guidance. For all available options, see the [Run-AllSubscriptions Wrapper Parameters](#run-allsubscriptions-wrapper-parameters).
 

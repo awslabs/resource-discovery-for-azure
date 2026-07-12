@@ -108,27 +108,29 @@ function Merge-RecoveryData
     {
         $MergeKeys = $RecoveryKeys
     }
-    # Guard an empty inventory splice. Fail-loud rules:
-    #   - If -Service was EXPLICITLY named but matched zero recovery keys, always
-    #     throw - the caller asked for specific inventory that isn't there (a typo
-    #     or the wrong recovery bundle), and silently skipping it would drop a
-    #     dimension they explicitly requested, even if a recover switch is set.
-    #   - Otherwise (no -Service given, so it defaulted to "all recovery keys" and
-    #     that set is empty): throw only when NO recovery action was requested at
-    #     all. When -RecoverConsumption/-RecoverMetrics is set the caller may
-    #     legitimately want to rebuild only those whole files and leave the
-    #     (already-complete) gap inventory untouched, so allow it through.
+    # Guard the inventory splice. Fail-loud rules:
+    #   - If -Service was EXPLICITLY named, EVERY requested name must be present
+    #     in the recovery inventory. Throw on ANY unmatched name - a TOTAL miss
+    #     (none matched) OR a PARTIAL miss (e.g. -Service A,B where A exists but B
+    #     does not). Silently splicing only the subset that happened to be there
+    #     would drop a dimension the caller explicitly asked for (a typo or the
+    #     wrong/incomplete recovery bundle), even if a recover switch is set.
+    #   - With no explicit -Service, MergeKeys defaults to "all recovery keys".
+    #     Only an empty recovery inventory reaches the error below; that is an
+    #     error unless the caller asked to rebuild consumption/metrics only
+    #     (leaving the already-complete gap inventory untouched).
     $ServiceExplicit = ($Service -and @($Service).Count -gt 0)
-    if (@($MergeKeys).Count -eq 0)
+    if ($ServiceExplicit)
     {
-        if ($ServiceExplicit)
+        $UnmatchedServices = @($Service | Where-Object { $_ -notin $RecoveryKeys })
+        if (@($UnmatchedServices).Count -gt 0)
         {
-            throw ("Merge-RecoveryData: -Service [{0}] matched no service keys in the recovery inventory. Check the names or point at the correct recovery bundle." -f ($Service -join ', '))
+            throw ("Merge-RecoveryData: -Service name(s) not found in the recovery inventory: [{0}]. Present keys: [{1}]. Check the names or point at the correct recovery bundle." -f ($UnmatchedServices -join ', '), ($RecoveryKeys -join ', '))
         }
-        if (-not ($RecoverConsumption -or $RecoverMetrics))
-        {
-            throw "Merge-RecoveryData: nothing to merge - the recovery inventory has no service keys."
-        }
+    }
+    elseif (@($MergeKeys).Count -eq 0 -and -not ($RecoverConsumption -or $RecoverMetrics))
+    {
+        throw "Merge-RecoveryData: nothing to merge - the recovery inventory has no service keys."
     }
 
     # Splice each recovered service key into the gap inventory (add if missing,

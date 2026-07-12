@@ -46,9 +46,21 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
+        # The report members are .html / .json / .csv. The ONLY .log permitted in
+        # the shared bundle is the curated, dictionary-scrubbed Diagnostics_*.log
+        # (a human-readable troubleshooting artifact deliberately kept as .log so
+        # the ingestion pipeline does not table-ingest it). Every OTHER .log
+        # (DebugLog_*, ErrorLog_*, Heartbeat_*) and the transcript .txt are
+        # LOCAL-only and must NEVER ship - so a .log with any other name, or any
+        # other unexpected extension, still fails this assertion.
         $allowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles) {
-            $file.Extension | Should -BeIn $allowedExtensions -Because "File '$($file.Name)' has unexpected extension"
+            if ($file.Extension -eq '.log') {
+                $file.Name | Should -BeLike 'Diagnostics_*.log' -Because "the only .log allowed in the shared bundle is Diagnostics_*.log; '$($file.Name)' is a local-only log that must not ship"
+            }
+            else {
+                $file.Extension | Should -BeIn $allowedExtensions -Because "File '$($file.Name)' has unexpected extension"
+            }
         }
     }
 

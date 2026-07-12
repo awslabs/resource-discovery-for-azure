@@ -2272,9 +2272,14 @@ if($Obfuscate.IsPresent)
     # subscription name/id - is run through Protect-DiagnosticText first
     # (dictionary-tokenized, then any leftover raw GUID masked as '<guid>').
     # Collector module names and phase names are generic Azure types, not
-    # customer data. Written as Diagnostics_*.json so the *.json sweep below
-    # picks it up; it is NOT in the exclusion guard, so - unlike the transcript /
-    # DebugLog / dictionary - it is intentionally INCLUDED in the shared zip.
+    # customer data. Written as a HUMAN-READABLE Diagnostics_*.log (NOT .json):
+    # the ingestion server ingests the report's *.json members into DB tables,
+    # so this troubleshooting artifact is a .log precisely so it is NOT
+    # table-ingested. Because it is a .log it is NOT caught by the *.json
+    # packaging sweep, so - unlike the transcript / DebugLog / dictionary, which
+    # are also .log/local and never shipped - it is added to the zip's Path
+    # array EXPLICITLY (see $shareableExtras below). It is the one artifact meant
+    # to ship AND be a .log; do not rely on the sweep to include it.
     # Whole build wrapped in try/catch: the diagnostics log is a troubleshooting
     # aid, not the report, so neither a construction error nor a write failure
     # may ever break packaging of the actual inventory.
@@ -2338,57 +2343,65 @@ if($Obfuscate.IsPresent)
             }
         }
 
-        # The subscription is emitted as its obfuscated TOKEN (from the scrub
-        # map), never its display NAME - display names routinely embed customer
-        # names and are NOT in any obfuscation dictionary, so shipping them would
-        # leak. A sub GUID not present in the map (e.g. a sub with no inventoried
-        # resources) is masked to '<guid>' by Protect-DiagnosticText.
-        # Where-Object { $null -ne $_ } guards the standalone-run case: these
-        # health globals are only nil-initialized by the wrapper, so in a direct
-        # ResourceInventory.ps1 run they can be $null. @($null) is a ONE-element
-        # array (the single $null), which would otherwise pipe one iteration and
-        # emit a phantom empty-string "failure" - a false signal to the ingestion
-        # party. Filtering nulls yields a genuinely empty list when there were no
-        # failures.
-        $diagCollectorFailures = @(
-            @($Global:CollectorFailures) | Where-Object { $null -ne $_ } | ForEach-Object {
-                [ordered]@{
-                    subscription = (Protect-DiagnosticText ([string]$_.Id) $diagScrubMap)
-                    collector    = [string]$_.Module
-                    message      = (Protect-DiagnosticText ([string]$_.Message) $diagScrubMap)
-                }
-            }
-        )
-        $diagMetricsAuthSkips = @(
-            @($Global:MetricsFailedSubs) | Where-Object { $null -ne $_ } | ForEach-Object {
-                [ordered]@{
-                    subscription = (Protect-DiagnosticText ([string]$_.Id) $diagScrubMap)
-                    message      = (Protect-DiagnosticText ([string]$_.Message) $diagScrubMap)
-                }
-            }
-        )
-        $diagConsumptionAuthSkips = @(
-            @($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ } | ForEach-Object {
-                [ordered]@{
-                    subscription = (Protect-DiagnosticText ([string]$_.Id) $diagScrubMap)
-                    message      = (Protect-DiagnosticText ([string]$_.Message) $diagScrubMap)
-                }
-            }
-        )
+        # Emitted as a HUMAN-READABLE .log, NOT .json, ON PURPOSE: the ingestion
+        # server ingests the report's *.json members into its database tables, so
+        # this troubleshooting artifact must NOT be a .json or it would be
+        # table-ingested as if it were report data. As a plain-text .log it is an
+        # attachment a human (operator / ingestion party) can read, and the
+        # pipeline leaves it alone. It is added to the zip EXPLICITLY below (the
+        # *.json sweep would never pick up a .log).
+        #
+        # The subscription is emitted as its obfuscated TOKEN, never its display
+        # NAME - display names routinely embed customer names and are NOT in any
+        # obfuscation dictionary, so shipping one would leak. A sub GUID not in
+        # the map (e.g. a sub with no inventoried resources) is masked to
+        # '<guid>' by Protect-DiagnosticText. Where-Object { $null -ne $_ } guards
+        # the standalone-run case: these health globals are only nil-initialized
+        # by the wrapper, so in a direct ResourceInventory.ps1 run they can be
+        # $null, and @($null) is a ONE-element array (the single $null) that would
+        # otherwise render a phantom "failure" line. Filtering nulls yields a
+        # genuine "0" when there were none.
+        $collectorFails = @(@($Global:CollectorFailures)     | Where-Object { $null -ne $_ })
+        $metricsSkips   = @(@($Global:MetricsFailedSubs)     | Where-Object { $null -ne $_ })
+        $consumpSkips   = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
 
-        $diagnostics = [ordered]@{
-            schemaVersion                       = 1
-            generatedAtUtc                       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            toolVersion                          = [string]$Global:Version
-            obfuscated                           = $true
-            phaseTimingsSeconds                  = $phaseTimingsSeconds
-            collectorFailures                    = $diagCollectorFailures
-            metricsAuthSkippedSubscriptions      = $diagMetricsAuthSkips
-            consumptionAuthSkippedSubscriptions  = $diagConsumptionAuthSkips
+        $diagLines = [System.Collections.Generic.List[string]]::new()
+        $diagLines.Add('Resource Discovery for Azure - shareable diagnostics (obfuscated run)')
+        $diagLines.Add('Safe to share: identifiers are obfuscated/masked. Human-readable')
+        $diagLines.Add('troubleshooting log - NOT report data, do not ingest into tables.')
+        $diagLines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+        $diagLines.Add(('Tool version    : {0}' -f [string]$Global:Version))
+        $diagLines.Add('')
+        $diagLines.Add('Phase timings (seconds):')
+        if ($phaseTimingsSeconds.Count -gt 0)
+        {
+            foreach ($phaseName in $phaseTimingsSeconds.Keys) { $diagLines.Add(('  {0}: {1}' -f $phaseName, $phaseTimingsSeconds[$phaseName])) }
+        }
+        else
+        {
+            $diagLines.Add('  (none recorded)')
+        }
+        $diagLines.Add('')
+        $diagLines.Add(('Collector failures: {0}' -f $collectorFails.Count))
+        foreach ($cfItem in $collectorFails)
+        {
+            $diagLines.Add(('  [sub {0}] {1}: {2}' -f (Protect-DiagnosticText ([string]$cfItem.Id) $diagScrubMap), [string]$cfItem.Module, (Protect-DiagnosticText ([string]$cfItem.Message) $diagScrubMap)))
+        }
+        $diagLines.Add('')
+        $diagLines.Add(('Metrics auth-skipped subscriptions: {0}' -f $metricsSkips.Count))
+        foreach ($msItem in $metricsSkips)
+        {
+            $diagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$msItem.Id) $diagScrubMap), (Protect-DiagnosticText ([string]$msItem.Message) $diagScrubMap)))
+        }
+        $diagLines.Add('')
+        $diagLines.Add(('Consumption auth-skipped subscriptions: {0}' -f $consumpSkips.Count))
+        foreach ($csItem in $consumpSkips)
+        {
+            $diagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$csItem.Id) $diagScrubMap), (Protect-DiagnosticText ([string]$csItem.Message) $diagScrubMap)))
         }
 
-        $diagnosticsFile = ($DefaultPath + "Diagnostics_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".json")
-        $diagnostics | ConvertTo-Json -Depth 6 | Out-File -FilePath $diagnosticsFile -Encoding utf8
+        $diagnosticsFile = ($DefaultPath + "Diagnostics_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".log")
+        ($diagLines -join [Environment]::NewLine) | Out-File -FilePath $diagnosticsFile -Encoding utf8
         Write-Log -Message ('Shareable diagnostics log written: {0}' -f (Split-Path -Path $diagnosticsFile -Leaf)) -Severity 'Info'
     }
     catch
@@ -2402,17 +2415,24 @@ if($Obfuscate.IsPresent)
     # subscription names) that the obfuscation layer never touches. The
     # transcript is excluded separately below (it is not a .json). Use a
     # specific json file list so only the safe, obfuscated json files ship.
-    # The Diagnostics_*.json above is deliberately NOT excluded - it is curated
-    # and dictionary-scrubbed, so it is meant to ship.
-    # The DebugLog_* .log (consolidated heartbeat + metrics diagnostics) and the
-    # legacy Heartbeat_*/ErrorLog_* .log files are not .json so the filter
-    # already excludes them; the explicit -notlike guards harden that seam so
-    # none can ship even if this filter is broadened later - they carry a real
-    # subscription GUID and real service/resource names and must stay local like
-    # the transcript.
+    # The shareable Diagnostics_*.log built above is a .log (so it is NOT swept
+    # by this *.json filter and is NOT table-ingested); it is added to the Path
+    # array EXPLICITLY below because it is curated + dictionary-scrubbed and is
+    # meant to ship. The LOCAL-only .log files (DebugLog_* consolidated
+    # heartbeat + metrics diagnostics, legacy Heartbeat_*/ErrorLog_*) are also
+    # not .json so this filter never sweeps them AND they are never added to the
+    # Path array, so they stay local; the explicit -notlike guards harden the
+    # seam so none can ship even if this filter is broadened later - they carry a
+    # real subscription GUID and real service/resource names.
     $jsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    # Include the shareable diagnostics .log if it was successfully written.
+    # Guarded (not assumed) so a diagnostics build/write failure above - which is
+    # caught and downgraded to a warning - cannot inject a $null/missing path
+    # into the archive list and break packaging of the actual report.
+    $shareableExtras = @()
+    if (-not [string]::IsNullOrEmpty($diagnosticsFile) -and (Test-Path -LiteralPath $diagnosticsFile)) { $shareableExtras += $diagnosticsFile }
     $compressionOutput = @{
-        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $jsonFiles
+        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $shareableExtras + $jsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }

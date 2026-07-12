@@ -2,7 +2,7 @@
 # =============================================================================
 # Offline, self-contained tests for the scrub that makes the SHAREABLE (in-zip,
 # obfuscated) diagnostics log safe. Protect-DiagnosticText is what stands
-# between a raw collector/phase exception message and the Diagnostics_*.json
+# between a raw collector/phase exception message and the Diagnostics_*.log
 # that ships in the obfuscated bundle, so these assert - directly, without a
 # live run - that every identifier class is masked or tokenized and NONE leaks:
 #   - a dictionary-known subscription GUID / resource name / resource group /

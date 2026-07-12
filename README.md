@@ -190,34 +190,37 @@ You might get more than one authentication request due to different collector pr
 
 ### Advanced Usage Examples
 
-**Scan specific subscription:**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012"
-```
+For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it inventories the whole tenant and forwards the common options (`-SkipConsumption`, `-SkipMetrics`, `-ConcurrencyLimit`, `-Obfuscate`, `-DeviceLogin`), so they behave exactly as they would on the inner script:
 
-**Scan specific resource group:**
+**Skip consumption (billing) data:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
-```
-
-**Adjust performance settings:**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ConcurrencyLimit 8
-```
-
-**Skip consumption:**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -SkipConsumption
 ```
 
 **Skip metrics:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SkipMetrics
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -SkipMetrics
 ```
 
-**Generate obfuscated report (mask sensitive data before sharing):**
+**Tune the metrics throttle:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ConcurrencyLimit 8
+```
+
+To mask identifying details before sharing externally, add `-Obfuscate` — see [Obfuscation Mode](#obfuscation-mode).
+
+#### Targeting a single subscription or resource group
+
+The wrapper always covers the whole tenant. To scope a run to **one** subscription or a **single** resource group (producing one consolidated report), call `ResourceInventory.ps1` directly — the wrapper does not expose `-SubscriptionID` or `-ResourceGroup`. It accepts the same `-SkipConsumption`, `-SkipMetrics`, and `-Obfuscate` switches.
+
+**Scan a specific subscription:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012"
+```
+
+**Scan a specific resource group:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
 ```
 
 ### Running Across All Subscriptions
@@ -357,6 +360,16 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 3. **Deliver to AWS team:** Send the renamed ZIP file for analysis
 
 ### Obfuscation Mode
+
+Obfuscation is **opt-in** (off by default). Add `-Obfuscate` to mask identifying details so the report can be shared externally — it works on both entry points:
+
+```powershell
+# Whole tenant (per-subscription reports):
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate
+
+# Single consolidated report:
+./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+```
 
 When using `-Obfuscate`, the following data is masked in all output files:
 

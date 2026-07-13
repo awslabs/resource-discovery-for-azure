@@ -89,6 +89,18 @@ function Measure-VariablePascalCase
 
         if ([string]::IsNullOrEmpty($Name)) { continue }
 
+        # Skip provider/drive-qualified variables (e.g. $env:PATH, $variable:x,
+        # $function:foo, $cert:y). These reference an external provider store,
+        # not a user-declared variable — their casing is provider-defined (and
+        # environment-variable names are case-sensitive on Linux), so the
+        # PascalCase convention does not apply and flagging them is a false
+        # positive. Real scope modifiers (global:/script:/etc.) are handled by
+        # the scope-prefix strip below, not here.
+        if ($Name -match '^(\w+):' -and $Matches[1].ToLower() -notin @('global', 'local', 'script', 'private', 'using', 'workflow'))
+        {
+            continue
+        }
+
         # VariablePath.UserPath includes the scope prefix (e.g. "script:Foo"
         # for $script:Foo) in lowercase. Left unstripped, that lowercase
         # prefix would always fail the uppercase-start check below regardless

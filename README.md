@@ -29,7 +29,7 @@ cd resource-discovery-for-azure
 **3. Run it:**
 
 ```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
 ```
 
 This:

@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $storageacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
 
-    if($storageacc)
+    if ($storageacc)
     {
         $tmp = @()
 
-        foreach ($1 in $storageacc) 
+        foreach ($1 in $storageacc)
         {
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -16,8 +16,8 @@ if ($Task -eq 'Processing')
             $timecreated = [datetime]$timecreated
             $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
 
-            if($data.isHnsEnabled){ $hnsEnabled = $true } else { $hnsEnabled = $false }
-            
+            if ($data.isHnsEnabled) { $hnsEnabled = $true } else { $hnsEnabled = $false }
+
             $obj = @{
                 'ID'                                   = $1.id;
                 'Subscription'                         = $sub1.Name;
@@ -31,9 +31,9 @@ if ($Task -eq 'Processing')
                 'PrimaryLocation'                      = $data.primaryLocation;
                 'StatusOfPrimary'                      = $data.statusOfPrimary;
                 'HierarchicalNamespace'                = $hnsEnabled;
-                'CreatedTime'                          = $timecreated;   
+                'CreatedTime'                          = $timecreated;
             }
-            
+
             $tmp += $obj
         }
 

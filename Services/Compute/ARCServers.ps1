@@ -2,12 +2,12 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $arcservers = $Resources | Where-Object {$_.TYPE -eq 'microsoft.hybridcompute/machines'}
+    $arcservers = $Resources | Where-Object { $_.TYPE -eq 'microsoft.hybridcompute/machines' }
 
-    if($arcservers)
+    if ($arcservers)
     {
         $tmp = @()
-        foreach ($1 in $arcservers) 
+        foreach ($1 in $arcservers)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES

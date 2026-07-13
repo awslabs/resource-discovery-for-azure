@@ -1,21 +1,21 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $DataExplorer = $Resources | Where-Object { $_.TYPE -eq 'microsoft.kusto/clusters' }
 
-    if($DataExplorer)
+    if ($DataExplorer)
     {
         $tmp = @()
 
-        foreach ($1 in $DataExplorer) 
+        foreach ($1 in $DataExplorer)
         {
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $sku = $1.SKU
 
-            $AutoScale = if($data.optimizedAutoscale.isEnabled -eq 'true'){'Enabled'}else{'Disabled'}
-            
+            $AutoScale = if ($data.optimizedAutoscale.isEnabled -eq 'true') { 'Enabled' }else { 'Disabled' }
+
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;

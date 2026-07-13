@@ -33,17 +33,18 @@ BeforeAll {
 
         $obfuscatedUri = $RawUri
 
-        if (-not $script:ConsumptionSubCache)  { $script:ConsumptionSubCache  = @{} }
-        if (-not $script:ConsumptionRgCache)   { $script:ConsumptionRgCache   = @{} }
+        if (-not $script:ConsumptionSubCache) { $script:ConsumptionSubCache = @{} }
+        if (-not $script:ConsumptionRgCache) { $script:ConsumptionRgCache = @{} }
         if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
 
         if ($RawUri -match '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
         {
-            $realSub  = $matches[1]
-            $realRg   = $matches[3]
+            $realSub = $matches[1]
+            $realRg = $matches[3]
             $realProv = $matches[5]
 
-            $obfSub = if ($script:ConsumptionSubCache.ContainsKey($realSub)) { $script:ConsumptionSubCache[$realSub] } else {
+            $obfSub = if ($script:ConsumptionSubCache.ContainsKey($realSub)) { $script:ConsumptionSubCache[$realSub] } else
+            {
                 $v = $prefix + 'sub_' + [guid]::NewGuid().ToString()
                 $script:ConsumptionSubCache[$realSub] = $v; $v
             }
@@ -52,9 +53,10 @@ BeforeAll {
 
             if (-not [string]::IsNullOrEmpty($realRg))
             {
-                $obfRg = if ($script:ConsumptionRgCache.ContainsKey($realRg)) { $script:ConsumptionRgCache[$realRg] } else {
+                $obfRg = if ($script:ConsumptionRgCache.ContainsKey($realRg)) { $script:ConsumptionRgCache[$realRg] } else
+                {
                     $isMc = $realRg -match '^mc_'
-                    $tag  = if ($isMc) { 'mc_' } else { '' }
+                    $tag = if ($isMc) { 'mc_' } else { '' }
                     $v = $prefix + 'rg_' + $tag + [guid]::NewGuid().ToString()
                     $script:ConsumptionRgCache[$realRg] = $v; $v
                 }
@@ -64,14 +66,15 @@ BeforeAll {
             if (-not [string]::IsNullOrEmpty($realProv))
             {
                 $provParts = $realProv -split '/'
-                $rebuilt   = @()
+                $rebuilt = @()
                 for ($pi = 0; $pi -lt $provParts.Count; $pi++)
                 {
                     $part = $provParts[$pi]
                     $isNameSegment = ($pi -ge 2 -and ($pi % 2 -eq 0))
                     if ($isNameSegment -and -not [string]::IsNullOrEmpty($part) -and $part -ne '$system')
                     {
-                        $obfName = if ($script:ConsumptionNameCache.ContainsKey($part)) { $script:ConsumptionNameCache[$part] } else {
+                        $obfName = if ($script:ConsumptionNameCache.ContainsKey($part)) { $script:ConsumptionNameCache[$part] } else
+                        {
                             $v = $prefix + [guid]::NewGuid().ToString()
                             $script:ConsumptionNameCache[$part] = $v; $v
                         }
@@ -113,8 +116,8 @@ Describe "Consumption obfuscation null/empty resourceUri handling" {
 
     BeforeEach {
         # Reset the per-run caches so determinism assertions are independent.
-        $script:ConsumptionSubCache  = @{}
-        $script:ConsumptionRgCache   = @{}
+        $script:ConsumptionSubCache = @{}
+        $script:ConsumptionRgCache = @{}
         $script:ConsumptionNameCache = @{}
     }
 
@@ -163,7 +166,7 @@ Describe "Consumption obfuscation null/empty resourceUri handling" {
 
         It "never emits the real subscription / resource-group / resource name" {
             $real = '/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/myrealrg/providers/microsoft.compute/virtualmachines/myrealvm'
-            $obf  = Get-ObfuscatedConsumptionUriForTest -RawUri $real
+            $obf = Get-ObfuscatedConsumptionUriForTest -RawUri $real
             $obf | Should -Not -Match '12345678-1234-1234-1234-123456789012'
             $obf | Should -Not -Match 'myrealrg'
             $obf | Should -Not -Match 'myrealvm'
@@ -171,7 +174,7 @@ Describe "Consumption obfuscation null/empty resourceUri handling" {
 
         It "preserves ARM path STRUCTURE and the resource provider/type for categorisation" {
             $real = '/subscriptions/aaaa/resourcegroups/rg1/providers/microsoft.compute/virtualmachines/vm1'
-            $obf  = Get-ObfuscatedConsumptionUriForTest -RawUri $real
+            $obf = Get-ObfuscatedConsumptionUriForTest -RawUri $real
             $obf | Should -Match '^/subscriptions/'
             $obf | Should -Match '/resourcegroups/'
             $obf | Should -Match '/providers/microsoft.compute/virtualmachines/'
@@ -179,14 +182,14 @@ Describe "Consumption obfuscation null/empty resourceUri handling" {
 
         It "is deterministic within a run (same real value -> same obfuscated value)" {
             $real = '/subscriptions/aaaa/resourcegroups/rg1/providers/microsoft.compute/virtualmachines/vm1'
-            $first  = Get-ObfuscatedConsumptionUriForTest -RawUri $real
+            $first = Get-ObfuscatedConsumptionUriForTest -RawUri $real
             $second = Get-ObfuscatedConsumptionUriForTest -RawUri $real
             $second | Should -BeExactly $first
         }
 
         It "preserves the AKS-managed-RG marker (mc_) so AKS rows stay categorisable" {
             $real = '/subscriptions/aaaa/resourcegroups/mc_aksrg_cluster_eastus/providers/microsoft.compute/virtualmachinescalesets/aks-nodepool'
-            $obf  = Get-ObfuscatedConsumptionUriForTest -RawUri $real
+            $obf = Get-ObfuscatedConsumptionUriForTest -RawUri $real
             $obf | Should -Match '/resourcegroups/(prod|nonprod)_rg_mc_'
         }
     }

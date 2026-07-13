@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $DataBricks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.databricks/workspaces' }
 
-    if($DataBricks)
+    if ($DataBricks)
     {
         $tmp = @()
 
-        foreach ($1 in $DataBricks) 
+        foreach ($1 in $DataBricks)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -16,7 +16,7 @@ if($Task -eq 'Processing')
             $timecreated = $data.createdDateTime
             $timecreated = [datetime]$timecreated
             $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
-            
+
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;
@@ -32,7 +32,7 @@ if($Task -eq 'Processing')
                 'StorageAccountSKU'         = $data.parameters.storageAccountSkuName.value;
                 'CreatedTime'               = $timecreated;
             }
-            
+
             $tmp += $obj
         }
 

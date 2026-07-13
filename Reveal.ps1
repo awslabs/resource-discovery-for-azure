@@ -173,10 +173,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Single')
         InputZip = $InputZip
         Fields   = $Fields
     }
-    if (-not [string]::IsNullOrEmpty($DictionaryPath))  { $EngineParams.DictionaryPath = $DictionaryPath }
+    if (-not [string]::IsNullOrEmpty($DictionaryPath)) { $EngineParams.DictionaryPath = $DictionaryPath }
     if (-not [string]::IsNullOrEmpty($SearchDirectory)) { $EngineParams.SearchDirectory = $SearchDirectory }
-    if (-not [string]::IsNullOrEmpty($OutputZip))       { $EngineParams.OutputZip = $OutputZip }
-    if ($All)                                           { $EngineParams.All = $true }
+    if (-not [string]::IsNullOrEmpty($OutputZip)) { $EngineParams.OutputZip = $OutputZip }
+    if ($All) { $EngineParams.All = $true }
 
     Invoke-RdaReveal @EngineParams
     return
@@ -257,15 +257,15 @@ Write-Host ("Output zip     : {0}" -f $OutputZip) -ForegroundColor Cyan
 Write-Host ""
 
 $Folders = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -ne $StagingDirectory })
+        Where-Object { $_.FullName -ne $StagingDirectory })
 
-$PairedCount   = 0
+$PairedCount = 0
 $RevealedCount = 0
-$ResumedCount  = 0
-$SkippedItems  = @()
-$FailedItems   = @()
-$FolderIndex   = 0
-$FolderTotal   = $Folders.Count
+$ResumedCount = 0
+$SkippedItems = @()
+$FailedItems = @()
+$FolderIndex = 0
+$FolderTotal = $Folders.Count
 
 # Hard cap on how long a single folder's reveal may run. A pathological report
 # (e.g. an unusually large or malformed zip) can make Expand-Archive /

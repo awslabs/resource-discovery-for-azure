@@ -1,15 +1,15 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $SQLPOOL = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/servers/elasticPools' }
 
-    if($SQLPOOL)
+    if ($SQLPOOL)
     {
         $tmp = @()
 
-        foreach ($1 in $SQLPOOL) 
-        {          
+        foreach ($1 in $SQLPOOL)
+        {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
@@ -31,7 +31,7 @@ if ($Task -eq 'Processing')
                 'DBMinCapacity'              = $data.perDatabaseSettings.minCapacity;
                 'ZoneRedundant'              = $data.zoneRedundant;
             }
-            
+
             $tmp += $obj
         }
 

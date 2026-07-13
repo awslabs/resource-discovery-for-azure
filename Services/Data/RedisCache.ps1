@@ -1,21 +1,21 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $RedisCache = @()
     $RedisCache += $Resources | Where-Object { $_.TYPE -eq 'microsoft.cache/redis' }
     $RedisCache += $Resources | Where-Object { $_.TYPE -eq 'microsoft.cache/redisenterprise' }
 
-    if($RedisCache)
+    if ($RedisCache)
     {
         $tmp = @()
 
-        foreach ($redisCacheInstance in $RedisCache) 
+        foreach ($redisCacheInstance in $RedisCache)
         {
             $subscription = $Sub | Where-Object { $_.id -eq $redisCacheInstance.subscriptionId }
             $data = $redisCacheInstance.Properties
-            
-            if($redisCacheInstance.Type -eq 'microsoft.cache/redis')
+
+            if ($redisCacheInstance.Type -eq 'microsoft.cache/redis')
             {
                 $obj = @{
                     'ID'                    = $redisCacheInstance.id;

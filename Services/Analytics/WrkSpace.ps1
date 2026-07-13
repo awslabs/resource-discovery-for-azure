@@ -2,13 +2,13 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $wrkspace = $Resources | Where-Object {$_.TYPE -eq 'microsoft.operationalinsights/workspaces'}
+    $wrkspace = $Resources | Where-Object { $_.TYPE -eq 'microsoft.operationalinsights/workspaces' }
 
-    if($wrkspace)
+    if ($wrkspace)
     {
         $tmp = @()
 
-        foreach ($1 in $wrkspace) 
+        foreach ($1 in $wrkspace)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES

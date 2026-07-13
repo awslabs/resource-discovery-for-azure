@@ -1,25 +1,25 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $IOTHubs = $Resources | Where-Object { $_.TYPE -eq 'microsoft.devices/iothubs' }
 
-    if($IOTHubs)
+    if ($IOTHubs)
     {
         $tmp = @()
 
-        foreach ($1 in $IOTHubs) 
+        foreach ($1 in $IOTHubs)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            
-            foreach ($loc in $data.locations) 
+
+            foreach ($loc in $data.locations)
             {
                 $obj = @{
                     'ID'                                = $1.id;
                     'Subscription'                      = $sub1.Name;
                     'ResourceGroup'                     = $1.RESOURCEGROUP;
-                    'Name'                              = $1.NAME;                                    
+                    'Name'                              = $1.NAME;
                     'SKU'                               = $data.sku.name;
                     'SKUTier'                           = $data.sku.tier;
                     'Location'                          = $loc.location;
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
                 }
 
                 $tmp += $obj
-            }              
+            }
         }
 
         $tmp

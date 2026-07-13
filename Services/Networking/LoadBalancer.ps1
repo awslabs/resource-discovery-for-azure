@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $LoadBalancer = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/loadbalancers' }
 
-    if($LoadBalancer)
+    if ($LoadBalancer)
     {
         $tmp = @()
 
-        foreach ($1 in $LoadBalancer) 
+        foreach ($1 in $LoadBalancer)
         {
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -28,7 +28,7 @@ if ($Task -eq 'Processing')
 
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

@@ -1,19 +1,19 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $MySQL = $Resources | Where-Object { $_.TYPE -eq 'microsoft.dbformysql/servers' }
 
-    if($MySQL)
+    if ($MySQL)
     {
         $tmp = @()
 
-        foreach ($1 in $MySQL) 
+        foreach ($1 in $MySQL)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $sku = $1.SKU
-            
+
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;

@@ -13,13 +13,15 @@
 
 Describe 'Report Schema Validation' {
     BeforeAll {
-        $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
+        $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+        {
             Get-ChildItem -Path $PSScriptRoot -Filter 'ResourcesReport_*.zip' |
                 Sort-Object LastWriteTime -Descending |
                 Select-Object -First 1 -ExpandProperty FullName
         }
 
-        if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath)) {
+        if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+        {
             throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
         }
 
@@ -35,14 +37,16 @@ Describe 'Report Schema Validation' {
         # populated service, where <slug> is the service/JSON key lowercased
         # with non-alphanumerics replaced by '-'.
         $script:SectionSlugs = @()
-        if ($script:HtmlContent) {
+        if ($script:HtmlContent)
+        {
             $svcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
             $script:SectionSlugs = @($svcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
         }
 
         # Helper mirroring Summary.ps1's slug rule so tests can map a service
         # name to its expected section id.
-        function script:Get-ServiceSlug([string]$Name) {
+        function script:Get-ServiceSlug([string]$Name)
+        {
             return ($Name -replace '[^a-zA-Z0-9]', '-').ToLower()
         }
 
@@ -53,7 +57,8 @@ Describe 'Report Schema Validation' {
     }
 
     AfterAll {
-        if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) {
+        if ($script:ExtractPath -and (Test-Path $script:ExtractPath))
+        {
             Remove-Item -Path $script:ExtractPath -Recurse -Force
         }
     }
@@ -97,7 +102,8 @@ Describe 'HTML section invariants' {
     }
 
     It 'Every inventory resource type with data should have a corresponding HTML section' {
-        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) {
+        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson)
+        {
             Set-ItResult -Skipped -Because 'no HTML or inventory JSON in fixture'
             return
         }
@@ -115,7 +121,8 @@ Describe 'HTML section invariants' {
         # A section slug is derived from the service key (e.g. "VirtualMachines"
         # -> "virtualmachines"), so it must never look like an obfuscated token.
         if (-not $script:FixtureReady) { Set-ItResult -Skipped -Because 'no fixture'; return }
-        foreach ($slug in $script:SectionSlugs) {
+        foreach ($slug in $script:SectionSlugs)
+        {
             $slug | Should -Not -Match $script:ObfuscationSectionPattern -Because "section slug '$slug' looks obfuscated; service names must remain literal"
         }
     }
@@ -125,7 +132,7 @@ Describe 'HTML section invariants' {
         # but rendered zero sections - that is the regression this guards.
         if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) { Set-ItResult -Skipped -Because 'no fixture'; return }
         $populatedCount = @($script:InventoryJson.PSObject.Properties |
-            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
+                Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
         if ($populatedCount -eq 0) { Set-ItResult -Skipped -Because 'inventory has no populated resource types'; return }
         $script:SectionSlugs.Count | Should -BeGreaterThan 0 -Because 'a populated inventory must render at least one service section'
     }

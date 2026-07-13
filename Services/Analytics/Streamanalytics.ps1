@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $Streamanalytics = $Resources | Where-Object { $_.TYPE -eq 'microsoft.streamanalytics/streamingjobs' }
 
-    if($Streamanalytics)
+    if ($Streamanalytics)
     {
         $tmp = @()
 
-        foreach ($1 in $Streamanalytics) 
+        foreach ($1 in $Streamanalytics)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -46,7 +46,7 @@ if ($Task -eq 'Processing')
 
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

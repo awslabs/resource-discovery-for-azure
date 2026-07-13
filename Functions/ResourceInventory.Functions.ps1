@@ -20,15 +20,15 @@
 # is available here exactly as before. Its default behavior is unchanged; it
 # gained additive -NoConsole / -ToDebugLog switches. See that file for detail.
 
-function GetLocalVersion() 
+function GetLocalVersion()
 {
     $versionJsonPath = "./Version.json"
-    if (Test-Path $versionJsonPath) 
+    if (Test-Path $versionJsonPath)
     {
         $localVersionJson = Get-Content $versionJsonPath | ConvertFrom-Json
         return ('{0}.{1}.{2}' -f $localVersionJson.MajorVersion, $localVersionJson.MinorVersion, $localVersionJson.BuildVersion)
-    } 
-    else 
+    }
+    else
     {
         Write-Host "Local Version.json not found. Clone the repo and execute the script from the root. Exiting." -ForegroundColor Red
         Exit
@@ -131,7 +131,7 @@ Function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
 function Invoke-AzGraphQuerySafe
 {
     param(
-        [Parameter(Mandatory=$true)][string]$Query,
+        [Parameter(Mandatory = $true)][string]$Query,
         [object[]]$ExtraArgs = @(),
         [switch]$Lowercase
     )

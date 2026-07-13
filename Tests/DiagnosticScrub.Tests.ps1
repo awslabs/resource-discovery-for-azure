@@ -31,15 +31,15 @@ BeforeAll {
     # GENERATED AT RUNTIME so no literal GUID / auth token lives in this source
     # file (only the Azure docs placeholder is a literal GUID) - keeps the file
     # clean for the pre-commit leak scan while still exercising every scrub path.
-    $script:SubGuid      = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
-    $script:RgName       = 'rg-sensitive-demo'
-    $script:ResName      = 'vm-app-demo'
-    $script:ArmId        = "/subscriptions/$script:SubGuid/resourceGroups/$script:RgName/providers/Microsoft.Compute/virtualMachines/$script:ResName"
+    $script:SubGuid = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
+    $script:RgName = 'rg-sensitive-demo'
+    $script:ResName = 'vm-app-demo'
+    $script:ArmId = "/subscriptions/$script:SubGuid/resourceGroups/$script:RgName/providers/Microsoft.Compute/virtualMachines/$script:ResName"
 
-    $script:SubToken  = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:RgToken   = 'nonprod_' + [guid]::NewGuid().ToString()
-    $script:NameToken = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:IdToken   = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:SubToken = 'prod_' + [guid]::NewGuid().ToString()
+    $script:RgToken = 'nonprod_' + [guid]::NewGuid().ToString()
+    $script:NameToken = 'prod_' + [guid]::NewGuid().ToString()
+    $script:IdToken = 'prod_' + [guid]::NewGuid().ToString()
 
     $script:Map = @{
         $script:ArmId   = $script:IdToken
@@ -56,18 +56,18 @@ BeforeAll {
     $NewRand = { param($n) -join (1..$n | ForEach-Object { '{0:x}' -f (Get-Random -Minimum 0 -Maximum 16) }) }
 
     # Synthetic identifiers of every class, embedded in one message.
-    $script:Email   = 'ops.admin@contoso-corp.com'
-    $script:Fqdn    = 'appdatastore.blob.core.windows.net'
-    $script:Ip      = '10.42.13.99'
+    $script:Email = 'ops.admin@contoso-corp.com'
+    $script:Fqdn = 'appdatastore.blob.core.windows.net'
+    $script:Ip = '10.42.13.99'
     $script:HomeNix = '/home/testuser/inventory/run.log'
     $script:HomeWin = 'C:\Users\testuser\inventory\run.log'
     # SAS signature + Bearer JWT assembled from runtime-random parts, so the
     # secret-shaped literal never appears in this file but the scrub's sig=/Bearer
     # rules still fire. Keep the sig/jwt values to assert they are gone afterward.
     $script:SigValue = (& $NewRand 32)
-    $script:SasUrl   = 'https://example-host/container/blob?sv=2021-08-06&ss=b&' + 'sig=' + $script:SigValue
+    $script:SasUrl = 'https://example-host/container/blob?sv=2021-08-06&ss=b&' + 'sig=' + $script:SigValue
     $script:JwtValue = 'eyJ' + (& $NewRand 12) + '.' + (& $NewRand 16) + '.' + (& $NewRand 16)
-    $script:Bearer   = 'Bearer ' + $script:JwtValue
+    $script:Bearer = 'Bearer ' + $script:JwtValue
 
     $script:RawMessage = @(
         "Collector 'Streamanalytics' failed for $script:ArmId",

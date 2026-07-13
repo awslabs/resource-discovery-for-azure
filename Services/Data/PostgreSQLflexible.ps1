@@ -1,18 +1,18 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $PostgreSQLFlexible = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.DBforPostgreSQL/flexibleServers' }
 
-    if($PostgreSQLFlexible)
+    if ($PostgreSQLFlexible)
     {
         $tmp = @()
 
-        foreach ($1 in $PostgreSQLFlexible) 
+        foreach ($1 in $PostgreSQLFlexible)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            
+
             $obj = @{
                 'ID'                                = $1.id;
                 'Subscription'                      = $sub1.Name;
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
                 'BackupRetentionDays'               = $data.backup.backupRetentionDays;
                 'GeoRedundantBackup'                = $data.backup.geoRedundantBackup;
                 'HighAvailability'                  = $data.highAvailability.mode;
-                'HighAvailabilityState'             = $data.highAvailability.state;                            
+                'HighAvailabilityState'             = $data.highAvailability.state;
             }
 
             $tmp += $obj

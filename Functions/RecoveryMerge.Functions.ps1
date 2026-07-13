@@ -84,17 +84,17 @@ function Merge-RecoveryData
         return $Found
     }
 
-    if (-not (Test-Path -Path $GapBundlePath -PathType Container))      { throw ("Merge-RecoveryData: GapBundlePath not found: {0}" -f $GapBundlePath) }
+    if (-not (Test-Path -Path $GapBundlePath -PathType Container)) { throw ("Merge-RecoveryData: GapBundlePath not found: {0}" -f $GapBundlePath) }
     if (-not (Test-Path -Path $RecoveryBundlePath -PathType Container)) { throw ("Merge-RecoveryData: RecoveryBundlePath not found: {0}" -f $RecoveryBundlePath) }
 
-    $GapInventoryFile      = Get-BundleFile -Directory $GapBundlePath      -Filter 'Inventory_*.json'
+    $GapInventoryFile = Get-BundleFile -Directory $GapBundlePath      -Filter 'Inventory_*.json'
     $RecoveryInventoryFile = Get-BundleFile -Directory $RecoveryBundlePath -Filter 'Inventory_*.json'
-    $GapConsumptionFile    = Get-BundleFile -Directory $GapBundlePath      -Filter 'Consumption_*.csv'  -Optional
-    $GapDictionaryFile     = Get-BundleFile -Directory $GapBundlePath      -Filter 'ObfuscationDictionary_*.json' -Optional
+    $GapConsumptionFile = Get-BundleFile -Directory $GapBundlePath      -Filter 'Consumption_*.csv'  -Optional
+    $GapDictionaryFile = Get-BundleFile -Directory $GapBundlePath      -Filter 'ObfuscationDictionary_*.json' -Optional
     $RecoveryDictionaryFile = Get-BundleFile -Directory $RecoveryBundlePath -Filter 'ObfuscationDictionary_*.json' -Optional
 
     # -- Load inventories -----------------------------------------------------
-    $GapInventory      = Get-Content -Path $GapInventoryFile.FullName -Raw | ConvertFrom-Json
+    $GapInventory = Get-Content -Path $GapInventoryFile.FullName -Raw | ConvertFrom-Json
     $RecoveryInventory = Get-Content -Path $RecoveryInventoryFile.FullName -Raw | ConvertFrom-Json
 
     # Determine which service keys to splice in. Default = every collector key the
@@ -150,12 +150,12 @@ function Merge-RecoveryData
         New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
     }
 
-    $OutInventoryFile   = Join-Path $OutputPath ("Inventory_{0}.json"   -f $BundleBase)
-    $OutConsumptionFile = Join-Path $OutputPath ("Consumption_{0}.csv"  -f $BundleBase)
-    $OutMetricsFile     = Join-Path $OutputPath ("Metrics_{0}.json"     -f $BundleBase)
-    $OutHtmlFile        = Join-Path $OutputPath ("{0}.html"             -f $BundleBase)
-    $OutZipFile         = Join-Path $OutputPath ("{0}.zip"              -f $BundleBase)
-    $OutDictionaryFile  = Join-Path $OutputPath ("ObfuscationDictionary_{0}.json" -f $BundleBase)
+    $OutInventoryFile = Join-Path $OutputPath ("Inventory_{0}.json" -f $BundleBase)
+    $OutConsumptionFile = Join-Path $OutputPath ("Consumption_{0}.csv" -f $BundleBase)
+    $OutMetricsFile = Join-Path $OutputPath ("Metrics_{0}.json" -f $BundleBase)
+    $OutHtmlFile = Join-Path $OutputPath ("{0}.html" -f $BundleBase)
+    $OutZipFile = Join-Path $OutputPath ("{0}.zip" -f $BundleBase)
+    $OutDictionaryFile = Join-Path $OutputPath ("ObfuscationDictionary_{0}.json" -f $BundleBase)
 
     # -- Write the merged inventory (depth 100 + compressed, matching the
     #    original serialization in ResourceInventory.ps1) ----------------------
@@ -173,7 +173,7 @@ function Merge-RecoveryData
     #    correctly even though its tokens differ from the gap run's. If the chosen
     #    source has none, write a canonical empty file so the bundle is
     #    structurally complete. --------------------------------------------------
-    $ConsumptionSource     = 'gap'
+    $ConsumptionSource = 'gap'
     $ConsumptionSourceFile = $GapConsumptionFile
     if ($RecoverConsumption)
     {
@@ -182,7 +182,7 @@ function Merge-RecoveryData
         {
             throw ("Merge-RecoveryData: -RecoverConsumption was requested but the recovery bundle '{0}' has no Consumption_*.csv. Re-run the recovery WITHOUT -SkipConsumption." -f $RecoveryBundlePath)
         }
-        $ConsumptionSource     = 'recovery'
+        $ConsumptionSource = 'recovery'
         $ConsumptionSourceFile = $RecoveryConsumptionFile
     }
     if ($ConsumptionSourceFile)
@@ -214,7 +214,7 @@ function Merge-RecoveryData
         $RecoveryBase = $RecoveryInventoryFile.BaseName -replace '^Inventory_', ''
         foreach ($MetricsFile in $RecoveryMetricsFiles)
         {
-            $Suffix      = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
+            $Suffix = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
             $RebasedName = 'Metrics_' + $BundleBase + $Suffix + '.json'
             Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $RebasedName) -Force
         }

@@ -1,13 +1,13 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $VMWare = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.AVS/privateClouds' }
 
-    if($VMWare)
+    if ($VMWare)
     {
         $tmp = @()
-        foreach ($1 in $VMWare) 
+        foreach ($1 in $VMWare)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES

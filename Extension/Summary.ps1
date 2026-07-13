@@ -495,9 +495,9 @@ function New-ServiceTable
             {
                 # Render arrays joined. Truncate ID arrays for readability.
                 $joined = ($val | ForEach-Object {
-                    if ($null -eq $_) { return '' }
-                    if ($_ -is [psobject] -and -not ($_ -is [string])) { '(obj)' } else { [string]$_ }
-                }) -join ', '
+                        if ($null -eq $_) { return '' }
+                        if ($_ -is [psobject] -and -not ($_ -is [string])) { '(obj)' } else { [string]$_ }
+                    }) -join ', '
                 if ($joined.Length -gt 200) { $joined = $joined.Substring(0, 200) + '...' }
                 [void]$sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $joined))
             }
@@ -526,9 +526,9 @@ function New-ServiceTable
 # all services for the donut.
 $topN = $ServiceSummary | Select-Object -First 10
 $donutData = $ServiceSummary | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
-$barData   = $topN           | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
-$donutSvg  = if ($donutData) { New-DonutChart -Data $donutData } else { '<div class="empty">No data</div>' }
-$barSvg    = if ($barData)   { New-BarChart   -Data $barData }   else { '<div class="empty">No data</div>' }
+$barData = $topN           | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
+$donutSvg = if ($donutData) { New-DonutChart -Data $donutData } else { '<div class="empty">No data</div>' }
+$barSvg = if ($barData) { New-BarChart   -Data $barData }   else { '<div class="empty">No data</div>' }
 
 # Build per-service tables in summary-order (highest count first) so the
 # scroll order matches the bar chart.
@@ -541,7 +541,7 @@ foreach ($svc in $ServiceSummary)
 
 $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
 $titleSafe = ConvertTo-HtmlSafe $Title
-$subSafe   = ConvertTo-HtmlSafe $SubscriptionName
+$subSafe = ConvertTo-HtmlSafe $SubscriptionName
 $tenantSafe = if ([string]::IsNullOrWhiteSpace($TenantId)) { '' } else { (ConvertTo-HtmlSafe $TenantId) }
 $versionSafe = if (-not [string]::IsNullOrWhiteSpace([string]$Version)) { ConvertTo-HtmlSafe ([string]$Version) } else { '' }
 
@@ -843,10 +843,10 @@ $js = @'
 '@
 
 # Build the full document. Using a here-string so the layout reads top-down.
-$tenantBlock  = if ([string]::IsNullOrWhiteSpace($tenantSafe))  { '' } else { "<div><b>Tenant:</b> $tenantSafe</div>" }
+$tenantBlock = if ([string]::IsNullOrWhiteSpace($tenantSafe)) { '' } else { "<div><b>Tenant:</b> $tenantSafe</div>" }
 $versionBlock = if ([string]::IsNullOrWhiteSpace($versionSafe)) { '' } else { "<div><b>RDA version:</b> $versionSafe</div>" }
 $extractBlock = if ([string]::IsNullOrWhiteSpace($extractTimeText)) { '' } else { "<div><b>Setup and resource discovery:</b> $extractTimeText</div>" }
-$reportBlock  = if ([string]::IsNullOrWhiteSpace($reportTimeText))  { '' } else { "<div><b>Total collection (all phases):</b> $reportTimeText</div>" }
+$reportBlock = if ([string]::IsNullOrWhiteSpace($reportTimeText)) { '' } else { "<div><b>Total collection (all phases):</b> $reportTimeText</div>" }
 
 # Clear per-phase timing breakdown (metrics / collectors / consumption) from
 # -PhaseTimings, rendered as individual header lines so it is obvious which phase
@@ -871,7 +871,7 @@ if ($PhaseTimings)
 $RenderStopwatch.Stop()
 $renderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##')) }
 $renderBlock = "<div><b>Report generation (HTML):</b> $renderTimeText</div>"
-$platBlock    = if ([string]::IsNullOrWhiteSpace($platSafe))        { '' } else { "<div><b>Environment:</b> $platSafe</div>" }
+$platBlock = if ([string]::IsNullOrWhiteSpace($platSafe)) { '' } else { "<div><b>Environment:</b> $platSafe</div>" }
 
 # Privacy banner. Obfuscated runs surface a green confirmation; identifiable
 # runs surface an amber warning so anyone opening the report is reminded the

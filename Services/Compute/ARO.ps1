@@ -1,10 +1,10 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $ARO = $Resources | Where-Object { $_.TYPE -eq 'microsoft.redhatopenshift/openshiftclusters' }
 
-    if($ARO)
+    if ($ARO)
     {
         $tmp = @()
         foreach ($1 in $ARO)
@@ -20,11 +20,11 @@ if ($Task -eq 'Processing')
                 'Location'             = $1.LOCATION;
                 'AROVersion'           = $data.clusterProfile.version;
                 'OutboundType'         = $data.networkProfile.outboundType;
-                'APIServerType'        = $data.apiserverProfile.visibility;               
-                'MasterSKU'            = $data.masterProfile.vmSize;                 
-                'WorkerSKU'            = $data.workerProfiles.vmSize | Select-Object -Unique;        
-                'WorkerDiskSize'       = $data.workerProfiles.diskSizeGB | Select-Object -Unique;        
-                'TotalWorkerNodes'     = $data.workerProfiles.count;            
+                'APIServerType'        = $data.apiserverProfile.visibility;
+                'MasterSKU'            = $data.masterProfile.vmSize;
+                'WorkerSKU'            = $data.workerProfiles.vmSize | Select-Object -Unique;
+                'WorkerDiskSize'       = $data.workerProfiles.diskSizeGB | Select-Object -Unique;
+                'TotalWorkerNodes'     = $data.workerProfiles.count;
             }
 
             $tmp += $obj

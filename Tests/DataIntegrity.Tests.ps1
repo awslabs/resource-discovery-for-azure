@@ -3,15 +3,17 @@
 # Run with: Invoke-Pester ./Tests/DataIntegrity.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
-        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" | 
+    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    {
+        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath)) {
+    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
     $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("DataIntTest_" + [guid]::NewGuid().ToString().Substring(0,8))
+    $script:ExtractPath = Join-Path $tmpBase ("DataIntTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
     Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
 
@@ -20,7 +22,8 @@ BeforeAll {
 
     # Read all file contents for scanning
     $script:AllContent = @{}
-    foreach ($file in (Get-ChildItem -Path $script:ExtractPath -File)) {
+    foreach ($file in (Get-ChildItem -Path $script:ExtractPath -File))
+    {
         $script:AllContent[$file.Name] = Get-Content $file.FullName -Raw
     }
 
@@ -30,13 +33,15 @@ BeforeAll {
     # pattern, treat the run as obfuscated. The PII-leak Describe later
     # also depends on this signal.
     $script:IsObfuscated = $false
-    if ($null -ne $script:Inventory) {
+    if ($null -ne $script:Inventory)
+    {
         $script:Inventory.PSObject.Properties |
             Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
             ForEach-Object {
                 @($_.Value) | ForEach-Object {
                     if ($script:IsObfuscated) { return }
-                    if ($null -ne $_ -and $null -ne $_.ID -and $_.ID -match $script:ObfuscationPattern) {
+                    if ($null -ne $_ -and $null -ne $_.ID -and $_.ID -match $script:ObfuscationPattern)
+                    {
                         $script:IsObfuscated = $true
                     }
                 }
@@ -54,7 +59,8 @@ AfterAll {
 Describe "PII Leak Scan" {
     It "Should not contain /subscriptions/ resource paths in any file" {
         $pattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
-        foreach ($fileName in $script:AllContent.Keys) {
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
             $script:AllContent[$fileName] | Should -Not -Match $pattern -Because "File '$fileName' should not contain Azure resource paths"
         }
@@ -62,7 +68,8 @@ Describe "PII Leak Scan" {
 
     It "Should not contain Azure tenant ID patterns in any file" {
         $pattern = '"tenant[Ii][Dd]"\s*:\s*"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"'
-        foreach ($fileName in $script:AllContent.Keys) {
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
             $script:AllContent[$fileName] | Should -Not -Match $pattern -Because "File '$fileName' should not contain tenant IDs"
         }
@@ -70,7 +77,8 @@ Describe "PII Leak Scan" {
 
     It "Should not contain email addresses in any file" {
         $pattern = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-        foreach ($fileName in $script:AllContent.Keys) {
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
             $matches = [regex]::Matches($script:AllContent[$fileName], $pattern)
             $matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses"
@@ -78,7 +86,8 @@ Describe "PII Leak Scan" {
     }
 
     It "Should not contain home directory paths in any file" {
-        foreach ($fileName in $script:AllContent.Keys) {
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
             $script:AllContent[$fileName] | Should -Not -Match '/home/[a-zA-Z]' -Because "File '$fileName' should not contain Unix home paths"
             $script:AllContent[$fileName] | Should -Not -Match 'C:\\Users\\[a-zA-Z]' -Because "File '$fileName' should not contain Windows user paths"
@@ -95,8 +104,10 @@ Describe "Cross-Reference Integrity" {
         if ($disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($disk in $disks) {
-            if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource)) {
+        foreach ($disk in $disks)
+        {
+            if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource))
+            {
                 $disk.AssociatedResource | Should -BeIn $vmIds -Because "Disk '$($disk.ID)' should reference a known VM"
                 $Checked++
             }
@@ -109,8 +120,10 @@ Describe "Cross-Reference Integrity" {
         if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($item in $avd) {
-            if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId)) {
+        foreach ($item in $avd)
+        {
+            if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId))
+            {
                 $item.HostId | Should -BeIn $vmIds -Because "AVD HostId should reference a known VM"
                 $Checked++
             }
@@ -122,8 +135,10 @@ Describe "Cross-Reference Integrity" {
         $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
         if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $Checked = 0
-        foreach ($item in $avd) {
-            if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId) -and ![string]::IsNullOrEmpty($item.Hostname)) {
+        foreach ($item in $avd)
+        {
+            if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId) -and ![string]::IsNullOrEmpty($item.Hostname))
+            {
                 $item.Hostname | Should -Not -Be $item.HostId -Because "Hostname and HostId should be different values"
                 $Checked++
             }
@@ -145,7 +160,8 @@ Describe "Deterministic Mapping" {
         # Unique subs should be far fewer than total resources
         $uniqueSubs.Count | Should -BeLessOrEqual $subs.Count -Because "Subscription values should be reused (deterministic)"
         # For a single-subscription environment, should be exactly 1
-        if ($subs.Count -gt 1) {
+        if ($subs.Count -gt 1)
+        {
             $uniqueSubs.Count | Should -BeLessThan $subs.Count -Because "Multiple resources should share subscription values"
         }
     }
@@ -165,16 +181,20 @@ Describe "Deterministic Mapping" {
 # ============================================================
 Describe "Non-Sensitive Fields Preserved" {
     It "VM Location should be a real Azure region" {
-        foreach ($vm in @($script:Inventory.VirtualMachines)) {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Location)) {
+        foreach ($vm in @($script:Inventory.VirtualMachines))
+        {
+            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Location))
+            {
                 $vm.Location | Should -Not -Match '^(prod|nonprod)_' -Because "Location should be a real region"
             }
         }
     }
 
     It "VM Size should be a real Azure VM size" {
-        foreach ($vm in @($script:Inventory.VirtualMachines)) {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size)) {
+        foreach ($vm in @($script:Inventory.VirtualMachines))
+        {
+            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size))
+            {
                 # Azure VM SKUs include Standard_*, Basic_*, M-series (M64s, M128ms),
                 # N-series GPU sizes etc. The invariant is "not obfuscated" - i.e.
                 # the size string was not run through the obfuscator. The actual
@@ -185,32 +205,40 @@ Describe "Non-Sensitive Fields Preserved" {
     }
 
     It "VM OS should be windows or linux" {
-        foreach ($vm in @($script:Inventory.VirtualMachines)) {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType)) {
+        foreach ($vm in @($script:Inventory.VirtualMachines))
+        {
+            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType))
+            {
                 $vm.OSType | Should -BeIn @('windows', 'linux') -Because "OSType should be a real OS type"
             }
         }
     }
 
     It "Storage SKU should not be obfuscated" {
-        foreach ($sa in @($script:Inventory.StorageAcc)) {
-            if ($null -ne $sa -and ![string]::IsNullOrEmpty($sa.SKU)) {
+        foreach ($sa in @($script:Inventory.StorageAcc))
+        {
+            if ($null -ne $sa -and ![string]::IsNullOrEmpty($sa.SKU))
+            {
                 $sa.SKU | Should -Not -Match '^(prod|nonprod)_' -Because "Storage SKU should be real"
             }
         }
     }
 
     It "Tag values are obfuscated (no raw values) on all resources" {
-        if (-not $script:IsObfuscated) {
+        if (-not $script:IsObfuscated)
+        {
             Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
             return
         }
         $obfPattern = '^(prod|nonprod)_'
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags' -and $null -ne $_.Tags) {
-                    foreach ($tag in @($_.Tags)) {
-                        if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value)) {
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags' -and $null -ne $_.Tags)
+                {
+                    foreach ($tag in @($_.Tags))
+                    {
+                        if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
+                        {
                             $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, never raw, when obfuscating"
                         }
                     }
@@ -227,7 +255,8 @@ Describe "No Null Obfuscated Fields" {
     It "No resource should have a null ID" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_) {
+                if ($null -ne $_)
+                {
                     $_.ID | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated ID"
                 }
             }
@@ -237,7 +266,8 @@ Describe "No Null Obfuscated Fields" {
     It "No resource should have a null Name" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Name') {
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Name')
+                {
                     $_.Name | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated Name"
                 }
             }
@@ -247,7 +277,8 @@ Describe "No Null Obfuscated Fields" {
     It "No resource should have a null Subscription" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Subscription') {
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Subscription')
+                {
                     $_.Subscription | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated Subscription"
                 }
             }
@@ -257,7 +288,8 @@ Describe "No Null Obfuscated Fields" {
     It "No resource should have a null ResourceGroup" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'ResourceGroup') {
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'ResourceGroup')
+                {
                     $_.ResourceGroup | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated ResourceGroup"
                 }
             }
@@ -275,7 +307,8 @@ Describe "No Null Obfuscated Fields" {
 # 57 collectors have dedicated cross-reference tests).
 Describe "Generic per-property leak scan" {
     It "No resource property in obfuscated output should contain a raw Azure resource path" {
-        if (-not $script:IsObfuscated) {
+        if (-not $script:IsObfuscated)
+        {
             Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
             return
         }
@@ -286,8 +319,10 @@ Describe "Generic per-property leak scan" {
                 $collector = $_.Name
                 @($_.Value) | ForEach-Object {
                     if ($null -eq $_) { return }
-                    foreach ($prop in $_.PSObject.Properties) {
-                        if ($null -ne $prop.Value -and $prop.Value -is [string] -and $prop.Value -match $azureIdPattern) {
+                    foreach ($prop in $_.PSObject.Properties)
+                    {
+                        if ($null -ne $prop.Value -and $prop.Value -is [string] -and $prop.Value -match $azureIdPattern)
+                        {
                             $hint = "[{0}.{1}]" -f $collector, $prop.Name
                             $prop.Value | Should -Not -Match $azureIdPattern -Because "Field $hint contains raw Azure resource path"
                         }

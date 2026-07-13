@@ -30,7 +30,8 @@ BeforeAll {
     # -DictionaryPath, -SearchDirectory, -Fields, -All, -OutputZip), so every
     # invocation below drives it unchanged.
     $script:RevealScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Reveal.ps1'
-    if (-not (Test-Path $script:RevealScript)) {
+    if (-not (Test-Path $script:RevealScript))
+    {
         throw "Reveal.ps1 not found at $script:RevealScript"
     }
 
@@ -38,41 +39,41 @@ BeforeAll {
     $base = "/subscriptions/$subGuid/resourceGroups"
 
     # Runtime-generated obfuscated tokens (GUID-shaped so the tool matches them).
-    $script:TokId     = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokName   = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokSub    = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokRg     = 'nonprod_' + [guid]::NewGuid().ToString()
-    $script:TokRgAks  = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokRgCase = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokTag    = 'prod_'    + [guid]::NewGuid().ToString()
-    $script:TokFree   = 'prod_'    + [guid]::NewGuid().ToString()
+    $script:TokId = 'prod_' + [guid]::NewGuid().ToString()
+    $script:TokName = 'prod_' + [guid]::NewGuid().ToString()
+    $script:TokSub = 'prod_' + [guid]::NewGuid().ToString()
+    $script:TokRg = 'nonprod_' + [guid]::NewGuid().ToString()
+    $script:TokRgAks = 'prod_' + [guid]::NewGuid().ToString()
+    $script:TokRgCase = 'prod_' + [guid]::NewGuid().ToString()
+    $script:TokTag = 'prod_' + [guid]::NewGuid().ToString()
+    $script:TokFree = 'prod_' + [guid]::NewGuid().ToString()
 
     # Real values behind the tokens. Subscription name deliberately contains a
     # comma and an ampersand to exercise CSV quoting and HTML encoding.
-    $script:RealRgName   = 'rg-app'
-    $script:RealRgAks    = 'MC_rg-aks_aks01_eastus'   # AKS managed RG
-    $script:RealRgCase   = 'RG-APP'                   # casing must be preserved
-    $script:RealSubName  = 'Contoso, Inc. (Prod) & Co'
-    $script:RealTagVal   = 'payments'
+    $script:RealRgName = 'rg-app'
+    $script:RealRgAks = 'MC_rg-aks_aks01_eastus'   # AKS managed RG
+    $script:RealRgCase = 'RG-APP'                   # casing must be preserved
+    $script:RealSubName = 'Contoso, Inc. (Prod) & Co'
+    $script:RealTagVal = 'payments'
     $script:RealFreeText = 'data-platform workspace for the analytics team'
 
-    $idVm   = "$base/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
-    $idAks  = "$base/$($script:RealRgAks)/providers/Microsoft.Compute/virtualMachines/aksnode0"
+    $idVm = "$base/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
+    $idAks = "$base/$($script:RealRgAks)/providers/Microsoft.Compute/virtualMachines/aksnode0"
     $idCase = "$base/$($script:RealRgCase)/providers/Microsoft.Storage/storageAccounts/sa01"
 
     # ---- Dictionary fixture (current shape: has SubscriptionNameMap + TagMap) ----
     $dict = [ordered]@{
         GeneratedAt         = '2026-06-30 00:00:00'
-        ResourceIdMap       = [ordered]@{ $script:TokId   = $idVm }
+        ResourceIdMap       = [ordered]@{ $script:TokId = $idVm }
         ResourceNameMap     = [ordered]@{ $script:TokName = $idVm }
-        SubscriptionMap     = [ordered]@{ $script:TokSub  = $idVm }
+        SubscriptionMap     = [ordered]@{ $script:TokSub = $idVm }
         ResourceGroupMap    = [ordered]@{
             $script:TokRg     = $idVm
             $script:TokRgAks  = $idAks
             $script:TokRgCase = $idCase
         }
-        SubscriptionNameMap = [ordered]@{ $script:TokSub  = $script:RealSubName }
-        TagMap              = [ordered]@{ $script:TokTag  = $script:RealTagVal }
+        SubscriptionNameMap = [ordered]@{ $script:TokSub = $script:RealSubName }
+        TagMap              = [ordered]@{ $script:TokTag = $script:RealTagVal }
         FreeTextMap         = [ordered]@{ $script:TokFree = $script:RealFreeText }
     }
 
@@ -137,15 +138,16 @@ BeforeAll {
 
     # Helper: run reveal into a fresh output zip, extract, return parsed members.
     # -DictPath / -SearchDir let individual tests point at alternate fixtures.
-    function Invoke-Reveal {
+    function Invoke-Reveal
+    {
         param([string[]]$Fields, [string]$DictPath = $script:DictPath, [string]$SearchDir, [switch]$All)
-        $out = Join-Path $script:TmpDir ("out_" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".zip")
+        $out = Join-Path $script:TmpDir ("out_" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".zip")
         $splat = @{ InputZip = $script:InputZip; OutputZip = $out }
         if ($SearchDir) { $splat['SearchDirectory'] = $SearchDir } else { $splat['DictionaryPath'] = $DictPath }
         if ($Fields) { $splat['Fields'] = $Fields }
         if ($All) { $splat['All'] = $true }
         & $script:RevealScript @splat *>&1 | Out-Null
-        $ex = Join-Path $script:TmpDir ("ex_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        $ex = Join-Path $script:TmpDir ("ex_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         Expand-Archive -Path $out -DestinationPath $ex -Force
         $invFile = Get-ChildItem $ex -Filter 'Inventory_*.json' | Select-Object -First 1
         $csvFile = Get-ChildItem $ex -Filter 'Consumption_*.csv' | Select-Object -First 1
@@ -160,7 +162,8 @@ BeforeAll {
 }
 
 AfterAll {
-    if ($script:TmpDir -and (Test-Path $script:TmpDir)) {
+    if ($script:TmpDir -and (Test-Path $script:TmpDir))
+    {
         Remove-Item -Path $script:TmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -230,7 +233,7 @@ Describe "Reveal-Obfuscation default fields (ResourceGroup + Subscription)" {
 
 Describe "Reveal-Obfuscation with -Fields Tag" {
 
-    BeforeAll { $script:RT = Invoke-Reveal -Fields @('ResourceGroup','Subscription','Tag') }
+    BeforeAll { $script:RT = Invoke-Reveal -Fields @('ResourceGroup', 'Subscription', 'Tag') }
 
     It "reveals the tag value when Tag is selected" {
         $script:RT.Inventory.VirtualMachines[0].Tags[0].Value | Should -Be $script:RealTagVal
@@ -310,20 +313,20 @@ Describe "Reveal-Obfuscation -Fields FreeText" {
     }
 
     It "is a no-op for free-text when the dictionary has no FreeTextMap" {
-        $noFreeDir = Join-Path $script:TmpDir ("nofree_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        $noFreeDir = Join-Path $script:TmpDir ("nofree_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $noFreeDir -Force | Out-Null
         $noFreeDict = Join-Path $noFreeDir 'ObfuscationDictionary_NoFree.json'
         [ordered]@{
             GeneratedAt      = '2026-06-30 00:00:00'
-            ResourceIdMap    = [ordered]@{ $script:TokId  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceIdMap    = [ordered]@{ $script:TokId = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
             ResourceNameMap  = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
-            SubscriptionMap  = [ordered]@{ $script:TokSub  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
-            ResourceGroupMap = [ordered]@{ $script:TokRg   = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            SubscriptionMap  = [ordered]@{ $script:TokSub = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceGroupMap = [ordered]@{ $script:TokRg = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $noFreeDict -Encoding utf8
 
         # Pair FreeText with a resolvable dimension so the run has something to do;
         # FreeText must be a no-op (Description stays a token) when no FreeTextMap.
-        $r = Invoke-Reveal -Fields @('ResourceGroup','FreeText') -DictPath $noFreeDict
+        $r = Invoke-Reveal -Fields @('ResourceGroup', 'FreeText') -DictPath $noFreeDict
         $r.Inventory.VirtualMachines[0].Description | Should -Be $script:TokFree
         $r.Inventory.VirtualMachines[0].ResourceGroup | Should -Be $script:RealRgName
     }
@@ -334,15 +337,15 @@ Describe "Reveal-Obfuscation older / partial dictionaries" {
     It "falls back to the subscription GUID when the dictionary has no SubscriptionNameMap" {
         # A dictionary written before SubscriptionNameMap existed: the friendly
         # name is unrecoverable, so the subscription reveals to its GUID instead.
-        $legacyDir = Join-Path $script:TmpDir ("legacy_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        $legacyDir = Join-Path $script:TmpDir ("legacy_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $legacyDir -Force | Out-Null
         $legacyDict = Join-Path $legacyDir 'ObfuscationDictionary_Legacy.json'
         [ordered]@{
             GeneratedAt      = '2026-06-30 00:00:00'
-            ResourceIdMap    = [ordered]@{ $script:TokId  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceIdMap    = [ordered]@{ $script:TokId = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
             ResourceNameMap  = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
             SubscriptionMap  = [ordered]@{ $script:TokSub = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
-            ResourceGroupMap = [ordered]@{ $script:TokRg  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceGroupMap = [ordered]@{ $script:TokRg = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $legacyDict -Encoding utf8
 
         $r = Invoke-Reveal -DictPath $legacyDict
@@ -350,19 +353,19 @@ Describe "Reveal-Obfuscation older / partial dictionaries" {
     }
 
     It "leaves tag values masked when -Fields Tag is requested but the dictionary has no TagMap" {
-        $noTagDir = Join-Path $script:TmpDir ("notag_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        $noTagDir = Join-Path $script:TmpDir ("notag_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $noTagDir -Force | Out-Null
         $noTagDict = Join-Path $noTagDir 'ObfuscationDictionary_NoTag.json'
         [ordered]@{
             GeneratedAt         = '2026-06-30 00:00:00'
-            ResourceIdMap       = [ordered]@{ $script:TokId   = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceIdMap       = [ordered]@{ $script:TokId = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
             ResourceNameMap     = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
-            SubscriptionMap     = [ordered]@{ $script:TokSub  = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
-            ResourceGroupMap    = [ordered]@{ $script:TokRg   = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
-            SubscriptionNameMap = [ordered]@{ $script:TokSub  = $script:RealSubName }
+            SubscriptionMap     = [ordered]@{ $script:TokSub = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            ResourceGroupMap    = [ordered]@{ $script:TokRg = "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-app/providers/Microsoft.Compute/virtualMachines/vm01" }
+            SubscriptionNameMap = [ordered]@{ $script:TokSub = $script:RealSubName }
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $noTagDict -Encoding utf8
 
-        $r = Invoke-Reveal -Fields @('ResourceGroup','Subscription','Tag') -DictPath $noTagDict
+        $r = Invoke-Reveal -Fields @('ResourceGroup', 'Subscription', 'Tag') -DictPath $noTagDict
         $r.Inventory.VirtualMachines[0].Tags[0].Value | Should -Be $script:TokTag
     }
 }
@@ -380,7 +383,7 @@ Describe "Reveal-Obfuscation dictionary handling and source safety" {
     }
 
     It "throws when neither -DictionaryPath nor a discoverable dictionary exists" {
-        $emptyDir = Join-Path $script:TmpDir ("empty_" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        $emptyDir = Join-Path $script:TmpDir ("empty_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
         { & $script:RevealScript -InputZip $script:InputZip -SearchDirectory $emptyDir -OutputZip (Join-Path $emptyDir 'o.zip') } |
             Should -Throw -ExpectedMessage '*ObfuscationDictionary*'
@@ -423,18 +426,18 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
         # Tokens modelling a deterministic obfuscator run: vmA and vmB shared the
         # SAME real free-text value, so Protect-FreeTextValue would have emitted a
         # single shared token for both; vmC had a distinct value -> distinct token.
-        $script:P3TokShared = 'prod_'    + [guid]::NewGuid().ToString()
-        $script:P3TokOther  = 'nonprod_' + [guid]::NewGuid().ToString()
+        $script:P3TokShared = 'prod_' + [guid]::NewGuid().ToString()
+        $script:P3TokOther = 'nonprod_' + [guid]::NewGuid().ToString()
 
         $script:P3RealShared = 'created-by: platform-team (owner of record)'
-        $script:P3RealOther  = 'runbook: nightly-maintenance, stage=qa'
+        $script:P3RealOther = 'runbook: nightly-maintenance, stage=qa'
 
         # vmA and vmB carry the shared token in a free-text field; vmC the other.
         $script:P3Inventory = [ordered]@{
             VirtualMachines = @(
                 [ordered]@{ Name = 'a'; ResourceGroup = 'rg-p3'; CreatedBy = $script:P3TokShared }
                 [ordered]@{ Name = 'b'; ResourceGroup = 'rg-p3'; CreatedBy = $script:P3TokShared }
-                [ordered]@{ Name = 'c'; ResourceGroup = 'rg-p3'; RoleName  = $script:P3TokOther }
+                [ordered]@{ Name = 'c'; ResourceGroup = 'rg-p3'; RoleName = $script:P3TokOther }
             )
         }
 
@@ -480,7 +483,8 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
     }
 
     AfterAll {
-        if ($script:P3Dir -and (Test-Path $script:P3Dir)) {
+        if ($script:P3Dir -and (Test-Path $script:P3Dir))
+        {
             Remove-Item -Path $script:P3Dir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
@@ -491,7 +495,8 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
     }
 
     It "FreeTextMap resolves each token to a real value (not a token, null, or the 'obfuscated' sentinel)" {
-        foreach ($tok in @($script:P3TokShared, $script:P3TokOther)) {
+        foreach ($tok in @($script:P3TokShared, $script:P3TokOther))
+        {
             $real = $script:P3Dict.FreeTextMap[$tok]
             $real | Should -Not -BeNullOrEmpty
             $real | Should -Not -Match $script:P3TokenRegex
@@ -824,15 +829,15 @@ Describe "Reveal-Obfuscation structural preservation (P5, Req 7.4)" {
         # fresh output zip; then extract BOTH the input and revealed zips
         # independently so member sets and per-member content can be compared
         # without depending on the reveal helper's internal extraction.
-        $script:P5Result      = Invoke-Reveal
+        $script:P5Result = Invoke-Reveal
         $script:P5RevealedZip = $script:P5Result.OutputZip
 
-        $script:P5InExtract  = Join-Path $script:TmpDir ("p5_in_"  + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $script:P5InExtract = Join-Path $script:TmpDir ("p5_in_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $script:P5OutExtract = Join-Path $script:TmpDir ("p5_out_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         Expand-Archive -Path $script:InputZip      -DestinationPath $script:P5InExtract  -Force
         Expand-Archive -Path $script:P5RevealedZip -DestinationPath $script:P5OutExtract -Force
 
-        $script:P5InNames  = @(Get-ChildItem -Path $script:P5InExtract  -Recurse -File | ForEach-Object { $_.Name } | Sort-Object)
+        $script:P5InNames = @(Get-ChildItem -Path $script:P5InExtract  -Recurse -File | ForEach-Object { $_.Name } | Sort-Object)
         $script:P5OutNames = @(Get-ChildItem -Path $script:P5OutExtract -Recurse -File | ForEach-Object { $_.Name } | Sort-Object)
     }
 
@@ -863,10 +868,10 @@ Describe "Reveal-Obfuscation structural preservation (P5, Req 7.4)" {
             $InCsvPath = Join-Path $script:P5InExtract $OutCsvFile.Name
             Test-Path -Path $InCsvPath | Should -BeTrue
 
-            $InRows  = @(Import-Csv -Path $InCsvPath)
+            $InRows = @(Import-Csv -Path $InCsvPath)
             $OutRows = @(Import-Csv -Path $OutCsvFile.FullName)
 
-            $InHeaders  = @($InRows[0].PSObject.Properties.Name)
+            $InHeaders = @($InRows[0].PSObject.Properties.Name)
             $OutHeaders = @($OutRows[0].PSObject.Properties.Name)
 
             ($OutHeaders -join '|') | Should -Be ($InHeaders -join '|')
@@ -935,7 +940,7 @@ Describe "Reveal-Obfuscation no-op byte equality (P6, Req 9.4)" {
         # leaving the CSV and HTML members with zero selected-token hits.
         $script:P6Result = Invoke-Reveal -Fields @('Tag')
 
-        $script:P6InExtract  = Join-Path $script:TmpDir ("p6_in_"  + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $script:P6InExtract = Join-Path $script:TmpDir ("p6_in_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $script:P6OutExtract = Join-Path $script:TmpDir ("p6_out_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         Expand-Archive -Path $script:InputZip           -DestinationPath $script:P6InExtract  -Force
         Expand-Archive -Path $script:P6Result.OutputZip -DestinationPath $script:P6OutExtract -Force
@@ -948,7 +953,7 @@ Describe "Reveal-Obfuscation no-op byte equality (P6, Req 9.4)" {
     }
 
     It "leaves a CSV member with no selected tokens byte-for-byte identical (SHA256)" {
-        $InCsv  = Join-Path $script:P6InExtract  'Consumption_Test.csv'
+        $InCsv = Join-Path $script:P6InExtract  'Consumption_Test.csv'
         $OutCsv = Join-Path $script:P6OutExtract 'Consumption_Test.csv'
         Test-Path -Path $InCsv  | Should -BeTrue
         Test-Path -Path $OutCsv | Should -BeTrue
@@ -956,7 +961,7 @@ Describe "Reveal-Obfuscation no-op byte equality (P6, Req 9.4)" {
     }
 
     It "leaves an HTML member with no selected tokens byte-for-byte identical (SHA256)" {
-        $InHtml  = Join-Path $script:P6InExtract  'ResourcesReport_Test.html'
+        $InHtml = Join-Path $script:P6InExtract  'ResourcesReport_Test.html'
         $OutHtml = Join-Path $script:P6OutExtract 'ResourcesReport_Test.html'
         Test-Path -Path $InHtml  | Should -BeTrue
         Test-Path -Path $OutHtml | Should -BeTrue
@@ -1021,7 +1026,7 @@ Describe "Reveal-Obfuscation per-format escaping safety (P9, Req 9.1/9.2/9.3)" {
         # One FreeText token whose real value carries every format-significant
         # character: a double quote, a comma, an ampersand, a less-than (and a
         # greater-than), and an embedded newline. Synthetic, no customer data.
-        $script:P9Tok  = 'prod_' + [guid]::NewGuid().ToString()
+        $script:P9Tok = 'prod_' + [guid]::NewGuid().ToString()
         $script:P9Real = "owner `"ops`", team A & B <primary>`nsecond line"
 
         # Independently computed expected encodings (NOT reusing the production
@@ -1075,14 +1080,15 @@ Describe "Reveal-Obfuscation per-format escaping safety (P9, Req 9.1/9.2/9.3)" {
         Expand-Archive -Path $out -DestinationPath $script:P9Extract -Force
 
         $script:P9JsonFile = (Get-ChildItem $script:P9Extract -Filter 'Inventory_*.json'   | Select-Object -First 1).FullName
-        $script:P9CsvFile  = (Get-ChildItem $script:P9Extract -Filter 'Consumption_*.csv'   | Select-Object -First 1).FullName
+        $script:P9CsvFile = (Get-ChildItem $script:P9Extract -Filter 'Consumption_*.csv'   | Select-Object -First 1).FullName
         $script:P9HtmlFile = (Get-ChildItem $script:P9Extract -Filter '*.html'              | Select-Object -First 1).FullName
 
         $script:P9TokenRegex = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
     }
 
     AfterAll {
-        if ($script:P9Dir -and (Test-Path $script:P9Dir)) {
+        if ($script:P9Dir -and (Test-Path $script:P9Dir))
+        {
             Remove-Item -Path $script:P9Dir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
@@ -1344,10 +1350,10 @@ Describe "Reveal-Obfuscation backward compatibility with older dictionaries (Req
         $script:BcLegacyDict = Join-Path $script:BcLegacyDir 'ObfuscationDictionary_LegacyNoSubName.json'
         [ordered]@{
             GeneratedAt      = '2026-06-30 00:00:00'
-            ResourceIdMap    = [ordered]@{ $script:TokId   = $script:BcVmId }
+            ResourceIdMap    = [ordered]@{ $script:TokId = $script:BcVmId }
             ResourceNameMap  = [ordered]@{ $script:TokName = $script:BcVmId }
-            SubscriptionMap  = [ordered]@{ $script:TokSub  = $script:BcVmId }
-            ResourceGroupMap = [ordered]@{ $script:TokRg   = $script:BcVmId }
+            SubscriptionMap  = [ordered]@{ $script:TokSub = $script:BcVmId }
+            ResourceGroupMap = [ordered]@{ $script:TokRg = $script:BcVmId }
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $script:BcLegacyDict -Encoding utf8
 
         # ---- Older-shaped dictionary: NO TagMap (tags not obfuscated) ----
@@ -1358,11 +1364,11 @@ Describe "Reveal-Obfuscation backward compatibility with older dictionaries (Req
         $script:BcNoTagDict = Join-Path $script:BcNoTagDir 'ObfuscationDictionary_NoTag.json'
         [ordered]@{
             GeneratedAt         = '2026-06-30 00:00:00'
-            ResourceIdMap       = [ordered]@{ $script:TokId   = $script:BcVmId }
+            ResourceIdMap       = [ordered]@{ $script:TokId = $script:BcVmId }
             ResourceNameMap     = [ordered]@{ $script:TokName = $script:BcVmId }
-            SubscriptionMap     = [ordered]@{ $script:TokSub  = $script:BcVmId }
-            ResourceGroupMap    = [ordered]@{ $script:TokRg   = $script:BcVmId }
-            SubscriptionNameMap = [ordered]@{ $script:TokSub  = $script:RealSubName }
+            SubscriptionMap     = [ordered]@{ $script:TokSub = $script:BcVmId }
+            ResourceGroupMap    = [ordered]@{ $script:TokRg = $script:BcVmId }
+            SubscriptionNameMap = [ordered]@{ $script:TokSub = $script:RealSubName }
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $script:BcNoTagDict -Encoding utf8
 
         # ---- Older-shaped dictionary: core maps ONLY, all optional maps absent ----
@@ -1371,10 +1377,10 @@ Describe "Reveal-Obfuscation backward compatibility with older dictionaries (Req
         $script:BcCoreOnlyDict = Join-Path $script:BcCoreOnlyDir 'ObfuscationDictionary_CoreOnly.json'
         [ordered]@{
             GeneratedAt      = '2026-06-30 00:00:00'
-            ResourceIdMap    = [ordered]@{ $script:TokId   = $script:BcVmId }
+            ResourceIdMap    = [ordered]@{ $script:TokId = $script:BcVmId }
             ResourceNameMap  = [ordered]@{ $script:TokName = $script:BcVmId }
-            SubscriptionMap  = [ordered]@{ $script:TokSub  = $script:BcVmId }
-            ResourceGroupMap = [ordered]@{ $script:TokRg   = $script:BcVmId }
+            SubscriptionMap  = [ordered]@{ $script:TokSub = $script:BcVmId }
+            ResourceGroupMap = [ordered]@{ $script:TokRg = $script:BcVmId }
         } | ConvertTo-Json -Depth 6 | Set-Content -Path $script:BcCoreOnlyDict -Encoding utf8
     }
 

@@ -33,7 +33,8 @@
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'
-    if (-not (Test-Path $script:FunctionsPath)) {
+    if (-not (Test-Path $script:FunctionsPath))
+    {
         throw "Could not find shared functions file at $script:FunctionsPath"
     }
     . $script:FunctionsPath
@@ -42,8 +43,10 @@ BeforeAll {
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
     $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome')
-    foreach ($Fn in $TargetFunctions) {
-        if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue)) {
+    foreach ($Fn in $TargetFunctions)
+    {
+        if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
+        {
             throw "Expected function '$Fn' to be defined by $script:FunctionsPath, but it was not. Has it been renamed or removed?"
         }
     }
@@ -54,7 +57,8 @@ BeforeAll {
 }
 
 AfterAll {
-    if ($script:TestRoot -and (Test-Path $script:TestRoot)) {
+    if ($script:TestRoot -and (Test-Path $script:TestRoot))
+    {
         Remove-Item -Path $script:TestRoot -Recurse -Force
     }
 }
@@ -194,7 +198,7 @@ Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
     }
 
     It 'Add-FailedAttempt increments Attempts when the same sub fails again (scalar input)' {
-        $First  = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first'
+        $First = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first'
         $Second = Add-FailedAttempt -Existing $First -Id 'sub-1' -Name 'Sub One' -Reason 'again'
         @($Second).Count | Should -Be 1 -Because 'the same sub Id must not be duplicated'
         @($Second)[0].Attempts | Should -Be 2
@@ -220,7 +224,7 @@ Describe 'Merge-FailedAttempts single-element handling' {
 
     It 'Accepts single (scalar) existing and stream failures without throwing' {
         $ExistingScalar = [pscustomobject]@{ Id = 'sub-1'; Name = 'Sub One'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'old'; Attempts = 1 }
-        $StreamScalar   = [pscustomobject]@{ Id = 'sub-2'; Name = 'Sub Two'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'new'; Attempts = 1 }
+        $StreamScalar = [pscustomobject]@{ Id = 'sub-2'; Name = 'Sub Two'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'new'; Attempts = 1 }
 
         { Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts $StreamScalar -CompletedIds @() } | Should -Not -Throw
 

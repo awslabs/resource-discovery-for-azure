@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $Synapse = $Resources | Where-Object { $_.TYPE -eq 'microsoft.synapse/workspaces' }
 
-    if($Synapse)
+    if ($Synapse)
     {
         $tmp = @()
-        
-        foreach ($1 in $Synapse) 
+
+        foreach ($1 in $Synapse)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -20,7 +20,7 @@ if ($Task -eq 'Processing')
                 'Name'                         = $1.NAME;
                 'Location'                     = $1.LOCATION;
                 'WorkspaceType'                = [string]$data.extraProperties.WorkspaceType;
-                'ManagedVirtualNetwork'        = $data.managedVirtualNetwork;                            
+                'ManagedVirtualNetwork'        = $data.managedVirtualNetwork;
                 'ManagedResourceGroup'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.managedResourceGroupName };
             }
 

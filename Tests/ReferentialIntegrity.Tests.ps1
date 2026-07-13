@@ -3,15 +3,17 @@
 # Run with: Invoke-Pester ./Tests/ReferentialIntegrity.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
-        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" | 
+    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    {
+        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath)) {
+    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
     $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("RefIntTest_" + [guid]::NewGuid().ToString().Substring(0,8))
+    $script:ExtractPath = Join-Path $tmpBase ("RefIntTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
     Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
 
@@ -19,10 +21,12 @@ BeforeAll {
     $script:Inventory = Get-Content $invFile.FullName -Raw | ConvertFrom-Json
 
     $csvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
-    $script:ConsumptionCsv = if ($csvFile) { 
+    $script:ConsumptionCsv = if ($csvFile)
+    {
         $content = Get-Content $csvFile.FullName -ErrorAction SilentlyContinue
         if ($null -ne $content -and $content.Count -gt 1) { Import-Csv $csvFile.FullName } else { @() }
-    } else { @() }
+    }
+    else { @() }
 
     # Collect all IDs across all resource types
     $script:AllIds = @()
@@ -56,8 +60,10 @@ Describe "VM Disk to VM Cross-Reference" {
         if ($disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($disk in $disks) {
-            if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource)) {
+        foreach ($disk in $disks)
+        {
+            if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource))
+            {
                 $disk.AssociatedResource | Should -BeIn $vmIds -Because "Disk '$($disk.ID)' AssociatedResource should reference a known VM"
                 $Checked++
             }
@@ -72,8 +78,10 @@ Describe "AVD HostId to VM Cross-Reference" {
         if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($avdItem in $avd) {
-            if ($null -ne $avdItem -and ![string]::IsNullOrEmpty($avdItem.HostId)) {
+        foreach ($avdItem in $avd)
+        {
+            if ($null -ne $avdItem -and ![string]::IsNullOrEmpty($avdItem.HostId))
+            {
                 $avdItem.HostId | Should -BeIn $vmIds -Because "AVD HostId should reference a known VM"
                 $Checked++
             }
@@ -91,9 +99,12 @@ Describe "SQL VM to VM Cross-Reference" {
         #   'obfuscated' (obfuscation on, parent id not indexed) / 'None' (no parent id).
         $tolerated = @('obfuscated', 'None')
         $Checked = 0
-        foreach ($sqlvm in $sqlvms) {
-            if ($null -ne $sqlvm -and ![string]::IsNullOrEmpty($sqlvm.ParentVirtualMachine)) {
-                if ($sqlvm.ParentVirtualMachine -notin $tolerated) {
+        foreach ($sqlvm in $sqlvms)
+        {
+            if ($null -ne $sqlvm -and ![string]::IsNullOrEmpty($sqlvm.ParentVirtualMachine))
+            {
+                if ($sqlvm.ParentVirtualMachine -notin $tolerated)
+                {
                     $sqlvm.ParentVirtualMachine | Should -BeIn $vmIds -Because "SQL VM '$($sqlvm.ID)' ParentVirtualMachine should reference a known VM's obfuscated ID"
                     $Checked++
                 }
@@ -114,8 +125,10 @@ Describe "Consumption to Inventory Cross-Reference" {
     It "Consumption ResourceIds that exist in inventory should use the same obfuscated value" {
         if ($script:ConsumptionCsv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
         $inventoryIds = $script:AllIds
-        foreach ($row in $script:ConsumptionCsv) {
-            if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $inventoryIds) {
+        foreach ($row in $script:ConsumptionCsv)
+        {
+            if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $inventoryIds)
+            {
                 # If it's in both, the ID should be identical (same dictionary mapping)
                 $row.ResourceId | Should -BeIn $inventoryIds -Because "Consumption ResourceId should match inventory ID"
             }
@@ -128,14 +141,16 @@ Describe "ResourceGroup Consistency" {
         $rgGroups = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.ResourceGroup) {
+                if ($null -ne $_ -and $null -ne $_.ResourceGroup)
+                {
                     if (-not $rgGroups.ContainsKey($_.ResourceGroup)) { $rgGroups[$_.ResourceGroup] = @() }
                     $rgGroups[$_.ResourceGroup] += $_.ID
                 }
             }
         }
         # Each RG should have at least one resource
-        foreach ($rg in $rgGroups.Keys) {
+        foreach ($rg in $rgGroups.Keys)
+        {
             $rgGroups[$rg].Count | Should -BeGreaterThan 0 -Because "ResourceGroup '$rg' should have at least one resource"
         }
     }
@@ -147,7 +162,8 @@ Describe "Subscription Determinism" {
         $subValues = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.Subscription) {
+                if ($null -ne $_ -and $null -ne $_.Subscription)
+                {
                     $subValues[$_.Subscription] = $true
                 }
             }
@@ -163,7 +179,8 @@ Describe "ResourceGroup Determinism" {
         $rgValues = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.ResourceGroup) {
+                if ($null -ne $_ -and $null -ne $_.ResourceGroup)
+                {
                     $rgValues[$_.ResourceGroup] = $true
                 }
             }
@@ -190,8 +207,10 @@ Describe "SQLDB to SQL Server Cross-Reference (P8)" {
         if ($SqlDbs.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
         $ServerIds = @($script:Inventory.SQLSERVER) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($db in $SqlDbs) {
-            if (![string]::IsNullOrEmpty($db.DatabaseServer) -and $db.DatabaseServer -ne 'obfuscated') {
+        foreach ($db in $SqlDbs)
+        {
+            if (![string]::IsNullOrEmpty($db.DatabaseServer) -and $db.DatabaseServer -ne 'obfuscated')
+            {
                 $db.DatabaseServer | Should -BeIn $ServerIds -Because "SQLDB '$($db.ID)' DatabaseServer should match its parent SQL Server's own obfuscated ID"
                 $Checked++
             }
@@ -205,8 +224,10 @@ Describe "SQLDB to SQL Server Cross-Reference (P8)" {
         $PoolIds = @($script:Inventory.SQLPOOL) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Tolerated = @('None', 'obfuscated')
         $Checked = 0
-        foreach ($db in $SqlDbs) {
-            if (![string]::IsNullOrEmpty($db.ElasticPoolID) -and $db.ElasticPoolID -notin $Tolerated) {
+        foreach ($db in $SqlDbs)
+        {
+            if (![string]::IsNullOrEmpty($db.ElasticPoolID) -and $db.ElasticPoolID -notin $Tolerated)
+            {
                 $db.ElasticPoolID | Should -BeIn $PoolIds -Because "SQLDB '$($db.ID)' ElasticPoolID should match its elastic pool's own obfuscated ID"
                 $Checked++
             }
@@ -221,8 +242,10 @@ Describe "SQLMIDB to Managed Instance Cross-Reference (P8)" {
         if ($MiDbs.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMIDB resources in this fixture"; return }
         $MiIds = @($script:Inventory.SQLMI) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($midb in $MiDbs) {
-            if (![string]::IsNullOrEmpty($midb.ManagedInstance) -and $midb.ManagedInstance -ne 'obfuscated') {
+        foreach ($midb in $MiDbs)
+        {
+            if (![string]::IsNullOrEmpty($midb.ManagedInstance) -and $midb.ManagedInstance -ne 'obfuscated')
+            {
                 $midb.ManagedInstance | Should -BeIn $MiIds -Because "SQLMIDB '$($midb.ID)' ManagedInstance should match its managed instance's own obfuscated ID"
                 $Checked++
             }
@@ -237,8 +260,10 @@ Describe "AvSet to VM Cross-Reference (P8)" {
         if ($AvSets.Count -eq 0) { Set-ItResult -Skipped -Because "no AvSet resources in this fixture"; return }
         $VmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($av in $AvSets) {
-            if (![string]::IsNullOrEmpty($av.VirtualMachines) -and $av.VirtualMachines -ne 'obfuscated') {
+        foreach ($av in $AvSets)
+        {
+            if (![string]::IsNullOrEmpty($av.VirtualMachines) -and $av.VirtualMachines -ne 'obfuscated')
+            {
                 $av.VirtualMachines | Should -BeIn $VmIds -Because "AvSet '$($av.ID)' VirtualMachines should match a member VM's own obfuscated ID"
                 $Checked++
             }
@@ -264,10 +289,12 @@ Describe "VMSS Related-Cluster Cross-Reference (P8)" {
         # prod_/nonprod_ token, which the AKS-cluster case already satisfies.
         $ClusterIds = @(@($script:Inventory.AKS) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID })
         $Checked = 0
-        foreach ($ss in $VmssItems) {
-            if (![string]::IsNullOrEmpty($ss.AKS)) {
-                $IsKnownClusterId  = $ss.AKS -in $ClusterIds
-                $IsSentinel        = $ss.AKS -eq 'obfuscated'
+        foreach ($ss in $VmssItems)
+        {
+            if (![string]::IsNullOrEmpty($ss.AKS))
+            {
+                $IsKnownClusterId = $ss.AKS -in $ClusterIds
+                $IsSentinel = $ss.AKS -eq 'obfuscated'
                 $IsWellFormedToken = $ss.AKS -match $script:TokenPattern
                 ($IsKnownClusterId -or $IsSentinel -or $IsWellFormedToken) | Should -BeTrue `
                     -Because "VMSS '$($ss.ID)' related-cluster value should match its cluster's own obfuscated ID (AKS or Service Fabric), or be the out-of-scope sentinel"
@@ -286,15 +313,16 @@ Describe "Cross-Reference Out-of-Scope Sentinel (P8)" {
         # for an out-of-scope target (Req 2.3), a benign 'None'/'' placeholder,
         # or a well-formed token. It must NEVER be a raw ARM path.
         $Refs = @()
-        @($script:Inventory.VMDisk)  | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.AssociatedResource)   { $Refs += $_.AssociatedResource } }
+        @($script:Inventory.VMDisk)  | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.AssociatedResource) { $Refs += $_.AssociatedResource } }
         @($script:Inventory.SQLVM)   | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.ParentVirtualMachine) { $Refs += $_.ParentVirtualMachine } }
-        @($script:Inventory.SQLDB)   | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.DatabaseServer)       { $Refs += $_.DatabaseServer }; if ($_.ElasticPoolID) { $Refs += $_.ElasticPoolID } }
-        @($script:Inventory.SQLMIDB) | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.ManagedInstance)      { $Refs += $_.ManagedInstance } }
-        @($script:Inventory.AvSet)   | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.VirtualMachines)      { $Refs += $_.VirtualMachines } }
+        @($script:Inventory.SQLDB)   | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.DatabaseServer) { $Refs += $_.DatabaseServer }; if ($_.ElasticPoolID) { $Refs += $_.ElasticPoolID } }
+        @($script:Inventory.SQLMIDB) | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.ManagedInstance) { $Refs += $_.ManagedInstance } }
+        @($script:Inventory.AvSet)   | Where-Object { $null -ne $_ } | ForEach-Object { if ($_.VirtualMachines) { $Refs += $_.VirtualMachines } }
         $Refs = @($Refs | Where-Object { ![string]::IsNullOrEmpty($_) })
         if ($Refs.Count -eq 0) { Set-ItResult -Skipped -Because "no cross-reference values present in this fixture"; return }
         $Tolerated = @('obfuscated', 'None')
-        foreach ($ref in $Refs) {
+        foreach ($ref in $Refs)
+        {
             if ($ref -in $Tolerated) { continue }
             ($ref -in $script:AllIds -or $ref -match $script:TokenPattern) | Should -BeTrue -Because "cross-reference '$ref' must be a valid target token or the 'obfuscated' sentinel, never a raw identifier"
         }
@@ -310,8 +338,8 @@ Describe "Metric Per-Resource Cached Token (P8)" {
         $Violations = @()
         $script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) } | Group-Object ID | ForEach-Object {
             $Names = @($_.Group.Name | Sort-Object -Unique).Count
-            $Subs  = @($_.Group.Subscription | Sort-Object -Unique).Count
-            $Rgs   = @($_.Group.ResourceGroup | Sort-Object -Unique).Count
+            $Subs = @($_.Group.Subscription | Sort-Object -Unique).Count
+            $Rgs = @($_.Group.ResourceGroup | Sort-Object -Unique).Count
             if ($Names -gt 1 -or $Subs -gt 1 -or $Rgs -gt 1) { $Violations += $_.Name }
         }
         $Violations | Should -BeNullOrEmpty -Because "each obfuscated resource ID should map to a single Name/Subscription/ResourceGroup across its metric rows"
@@ -325,7 +353,8 @@ Describe "Metric Per-Resource Cached Token (P8)" {
         # normally also inventoried, so this fallback path may be unexercised.
         $AbsentIds = @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) -and $_.ID -notin $script:AllIds } | Select-Object -ExpandProperty ID -Unique)
         if ($AbsentIds.Count -eq 0) { Set-ItResult -Skipped -Because "fixture does not exercise the metric fallback path (all metric-referenced resources are present in the inventory dictionary)"; return }
-        foreach ($id in $AbsentIds) {
+        foreach ($id in $AbsentIds)
+        {
             $id | Should -Match $script:TokenPattern -Because "a metric resource absent from the main dictionary should still receive a cached prod_/nonprod_ token, not a raw id"
             $id | Should -Not -Be 'obfuscated' -Because "the metric fallback assigns a correlatable cached token, not the lossy sentinel"
         }

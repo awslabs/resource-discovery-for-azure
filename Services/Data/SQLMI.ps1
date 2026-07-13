@@ -1,15 +1,15 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $SQLSERVERMI = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/managedInstances' }
     $SQLSERVERMIDB = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/managedinstances/databases' }
 
-    if($SQLSERVERMI)
+    if ($SQLSERVERMI)
     {
         $tmp = @()
 
-        foreach ($1 in $SQLSERVERMI) 
+        foreach ($1 in $SQLSERVERMI)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -35,10 +35,10 @@ if ($Task -eq 'Processing')
                 'ZoneRedundant'                 = $data.zoneRedundant;
                 'Databases'                     = if ($null -ne $databases) { $databases.Count } else { '0' }
             }
-            
-            $tmp += $obj        
+
+            $tmp += $obj
         }
-        
+
         $tmp
     }
 }

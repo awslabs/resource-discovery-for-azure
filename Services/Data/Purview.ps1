@@ -1,13 +1,13 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $Purview = $Resources | Where-Object { $_.TYPE -eq 'microsoft.purview/accounts' }
 
-    if($Purview)
+    if ($Purview)
     {
         $tmp = @()
-        foreach ($1 in $Purview) 
+        foreach ($1 in $Purview)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -25,13 +25,13 @@ if ($Task -eq 'Processing')
                 'SKU'                 = $data.sku.name;
                 'Capacity'            = $data.sku.capacity;
                 'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.createdBy } else { $data.createdBy };
-                'FriendlyName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.friendlyName } else { $data.friendlyName };      
-                'CreatedTime'         = $timecreated;                      
+                'FriendlyName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.friendlyName } else { $data.friendlyName };
+                'CreatedTime'         = $timecreated;
             }
 
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

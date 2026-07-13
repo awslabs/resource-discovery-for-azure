@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-If ($Task -eq 'Processing') 
+If ($Task -eq 'Processing')
 {
     $SQLVM = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sqlvirtualmachine/sqlvirtualmachines' }
 
-    if($SQLVM)
+    if ($SQLVM)
     {
         $tmp = @()
 
-        foreach ($1 in $SQLVM) 
+        foreach ($1 in $SQLVM)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -21,9 +21,12 @@ If ($Task -eq 'Processing')
             # preserving the SQL-VM -> compute-VM link. Falls back to 'obfuscated' when
             # obfuscation is on but the parent id was not indexed (e.g. out-of-scope VM),
             # matching the convention used by the other collectors.
-            $ParentVM = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
+            $ParentVM = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
+            {
                 if (![string]::IsNullOrEmpty($data.virtualMachineResourceId) -and $ResourceIdDictionary.ContainsKey($data.virtualMachineResourceId)) { $ResourceIdDictionary[$data.virtualMachineResourceId] } else { 'obfuscated' }
-            } else {
+            }
+            else
+            {
                 if (![string]::IsNullOrEmpty($data.virtualMachineResourceId)) { $data.virtualMachineResourceId } else { 'None' }
             }
 
@@ -40,8 +43,8 @@ If ($Task -eq 'Processing')
                 'SQLManagement'             = $data.sqlManagement;
                 'SQLImageSku'               = $data.sqlImageSku;
             }
-            
-            $tmp += $obj      
+
+            $tmp += $obj
         }
 
         $tmp

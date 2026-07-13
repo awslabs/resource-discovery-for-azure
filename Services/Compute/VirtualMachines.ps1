@@ -2,12 +2,12 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $virtualMachines =  $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' } 
-    $disk = $Resources | Where-Object {$_.TYPE -eq 'microsoft.compute/disks'}
-    
+    $virtualMachines = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
+    $disk = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' }
+
     $vmsizemap = @{}
 
-    foreach($location in ($virtualMachines | Select-Object -ExpandProperty location -Unique))
+    foreach ($location in ($virtualMachines | Select-Object -ExpandProperty location -Unique))
     {
         $savedDebugPref = $DebugPreference
         $DebugPreference = 'SilentlyContinue'
@@ -18,7 +18,8 @@ If ($Task -eq 'Processing')
         {
             $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
             $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
-            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name)) {
+            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name))
+            {
                 $vmsizemap[$vmsize.Name] = @{
                     CPU = [int]$cpuCap
                     RAM = [math]::Max([decimal]$memCap, 0)
@@ -27,37 +28,37 @@ If ($Task -eq 'Processing')
         }
     }
 
-    if($virtualMachines)
-    {    
+    if ($virtualMachines)
+    {
         $tmp = @()
 
-        foreach ($vm in $virtualMachines) 
+        foreach ($vm in $virtualMachines)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $vm.subscriptionId }
-            $data = $vm.PROPERTIES 
+            $data = $vm.PROPERTIES
             $timecreated = if ($null -ne $data.timeCreated) { [datetime]($data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
 
             $Lic = ''
-            
-            switch ($data.licenseType) 
+
+            switch ($data.licenseType)
             {
                 'Windows_Server' { $Lic = 'AHUB for Windows' }
                 'Windows_Client' { $Lic = 'Windows Client Multi-Tenant' }
-                'RHEL_BYOS'      { $Lic = 'AHUB for Redhat' }
-                'SLES_BYOS'      { $Lic = 'AHUB for SUSE' }
+                'RHEL_BYOS' { $Lic = 'AHUB for Redhat' }
+                'SLES_BYOS' { $Lic = 'AHUB for SUSE' }
             }
 
-            $Lic = if($Lic) { $Lic } else { 'License Included' }
+            $Lic = if ($Lic) { $Lic } else { 'License Included' }
 
-            if($data.storageProfile.osDisk.managedDisk.id) 
+            if ($data.storageProfile.osDisk.managedDisk.id)
             {
-               $OSDisk = ($disk | Where-Object {$_.id -eq $data.storageProfile.osDisk.managedDisk.id} | Select-Object -Unique).sku.name
-               $OSDiskSize = ($disk | Where-Object {$_.id -eq $data.storageProfile.osDisk.managedDisk.id} | Select-Object -Unique).Properties.diskSizeGB
+                $OSDisk = ($disk | Where-Object { $_.id -eq $data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).sku.name
+                $OSDiskSize = ($disk | Where-Object { $_.id -eq $data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).Properties.diskSizeGB
             }
             else
             {
-               $OSDisk = if($data.storageProfile.osDisk.vhd.uri){ 'Custom VHD' } else { 'None' }
-               $OSDiskSize = $data.storageProfile.osDisk.diskSizeGB
+                $OSDisk = if ($data.storageProfile.osDisk.vhd.uri) { 'Custom VHD' } else { 'None' }
+                $OSDiskSize = $data.storageProfile.osDisk.diskSizeGB
             }
 
             $cpus = $vmsizemap[$data.hardwareProfile.vmSize].CPU;
@@ -66,9 +67,9 @@ If ($Task -eq 'Processing')
             $cpus = if ($null -ne $cpus) { $cpus } else { '0' }
             $ram = if ($null -ne $ram) { $ram } else { '0' }
 
-            $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }    
+            $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }
 
-            $tags = if(![string]::IsNullOrEmpty($vm.tags.psobject.properties)){$vm.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+            $tags = if (![string]::IsNullOrEmpty($vm.tags.psobject.properties)) { $vm.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
             $obfuscatedId = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id } } else { $null }
 
@@ -78,7 +79,7 @@ If ($Task -eq 'Processing')
                 'ResourceGroup'                 = $vm.RESOURCEGROUP;
                 'Name'                          = $vm.NAME;
                 'Location'                      = $vm.LOCATION;
-                'AvailabilitySet'               = if ($null -ne $data.availabilitySet) { 'true' } else { 'false' }    
+                'AvailabilitySet'               = if ($null -ne $data.availabilitySet) { 'true' } else { 'false' }
                 'Size'                          = $data.hardwareProfile.vmSize;
                 'CPU'                           = $cpus;
                 'Memory'                        = $ram;
@@ -100,7 +101,7 @@ If ($Task -eq 'Processing')
 
             $tmp += $obj
         }
-              
+
         $tmp
-    }            
+    }
 }

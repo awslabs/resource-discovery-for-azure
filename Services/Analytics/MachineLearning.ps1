@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-If ($Task -eq 'Processing') 
+If ($Task -eq 'Processing')
 {
     $AzureML = $Resources | Where-Object { $_.TYPE -eq 'microsoft.machinelearningservices/workspaces' }
 
-    if($AzureML)
+    if ($AzureML)
     {
         $tmp = @()
 
-        foreach ($1 in $AzureML) 
+        foreach ($1 in $AzureML)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -22,13 +22,14 @@ If ($Task -eq 'Processing')
             # aborts the entire subscription. Guard every reference and emit $null
             # (or, for obfuscated runs, the literal string 'obfuscated' to match the
             # rest of this module's lossy fallback pattern) when the field is absent.
-            $StorageAcc        = if ([string]::IsNullOrEmpty($data.storageAccount))      { $null } else { $data.storageAccount.split('/')[8] }
-            $KeyVault          = if ([string]::IsNullOrEmpty($data.keyVault))            { $null } else { $data.keyVault.split('/')[8] }
-            $Insight           = if ([string]::IsNullOrEmpty($data.applicationInsights)) { $null } else { $data.applicationInsights.split('/')[8] }
-            $containerRegistry = if ([string]::IsNullOrEmpty($data.containerRegistry))   { $null } else { $data.containerRegistry.split('/')[8] }
+            $StorageAcc = if ([string]::IsNullOrEmpty($data.storageAccount)) { $null } else { $data.storageAccount.split('/')[8] }
+            $KeyVault = if ([string]::IsNullOrEmpty($data.keyVault)) { $null } else { $data.keyVault.split('/')[8] }
+            $Insight = if ([string]::IsNullOrEmpty($data.applicationInsights)) { $null } else { $data.applicationInsights.split('/')[8] }
+            $containerRegistry = if ([string]::IsNullOrEmpty($data.containerRegistry)) { $null } else { $data.containerRegistry.split('/')[8] }
 
             # Obfuscate cross-reference names when dictionary is populated
-            if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) {
+            if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
+            {
                 $StorageAcc = if (![string]::IsNullOrEmpty($data.storageAccount) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.storageAccount)) { $ResourceIdDictionary[$data.storageAccount] } else { 'obfuscated' }
                 $KeyVault = if (![string]::IsNullOrEmpty($data.keyVault) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.keyVault)) { $ResourceIdDictionary[$data.keyVault] } else { 'obfuscated' }
                 $Insight = if (![string]::IsNullOrEmpty($data.applicationInsights) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.applicationInsights)) { $ResourceIdDictionary[$data.applicationInsights] } else { 'obfuscated' }

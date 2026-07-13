@@ -1,21 +1,21 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $COSMOS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.documentdb/databaseaccounts' }
 
-    if($COSMOS)
+    if ($COSMOS)
     {
         $tmp = @()
 
-        foreach ($1 in $COSMOS) 
-        {                
+        foreach ($1 in $COSMOS)
+        {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
-            $GeoReplicate = if($data.failoverPolicies.count -gt 1) { 'Enabled' } else { 'Disabled' }
-            $FreeTier = if($data.enableFreeTier -eq $true) { 'Opted In' } else { 'Opted Out' }
-            
+            $GeoReplicate = if ($data.failoverPolicies.count -gt 1) { 'Enabled' } else { 'Disabled' }
+            $FreeTier = if ($data.enableFreeTier -eq $true) { 'Opted In' } else { 'Opted Out' }
+
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
 
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

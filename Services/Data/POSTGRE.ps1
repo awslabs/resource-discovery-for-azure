@@ -1,19 +1,19 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $POSTGRE = $Resources | Where-Object { $_.TYPE -eq 'microsoft.dbforpostgresql/servers' }
 
-    if($POSTGRE)
+    if ($POSTGRE)
     {
         $tmp = @()
 
-        foreach ($1 in $POSTGRE) 
+        foreach ($1 in $POSTGRE)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $sku = $1.SKU
-            
+
             $obj = @{
                 'ID'                        = $1.id;
                 'Subscription'              = $sub1.Name;

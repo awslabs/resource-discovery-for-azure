@@ -22,9 +22,11 @@
 # Single exit path that ensures the wrapper transcript is stopped before
 # returning to the host. Used by every error path that previously called
 # `exit <code>` directly.
-function Exit-Wrapper {
+function Exit-Wrapper
+{
     param([int]$Code = 0)
-    if ($WrapperTranscriptStarted) {
+    if ($WrapperTranscriptStarted)
+    {
         try { Stop-Transcript | Out-Null }
         catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
     }
@@ -93,7 +95,7 @@ function Get-RecommendedParallelism
 
     # Metrics throttle: I/O bound, so 2x vCPU, bounded to [6,16].
     $concurrency = $vCpu * 2
-    if ($concurrency -lt 6)  { $concurrency = 6 }
+    if ($concurrency -lt 6) { $concurrency = 6 }
     if ($concurrency -gt 16) { $concurrency = 16 }
 
     [pscustomobject]@{
@@ -140,12 +142,12 @@ public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 '@ -ErrorAction Stop
         }
 
-        $STD_INPUT_HANDLE      = -10
-        $ENABLE_QUICK_EDIT     = [uint32]0x0040
+        $STD_INPUT_HANDLE = -10
+        $ENABLE_QUICK_EDIT = [uint32]0x0040
         $ENABLE_EXTENDED_FLAGS = [uint32]0x0080
 
         $handle = [Rda.ConsoleMode]::GetStdHandle($STD_INPUT_HANDLE)
-        $mode   = [uint32]0
+        $mode = [uint32]0
         if ([Rda.ConsoleMode]::GetConsoleMode($handle, [ref]$mode))
         {
             $newMode = ($mode -band (-bnot $ENABLE_QUICK_EDIT)) -bor $ENABLE_EXTENDED_FLAGS
@@ -173,8 +175,9 @@ public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 #
 # Returns one of: 'NoAccess', 'Empty', 'Unknown'. Only called for subs that
 # returned 0 resources, so it adds no cost to the normal (non-empty) path.
-function Get-SubscriptionAccessState {
-    param([Parameter(Mandatory=$true)][string]$SubscriptionId)
+function Get-SubscriptionAccessState
+{
+    param([Parameter(Mandatory = $true)][string]$SubscriptionId)
 
     # One cheap, access-scoped control-plane call. Capture stdout+stderr
     # together and the exit code. Listing resource groups requires a role on
@@ -182,12 +185,14 @@ function Get-SubscriptionAccessState {
     $output = (az group list --subscription $SubscriptionId --query "length(@)" -o tsv 2>&1) -join ' '
     $exit = $LASTEXITCODE
 
-    if ($exit -eq 0) {
+    if ($exit -eq 0)
+    {
         # Call succeeded: identity can read the subscription, so 0 resources
         # means it is genuinely empty.
         return 'Empty'
     }
-    if ($output -match 'AuthorizationFailed|does not have authorization|not authorized|Forbidden|403') {
+    if ($output -match 'AuthorizationFailed|does not have authorization|not authorized|Forbidden|403')
+    {
         return 'NoAccess'
     }
     # An identity that can ENUMERATE a subscription (it came from
@@ -195,7 +200,8 @@ function Get-SubscriptionAccessState {
     # control-plane read into it has no usable role there - ARM hides the
     # subscription rather than returning a 403. Treat that as NoAccess too,
     # since the sub IDs we probe are always real and tenant-visible.
-    if ($output -match "not found|not recognized|could not be found|was not found") {
+    if ($output -match "not found|not recognized|could not be found|was not found")
+    {
         return 'NoAccess'
     }
     # Some other failure (transient ARM error, throttling, network). Don't
@@ -217,7 +223,8 @@ function Get-SubscriptionAccessState {
 # same checks (it deliberately differs: it honors -OutputDirectory, throws
 # instead of calling Exit-Wrapper, and is gated on -not $RunAllSubs). Keep the
 # two behaviorally in sync - if you change a check here, mirror it there.
-function Invoke-PreFlightChecks {
+function Invoke-PreFlightChecks
+{
     param(
         [Parameter(Mandatory = $true)] [string] $InventoryRoot
     )
@@ -237,9 +244,11 @@ function Invoke-PreFlightChecks {
     #   - Cmdlet present, object returned -> Cloud Shell, drive mounted.
     # The 3>$null suppresses the noisy WARNING so our message is the first
     # thing the user sees.
-    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue) {
+    if (Get-Command Get-CloudDrive -ErrorAction SilentlyContinue)
+    {
         $CheckCloudDrive = Get-CloudDrive 3>$null 2>$null
-        if ($null -eq $CheckCloudDrive) {
+        if ($null -eq $CheckCloudDrive)
+        {
             Write-Host ""
             Write-Host "WARNING: Cloud Shell detected, but no storage account is mounted." -ForegroundColor Yellow
             Write-Host "  Outputs in $InventoryRoot will be lost when this Cloud Shell session ends." -ForegroundColor Yellow
@@ -248,7 +257,9 @@ function Invoke-PreFlightChecks {
             Write-Host "  settings menu (gear icon) > Reset User Settings > Mount storage account." -ForegroundColor Yellow
             Write-Host "  Continuing in ephemeral mode - download the report ZIP from $InventoryRoot before closing the shell." -ForegroundColor Yellow
             Write-Host ""
-        } else {
+        }
+        else
+        {
             Write-Host ("Cloud Shell drive mounted: {0}" -f $CheckCloudDrive.Name) -ForegroundColor Green
         }
     }
@@ -262,21 +273,30 @@ function Invoke-PreFlightChecks {
     # is filling the home directory) the run will fail late with a confusing
     # "There is not enough space" during report generation or zip packaging.
     # Catch it now.
-    try {
+    try
+    {
         $rootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
         $drive = $rootItem.PSDrive
-        if ($null -ne $drive -and $null -ne $drive.Free) {
+        if ($null -ne $drive -and $null -ne $drive.Free)
+        {
             $freeMB = [math]::Round($drive.Free / 1MB, 0)
-            if ($freeMB -lt 100) {
+            if ($freeMB -lt 100)
+            {
                 Write-Host ("ERROR: Free disk space at {0} is {1} MB. The script needs at least 100 MB to start. Free space and re-run." -f $InventoryRoot, $freeMB) -ForegroundColor Red
                 Exit-Wrapper -Code 1
-            } elseif ($freeMB -lt 500) {
+            }
+            elseif ($freeMB -lt 500)
+            {
                 Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $InventoryRoot, $freeMB) -ForegroundColor Yellow
-            } else {
+            }
+            else
+            {
                 Write-Host ("Free disk space: {0:N0} MB at {1}" -f $freeMB, $InventoryRoot) -ForegroundColor Green
             }
         }
-    } catch {
+    }
+    catch
+    {
         # If we cannot read free space (uncommon - usually means the inventory
         # root is on an exotic filesystem), warn but do not fail. The write
         # probe below is the real correctness gate.
@@ -289,15 +309,19 @@ function Invoke-PreFlightChecks {
     # readonly mount, permissions, antivirus quarantine, DLP product, etc.
     # Cheap (~1 ms) and definitive.
     $probePath = Join-Path $InventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
-    try {
+    try
+    {
         Set-Content -Path $probePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
         $probeRead = Get-Content -Path $probePath -Raw -ErrorAction Stop
-        if ($probeRead -notmatch 'preflight write probe') {
+        if ($probeRead -notmatch 'preflight write probe')
+        {
             throw "Write probe content mismatch (read back '$probeRead')"
         }
         Remove-Item -Path $probePath -Force -ErrorAction Stop
         Write-Host ("Write probe: OK ({0})" -f $InventoryRoot) -ForegroundColor Green
-    } catch {
+    }
+    catch
+    {
         Write-Host ("ERROR: Cannot write to {0}: {1}" -f $InventoryRoot, $_.Exception.Message) -ForegroundColor Red
         Write-Host "  This usually means: readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Red
         Write-Host "  Verify the directory is writable and re-run." -ForegroundColor Red
@@ -331,28 +355,34 @@ function Invoke-PreFlightChecks {
 # downstream call (az login, Get-AzSubscription, the resume state filename, the
 # auth gate) operates on a stable identifier even if Azure later renames the
 # domain.
-function Resolve-TenantId {
-    param([Parameter(Mandatory=$true)][string]$Value)
+function Resolve-TenantId
+{
+    param([Parameter(Mandatory = $true)][string]$Value)
 
     $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     if ($Value -match $guidPattern) { return $Value }
 
     $url = "https://login.microsoftonline.com/$Value/v2.0/.well-known/openid-configuration"
     Write-Host ("Resolving tenant '{0}' via OIDC discovery..." -f $Value) -ForegroundColor Cyan
-    try {
+    try
+    {
         $config = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
-    } catch {
+    }
+    catch
+    {
         throw "Could not resolve tenant '$Value' to a GUID. Check that it is a valid Azure AD domain or pass the tenant GUID directly. Underlying error: $($_.Exception.Message)"
     }
 
-    if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.issuer)) {
+    if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.issuer))
+    {
         throw "OIDC discovery for tenant '$Value' returned an unexpected response (no issuer)."
     }
 
     # issuer looks like https://login.microsoftonline.com/<guid>/v2.0
     $segments = $config.issuer -split '/'
     $resolved = $segments | Where-Object { $_ -match $guidPattern } | Select-Object -First 1
-    if (-not $resolved) {
+    if (-not $resolved)
+    {
         throw "OIDC discovery for tenant '$Value' did not contain a recognizable tenant GUID. issuer='$($config.issuer)'"
     }
 
@@ -360,19 +390,24 @@ function Resolve-TenantId {
     return $resolved
 }
 
-function Get-CompletedSubscriptionIds {
+function Get-CompletedSubscriptionIds
+{
     param([string]$Path, [string]$Tenant)
 
     if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
-    try {
+    try
+    {
         $state = Get-Content -Path $Path -Raw | ConvertFrom-Json
-        if ($state.TenantID -ne $Tenant) {
+        if ($state.TenantID -ne $Tenant)
+        {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $state.TenantID) -ForegroundColor Yellow
             return @()
         }
         if ($null -eq $state.CompletedSubscriptionIds) { return @() }
         return @($state.CompletedSubscriptionIds)
-    } catch {
+    }
+    catch
+    {
         Write-Host ("Could not read resume state file ({0}); starting fresh. $_" -f $Path) -ForegroundColor Yellow
         return @()
     }
@@ -384,21 +419,26 @@ function Get-CompletedSubscriptionIds {
 # Backward-compatible: a state file written by an older version of this
 # script (which has CompletedSubscriptionIds but no FailedAttempts key) reads
 # back as empty here, so existing on-disk state never blocks an upgrade.
-function Get-FailedAttempts {
+function Get-FailedAttempts
+{
     param([string]$Path, [string]$Tenant)
 
     if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
-    try {
+    try
+    {
         $state = Get-Content -Path $Path -Raw | ConvertFrom-Json
         if ($state.TenantID -ne $Tenant) { return @() }
         if ($null -eq $state.FailedAttempts) { return @() }
         return @($state.FailedAttempts)
-    } catch {
+    }
+    catch
+    {
         return @()
     }
 }
 
-function Save-CompletedSubscriptionIds {
+function Save-CompletedSubscriptionIds
+{
     param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @())
 
     $state = [pscustomobject]@{
@@ -412,9 +452,12 @@ function Save-CompletedSubscriptionIds {
         FailedAttempts            = @($FailedAttempts)
         LastUpdated               = (Get-Date).ToString('o')
     }
-    try {
+    try
+    {
         $state | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
-    } catch {
+    }
+    catch
+    {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
     }
 }
@@ -422,7 +465,8 @@ function Save-CompletedSubscriptionIds {
 # Update an in-memory FailedAttempts list to record (or refresh) one sub's
 # failure. Increments Attempts when the sub is already in the list. Caller
 # is responsible for persisting via Save-CompletedSubscriptionIds afterwards.
-function Add-FailedAttempt {
+function Add-FailedAttempt
+{
     param(
         # [object] rather than [System.Collections.IEnumerable]: when the list
         # holds exactly one prior failure, PowerShell collapses it to a single
@@ -437,10 +481,13 @@ function Add-FailedAttempt {
     )
     $list = @($Existing | Where-Object { $_ })
     $existingEntry = $list | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
-    if ($null -ne $existingEntry) {
+    if ($null -ne $existingEntry)
+    {
         $list = @($list | Where-Object { $_.Id -ne $Id })
         $attempts = if ($existingEntry.Attempts) { [int]$existingEntry.Attempts + 1 } else { 2 }
-    } else {
+    }
+    else
+    {
         $attempts = 1
     }
     $list += [pscustomobject]@{
@@ -456,7 +503,8 @@ function Add-FailedAttempt {
 # Remove a sub's FailedAttempts entry once it has succeeded on a retry, so
 # the resume-state file does not grow into a graveyard of historical
 # failures. Caller persists.
-function Remove-FailedAttempt {
+function Remove-FailedAttempt
+{
     param(
         # [object] not [System.Collections.IEnumerable]: same single-element
         # collapse as Add-FailedAttempt - a lone prior failure arrives as a
@@ -476,10 +524,11 @@ function Remove-FailedAttempt {
 # Get-ChildItem hides dot-files by default on Unix. Pulled out to its own
 # function purely so it can be exercised by a Pester test against a temp
 # directory without spinning up any streams.
-function Get-StreamResumeStateFiles {
+function Get-StreamResumeStateFiles
+{
     param(
-        [Parameter(Mandatory=$true)][string]$InventoryRoot,
-        [Parameter(Mandatory=$true)][string]$Tenant
+        [Parameter(Mandatory = $true)][string]$InventoryRoot,
+        [Parameter(Mandatory = $true)][string]$Tenant
     )
     return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
@@ -493,7 +542,8 @@ function Get-StreamResumeStateFiles {
 #     before a later, more informative failure never shadows it.
 # Pulled out to its own function (previously inlined) so this decision can
 # be unit-tested directly instead of only via full multi-stream runs.
-function Merge-FailedAttempts {
+function Merge-FailedAttempts
+{
     param(
         # [object], not [System.Collections.IEnumerable], for all three: same
         # single-element-collapse hazard as Add-/Remove-FailedAttempt. When any
@@ -506,7 +556,8 @@ function Merge-FailedAttempts {
         [object]$CompletedIds
     )
     $CompletedIds = @($CompletedIds)
-    if (@($StreamFailedAttempts).Count -eq 0) {
+    if (@($StreamFailedAttempts).Count -eq 0)
+    {
         # No new stream failures: still prune any existing entry whose sub
         # now appears in CompletedIds (a different stream succeeded for it).
         return @($ExistingFailedAttempts | Where-Object { $_ -and -not ($CompletedIds -contains $_.Id) })
@@ -514,34 +565,41 @@ function Merge-FailedAttempts {
     $merged = @($ExistingFailedAttempts) + @($StreamFailedAttempts)
     $byId = $merged | Where-Object { $_ } | Group-Object -Property Id
     $reconciled = @()
-    foreach ($g in $byId) {
+    foreach ($g in $byId)
+    {
         if ($CompletedIds -contains $g.Name) { continue }
-        $best = $g.Group | Sort-Object -Property @{Expression={[datetime]($_.LastFailedAt)}} -Descending | Select-Object -First 1
+        $best = $g.Group | Sort-Object -Property @{Expression = { [datetime]($_.LastFailedAt) } } -Descending | Select-Object -First 1
         $reconciled += $best
     }
     return $reconciled
 }
 
-function Get-AzCliSignedInTenant {
+function Get-AzCliSignedInTenant
+{
     $raw = az account show --output json 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
     try { return ($raw | ConvertFrom-Json).tenantId } catch { return $null }
 }
 
-function Get-AzPsSignedInTenant {
-    try {
+function Get-AzPsSignedInTenant
+{
+    try
+    {
         $ctx = Get-AzContext -ErrorAction Stop
         if ($null -eq $ctx -or $null -eq $ctx.Account) { return $null }
         return $ctx.Tenant.Id
-    } catch {
+    }
+    catch
+    {
         return $null
     }
 }
 
 # Probe whether az CLI can silently acquire a token for $TenantID.
 # Returns $true on success, $false on any failure.
-function Test-AzCliTokenSilent {
-    param([Parameter(Mandatory=$true)][string]$Tenant)
+function Test-AzCliTokenSilent
+{
+    param([Parameter(Mandatory = $true)][string]$Tenant)
     az account get-access-token --tenant $Tenant --output none 2>$null
     return ($LASTEXITCODE -eq 0)
 }
@@ -554,10 +612,12 @@ function Test-AzCliTokenSilent {
 # deprecation banner as a failure - that warning fires on every successful
 # call now that the SecureString-output cmdlet is the recommended path,
 # and ignoring it lets users on the new module version skip re-auth.
-function Test-AzPsTokenSilent {
-    param([Parameter(Mandatory=$true)][string]$Tenant)
+function Test-AzPsTokenSilent
+{
+    param([Parameter(Mandatory = $true)][string]$Tenant)
     $warnings = @()
-    try {
+    try
+    {
         $token = Get-AzAccessToken -TenantId $Tenant -ErrorAction Stop -WarningVariable warnings -WarningAction SilentlyContinue
         if ($null -eq $token -or [string]::IsNullOrWhiteSpace($token.Token)) { return $false }
         # Filter out known-benign warnings before deciding the call failed.
@@ -565,16 +625,18 @@ function Test-AzPsTokenSilent {
         # output every time the cmdlet returns successfully; treating that as
         # failure forces users to re-authenticate every run.
         $realWarnings = @($warnings | Where-Object {
-            $msg = $_.Message
-            -not (
-                $msg -match 'Get-AzAccessToken\s*:?\s*Upcoming breaking changes' -or
-                $msg -match 'AsSecureString' -or
-                $msg -match 'plain string token output is deprecated'
-            )
-        })
+                $msg = $_.Message
+                -not (
+                    $msg -match 'Get-AzAccessToken\s*:?\s*Upcoming breaking changes' -or
+                    $msg -match 'AsSecureString' -or
+                    $msg -match 'plain string token output is deprecated'
+                )
+            })
         if ($realWarnings.Count -gt 0) { return $false }
         return $true
-    } catch {
+    }
+    catch
+    {
         return $false
     }
 }
@@ -597,7 +659,8 @@ function Test-AzPsTokenSilent {
 # Priority logic pulled into its own function so it is independently
 # unit-testable (see Tests/RunAllSubscriptionsReconciliation.Tests.ps1) without
 # requiring a live wrapper run. Pure function: two booleans in, exit code out.
-function Get-WrapperExitCode {
+function Get-WrapperExitCode
+{
     param(
         [bool]$AuthSkipped,
         [bool]$CollectorsFailed
@@ -610,15 +673,18 @@ function Get-WrapperExitCode {
 
 # ---- Stream worker output + per-stream state --------------------------------
 
-function Write-Stream {
+function Write-Stream
+{
     param([string]$Message, [string]$Color = 'Gray')
     Write-Host ("{0} {1}" -f $Tag, $Message) -ForegroundColor $Color
 }
 
-function Read-StreamState {
+function Read-StreamState
+{
     param([string]$Path)
     if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
-    try {
+    try
+    {
         $obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         return @{
             Completed = if ($null -eq $obj.Completed) { @() } else { @($obj.Completed) }
@@ -626,22 +692,28 @@ function Read-StreamState {
             # no FailedAttempts key, so default to @().
             Failed    = if ($null -eq $obj.FailedAttempts) { @() } else { @($obj.FailedAttempts) }
         }
-    } catch {
+    }
+    catch
+    {
         Write-Stream ("WARNING: could not read stream state at {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
         return @{ Completed = @(); Failed = @() }
     }
 }
 
-function Write-StreamState {
+function Write-StreamState
+{
     param([string]$Path, [string[]]$Completed, $FailedAttempts = @())
-    try {
+    try
+    {
         @{
             Tenant         = $TenantID
             StreamId       = $StreamId
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
         } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
-    } catch {
+    }
+    catch
+    {
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
     }
 }
@@ -660,11 +732,13 @@ function Write-StreamState {
 #                   throttling, transient network). NOT a hard failure: this is
 #                   the recoverable class the per-subscription consumption phase
 #                   already detects, retries once, and reports on.
-function Get-ConsumptionAccessOutcome {
+function Get-ConsumptionAccessOutcome
+{
     param([string]$ErrorMessage)
     if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return 'Ok' }
     # Authorization / permission denial signatures across ARM + the billing APIs.
-    if ($ErrorMessage -match '(?i)authoriz|forbidden|\b403\b|does not have|AuthorizationFailed|not authorized|insufficient privileg|access is denied|RBAC') {
+    if ($ErrorMessage -match '(?i)authoriz|forbidden|\b403\b|does not have|AuthorizationFailed|not authorized|insufficient privileg|access is denied|RBAC')
+    {
         return 'Denied'
     }
     return 'Unavailable'
@@ -677,21 +751,28 @@ function Get-ConsumptionAccessOutcome {
 # zero usage returns an empty result (not an error) -> 'Ok'. A failure to switch
 # context is treated as 'Unavailable' (a session/token problem, not a
 # consumption-authorization denial).
-function Test-ConsumptionAccess {
-    param([Parameter(Mandatory=$true)][string]$SubscriptionId)
+function Test-ConsumptionAccess
+{
+    param([Parameter(Mandatory = $true)][string]$SubscriptionId)
 
-    try {
+    try
+    {
         $null = Set-AzContext -Subscription $SubscriptionId -ErrorAction Stop
-    } catch {
+    }
+    catch
+    {
         return 'Unavailable'
     }
 
-    $probeEnd   = (Get-Date).Date
+    $probeEnd = (Get-Date).Date
     $probeStart = $probeEnd.AddDays(-1)
-    try {
+    try
+    {
         $null = Get-UsageAggregates -ReportedStartTime $probeStart -ReportedEndTime $probeEnd -AggregationGranularity 'Daily' -ErrorAction Stop
         return 'Ok'
-    } catch {
+    }
+    catch
+    {
         return (Get-ConsumptionAccessOutcome -ErrorMessage $_.Exception.Message)
     }
 }

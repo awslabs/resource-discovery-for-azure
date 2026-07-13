@@ -1,28 +1,28 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $VirtualWAN = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/virtualwans' }
     $VirtualHub = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/virtualhubs' }
     $VPNSite = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/vpnsites' }
 
-    if($VirtualWAN)
+    if ($VirtualWAN)
     {
         $tmp = @()
 
-        foreach ($1 in $VirtualWAN) 
+        foreach ($1 in $VirtualWAN)
         {
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $vhub = $VirtualHub | Where-Object { $_.ID -in $data.virtualHubs.id }
             $vpn = $VPNSite | Where-Object { $_.ID -in $data.vpnSites.id }
-            
-            if($vpn)
+
+            if ($vpn)
             {
-                foreach ($2 in $vhub) 
+                foreach ($2 in $vhub)
                 {
-                    foreach ($3 in $vpn) 
-                    {                        
+                    foreach ($3 in $vpn)
+                    {
                         $obj = @{
                             'ID'                            = $1.id;
                             'Subscription'                  = $sub1.Name;
@@ -42,8 +42,8 @@ if ($Task -eq 'Processing')
             }
             else
             {
-                foreach ($2 in $vhub) 
-                {                    
+                foreach ($2 in $vhub)
+                {
                     $obj = @{
                         'ID'                            = $1.id;
                         'Subscription'                  = $sub1.Name;
@@ -52,7 +52,7 @@ if ($Task -eq 'Processing')
                         'Location'                      = $1.LOCATION;
                     }
 
-                    $tmp += $obj                    
+                    $tmp += $obj
                 }
             }
         }

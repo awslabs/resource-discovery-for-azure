@@ -2,13 +2,13 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $evthub = $Resources | Where-Object {$_.TYPE -eq 'microsoft.eventhub/namespaces'}
+    $evthub = $Resources | Where-Object { $_.TYPE -eq 'microsoft.eventhub/namespaces' }
 
-    if($evthub)
+    if ($evthub)
     {
         $tmp = @()
-        
-        foreach ($1 in $evthub) 
+
+        foreach ($1 in $evthub)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -31,7 +31,7 @@ if ($Task -eq 'Processing')
                 'KafkaEnabled'         = $data.kafkaEnabled;
                 'CreatedTime'          = $timecreated;
             }
-            
+
             $tmp += $obj
         }
 

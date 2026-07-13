@@ -2,18 +2,18 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $expressroute = $Resources | Where-Object {$_.TYPE -eq 'microsoft.network/expressroutecircuits'}
+    $expressroute = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/expressroutecircuits' }
 
-    if($expressroute)
+    if ($expressroute)
     {
         $tmp = @()
 
-        foreach ($1 in $expressroute) 
+        foreach ($1 in $expressroute)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $sku = $1.SKU
-            
+
             $obj = @{
                 'ID'                    = $1.id;
                 'Subscription'          = $sub1.name;

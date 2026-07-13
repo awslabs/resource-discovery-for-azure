@@ -194,7 +194,7 @@ Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
     # $SubscriptionID up the call chain without throwing when no subscription is
     # in scope (e.g. a standalone full-tenant run) - in that case no tag is added
     # and the output is byte-for-byte unchanged.
-    $SubId  = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
+    $SubId = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
     $SubTag = if (-not [string]::IsNullOrEmpty($SubId)) { '[{0}] ' -f $SubId.Substring(0, [Math]::Min(8, $SubId.Length)) } else { '' }
     $Message = $SubTag + $Message
 
@@ -202,11 +202,11 @@ Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
     {
         switch ($Severity)
         {
-            "Info"    { Write-Host $Message -ForegroundColor Cyan }
+            "Info" { Write-Host $Message -ForegroundColor Cyan }
             "Warning" { Write-Host $Message -ForegroundColor Yellow }
-            "Error"   { Write-Host $Message -ForegroundColor Red }
+            "Error" { Write-Host $Message -ForegroundColor Red }
             "Success" { Write-Host $Message -ForegroundColor Green }
-            default   { Write-Host $Message }
+            default { Write-Host $Message }
         }
     }
 

@@ -2,18 +2,18 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AKS = $Resources | Where-Object {$_.TYPE -eq 'microsoft.containerservice/managedclusters'}
+    $AKS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerservice/managedclusters' }
 
-    if($AKS)
+    if ($AKS)
     {
         $tmp = @()
 
-        foreach ($1 in $AKS) 
+        foreach ($1 in $AKS)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
-            foreach ($2 in $data.agentPoolProfiles) 
+            foreach ($2 in $data.agentPoolProfiles)
             {
                 # Recomputed on every node-pool iteration (not hoisted above this
                 # loop): the cluster's tags are the SAME real values across all of
@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 # Select-Object projection per row gives each row its own object
                 # instances so the same real tag value still yields the same
                 # token (determinism, P1), without aliasing across rows.
-                $tags = if(![string]::IsNullOrEmpty($1.tags.psobject.properties)){$1.tags.psobject.properties | Select-Object Name, Value } else{ $null }
+                $tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
                 $obj = @{
                     'ID'                        = $1.id;
@@ -36,7 +36,7 @@ if ($Task -eq 'Processing')
                     'Sku'                       = $1.sku.name;
                     'SkuTier'                   = $1.sku.tier;
                     'KubernetesVersion'         = $data.kubernetesVersion;
-                    'LoadBalancerSku'           = $data.networkProfile.loadBalancerSku;                
+                    'LoadBalancerSku'           = $data.networkProfile.loadBalancerSku;
                     'NodePoolName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $2.name } else { $2.name };
                     'PoolProfileType'           = $2.type;
                     'PoolMode'                  = $2.mode;

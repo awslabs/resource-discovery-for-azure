@@ -1,21 +1,21 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $snapshots = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.Compute/snapshots' }
 
-    if($snapshots)
+    if ($snapshots)
     {
         $tmp = @()
 
-        foreach ($snapshot in $snapshots) 
+        foreach ($snapshot in $snapshots)
         {
             $sub1 = $SUB | Where-Object { $_.Id -eq $snapshot.subscriptionId }
             $data = $snapshot.PROPERTIES
             $timecreated = $data.timeCreated
             $timecreated = [datetime]$timecreated
             $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
-            
+
             $obj = @{
                 'ID'                                    = $snapshot.id;
                 'Subscription'                          = $sub1.Name;

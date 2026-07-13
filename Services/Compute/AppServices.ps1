@@ -2,13 +2,13 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $AppSvc = $Resources | Where-Object {$_.TYPE -eq 'microsoft.web/sites'}
+    $AppSvc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.web/sites' }
 
-    if($AppSvc)
+    if ($AppSvc)
     {
         $tmp = @()
 
-        foreach ($1 in $AppSvc) 
+        foreach ($1 in $AppSvc)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -24,14 +24,14 @@ If ($Task -eq 'Processing')
                 'State'                         = $data.state;
                 'SKU'                           = $data.sku;
                 'AvailabilityState'             = $data.availabilityState;
-                'SiteProperties'                = $data.siteProperties;          
+                'SiteProperties'                = $data.siteProperties;
                 'ContainerSize'                 = $data.containerSize;
                 'ServerFarmId'                  = if (![string]::IsNullOrEmpty($data.serverFarmId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.serverFarmId)) { $ResourceIdDictionary[$data.serverFarmId] } else { 'obfuscated' } } else { $data.serverFarmId };
             }
 
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

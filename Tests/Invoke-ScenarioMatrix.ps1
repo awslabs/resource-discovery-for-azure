@@ -50,12 +50,13 @@ $ErrorActionPreference = 'Stop'
 # runner behaves identically regardless of how it's launched.
 $Scenarios = @($Scenarios | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-$RepoRoot       = Split-Path $PSScriptRoot -Parent
-$InventoryPs1   = Join-Path $RepoRoot 'ResourceInventory.ps1'
-$WorkRoot       = Join-Path ([System.IO.Path]::GetTempPath()) ("ScenarioMatrix_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+$RepoRoot = Split-Path $PSScriptRoot -Parent
+$InventoryPs1 = Join-Path $RepoRoot 'ResourceInventory.ps1'
+$WorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ScenarioMatrix_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
 if (-not (Test-Path $InventoryPs1)) { throw "Cannot find ResourceInventory.ps1 at $InventoryPs1" }
-if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 })) {
+if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 }))
+{
     throw "Pester v5+ is required. Install-Module Pester -Force -Scope CurrentUser"
 }
 
@@ -64,12 +65,14 @@ if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge
 # metric-eligible resources, so the schema tests actually see metric data).
 # -------------------------------------------------------------------------
 $ctx = Get-AzContext -ErrorAction SilentlyContinue
-if ($null -eq $ctx -or $null -eq $ctx.Account) {
+if ($null -eq $ctx -or $null -eq $ctx.Account)
+{
     throw "No Azure context. Run Connect-AzAccount first."
 }
 if ([string]::IsNullOrEmpty($TenantID)) { $TenantID = $ctx.Tenant.Id }
 
-if ([string]::IsNullOrEmpty($SubscriptionID)) {
+if ([string]::IsNullOrEmpty($SubscriptionID))
+{
     Write-Host "Auto-discovering a subscription with metric-eligible resources..." -ForegroundColor Cyan
     $metricTypes = @(
         'microsoft.compute/virtualmachines'
@@ -80,7 +83,8 @@ if ([string]::IsNullOrEmpty($SubscriptionID)) {
         'microsoft.web/sites'
     )
     $best = $null; $bestCount = -1
-    foreach ($s in @(Get-AzSubscription -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' })) {
+    foreach ($s in @(Get-AzSubscription -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' }))
+    {
         $null = Set-AzContext -Subscription $s.Id -ErrorAction SilentlyContinue
         $c = 0
         foreach ($t in $metricTypes) { try { $c += @(Get-AzResource -ResourceType $t -ErrorAction SilentlyContinue).Count } catch {} }
@@ -119,11 +123,11 @@ $obfuscationTests = @(
 )
 
 $catalog = @{
-    'default'         = @{ Args = @{};                                          Tests = $structuralTests }
-    'obfuscate'       = @{ Args = @{ Obfuscate = $true };                       Tests = ($structuralTests + $obfuscationTests) }
+    'default'         = @{ Args = @{}; Tests = $structuralTests }
+    'obfuscate'       = @{ Args = @{ Obfuscate = $true }; Tests = ($structuralTests + $obfuscationTests) }
     'skipboth'        = @{ Args = @{ SkipMetrics = $true; SkipConsumption = $true }; Tests = $structuralTests }
-    'skipmetrics'     = @{ Args = @{ SkipMetrics = $true };                     Tests = $structuralTests }
-    'skipconsumption' = @{ Args = @{ SkipConsumption = $true };                 Tests = $structuralTests }
+    'skipmetrics'     = @{ Args = @{ SkipMetrics = $true }; Tests = $structuralTests }
+    'skipconsumption' = @{ Args = @{ SkipConsumption = $true }; Tests = $structuralTests }
 }
 
 New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
@@ -133,13 +137,14 @@ try
 {
     foreach ($name in $Scenarios)
     {
-        if (-not $catalog.ContainsKey($name)) {
+        if (-not $catalog.ContainsKey($name))
+        {
             Write-Host ("Unknown scenario '{0}' - skipping. Valid: {1}" -f $name, ($catalog.Keys -join ', ')) -ForegroundColor Yellow
             continue
         }
 
         $scenario = $catalog[$name]
-        $outDir   = Join-Path $WorkRoot $name
+        $outDir = Join-Path $WorkRoot $name
         Write-Host ""
         Write-Host ("======== SCENARIO: {0} ========" -f $name) -ForegroundColor Magenta
 
@@ -159,7 +164,8 @@ try
         $zip = Get-ChildItem $outDir -Filter 'ResourcesReport_*.zip' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-        if (-not $zip) {
+        if (-not $zip)
+        {
             Write-Host "  FAILED: no output zip produced." -ForegroundColor Red
             $summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = -1; Skipped = 0 }
             continue
@@ -168,12 +174,15 @@ try
 
         # Run the applicable tests against this zip.
         $env:TEST_ZIP_PATH = $zip.FullName
-        if ($name -eq 'obfuscate') {
+        if ($name -eq 'obfuscate')
+        {
             $env:TEST_SUBSCRIPTION_ID = $SubscriptionID
-            $env:TEST_USER_EMAIL      = $ctx.Account.Id
+            $env:TEST_USER_EMAIL = $ctx.Account.Id
             $dict = Get-ChildItem $outDir -Filter 'ObfuscationDictionary_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($dict) { $env:TEST_DICT_PATH = $dict.FullName } else { Remove-Item Env:TEST_DICT_PATH -ErrorAction SilentlyContinue }
-        } else {
+        }
+        else
+        {
             Remove-Item Env:TEST_SUBSCRIPTION_ID -ErrorAction SilentlyContinue
             Remove-Item Env:TEST_USER_EMAIL      -ErrorAction SilentlyContinue
             Remove-Item Env:TEST_DICT_PATH       -ErrorAction SilentlyContinue
@@ -181,13 +190,13 @@ try
 
         $testPaths = $scenario.Tests | ForEach-Object { Join-Path $PSScriptRoot $_ }
         $cfg = New-PesterConfiguration
-        $cfg.Run.Path        = $testPaths
-        $cfg.Run.PassThru    = $true
+        $cfg.Run.Path = $testPaths
+        $cfg.Run.PassThru = $true
         $cfg.Output.Verbosity = 'None'
         $res = Invoke-Pester -Configuration $cfg
 
-        $passed  = $res.PassedCount
-        $failed  = $res.FailedCount
+        $passed = $res.PassedCount
+        $failed = $res.FailedCount
         $skipped = $res.SkippedCount
         $realFailures = @($res.Failed)
 
@@ -207,11 +216,13 @@ try
         # So we key off ErrorRecord, NOT Result, and NOT TotalCount (a partial
         # crash still executes some tests, so TotalCount > 0).
         $discoveryFailures = @($res.Containers | Where-Object { @($_.ErrorRecord).Count -gt 0 })
-        if ($discoveryFailures.Count -gt 0) {
+        if ($discoveryFailures.Count -gt 0)
+        {
             $failed = $failed + $discoveryFailures.Count
-            foreach ($c in $discoveryFailures) {
+            foreach ($c in $discoveryFailures)
+            {
                 $itemName = if ($c.Item) { $c.Item.ToString() } else { 'unknown container' }
-                $errText  = ($c.ErrorRecord | Select-Object -First 1)
+                $errText = ($c.ErrorRecord | Select-Object -First 1)
                 Write-Host ("    CONTAINER FAILED (discovery): {0} - {1}" -f $itemName, $errText) -ForegroundColor Red
             }
         }
@@ -221,9 +232,11 @@ try
         # includes the transcript .txt - see ResourceInventory.ps1 ~line 1514).
         # Pester 5.7 has no ExcludeFullName, so reclassify them post-run: they
         # are EXPECTED to fail here and must not count against the scenario.
-        if ($name -ne 'obfuscate') {
+        if ($name -ne 'obfuscate')
+        {
             $reclassified = @($realFailures | Where-Object { $_.Name -in $nonObfuscatedExcludedTests })
-            if ($reclassified.Count -gt 0) {
+            if ($reclassified.Count -gt 0)
+            {
                 $failed = $failed - $reclassified.Count
                 $skipped = $skipped + $reclassified.Count
                 $realFailures = @($realFailures | Where-Object { $_.Name -notin $nonObfuscatedExcludedTests })
@@ -251,12 +264,15 @@ finally
     Remove-Item Env:TEST_USER_EMAIL      -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_DICT_PATH       -ErrorAction SilentlyContinue
 
-    if (-not $KeepOutput) {
+    if (-not $KeepOutput)
+    {
         # The generated zips contain REAL subscription identifiers (non-obfuscated
         # scenarios especially). Remove them unless the caller asked to keep them.
         try { Remove-Item -Path $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue }
         catch { Write-Host ("  cleanup warning: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
-    } else {
+    }
+    else
+    {
         Write-Host ("`nOutput kept at: {0} (contains real identifiers - delete when done)." -f $WorkRoot) -ForegroundColor Yellow
     }
 }
@@ -273,16 +289,20 @@ $summary | Format-Table -AutoSize | Out-String | Write-Host
 # shell), the loop above skips all of them via `continue` and $summary is never
 # populated. An empty collection has zero failures by definition, which would
 # otherwise print "All scenarios passed" and exit 0 despite nothing running.
-if ($summary.Count -eq 0) {
+if ($summary.Count -eq 0)
+{
     Write-Host ("No scenarios were executed (requested: {0}). Valid names: {1}" -f ($Scenarios -join ', '), ($catalog.Keys -join ', ')) -ForegroundColor Red
     exit 1
 }
 
 $totalFailed = ($summary | Where-Object { $_.Failed -ne 0 }).Count
-if ($totalFailed -eq 0) {
+if ($totalFailed -eq 0)
+{
     Write-Host ("All {0} scenario(s) passed their applicable tests." -f $summary.Count) -ForegroundColor Green
     exit 0
-} else {
+}
+else
+{
     Write-Host ("{0} scenario(s) had failures - review above." -f $totalFailed) -ForegroundColor Red
     exit 1
 }

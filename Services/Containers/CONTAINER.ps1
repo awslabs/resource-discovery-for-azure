@@ -2,18 +2,18 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $CONTAINER = $Resources | Where-Object {$_.TYPE -eq 'microsoft.containerinstance/containergroups'}
+    $CONTAINER = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerinstance/containergroups' }
 
-    if($CONTAINER)
+    if ($CONTAINER)
     {
         $tmp = @()
 
-        foreach ($1 in $CONTAINER) 
+        foreach ($1 in $CONTAINER)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            
-            foreach ($2 in $data.containers) 
+
+            foreach ($2 in $data.containers)
             {
                 $obj = @{
                     'ID'                  = $1.id;

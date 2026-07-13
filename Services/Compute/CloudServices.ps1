@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $CloudServices = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/cloudservices' }
 
-    if($CloudServices)
+    if ($CloudServices)
     {
         $tmp = @()
 
-        foreach ($1 in $CloudServices) 
+        foreach ($1 in $CloudServices)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -26,7 +26,7 @@ if ($Task -eq 'Processing')
             $obj | Add-Member -MemberType NoteProperty -Name Roles -Value NotSet
             $obj.Roles = [System.Collections.Generic.List[object]]::new()
 
-            foreach ($roleProfile in $roles) 
+            foreach ($roleProfile in $roles)
             {
                 $roleProfileObj = @{
                     'RoleName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $roleProfile.name } else { $roleProfile.name };
@@ -35,12 +35,12 @@ if ($Task -eq 'Processing')
                     'SkuCapacity'     = $roleProfile.sku.capacity;
                 }
 
-                $obj.Roles.Add($roleProfileObj) 
+                $obj.Roles.Add($roleProfileObj)
             }
 
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

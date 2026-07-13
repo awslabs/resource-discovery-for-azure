@@ -1,22 +1,22 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $PublicIP = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/publicipaddresses' }
 
-    if($PublicIP)
+    if ($PublicIP)
     {
         $tmp = @()
 
-        foreach ($1 in $PublicIP) 
+        foreach ($1 in $PublicIP)
         {
             $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
 
             if (!($data.ipConfiguration.id)) { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
             if (!($data.natGateway.id) -and $Use -eq 'UnderUtilized') { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
-                      
-            if ($null -ne $data.ipConfiguration.id) 
+
+            if ($null -ne $data.ipConfiguration.id)
             {
                 $obj = @{
                     'ID'                       = $1.id;
@@ -34,8 +34,8 @@ if ($Task -eq 'Processing')
                 }
 
                 $tmp += $obj
-            }               
-            else 
+            }
+            else
             {
                 $obj = @{
                     'ID'                       = $1.id;
@@ -51,9 +51,9 @@ if ($Task -eq 'Processing')
                     'AssociatedResource'       = 'None';
                     'AssociatedResourceType'   = 'None';
                 }
-                
-                $tmp += $obj           
-            }             
+
+                $tmp += $obj
+            }
         }
 
         $tmp

@@ -1,13 +1,13 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $NetApp = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.NetApp/netAppAccounts/capacityPools/volumes' }
 
-    if($NetApp)
+    if ($NetApp)
     {
         $tmp = @()
-        foreach ($1 in $NetApp) 
+        foreach ($1 in $NetApp)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -15,8 +15,8 @@ if ($Task -eq 'Processing')
             $NetApp = $1.Name.split('/')[0]
             $CapacityPool = $1.Name.split('/')[1]
             $Volume = $1.Name.split('/')[2]
-            $Quota = ((($data.usageThreshold/1024)/1024)/1024)/1024
-            
+            $Quota = ((($data.usageThreshold / 1024) / 1024) / 1024) / 1024
+
             $obj = @{
                 'ID'                                = $1.id;
                 'Subscription'                      = $sub1.Name;
@@ -29,7 +29,7 @@ if ($Task -eq 'Processing')
                 'QuotaTB'                           = [string]$Quota;
                 'Protocol'                          = [string]$data.protocolTypes;
                 'MaxThroughputMiBs'                 = [string]$data.throughputMibps;
-                'LDAP'                              = $data.ldapEnabled;                        
+                'LDAP'                              = $data.ldapEnabled;
             }
 
             $tmp += $obj

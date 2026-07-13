@@ -2,14 +2,14 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $vmss = $Resources | Where-Object {$_.TYPE -eq 'microsoft.compute/virtualmachinescalesets'}
-    $AutoScale = $Resources | Where-Object {$_.TYPE -eq "microsoft.insights/autoscalesettings" -and $_.Properties.enabled -eq 'true'} 
-    $AKS = $Resources | Where-Object {$_.TYPE -eq 'microsoft.containerservice/managedclusters'}
-    $SFC = $Resources | Where-Object {$_.TYPE -eq 'microsoft.servicefabric/clusters'}
+    $vmss = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachinescalesets' }
+    $AutoScale = $Resources | Where-Object { $_.TYPE -eq "microsoft.insights/autoscalesettings" -and $_.Properties.enabled -eq 'true' }
+    $AKS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerservice/managedclusters' }
+    $SFC = $Resources | Where-Object { $_.TYPE -eq 'microsoft.servicefabric/clusters' }
 
     $vmsizemap = @{}
 
-    foreach($location in ($vmss | Select-Object -ExpandProperty location -Unique))
+    foreach ($location in ($vmss | Select-Object -ExpandProperty location -Unique))
     {
         $savedDebugPref = $DebugPreference
         $DebugPreference = 'SilentlyContinue'
@@ -20,7 +20,8 @@ if ($Task -eq 'Processing')
         {
             $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
             $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
-            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name)) {
+            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name))
+            {
                 $vmsizemap[$vmsize.Name] = @{
                     CPU = [int]$cpuCap
                     RAM = [math]::Max([decimal]$memCap, 0)
@@ -29,21 +30,21 @@ if ($Task -eq 'Processing')
         }
     }
 
-    if($vmss)
+    if ($vmss)
     {
         $tmp = @()
 
-        foreach ($1 in $vmss) 
+        foreach ($1 in $vmss)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
             $OS = $data.virtualMachineProfile.storageProfile.osDisk.osType
-            $Scaling = ($AutoScale | Where-Object {$_.Properties.targetResourceUri -eq $1.id})
+            $Scaling = ($AutoScale | Where-Object { $_.Properties.targetResourceUri -eq $1.id })
 
-            if([string]::IsNullOrEmpty($Scaling)){$AutoSc = $false}else{$AutoSc = $true}
+            if ([string]::IsNullOrEmpty($Scaling)) { $AutoSc = $false }else { $AutoSc = $true }
 
-            $RelatedAKSId = ($AKS | Where-Object {$_.properties.nodeResourceGroup -eq $1.resourceGroup}).id
-            if([string]::IsNullOrEmpty($RelatedAKSId)){$RelatedId = ($SFC | Where-Object {$_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint}).id}else{$RelatedId = $RelatedAKSId}
+            $RelatedAKSId = ($AKS | Where-Object { $_.properties.nodeResourceGroup -eq $1.resourceGroup }).id
+            if ([string]::IsNullOrEmpty($RelatedAKSId)) { $RelatedId = ($SFC | Where-Object { $_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint }).id }else { $RelatedId = $RelatedAKSId }
             $Related = if ([string]::IsNullOrEmpty($RelatedId)) { $RelatedId } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($RelatedId)) { $ResourceIdDictionary[$RelatedId] } else { 'obfuscated' } } else { $RelatedId.split('/')[8] }
 
             $timecreated = $data.timeCreated
@@ -72,10 +73,10 @@ if ($Task -eq 'Processing')
                 'RAM'                           = $ram;
                 'VMOS'                          = $OS;
                 'OSImage'                       = $data.virtualMachineProfile.storageProfile.imageReference.offer;
-                'ImageVersion'                  = $data.virtualMachineProfile.storageProfile.imageReference.sku;                            
+                'ImageVersion'                  = $data.virtualMachineProfile.storageProfile.imageReference.sku;
                 'DiskSizeGB'                    = $data.virtualMachineProfile.storageProfile.osDisk.diskSizeGB;
                 'StorageAccountType'            = $data.virtualMachineProfile.storageProfile.osDisk.managedDisk.storageAccountType;
-                'AcceleratedNetworkingEnabled'  = $data.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.properties.enableAcceleratedNetworking; 
+                'AcceleratedNetworkingEnabled'  = $data.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.properties.enableAcceleratedNetworking;
                 'CreatedTime'                   = $timecreated;
             }
 

@@ -3,15 +3,17 @@
 # Run with: Invoke-Pester ./Tests/OutputCompleteness.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
-        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" | 
+    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    {
+        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath)) {
+    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
     $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("CompleteTest_" + [guid]::NewGuid().ToString().Substring(0,8))
+    $script:ExtractPath = Join-Path $tmpBase ("CompleteTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
     Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
 
@@ -54,11 +56,14 @@ Describe "Zip File Contents" {
         # LOCAL-only and must NEVER ship - so a .log with any other name, or any
         # other unexpected extension, still fails this assertion.
         $allowedExtensions = @('.html', '.json', '.csv')
-        foreach ($file in $script:AllFiles) {
-            if ($file.Extension -eq '.log') {
+        foreach ($file in $script:AllFiles)
+        {
+            if ($file.Extension -eq '.log')
+            {
                 $file.Name | Should -BeLike 'Diagnostics_*.log' -Because "the only .log allowed in the shared bundle is Diagnostics_*.log; '$($file.Name)' is a local-only log that must not ship"
             }
-            else {
+            else
+            {
                 $file.Extension | Should -BeIn $allowedExtensions -Because "File '$($file.Name)' has unexpected extension"
             }
         }
@@ -83,7 +88,8 @@ Describe "Inventory JSON Structure" {
     It "Every resource should have ID, Name, and Location fields" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_) {
+                if ($null -ne $_)
+                {
                     $_.PSObject.Properties.Name | Should -Contain 'ID' -Because "Resource in $($_.Name) should have ID"
                     $_.PSObject.Properties.Name | Should -Contain 'Location' -Because "Resource should have Location"
                 }
@@ -95,7 +101,8 @@ Describe "Inventory JSON Structure" {
 Describe "Metrics JSON Structure" {
     It "Every metrics file should have a Metrics array" {
         $metricsFiles = Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json"
-        foreach ($mf in $metricsFiles) {
+        foreach ($mf in $metricsFiles)
+        {
             $data = Get-Content $mf.FullName -Raw | ConvertFrom-Json
             $data.PSObject.Properties.Name | Should -Contain 'Metrics'
         }
@@ -103,10 +110,13 @@ Describe "Metrics JSON Structure" {
 
     It "Each metric entry should have Service, Metric, and MetricValue fields" {
         $metricsFiles = Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json"
-        foreach ($mf in $metricsFiles) {
+        foreach ($mf in $metricsFiles)
+        {
             $data = Get-Content $mf.FullName -Raw | ConvertFrom-Json
-            foreach ($m in @($data.Metrics)) {
-                if ($null -ne $m) {
+            foreach ($m in @($data.Metrics))
+            {
+                if ($null -ne $m)
+                {
                     $m.PSObject.Properties.Name | Should -Contain 'Service'
                     $m.PSObject.Properties.Name | Should -Contain 'Metric'
                     $m.PSObject.Properties.Name | Should -Contain 'MetricValue'
@@ -119,8 +129,10 @@ Describe "Metrics JSON Structure" {
 Describe "Non-Sensitive Fields Preserved" {
     It "VM Location should be a real Azure region (not obfuscated)" {
         $vms = @($script:Inventory.VirtualMachines)
-        foreach ($vm in $vms) {
-            if ($null -ne $vm) {
+        foreach ($vm in $vms)
+        {
+            if ($null -ne $vm)
+            {
                 $vm.Location | Should -Not -Match '^(prod|nonprod)_' -Because "Location should be a real region, not obfuscated"
             }
         }
@@ -128,8 +140,10 @@ Describe "Non-Sensitive Fields Preserved" {
 
     It "VM Size should be a real Azure VM size" {
         $vms = @($script:Inventory.VirtualMachines)
-        foreach ($vm in $vms) {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size)) {
+        foreach ($vm in $vms)
+        {
+            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size))
+            {
                 # Same rationale as DataIntegrity.Tests.ps1: VM SKUs include
                 # Standard_*, Basic_*, M*, N* etc. The invariant under test is
                 # "not obfuscated", not a particular naming convention.
@@ -140,8 +154,10 @@ Describe "Non-Sensitive Fields Preserved" {
 
     It "VM OS should be a real OS type" {
         $vms = @($script:Inventory.VirtualMachines)
-        foreach ($vm in $vms) {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType)) {
+        foreach ($vm in $vms)
+        {
+            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType))
+            {
                 $vm.OSType | Should -BeIn @('windows', 'linux') -Because "OSType should be windows or linux"
             }
         }
@@ -149,8 +165,10 @@ Describe "Non-Sensitive Fields Preserved" {
 
     It "Storage SKU should be a real Azure storage SKU" {
         $storage = @($script:Inventory.StorageAcc)
-        foreach ($sa in $storage) {
-            if ($null -ne $sa -and ![string]::IsNullOrEmpty($sa.SKU)) {
+        foreach ($sa in $storage)
+        {
+            if ($null -ne $sa -and ![string]::IsNullOrEmpty($sa.SKU))
+            {
                 $sa.SKU | Should -Not -Match '^(prod|nonprod)_' -Because "Storage SKU should be real, not obfuscated"
             }
         }

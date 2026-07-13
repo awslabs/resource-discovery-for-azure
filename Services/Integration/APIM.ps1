@@ -2,17 +2,17 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $APIM = $Resources | Where-Object {$_.TYPE -eq 'microsoft.apimanagement/service'}
+    $APIM = $Resources | Where-Object { $_.TYPE -eq 'microsoft.apimanagement/service' }
 
-    if($APIM)
+    if ($APIM)
     {
         $tmp = @()
 
-        foreach ($1 in $APIM) 
+        foreach ($1 in $APIM)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
-            
+
             $obj = @{
                 'ID'                   = $1.id;
                 'Subscription'         = $sub1.Name;
@@ -23,10 +23,10 @@ if ($Task -eq 'Processing')
                 'SKU'                  = $1.sku.name;
                 'VirtualNetworkType'   = $data.virtualNetworkType;
             }
-            
-            $tmp += $obj          
+
+            $tmp += $obj
         }
-        
+
         $tmp
     }
 }

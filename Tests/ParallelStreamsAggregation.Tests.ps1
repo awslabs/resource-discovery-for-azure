@@ -30,17 +30,20 @@ BeforeAll {
     # all tests in this file Skipped, mirroring how Obfuscation.Tests.ps1
     # gracefully handles "no fixture provided".
     $script:HaveFixture = $false
-    if ($env:TEST_SEQUENTIAL_BUNDLE -and $env:TEST_PARALLEL_BUNDLE) {
-        if ((Test-Path $env:TEST_SEQUENTIAL_BUNDLE) -and (Test-Path $env:TEST_PARALLEL_BUNDLE)) {
+    if ($env:TEST_SEQUENTIAL_BUNDLE -and $env:TEST_PARALLEL_BUNDLE)
+    {
+        if ((Test-Path $env:TEST_SEQUENTIAL_BUNDLE) -and (Test-Path $env:TEST_PARALLEL_BUNDLE))
+        {
             $script:HaveFixture = $true
             $script:SeqBundlePath = $env:TEST_SEQUENTIAL_BUNDLE
             $script:ParBundlePath = $env:TEST_PARALLEL_BUNDLE
         }
     }
 
-    function Expand-Bundle($bundlePath, $label) {
+    function Expand-Bundle($bundlePath, $label)
+    {
         $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
-        $extractRoot = Join-Path $tmpBase ("ParStreams_${label}_" + [guid]::NewGuid().ToString().Substring(0,8))
+        $extractRoot = Join-Path $tmpBase ("ParStreams_${label}_" + [guid]::NewGuid().ToString().Substring(0, 8))
         New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
 
         # Outer bundle expand -> contains one or more inner per-sub ResourcesReport_*.zip files.
@@ -49,7 +52,8 @@ BeforeAll {
         # Each inner ZIP is itself the per-sub artifact bundle.
         $innerZips = @(Get-ChildItem -Path $extractRoot -Filter 'ResourcesReport_*.zip' -File)
         $perSub = @()
-        foreach ($iz in $innerZips) {
+        foreach ($iz in $innerZips)
+        {
             $subDir = Join-Path $extractRoot ($iz.BaseName)
             New-Item -ItemType Directory -Path $subDir -Force | Out-Null
             Expand-Archive -Path $iz.FullName -DestinationPath $subDir -Force
@@ -64,24 +68,27 @@ BeforeAll {
         }
     }
 
-    function Get-PerSubArtifacts($subDir) {
+    function Get-PerSubArtifacts($subDir)
+    {
         $htmlFile = Get-ChildItem -Path $subDir -Filter 'ResourcesReport_*.html' | Select-Object -First 1
-        $invFile  = Get-ChildItem -Path $subDir -Filter 'Inventory_*.json'      | Select-Object -First 1
-        $metFile  = Get-ChildItem -Path $subDir -Filter 'Metrics_*.json'        | Select-Object -First 1
-        $conFile  = Get-ChildItem -Path $subDir -Filter 'Consumption_*.csv'     | Select-Object -First 1
+        $invFile = Get-ChildItem -Path $subDir -Filter 'Inventory_*.json'      | Select-Object -First 1
+        $metFile = Get-ChildItem -Path $subDir -Filter 'Metrics_*.json'        | Select-Object -First 1
+        $conFile = Get-ChildItem -Path $subDir -Filter 'Consumption_*.csv'     | Select-Object -First 1
 
         $inv = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
         $met = if ($metFile) { Get-Content $metFile.FullName -Raw | ConvertFrom-Json } else { $null }
 
         $conRows = 0
-        if ($conFile) {
+        if ($conFile)
+        {
             $lines = Get-Content $conFile.FullName -ErrorAction SilentlyContinue
             if ($lines -and $lines.Count -gt 1) { $conRows = $lines.Count - 1 }
         }
 
         # Resource type names that have data (non-null arrays). Excludes Version key.
         $populatedTypes = @()
-        if ($inv) {
+        if ($inv)
+        {
             # "Populated" means the resource type actually has rows. Every
             # collector emits a (possibly empty) array, so a non-null check
             # alone would treat all ~57 types as populated even for an empty
@@ -92,23 +99,24 @@ BeforeAll {
                 $inv.PSObject.Properties |
                     Where-Object { $_.Name -ne 'Version' -and $null -ne $_.Value -and @($_.Value).Count -gt 0 } |
                     ForEach-Object { $_.Name }
-            ) | Sort-Object
-        }
+                ) | Sort-Object
+            }
 
-        # Resource ID universe across every populated type
-        $allIds = @()
-        if ($inv) {
-            $inv.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
-                ForEach-Object {
-                    @($_.Value) | ForEach-Object { if ($_ -and $_.ID) { $allIds += $_.ID } }
-                }
+            # Resource ID universe across every populated type
+            $allIds = @()
+            if ($inv)
+            {
+                $inv.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+                    ForEach-Object {
+                        @($_.Value) | ForEach-Object { if ($_ -and $_.ID) { $allIds += $_.ID } }
+                    }
         }
 
         return [pscustomobject]@{
             HtmlPath        = if ($htmlFile) { $htmlFile.FullName } else { $null }
-            InventoryPath   = if ($invFile)  { $invFile.FullName }  else { $null }
-            MetricsPath     = if ($metFile)  { $metFile.FullName }  else { $null }
-            ConsumptionPath = if ($conFile)  { $conFile.FullName }  else { $null }
+            InventoryPath   = if ($invFile) { $invFile.FullName }  else { $null }
+            MetricsPath     = if ($metFile) { $metFile.FullName }  else { $null }
+            ConsumptionPath = if ($conFile) { $conFile.FullName }  else { $null }
             PopulatedTypes  = $populatedTypes
             ResourceCount   = $allIds.Count
             ResourceIds     = ($allIds | Sort-Object -Unique)
@@ -117,7 +125,8 @@ BeforeAll {
         }
     }
 
-    function Get-HtmlSectionSlugs($htmlPath) {
+    function Get-HtmlSectionSlugs($htmlPath)
+    {
         # Enumerate the service-section slugs the HTML report emitted, without
         # depending on any module. Summary.ps1 emits one
         # <details class="service-section" id="svc-<slug>"> per populated
@@ -133,31 +142,40 @@ BeforeAll {
     }
 
     $bundles = $null
-    if ($script:HaveFixture) {
+    if ($script:HaveFixture)
+    {
         $bundles = @{
             Sequential = $script:SeqBundlePath
             Parallel   = $script:ParBundlePath
         }
     }
-    if ($script:HaveFixture) {
+    if ($script:HaveFixture)
+    {
         $script:Sequential = Expand-Bundle -bundlePath $bundles.Sequential -label 'seq'
-        $script:Parallel   = Expand-Bundle -bundlePath $bundles.Parallel   -label 'par'
-    } else {
+        $script:Parallel = Expand-Bundle -bundlePath $bundles.Parallel   -label 'par'
+    }
+    else
+    {
         $script:Sequential = $null
-        $script:Parallel   = $null
+        $script:Parallel = $null
     }
 
     # Build per-sub artifact maps keyed by populated-type signature so we can
     # match a sequential sub to its parallel counterpart even though their
     # millisecond-precision timestamps differ.
-    $script:SeqArtifacts = if ($script:HaveFixture) {
+    $script:SeqArtifacts = if ($script:HaveFixture)
+    {
         @($script:Sequential.Inner | ForEach-Object { Get-PerSubArtifacts $_.Dir })
-    } else { @() }
-    $script:ParArtifacts = if ($script:HaveFixture) {
+    }
+    else { @() }
+    $script:ParArtifacts = if ($script:HaveFixture)
+    {
         @($script:Parallel.Inner   | ForEach-Object { Get-PerSubArtifacts $_.Dir })
-    } else { @() }
+    }
+    else { @() }
 
-    function Get-SignatureKey($a) {
+    function Get-SignatureKey($a)
+    {
         # Tuple of (resource-count, sorted populated-type names) is unique enough for
         # the small fixture sizes we test against. Falls back to ResourceCount alone
         # if both subs happen to have identical type sets.
@@ -170,10 +188,12 @@ BeforeAll {
 }
 
 AfterAll {
-    if ($script:Sequential -and (Test-Path $script:Sequential.Root)) {
+    if ($script:Sequential -and (Test-Path $script:Sequential.Root))
+    {
         Remove-Item -Path $script:Sequential.Root -Recurse -Force
     }
-    if ($script:Parallel -and (Test-Path $script:Parallel.Root)) {
+    if ($script:Parallel -and (Test-Path $script:Parallel.Root))
+    {
         Remove-Item -Path $script:Parallel.Root -Recurse -Force
     }
 }
@@ -190,7 +210,8 @@ Describe 'Bundle-level structure' {
     }
 
     It 'Each inner per-sub directory contains an HTML report, Inventory JSON, Metrics JSON, and Consumption CSV (sequential)' {
-        foreach ($a in $script:SeqArtifacts) {
+        foreach ($a in $script:SeqArtifacts)
+        {
             $a.HtmlPath        | Should -Not -BeNullOrEmpty -Because 'HTML report is the primary output artifact'
             $a.InventoryPath   | Should -Not -BeNullOrEmpty
             $a.MetricsPath     | Should -Not -BeNullOrEmpty
@@ -199,7 +220,8 @@ Describe 'Bundle-level structure' {
     }
 
     It 'Each inner per-sub directory contains an HTML report, Inventory JSON, Metrics JSON, and Consumption CSV (parallel)' {
-        foreach ($a in $script:ParArtifacts) {
+        foreach ($a in $script:ParArtifacts)
+        {
             $a.HtmlPath        | Should -Not -BeNullOrEmpty
             $a.InventoryPath   | Should -Not -BeNullOrEmpty
             $a.MetricsPath     | Should -Not -BeNullOrEmpty
@@ -240,9 +262,12 @@ Describe 'Sequential vs parallel: per-sub equivalence' {
         # of one sub's metrics, far above 5%).
         $seqM = ($script:SeqArtifacts | Measure-Object -Property MetricsCount -Sum).Sum
         $parM = ($script:ParArtifacts | Measure-Object -Property MetricsCount -Sum).Sum
-        if ($seqM -eq 0) {
+        if ($seqM -eq 0)
+        {
             $parM | Should -Be 0 -Because 'if sequential collected zero metrics, parallel must too'
-        } else {
+        }
+        else
+        {
             $delta = [Math]::Abs($parM - $seqM) / [double]$seqM
             $delta | Should -BeLessOrEqual 0.05 `
                 -Because "metrics drift too large: seq=$seqM par=$parM (delta $($delta.ToString('P1')))"
@@ -255,7 +280,8 @@ Describe 'HTML section equivalence' {
     It 'Each sub has the same set of HTML service sections in sequential vs parallel' {
         # Match per-sub by population signature (count + types) so the comparison
         # is robust to subscription ordering differences between modes.
-        foreach ($key in $script:SeqBySig.Keys) {
+        foreach ($key in $script:SeqBySig.Keys)
+        {
             $script:ParBySig.ContainsKey($key) | Should -BeTrue `
                 -Because "no parallel-side counterpart found for sequential sub with signature '$key'"
             $seqSections = Get-HtmlSectionSlugs $script:SeqBySig[$key].HtmlPath
@@ -272,14 +298,17 @@ Describe 'HTML section equivalence' {
         # 0 sections. Asserting "every sub has >=1 section" was wrong: it
         # false-fails on tenants that contain an empty subscription. Compare the
         # rendered section count to the populated-type count instead.
-        foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts)) {
+        foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts))
+        {
             $sections = @(Get-HtmlSectionSlugs $a.HtmlPath | Where-Object { $_ })
             $populatedCount = @($a.PopulatedTypes).Count
-            if ($populatedCount -eq 0) {
+            if ($populatedCount -eq 0)
+            {
                 $sections.Count | Should -Be 0 `
                     -Because 'an empty subscription (no populated resource types) must render no service sections'
             }
-            else {
+            else
+            {
                 $sections.Count | Should -BeGreaterThan 0 `
                     -Because 'a populated subscription must render at least one service section'
             }
@@ -293,7 +322,8 @@ Describe 'Inventory JSON key parity' {
         # The schema fingerprint is the union of all populated-type sets across
         # both modes. We only assert that whichever keys are present on one side
         # are also present on the matching sub on the other side.
-        foreach ($key in $script:SeqBySig.Keys) {
+        foreach ($key in $script:SeqBySig.Keys)
+        {
             if (-not $script:ParBySig.ContainsKey($key)) { continue }
             $seqInv = Get-Content $script:SeqBySig[$key].InventoryPath -Raw | ConvertFrom-Json
             $parInv = Get-Content $script:ParBySig[$key].InventoryPath -Raw | ConvertFrom-Json
@@ -306,7 +336,8 @@ Describe 'Inventory JSON key parity' {
 
     It 'Version field is present and identical in every Inventory JSON (both modes)' {
         $versions = @()
-        foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts)) {
+        foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts))
+        {
             $inv = Get-Content $a.InventoryPath -Raw | ConvertFrom-Json
             $inv.Version | Should -Not -BeNullOrEmpty
             $versions += $inv.Version
@@ -329,12 +360,15 @@ Describe 'Obfuscation universe parity (only meaningful on -Obfuscate runs)' {
         $seqObf = @($seqIds | Where-Object { $_ -match '^(prod|nonprod)_' }).Count
         $parObf = @($parIds | Where-Object { $_ -match '^(prod|nonprod)_' }).Count
 
-        if ($seqObf -gt 0 -or $parObf -gt 0) {
+        if ($seqObf -gt 0 -or $parObf -gt 0)
+        {
             $seqRatio = if ($seqIds.Count) { $seqObf / [double]$seqIds.Count } else { 0 }
             $parRatio = if ($parIds.Count) { $parObf / [double]$parIds.Count } else { 0 }
             [Math]::Abs($seqRatio - $parRatio) | Should -BeLessOrEqual 0.01 `
                 -Because "obfuscation ratio diverges between modes: seq=$($seqRatio.ToString('P1')) par=$($parRatio.ToString('P1'))"
-        } else {
+        }
+        else
+        {
             Set-ItResult -Skipped -Because 'neither bundle contains obfuscated IDs (set up with -Obfuscate to enable this test)'
         }
     }

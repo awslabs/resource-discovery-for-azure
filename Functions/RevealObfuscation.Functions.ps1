@@ -46,35 +46,35 @@ function Get-JsonEscaped
     return $json.Substring(1, $json.Length - 2)
 }
 
-    # Reveal selected tokens inside a single string. The replacement value is
-    # escaped to match the destination format so a revealed value containing
-    # special characters (e.g. a subscription display name with '&', or a
-    # free-text tag value) stays valid in that file:
-    #   Json -> escaped for a JSON string literal
-    #   Html -> HTML-entity encoded (the report encodes every rendered value)
-    #   None -> raw (CSV field values are re-quoted by Export-Csv instead)
-    # Tokens not in $Replacements are returned unchanged, so unselected
-    # dimensions stay masked. Increments $script:fileHits per substituted token.
-    function Convert-RevealString
-    {
-        param([string]$Text, [string]$EscapeMode = 'None')
-        return [regex]::Replace($Text, $tokenPattern, {
-                param($m)
-                $tok = $m.Value
-                if ($Replacements.ContainsKey($tok))
+# Reveal selected tokens inside a single string. The replacement value is
+# escaped to match the destination format so a revealed value containing
+# special characters (e.g. a subscription display name with '&', or a
+# free-text tag value) stays valid in that file:
+#   Json -> escaped for a JSON string literal
+#   Html -> HTML-entity encoded (the report encodes every rendered value)
+#   None -> raw (CSV field values are re-quoted by Export-Csv instead)
+# Tokens not in $Replacements are returned unchanged, so unselected
+# dimensions stay masked. Increments $script:fileHits per substituted token.
+function Convert-RevealString
+{
+    param([string]$Text, [string]$EscapeMode = 'None')
+    return [regex]::Replace($Text, $tokenPattern, {
+            param($m)
+            $tok = $m.Value
+            if ($Replacements.ContainsKey($tok))
+            {
+                $script:fileHits++
+                $val = $Replacements[$tok]
+                switch ($EscapeMode)
                 {
-                    $script:fileHits++
-                    $val = $Replacements[$tok]
-                    switch ($EscapeMode)
-                    {
-                        'Json' { return (Get-JsonEscaped $val) }
-                        'Html' { return [System.Net.WebUtility]::HtmlEncode($val) }
-                        default { return $val }
-                    }
+                    'Json' { return (Get-JsonEscaped $val) }
+                    'Html' { return [System.Net.WebUtility]::HtmlEncode($val) }
+                    default { return $val }
                 }
-                return $tok
-            })
-    }
+            }
+            return $tok
+        })
+}
 
 
 # =============================================================================
@@ -133,7 +133,7 @@ function Invoke-RdaReveal
 
     if ([string]::IsNullOrEmpty($OutputZip))
     {
-        $inDir  = Split-Path -Path $InputZip -Parent
+        $inDir = Split-Path -Path $InputZip -Parent
         $inBase = [System.IO.Path]::GetFileNameWithoutExtension($InputZip)
         $OutputZip = Join-Path $inDir ($inBase + '_revealed.zip')
     }
@@ -156,12 +156,12 @@ function Invoke-RdaReveal
     # ---- Load dictionary ---------------------------------------------------
     $Dict = Get-Content -Path $DictionaryPath -Raw | ConvertFrom-Json
 
-    $RgMap       = ConvertTo-LookupTable $Dict.ResourceGroupMap
-    $SubMap      = ConvertTo-LookupTable $Dict.SubscriptionMap
-    $SubNameMap  = ConvertTo-LookupTable $Dict.SubscriptionNameMap
-    $TagMap      = ConvertTo-LookupTable $Dict.TagMap
-    $IdMap       = ConvertTo-LookupTable $Dict.ResourceIdMap
-    $NameMap     = ConvertTo-LookupTable $Dict.ResourceNameMap
+    $RgMap = ConvertTo-LookupTable $Dict.ResourceGroupMap
+    $SubMap = ConvertTo-LookupTable $Dict.SubscriptionMap
+    $SubNameMap = ConvertTo-LookupTable $Dict.SubscriptionNameMap
+    $TagMap = ConvertTo-LookupTable $Dict.TagMap
+    $IdMap = ConvertTo-LookupTable $Dict.ResourceIdMap
+    $NameMap = ConvertTo-LookupTable $Dict.ResourceNameMap
     $FreeTextMap = ConvertTo-LookupTable $Dict.FreeTextMap
 
     # ---- Build token -> real-value replacement map for selected fields -----
@@ -305,7 +305,7 @@ function Invoke-RdaReveal
                 {
                     '.json' { 'Json' }
                     '.html' { 'Html' }
-                    '.htm'  { 'Html' }
+                    '.htm' { 'Html' }
                     default { 'None' }
                 }
                 $newContent = Convert-RevealString -Text $content -EscapeMode $escapeMode

@@ -59,7 +59,7 @@ BeforeAll {
         param([scriptblock] $Call)
         $Records = & $Call 6>&1
         @($Records | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } |
-            ForEach-Object { $_.MessageData.Message })
+                ForEach-Object { $_.MessageData.Message })
     }
 }
 

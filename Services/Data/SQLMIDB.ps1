@@ -1,14 +1,14 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $SQLSERVERMIDB = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/managedinstances/databases' }
 
-    if($SQLSERVERMIDB)
+    if ($SQLSERVERMIDB)
     {
         $tmp = @()
 
-        foreach ($1 in $SQLSERVERMIDB) 
+        foreach ($1 in $SQLSERVERMIDB)
         {
             $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $data = $1.PROPERTIES
@@ -21,12 +21,12 @@ if ($Task -eq 'Processing')
                 'Collation'                 = $data.collation;
                 'CreationDate'              = $data.creationDate;
                 'DefaultSecondaryLocation'  = $data.defaultSecondaryLocation;
-                'Status'                    = $data.status;   
-            } 
-            
+                'Status'                    = $data.status;
+            }
+
             $tmp += $obj
         }
-        
+
         $tmp
     }
 }

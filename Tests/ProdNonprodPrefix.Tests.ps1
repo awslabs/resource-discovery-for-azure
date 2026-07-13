@@ -3,22 +3,22 @@
 # Run with: Invoke-Pester ./Tests/ProdNonprodPrefix.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
     {
         Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
     {
         throw "No test zip found."
     }
-    $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("PrefixTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+    $script:ExtractPath = Join-Path $TmpBase ("PrefixTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
-    $invFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
-    $script:Inventory = Get-Content $invFile.FullName -Raw | ConvertFrom-Json
+    $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+    $script:Inventory = Get-Content $InvFile.FullName -Raw | ConvertFrom-Json
 
     $script:AllResources = @()
     $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
@@ -37,12 +37,12 @@ Describe "Prefix Consistency Per Resource" {
             # Only check ID and Name — Subscription/ResourceGroup are shared across
             # resources and their prefix is derived from the subscription/RG name
             # itself, so they may differ from the resource's own prefix in mixed environments.
-            $fields = @($r.ID, $r.Name) | Where-Object { ![string]::IsNullOrEmpty($_) }
-            $prefixes = $fields | ForEach-Object { if ($_ -match '^(prod|nonprod)_') { $Matches[1] } }
-            $uniquePrefixes = $prefixes | Select-Object -Unique
-            if ($uniquePrefixes.Count -gt 0)
+            $Fields = @($r.ID, $r.Name) | Where-Object { ![string]::IsNullOrEmpty($_) }
+            $Prefixes = $Fields | ForEach-Object { if ($_ -match '^(prod|nonprod)_') { $Matches[1] } }
+            $UniquePrefixes = $Prefixes | Select-Object -Unique
+            if ($UniquePrefixes.Count -gt 0)
             {
-                $uniquePrefixes.Count | Should -Be 1 -Because "Resource '$($r.ID)' should have consistent prefix on ID and Name (got: $($uniquePrefixes -join ', '))"
+                $UniquePrefixes.Count | Should -Be 1 -Because "Resource '$($r.ID)' should have consistent prefix on ID and Name (got: $($UniquePrefixes -join ', '))"
             }
         }
     }
@@ -75,20 +75,20 @@ Describe "Prefix Format Validation" {
 
 Describe "Consumption Prefix Consistency" {
     It "Consumption ResourceIds should have prod_ or nonprod_ prefix" {
-        $csvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
-        if ($null -eq $csvFile) { Set-ItResult -Skipped -Because "no consumption csv in fixture"; return }
-        $content = Get-Content $csvFile.FullName -ErrorAction SilentlyContinue
-        if ($null -eq $content -or $content.Count -le 1) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
-        $csv = Import-Csv $csvFile.FullName
+        $CsvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
+        if ($null -eq $CsvFile) { Set-ItResult -Skipped -Because "no consumption csv in fixture"; return }
+        $Content = Get-Content $CsvFile.FullName -ErrorAction SilentlyContinue
+        if ($null -eq $Content -or $Content.Count -le 1) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
+        $Csv = Import-Csv $CsvFile.FullName
         # Two valid shapes for an obfuscated consumption ResourceId:
         #   - legacy flat token: ^(prod|nonprod)_...
         #   - structure-preserving ARM path: starts with /subscriptions/(prod|nonprod)_sub_...
-        $validShape = '^((prod|nonprod)_|/subscriptions/(prod|nonprod)_sub_)'
-        foreach ($row in $csv)
+        $ValidShape = '^((prod|nonprod)_|/subscriptions/(prod|nonprod)_sub_)'
+        foreach ($row in $Csv)
         {
             if (![string]::IsNullOrEmpty($row.ResourceId))
             {
-                $row.ResourceId | Should -Match $validShape -Because "Consumption ResourceId should be obfuscated with prod_/nonprod_ prefix (flat or ARM-shape)"
+                $row.ResourceId | Should -Match $ValidShape -Because "Consumption ResourceId should be obfuscated with prod_/nonprod_ prefix (flat or ARM-shape)"
             }
         }
     }
@@ -195,16 +195,16 @@ Describe "Type Hint Fidelity — name only, never ID (P7 / Req 3.4)" {
         # type-hinted resource. If it does not (prod-only / no databricks/aks/vmss
         # resources), record the fixture limitation instead of asserting on
         # absent data.
-        $hintPattern = '^(prod|nonprod)_(databricks|aks|vmss)_[0-9a-f]{8}-'
-        $hintedNames = @($script:AllResources | Where-Object { $null -ne $_.Name -and $_.Name -match $hintPattern })
-        if ($hintedNames.Count -eq 0)
+        $HintPattern = '^(prod|nonprod)_(databricks|aks|vmss)_[0-9a-f]{8}-'
+        $HintedNames = @($script:AllResources | Where-Object { $null -ne $_.Name -and $_.Name -match $HintPattern })
+        if ($HintedNames.Count -eq 0)
         {
             Set-ItResult -Skipped -Because "fixture contains no databricks/aks/vmss type-hinted resources to assert against"
             return
         }
-        foreach ($r in $hintedNames)
+        foreach ($r in $HintedNames)
         {
-            $r.Name | Should -Match $hintPattern -Because "the type hint must be well-formed on the Name"
+            $r.Name | Should -Match $HintPattern -Because "the type hint must be well-formed on the Name"
             $r.ID   | Should -Not -Match '^(prod|nonprod)_(databricks|aks|vmss)_' -Because "the same resource's ID must remain hint-free ('$($r.ID)')"
         }
     }

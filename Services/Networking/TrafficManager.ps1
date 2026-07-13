@@ -6,26 +6,26 @@ if ($Task -eq 'Processing')
 
     if ($TrafficManager)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $TrafficManager)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $obj = @{
+            $Obj = @{
                 'ID'                               = $1.id;
-                'Subscription'                     = $sub1.Name;
+                'Subscription'                     = $Sub1.Name;
                 'ResourceGroup'                    = $1.RESOURCEGROUP;
                 'Name'                             = $1.NAME;
-                'Status'                           = $data.profilestatus;
-                'RoutingMethod'                    = $data.trafficroutingmethod;
-                'MonitorStatus'                    = $data.monitorconfig.profilemonitorstatus;
+                'Status'                           = $Data.profilestatus;
+                'RoutingMethod'                    = $Data.trafficroutingmethod;
+                'MonitorStatus'                    = $Data.monitorconfig.profilemonitorstatus;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

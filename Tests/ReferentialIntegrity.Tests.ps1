@@ -3,28 +3,28 @@
 # Run with: Invoke-Pester ./Tests/ReferentialIntegrity.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
     {
         Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
     {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
-    $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("RefIntTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+    $script:ExtractPath = Join-Path $TmpBase ("RefIntTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
-    $invFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
-    $script:Inventory = Get-Content $invFile.FullName -Raw | ConvertFrom-Json
+    $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+    $script:Inventory = Get-Content $InvFile.FullName -Raw | ConvertFrom-Json
 
-    $csvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
-    $script:ConsumptionCsv = if ($csvFile)
+    $CsvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
+    $script:ConsumptionCsv = if ($CsvFile)
     {
-        $content = Get-Content $csvFile.FullName -ErrorAction SilentlyContinue
-        if ($null -ne $content -and $content.Count -gt 1) { Import-Csv $csvFile.FullName } else { @() }
+        $Content = Get-Content $CsvFile.FullName -ErrorAction SilentlyContinue
+        if ($null -ne $Content -and $Content.Count -gt 1) { Import-Csv $CsvFile.FullName } else { @() }
     }
     else { @() }
 
@@ -56,15 +56,15 @@ AfterAll {
 
 Describe "VM Disk to VM Cross-Reference" {
     It "Every disk AssociatedResource should match a VM ID or be null" {
-        $disks = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
-        if ($disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
-        $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Disks = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
+        if ($Disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
+        $VmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($disk in $disks)
+        foreach ($disk in $Disks)
         {
             if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource))
             {
-                $disk.AssociatedResource | Should -BeIn $vmIds -Because "Disk '$($disk.ID)' AssociatedResource should reference a known VM"
+                $disk.AssociatedResource | Should -BeIn $VmIds -Because "Disk '$($disk.ID)' AssociatedResource should reference a known VM"
                 $Checked++
             }
         }
@@ -74,15 +74,15 @@ Describe "VM Disk to VM Cross-Reference" {
 
 Describe "AVD HostId to VM Cross-Reference" {
     It "Every AVD HostId should match a VM ID or be null" {
-        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
-        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
-        $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($Avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $VmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($avdItem in $avd)
+        foreach ($avdItem in $Avd)
         {
             if ($null -ne $avdItem -and ![string]::IsNullOrEmpty($avdItem.HostId))
             {
-                $avdItem.HostId | Should -BeIn $vmIds -Because "AVD HostId should reference a known VM"
+                $avdItem.HostId | Should -BeIn $VmIds -Because "AVD HostId should reference a known VM"
                 $Checked++
             }
         }
@@ -92,20 +92,20 @@ Describe "AVD HostId to VM Cross-Reference" {
 
 Describe "SQL VM to VM Cross-Reference" {
     It "Every SQL VM ParentVirtualMachine should match a VM ID (or be a tolerated sentinel)" {
-        $sqlvms = @($script:Inventory.SQLVM) | Where-Object { $null -ne $_ }
-        if ($sqlvms.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLVM resources in this fixture"; return }
-        $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Sqlvms = @($script:Inventory.SQLVM) | Where-Object { $null -ne $_ }
+        if ($Sqlvms.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLVM resources in this fixture"; return }
+        $VmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         # Sentinels the collector emits when the parent VM is out of scope or absent:
         #   'obfuscated' (obfuscation on, parent id not indexed) / 'None' (no parent id).
-        $tolerated = @('obfuscated', 'None')
+        $Tolerated = @('obfuscated', 'None')
         $Checked = 0
-        foreach ($sqlvm in $sqlvms)
+        foreach ($sqlvm in $Sqlvms)
         {
             if ($null -ne $sqlvm -and ![string]::IsNullOrEmpty($sqlvm.ParentVirtualMachine))
             {
-                if ($sqlvm.ParentVirtualMachine -notin $tolerated)
+                if ($sqlvm.ParentVirtualMachine -notin $Tolerated)
                 {
-                    $sqlvm.ParentVirtualMachine | Should -BeIn $vmIds -Because "SQL VM '$($sqlvm.ID)' ParentVirtualMachine should reference a known VM's obfuscated ID"
+                    $sqlvm.ParentVirtualMachine | Should -BeIn $VmIds -Because "SQL VM '$($sqlvm.ID)' ParentVirtualMachine should reference a known VM's obfuscated ID"
                     $Checked++
                 }
             }
@@ -116,21 +116,21 @@ Describe "SQL VM to VM Cross-Reference" {
 
 Describe "Obfuscated ID Uniqueness" {
     It "Every obfuscated ID should be unique across all resources" {
-        $idCounts = $script:AllIds | Group-Object | Where-Object { $_.Count -gt 1 }
-        $idCounts | Should -BeNullOrEmpty -Because "No two resources should share the same obfuscated ID"
+        $IdCounts = $script:AllIds | Group-Object | Where-Object { $_.Count -gt 1 }
+        $IdCounts | Should -BeNullOrEmpty -Because "No two resources should share the same obfuscated ID"
     }
 }
 
 Describe "Consumption to Inventory Cross-Reference" {
     It "Consumption ResourceIds that exist in inventory should use the same obfuscated value" {
         if ($script:ConsumptionCsv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
-        $inventoryIds = $script:AllIds
+        $InventoryIds = $script:AllIds
         foreach ($row in $script:ConsumptionCsv)
         {
-            if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $inventoryIds)
+            if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $InventoryIds)
             {
                 # If it's in both, the ID should be identical (same dictionary mapping)
-                $row.ResourceId | Should -BeIn $inventoryIds -Because "Consumption ResourceId should match inventory ID"
+                $row.ResourceId | Should -BeIn $InventoryIds -Because "Consumption ResourceId should match inventory ID"
             }
         }
     }
@@ -138,20 +138,20 @@ Describe "Consumption to Inventory Cross-Reference" {
 
 Describe "ResourceGroup Consistency" {
     It "Resources with the same obfuscated ResourceGroup should be grouped together" {
-        $rgGroups = @{}
+        $RgGroups = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_ -and $null -ne $_.ResourceGroup)
                 {
-                    if (-not $rgGroups.ContainsKey($_.ResourceGroup)) { $rgGroups[$_.ResourceGroup] = @() }
-                    $rgGroups[$_.ResourceGroup] += $_.ID
+                    if (-not $RgGroups.ContainsKey($_.ResourceGroup)) { $RgGroups[$_.ResourceGroup] = @() }
+                    $RgGroups[$_.ResourceGroup] += $_.ID
                 }
             }
         }
         # Each RG should have at least one resource
-        foreach ($rg in $rgGroups.Keys)
+        foreach ($rg in $RgGroups.Keys)
         {
-            $rgGroups[$rg].Count | Should -BeGreaterThan 0 -Because "ResourceGroup '$rg' should have at least one resource"
+            $RgGroups[$rg].Count | Should -BeGreaterThan 0 -Because "ResourceGroup '$rg' should have at least one resource"
         }
     }
 }
@@ -159,33 +159,33 @@ Describe "ResourceGroup Consistency" {
 Describe "Subscription Determinism" {
     It "Resources sharing the same obfuscated Subscription should all have the same value" {
         # Collect all subscription values
-        $subValues = @{}
+        $SubValues = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_ -and $null -ne $_.Subscription)
                 {
-                    $subValues[$_.Subscription] = $true
+                    $SubValues[$_.Subscription] = $true
                 }
             }
         }
         # There should be fewer unique subscription values than total resources
         # (deterministic = same real sub maps to same obfuscated sub)
-        $subValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "Subscription values should be reused across resources in the same subscription"
+        $SubValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "Subscription values should be reused across resources in the same subscription"
     }
 }
 
 Describe "ResourceGroup Determinism" {
     It "Fewer unique ResourceGroup values than total resources (deterministic mapping)" {
-        $rgValues = @{}
+        $RgValues = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_ -and $null -ne $_.ResourceGroup)
                 {
-                    $rgValues[$_.ResourceGroup] = $true
+                    $RgValues[$_.ResourceGroup] = $true
                 }
             }
         }
-        $rgValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "ResourceGroup values should be reused across resources in the same RG"
+        $RgValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "ResourceGroup values should be reused across resources in the same RG"
     }
 }
 

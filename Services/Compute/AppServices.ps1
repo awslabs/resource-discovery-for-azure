@@ -6,32 +6,32 @@ If ($Task -eq 'Processing')
 
     if ($AppSvc)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $AppSvc)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $obj = @{
+            $Obj = @{
                 'ID'                            = $1.id;
-                'Subscription'                  = $sub1.Name;
+                'Subscription'                  = $Sub1.Name;
                 'ResourceGroup'                 = $1.RESOURCEGROUP;
                 'Name'                          = $1.NAME;
                 'AppType'                       = $1.KIND;
                 'Location'                      = $1.LOCATION;
-                'Enabled'                       = $data.enabled;
-                'State'                         = $data.state;
-                'SKU'                           = $data.sku;
-                'AvailabilityState'             = $data.availabilityState;
-                'SiteProperties'                = $data.siteProperties;
-                'ContainerSize'                 = $data.containerSize;
-                'ServerFarmId'                  = if (![string]::IsNullOrEmpty($data.serverFarmId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.serverFarmId)) { $ResourceIdDictionary[$data.serverFarmId] } else { 'obfuscated' } } else { $data.serverFarmId };
+                'Enabled'                       = $Data.enabled;
+                'State'                         = $Data.state;
+                'SKU'                           = $Data.sku;
+                'AvailabilityState'             = $Data.availabilityState;
+                'SiteProperties'                = $Data.siteProperties;
+                'ContainerSize'                 = $Data.containerSize;
+                'ServerFarmId'                  = if (![string]::IsNullOrEmpty($Data.serverFarmId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.serverFarmId)) { $ResourceIdDictionary[$Data.serverFarmId] } else { 'obfuscated' } } else { $Data.serverFarmId };
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

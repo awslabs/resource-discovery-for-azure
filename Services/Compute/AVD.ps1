@@ -8,82 +8,82 @@ if ($Task -eq 'Processing')
 
     if ($AVD)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $AVD)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $sessionhosts = @()
+            $Sessionhosts = @()
             foreach ($h in $Hosts)
             {
-                $n = $h.ID -split '/sessionhosts/'
+                $N = $h.ID -split '/sessionhosts/'
 
-                if ($n[0] -eq $1.id )
+                if ($N[0] -eq $1.id )
                 {
-                    $sessionhosts += $h
+                    $Sessionhosts += $h
                 }
             }
 
-            foreach ($2 in $sessionhosts)
+            foreach ($2 in $Sessionhosts)
             {
-                $vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId }
+                $Vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId }
 
                 # Resolve HostId and Hostname
-                $hostIdValue = $null
-                $hostnameValue = $null
-                if (![string]::IsNullOrEmpty($vmsessionhosts.Id))
+                $HostIdValue = $null
+                $HostnameValue = $null
+                if (![string]::IsNullOrEmpty($Vmsessionhosts.Id))
                 {
                     if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
                     {
                         # Obfuscation ON: never emit the real VM id or name. Use the
                         # dictionary value when the backing VM was indexed, else the
                         # lossy 'obfuscated' fallback used elsewhere in the codebase.
-                        $hostIdValue = if ($ResourceIdDictionary.ContainsKey($vmsessionhosts.Id)) { $ResourceIdDictionary[$vmsessionhosts.Id] } else { 'obfuscated' }
+                        $HostIdValue = if ($ResourceIdDictionary.ContainsKey($Vmsessionhosts.Id)) { $ResourceIdDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
                         # Deterministic hostname: derive from VM ID hash so same input = same output
-                        $hnPrefix = $hostIdValue.Split('_')[0]
-                        $sha = [System.Security.Cryptography.SHA256]::Create()
+                        $HnPrefix = $HostIdValue.Split('_')[0]
+                        $Sha = [System.Security.Cryptography.SHA256]::Create()
                         try
                         {
-                            $hnHash = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($vmsessionhosts.Id + '_hostname'))).Replace('-', '').Substring(0, 32).ToLower()
+                            $HnHash = [System.BitConverter]::ToString($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Vmsessionhosts.Id + '_hostname'))).Replace('-', '').Substring(0, 32).ToLower()
                         }
-                        finally { $sha.Dispose() }
-                        $hostnameValue = $hnPrefix + '_' + $hnHash.Substring(0, 8) + '-' + $hnHash.Substring(8, 4) + '-' + $hnHash.Substring(12, 4) + '-' + $hnHash.Substring(16, 4) + '-' + $hnHash.Substring(20, 12)
+                        finally { $Sha.Dispose() }
+                        $HostnameValue = $HnPrefix + '_' + $HnHash.Substring(0, 8) + '-' + $HnHash.Substring(8, 4) + '-' + $HnHash.Substring(12, 4) + '-' + $HnHash.Substring(16, 4) + '-' + $HnHash.Substring(20, 12)
                     }
                     else
                     {
-                        $hostIdValue = $vmsessionhosts.Id
-                        $hostnameValue = $vmsessionhosts.Name
+                        $HostIdValue = $Vmsessionhosts.Id
+                        $HostnameValue = $Vmsessionhosts.Name
                     }
                 }
 
-                $obj = @{
+                $Obj = @{
                     'ID'                 = $1.id;
-                    'Subscription'       = $sub1.Name;
+                    'Subscription'       = $Sub1.Name;
                     'ResourceGroup'      = $1.RESOURCEGROUP;
                     'Name'               = $1.NAME;
                     'Location'           = $1.LOCATION;
-                    'HostPoolType'       = $data.hostPoolType;
-                    'LoadBalancer'       = $data.loadBalancerType;
-                    'MaxSessionLimit'    = $data.maxSessionLimit;
-                    'PreferredAppGroup'  = $data.preferredAppGroupType;
+                    'HostPoolType'       = $Data.hostPoolType;
+                    'LoadBalancer'       = $Data.loadBalancerType;
+                    'MaxSessionLimit'    = $Data.maxSessionLimit;
+                    'PreferredAppGroup'  = $Data.preferredAppGroupType;
                     'AVDAgentVersion'    = $2.properties.agentVersion;
                     'AllowNewSession'    = $2.properties.allowNewSession;
                     'UpdateStatus'       = $2.properties.updateState;
-                    'HostId'             = $hostIdValue;
-                    'Hostname'           = $hostnameValue;
-                    'VMSize'             = $vmsessionhosts.properties.hardwareProfile.vmsize;
-                    'OSType'             = $vmsessionhosts.properties.storageProfile.osdisk.ostype;
-                    'VMDiskType'         = $vmsessionhosts.properties.storageProfile.osdisk.managedDisk.storageAccountType;
+                    'HostId'             = $HostIdValue;
+                    'Hostname'           = $HostnameValue;
+                    'VMSize'             = $Vmsessionhosts.properties.hardwareProfile.vmsize;
+                    'OSType'             = $Vmsessionhosts.properties.storageProfile.osdisk.ostype;
+                    'VMDiskType'         = $Vmsessionhosts.properties.storageProfile.osdisk.managedDisk.storageAccountType;
                     'HostStatus'         = $2.properties.status;
                     'OSVersion'          = $2.properties.osVersion;
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
         }
 
-        $tmp
+        $Tmp
     }
 }

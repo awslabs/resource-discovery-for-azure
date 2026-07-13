@@ -4,22 +4,22 @@
 # Run with: Invoke-Pester ./Tests/Frontdoor.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
     {
         Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
     {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
-    $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("FrontdoorTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+    $script:ExtractPath = Join-Path $TmpBase ("FrontdoorTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
-    $invFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
-    $script:Inventory = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
+    $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+    $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
     $script:FrontDoors = @($script:Inventory.FRONTDOOR) | Where-Object { $null -ne $_ }
 
     $script:ObfuscationPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -40,10 +40,10 @@ AfterAll {
 Describe "Front Door Collector Schema" {
     It "Should produce entries with all expected fields" {
         if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
-        $expected = @('ID', 'Subscription', 'ResourceGroup', 'Name', 'Location', 'Type', 'State', 'WebApplicationFirewall', 'ResourceType')
+        $Expected = @('ID', 'Subscription', 'ResourceGroup', 'Name', 'Location', 'Type', 'State', 'WebApplicationFirewall', 'ResourceType')
         foreach ($fd in $script:FrontDoors)
         {
-            foreach ($field in $expected)
+            foreach ($field in $Expected)
             {
                 $fd.PSObject.Properties.Name | Should -Contain $field -Because "Every Front Door entry should have a '$field' field"
             }
@@ -54,10 +54,10 @@ Describe "Front Door Collector Schema" {
 Describe "Front Door Tier Detection" {
     It "Type field should only contain known tier values" {
         if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
-        $validTypes = @('Classic', 'Standard', 'Premium')
+        $ValidTypes = @('Classic', 'Standard', 'Premium')
         foreach ($fd in $script:FrontDoors)
         {
-            $fd.Type | Should -BeIn $validTypes -Because "Type should be one of: $($validTypes -join ', ')"
+            $fd.Type | Should -BeIn $ValidTypes -Because "Type should be one of: $($ValidTypes -join ', ')"
         }
     }
 
@@ -141,10 +141,10 @@ Describe "Front Door Non-Sensitive Field Preservation" {
 
     It "ResourceType should be a valid Azure resource type (not obfuscated)" {
         if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
-        $validTypes = @('microsoft.network/frontdoors', 'microsoft.cdn/profiles')
+        $ValidTypes = @('microsoft.network/frontdoors', 'microsoft.cdn/profiles')
         foreach ($fd in $script:FrontDoors)
         {
-            $fd.ResourceType | Should -BeIn $validTypes -Because "ResourceType should be the raw Azure type, not obfuscated"
+            $fd.ResourceType | Should -BeIn $ValidTypes -Because "ResourceType should be the raw Azure type, not obfuscated"
         }
     }
 }

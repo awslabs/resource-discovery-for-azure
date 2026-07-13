@@ -13,17 +13,17 @@ if ($Task -eq 'Processing')
 
     if ($FRONTDOOR)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $FRONTDOOR)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
             # Tier identification.
             # Classic has a single tier; Standard/Premium are distinguished by SKU name
             # (Standard_AzureFrontDoor vs Premium_AzureFrontDoor).
-            $frontDoorType = if ($1.TYPE -eq 'microsoft.network/frontdoors')
+            $FrontDoorType = if ($1.TYPE -eq 'microsoft.network/frontdoors')
             {
                 'Classic'
             }
@@ -49,16 +49,16 @@ if ($Task -eq 'Processing')
             $WAF = $false
             if ($1.TYPE -eq 'microsoft.network/frontdoors')
             {
-                $wafId = $data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id
-                if (![string]::IsNullOrEmpty($wafId))
+                $WafId = $Data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id
+                if (![string]::IsNullOrEmpty($WafId))
                 {
                     $WAF = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
                     {
-                        if ($ResourceIdDictionary.ContainsKey($wafId)) { $ResourceIdDictionary[$wafId] } else { 'obfuscated' }
+                        if ($ResourceIdDictionary.ContainsKey($WafId)) { $ResourceIdDictionary[$WafId] } else { 'obfuscated' }
                     }
                     else
                     {
-                        $wafId.split('/')[8]
+                        $WafId.split('/')[8]
                     }
                 }
             }
@@ -70,25 +70,25 @@ if ($Task -eq 'Processing')
             }
 
             # State with fallback chain
-            $state = if ($data.enabledState) { $data.enabledState }
-            elseif ($data.provisioningState) { $data.provisioningState }
+            $State = if ($Data.enabledState) { $Data.enabledState }
+            elseif ($Data.provisioningState) { $Data.provisioningState }
             else { 'Unknown' }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                        = $1.id;
-                'Subscription'              = $sub1.Name;
+                'Subscription'              = $Sub1.Name;
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
-                'Type'                      = $frontDoorType;
+                'Type'                      = $FrontDoorType;
                 'ResourceType'              = $1.TYPE;
-                'State'                     = $state;
+                'State'                     = $State;
                 'WebApplicationFirewall'    = [string]$WAF;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

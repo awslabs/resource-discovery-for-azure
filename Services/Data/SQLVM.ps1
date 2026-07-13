@@ -6,12 +6,12 @@ If ($Task -eq 'Processing')
 
     if ($SQLVM)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $SQLVM)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
             # The parent compute VM that this SQL VM resource sits on. Azure exposes
             # it as properties.virtualMachineResourceId (the ARM id of the underlying
@@ -23,30 +23,30 @@ If ($Task -eq 'Processing')
             # matching the convention used by the other collectors.
             $ParentVM = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
             {
-                if (![string]::IsNullOrEmpty($data.virtualMachineResourceId) -and $ResourceIdDictionary.ContainsKey($data.virtualMachineResourceId)) { $ResourceIdDictionary[$data.virtualMachineResourceId] } else { 'obfuscated' }
+                if (![string]::IsNullOrEmpty($Data.virtualMachineResourceId) -and $ResourceIdDictionary.ContainsKey($Data.virtualMachineResourceId)) { $ResourceIdDictionary[$Data.virtualMachineResourceId] } else { 'obfuscated' }
             }
             else
             {
-                if (![string]::IsNullOrEmpty($data.virtualMachineResourceId)) { $data.virtualMachineResourceId } else { 'None' }
+                if (![string]::IsNullOrEmpty($Data.virtualMachineResourceId)) { $Data.virtualMachineResourceId } else { 'None' }
             }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                        = $1.id;
-                'Subscription'              = $sub1.Name;
+                'Subscription'              = $Sub1.Name;
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'Zone'                      = if ($null -ne $1.ZONES) { $1.ZONES } else { 'None' }
                 'ParentVirtualMachine'      = $ParentVM;
-                'SQLServerLicenseType'      = $data.sqlServerLicenseType;
-                'SQLImage'                  = $data.sqlImageOffer;
-                'SQLManagement'             = $data.sqlManagement;
-                'SQLImageSku'               = $data.sqlImageSku;
+                'SQLServerLicenseType'      = $Data.sqlServerLicenseType;
+                'SQLImage'                  = $Data.sqlImageOffer;
+                'SQLManagement'             = $Data.sqlManagement;
+                'SQLImageSku'               = $Data.sqlImageSku;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

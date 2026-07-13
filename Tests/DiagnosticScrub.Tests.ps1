@@ -149,9 +149,9 @@ Describe "Protect-DiagnosticText preserves already-obfuscated tokens and edge ca
 
     It "leaves an existing prod_/nonprod_ token intact (GUID safety net does not corrupt it)" {
         # Token built at runtime so no literal GUID lives in this source file.
-        $token = 'prod_' + [guid]::NewGuid().ToString()
-        $out = Protect-DiagnosticText "already masked: $token" $null
-        $out | Should -Match ([regex]::Escape($token))
+        $Token = 'prod_' + [guid]::NewGuid().ToString()
+        $Out = Protect-DiagnosticText "already masked: $Token" $null
+        $Out | Should -Match ([regex]::Escape($Token))
     }
 
     It "returns null/empty input unchanged" {
@@ -160,8 +160,8 @@ Describe "Protect-DiagnosticText preserves already-obfuscated tokens and edge ca
     }
 
     It "works with no map (structured masking still applies)" {
-        $out = Protect-DiagnosticText "tenant $script:UnknownGuid mail $script:Email" $null
-        $out | Should -Not -Match ([regex]::Escape($script:UnknownGuid))
-        $out | Should -Not -Match ([regex]::Escape($script:Email))
+        $Out = Protect-DiagnosticText "tenant $script:UnknownGuid mail $script:Email" $null
+        $Out | Should -Not -Match ([regex]::Escape($script:UnknownGuid))
+        $Out | Should -Not -Match ([regex]::Escape($script:Email))
     }
 }

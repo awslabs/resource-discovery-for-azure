@@ -6,35 +6,35 @@ if ($Task -eq 'Processing')
 
     if ($AppInsights)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $AppInsights)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $timecreated = $data.CreationDate
-            $timecreated = [datetime]$timecreated
-            $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
-            $Sampling = if ([string]::IsNullOrEmpty($data.SamplingPercentage)) { 'Disabled' }else { $data.SamplingPercentage }
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Timecreated = $Data.CreationDate
+            $Timecreated = [datetime]$Timecreated
+            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Sampling = if ([string]::IsNullOrEmpty($Data.SamplingPercentage)) { 'Disabled' }else { $Data.SamplingPercentage }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                    = $1.id;
-                'Subscription'          = $sub1.Name;
+                'Subscription'          = $Sub1.Name;
                 'ResourceGroup'         = $1.RESOURCEGROUP;
                 'Name'                  = $1.NAME;
                 'Location'              = $1.LOCATION;
-                'ApplicationType'       = $data.Application_Type;
-                'FlowType'              = $data.Flow_Type;
-                'Version'               = $data.Ver;
+                'ApplicationType'       = $Data.Application_Type;
+                'FlowType'              = $Data.Flow_Type;
+                'Version'               = $Data.Ver;
                 'DataSampling'          = [string]$Sampling;
-                'RetentionInDays'       = $data.RetentionInDays;
-                'IngestionMode'         = $data.IngestionMode;
-                'CreatedTime'           = $timecreated;
+                'RetentionInDays'       = $Data.RetentionInDays;
+                'IngestionMode'         = $Data.IngestionMode;
+                'CreatedTime'           = $Timecreated;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

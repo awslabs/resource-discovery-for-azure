@@ -38,7 +38,7 @@ BeforeAll {
     {
         param([string]$VmResourceId)  # value placed at PROPERTIES.virtualMachineResourceId; omit/empty to test the no-parent path
 
-        $props = [pscustomobject]@{
+        $Props = [pscustomobject]@{
             virtualMachineResourceId = $VmResourceId
             sqlServerLicenseType     = 'PAYG'
             sqlImageOffer            = 'sql2019-ws2022'
@@ -53,7 +53,7 @@ BeforeAll {
             LOCATION       = 'eastus'
             ZONES          = $null
             subscriptionId = $script:DocGuid
-            PROPERTIES     = $props
+            PROPERTIES     = $Props
         }
     }
 
@@ -61,52 +61,52 @@ BeforeAll {
     function Invoke-SqlVmCollector
     {
         param($Resources, $Dictionary)
-        $result = & $script:Collector -Sub $script:Subs -Resources $Resources -Task 'Processing' -ResourceIdDictionary $Dictionary
-        return @($result)[0]
+        $Result = & $script:Collector -Sub $script:Subs -Resources $Resources -Task 'Processing' -ResourceIdDictionary $Dictionary
+        return @($Result)[0]
     }
 }
 
 Describe 'SQL VM parent-VM cross-reference (obfuscated)' {
 
     It 'resolves ParentVirtualMachine to the SAME token the VM got when the parent is in the dictionary' {
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $dict[$script:VmRealId] = $script:VmObfToken   # the VirtualMachines collector indexes the VM here
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Dict[$script:VmRealId] = $script:VmObfToken   # the VirtualMachines collector indexes the VM here
 
-        $rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $dict
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $Dict
 
-        $rec.ParentVirtualMachine | Should -BeExactly $script:VmObfToken -Because 'the SQL VM must carry the same obfuscated token as its compute VM'
+        $Rec.ParentVirtualMachine | Should -BeExactly $script:VmObfToken -Because 'the SQL VM must carry the same obfuscated token as its compute VM'
         # And it must NOT leak the real id.
-        $rec.ParentVirtualMachine | Should -Not -Match 'microsoft.compute'
+        $Rec.ParentVirtualMachine | Should -Not -Match 'microsoft.compute'
     }
 
     It "falls back to 'obfuscated' when obfuscation is on but the parent VM is not in the dictionary" {
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $dict['/subscriptions/x/some/other/id'] = 'prod_unrelated'   # non-empty dict, but not our VM
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Dict['/subscriptions/x/some/other/id'] = 'prod_unrelated'   # non-empty dict, but not our VM
 
-        $rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $dict
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $Dict
 
-        $rec.ParentVirtualMachine | Should -BeExactly 'obfuscated' -Because 'an out-of-scope parent must not leak the real id'
+        $Rec.ParentVirtualMachine | Should -BeExactly 'obfuscated' -Because 'an out-of-scope parent must not leak the real id'
     }
 
     It "returns 'obfuscated' (never the real id) when obfuscation is on and the SQL VM has no parent id" {
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $dict[$script:VmRealId] = $script:VmObfToken
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Dict[$script:VmRealId] = $script:VmObfToken
 
-        $rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId '') -Dictionary $dict
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId '') -Dictionary $Dict
 
-        $rec.ParentVirtualMachine | Should -BeExactly 'obfuscated'
+        $Rec.ParentVirtualMachine | Should -BeExactly 'obfuscated'
     }
 }
 
 Describe 'SQL VM parent-VM cross-reference (non-obfuscated)' {
 
     It 'passes the raw parent id through when obfuscation is off (null dictionary)' {
-        $rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $null
-        $rec.ParentVirtualMachine | Should -BeExactly $script:VmRealId
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $null
+        $Rec.ParentVirtualMachine | Should -BeExactly $script:VmRealId
     }
 
     It "emits 'None' when obfuscation is off and there is no parent id" {
-        $rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId '') -Dictionary $null
-        $rec.ParentVirtualMachine | Should -BeExactly 'None'
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId '') -Dictionary $null
+        $Rec.ParentVirtualMachine | Should -BeExactly 'None'
     }
 }

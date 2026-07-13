@@ -67,7 +67,56 @@
         # this rule does not mask collector misuse. Converting these coloured
         # prompts to Write-Output/Write-Information would break the interactive
         # experience, so the rule is excluded rather than "fixed".
-        'PSAvoidUsingWriteHost'
+        'PSAvoidUsingWriteHost',
+
+        # False positive against the fixed collector contract and indirect
+        # parameter use. Every Services/*/*.ps1 collector takes the required
+        # 4-param signature ($Sub, $Resources, $Task, $ResourceIdDictionary);
+        # collectors without cross-references legitimately never read
+        # $ResourceIdDictionary, but it MUST stay because the orchestrator binds
+        # it by name (removing it would break the contract). The entry scripts'
+        # parameters (TenantID, SubscriptionID, etc.) are consumed indirectly
+        # (splatting, $PSBoundParameters, nested scriptblocks) which this rule
+        # does not track. Removing either class would be wrong, so the rule is
+        # excluded.
+        'PSReviewUnusedParameter',
+
+        # False positive on the correct Start-Job pattern. The parallel workers
+        # pass state into the job via -ArgumentList bound to a param() block
+        # (e.g. Reveal.ps1 Start-Job { param($InputZip,...) } -ArgumentList ...),
+        # NOT via $using:. The rule assumes any variable in a job scriptblock
+        # needs the Using: modifier and flags the (correct) param-bound ones.
+        # Adding $using: would be wrong here.
+        'PSUseUsingScopeModifierInNewRunspaces',
+
+        # False positive for a script-based tool with no exported cmdlets. The
+        # flagged functions are internal HTML/object builders (New-DonutChart,
+        # New-BarChart, New-ServiceTable, test New-* helpers) that return
+        # strings/objects, plus internal resume-state helpers. None are public
+        # cmdlets, so wiring up ShouldProcess/-WhatIf/-Confirm would be pure
+        # ceremony with no user-facing benefit.
+        'PSUseShouldProcessForStateChangingFunctions',
+
+        # Intentional: the flagged functions return COLLECTIONS, so the plural
+        # noun is semantically accurate (Get-FailedAttempts, Get-CompletedSubscriptionIds,
+        # Get-StreamResumeStateFiles, etc.). Renaming to singular would be less
+        # accurate and would churn every call site for a cosmetic naming rule.
+        'PSUseSingularNouns',
+
+        # Repo convention is UTF-8 WITHOUT BOM and LF line endings (enforced by
+        # the formatter pass). This rule wants a BOM on files it considers
+        # unicode-encoded; adding BOMs would fight the deliberate no-BOM
+        # convention and create churn on Linux/CI. Excluded.
+        'PSUseBOMForUnicodeEncodedFile',
+
+        # Intentional best-effort swallow in non-fatal paths. The flagged catch
+        # blocks are deliberate (each carries an explanatory comment): CloudShell
+        # detection (the failure IS the "not CloudShell" signal), and
+        # progress/error/debug-log writes that must NEVER break a run. Genuine
+        # error handling elsewhere uses Write-Log + -ErrorAction Stop; these
+        # specific paths are meant to fail silently, so the rule is excluded
+        # rather than adding no-op statements to satisfy it.
+        'PSAvoidUsingEmptyCatchBlock'
     )
 
     Severity = @('Error', 'Warning', 'Information')

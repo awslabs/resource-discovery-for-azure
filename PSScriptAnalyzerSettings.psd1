@@ -43,7 +43,31 @@
         # It only enforces cosmetic casing of cmdlet/keyword names, so excluding
         # it costs no correctness/security coverage. (The Rules block below no
         # longer enables it — see the note there.)
-        'PSUseCorrectCasing'
+        'PSUseCorrectCasing',
+
+        # Intentional architecture, not a defect. The obfuscation dictionaries
+        # and per-phase health globals ($Global:ResourceIdDictionary,
+        # $Global:ResourceNameDictionary, $Global:ConsumptionFailedSubs,
+        # $Global:MetricsFailedSubs, $Global:CollectorFailures, etc.) are the
+        # established, documented cross-collector state-sharing mechanism for
+        # this tool (see .kiro/steering/project-architecture.md). Collectors
+        # read these globals by design; there is no accidental global leakage
+        # (Services/* declare none). Flagging every read/write of the sanctioned
+        # globals is pure noise here, so the rule is excluded rather than
+        # annotating hundreds of intentional uses.
+        'PSAvoidGlobalVars',
+
+        # Intentional interactive console UX, not logging. Write-Host is used
+        # deliberately for coloured, user-facing terminal output in the
+        # interactive wrapper and tooling (PowerShell 7 / Azure CLI / Az module
+        # install prompts, Read-Host flows, auth status, progress and run
+        # summaries) via -ForegroundColor. File logging goes through Write-Log;
+        # structured data is returned as objects. The Services/* collectors
+        # contain ZERO Write-Host (verified) — they emit objects — so excluding
+        # this rule does not mask collector misuse. Converting these coloured
+        # prompts to Write-Output/Write-Information would break the interactive
+        # experience, so the rule is excluded rather than "fixed".
+        'PSAvoidUsingWriteHost'
     )
 
     Severity = @('Error', 'Warning', 'Information')

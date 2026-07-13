@@ -42,8 +42,8 @@ function Get-JsonEscaped
     # Return the input string escaped for placement INSIDE a JSON string literal
     # (ConvertTo-Json wraps + escapes; strip the surrounding quotes).
     param([string]$Text)
-    $json = $Text | ConvertTo-Json -Compress
-    return $json.Substring(1, $json.Length - 2)
+    $Json = $Text | ConvertTo-Json -Compress
+    return $Json.Substring(1, $Json.Length - 2)
 }
 
 # Reveal selected tokens inside a single string. The replacement value is
@@ -58,21 +58,21 @@ function Get-JsonEscaped
 function Convert-RevealString
 {
     param([string]$Text, [string]$EscapeMode = 'None')
-    return [regex]::Replace($Text, $tokenPattern, {
+    return [regex]::Replace($Text, $TokenPattern, {
             param($m)
-            $tok = $m.Value
-            if ($Replacements.ContainsKey($tok))
+            $Tok = $m.Value
+            if ($Replacements.ContainsKey($Tok))
             {
-                $script:fileHits++
-                $val = $Replacements[$tok]
+                $script:FileHits++
+                $Val = $Replacements[$Tok]
                 switch ($EscapeMode)
                 {
-                    'Json' { return (Get-JsonEscaped $val) }
-                    'Html' { return [System.Net.WebUtility]::HtmlEncode($val) }
-                    default { return $val }
+                    'Json' { return (Get-JsonEscaped $Val) }
+                    'Html' { return [System.Net.WebUtility]::HtmlEncode($Val) }
+                    default { return $Val }
                 }
             }
-            return $tok
+            return $Tok
         })
 }
 
@@ -133,9 +133,9 @@ function Invoke-RdaReveal
 
     if ([string]::IsNullOrEmpty($OutputZip))
     {
-        $inDir = Split-Path -Path $InputZip -Parent
-        $inBase = [System.IO.Path]::GetFileNameWithoutExtension($InputZip)
-        $OutputZip = Join-Path $inDir ($inBase + '_revealed.zip')
+        $InDir = Split-Path -Path $InputZip -Parent
+        $InBase = [System.IO.Path]::GetFileNameWithoutExtension($InputZip)
+        $OutputZip = Join-Path $InDir ($InBase + '_revealed.zip')
     }
 
     # -All is a convenience for a full reveal: expand to every dimension the
@@ -166,14 +166,14 @@ function Invoke-RdaReveal
 
     # ---- Build token -> real-value replacement map for selected fields -----
     $Replacements = @{}
-    $skipped = @{}
+    $Skipped = @{}
 
     if ($Fields -contains 'ResourceGroup')
     {
         foreach ($token in $RgMap.Keys)
         {
-            $rgName = Get-RgNameFromResourceId $RgMap[$token]
-            if (-not [string]::IsNullOrEmpty($rgName)) { $Replacements[$token] = $rgName }
+            $RgName = Get-RgNameFromResourceId $RgMap[$token]
+            if (-not [string]::IsNullOrEmpty($RgName)) { $Replacements[$token] = $RgName }
         }
     }
 
@@ -181,17 +181,17 @@ function Invoke-RdaReveal
     {
         foreach ($token in $SubMap.Keys)
         {
-            $real = $null
+            $Real = $null
             if ($SubNameMap.ContainsKey($token) -and -not [string]::IsNullOrEmpty($SubNameMap[$token]))
             {
-                $real = $SubNameMap[$token]
+                $Real = $SubNameMap[$token]
             }
             else
             {
-                $real = Get-SubGuidFromResourceId $SubMap[$token]
-                if (-not [string]::IsNullOrEmpty($real)) { $skipped['SubscriptionName'] = $true }
+                $Real = Get-SubGuidFromResourceId $SubMap[$token]
+                if (-not [string]::IsNullOrEmpty($Real)) { $Skipped['SubscriptionName'] = $true }
             }
-            if (-not [string]::IsNullOrEmpty($real)) { $Replacements[$token] = $real }
+            if (-not [string]::IsNullOrEmpty($Real)) { $Replacements[$token] = $Real }
         }
     }
 
@@ -213,8 +213,8 @@ function Invoke-RdaReveal
         # last '/'-delimited segment of that Id.
         foreach ($token in $NameMap.Keys)
         {
-            $name = ($NameMap[$token] -split '/')[-1]
-            if (-not [string]::IsNullOrEmpty($name)) { $Replacements[$token] = $name }
+            $Name = ($NameMap[$token] -split '/')[-1]
+            if (-not [string]::IsNullOrEmpty($Name)) { $Replacements[$token] = $Name }
         }
     }
 
@@ -239,7 +239,7 @@ function Invoke-RdaReveal
         }
     }
 
-    if ($skipped.ContainsKey('SubscriptionName'))
+    if ($Skipped.ContainsKey('SubscriptionName'))
     {
         Write-Warning "One or more subscriptions had no friendly name in the dictionary (older -Obfuscate run); revealed the subscription GUID instead. Re-run the inventory with a current version to capture SubscriptionNameMap."
     }
@@ -256,31 +256,31 @@ function Invoke-RdaReveal
     # (prod_aks_<guid>, etc.) - the regex matches both; the callback only
     # substitutes tokens present in $Replacements, so non-selected dimensions
     # are left masked.
-    $tokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    $TokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
-    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("Reveal_" + [guid]::NewGuid().ToString())
-    New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+    $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("Reveal_" + [guid]::NewGuid().ToString())
+    New-Item -ItemType Directory -Path $TmpRoot -Force | Out-Null
 
     try
     {
-        Expand-Archive -Path $InputZip -DestinationPath $tmpRoot -Force
+        Expand-Archive -Path $InputZip -DestinationPath $TmpRoot -Force
 
-        $totalHits = 0
-        $files = Get-ChildItem -Path $tmpRoot -Recurse -File
-        foreach ($file in $files)
+        $TotalHits = 0
+        $Files = Get-ChildItem -Path $TmpRoot -Recurse -File
+        foreach ($file in $Files)
         {
-            $script:fileHits = 0
-            $ext = $file.Extension.ToLowerInvariant()
+            $script:FileHits = 0
+            $Ext = $file.Extension.ToLowerInvariant()
 
-            if ($ext -eq '.csv')
+            if ($Ext -eq '.csv')
             {
                 # Field-aware reveal: re-export through the CSV writer so a
                 # revealed value containing a comma/quote is correctly quoted and
                 # cannot break the column structure a raw text replace could.
-                $rows = @(Import-Csv -Path $file.FullName)
-                if ($rows.Count -gt 0)
+                $Rows = @(Import-Csv -Path $file.FullName)
+                if ($Rows.Count -gt 0)
                 {
-                    foreach ($row in $rows)
+                    foreach ($row in $Rows)
                     {
                         foreach ($prop in $row.PSObject.Properties)
                         {
@@ -290,44 +290,44 @@ function Invoke-RdaReveal
                             }
                         }
                     }
-                    if ($script:fileHits -gt 0)
+                    if ($script:FileHits -gt 0)
                     {
-                        $rows | Export-Csv -Path $file.FullName -NoTypeInformation -Encoding utf8
+                        $Rows | Export-Csv -Path $file.FullName -NoTypeInformation -Encoding utf8
                     }
                 }
             }
             else
             {
-                $content = Get-Content -Path $file.FullName -Raw
-                if ([string]::IsNullOrEmpty($content)) { continue }
+                $Content = Get-Content -Path $file.FullName -Raw
+                if ([string]::IsNullOrEmpty($Content)) { continue }
 
-                $escapeMode = switch ($ext)
+                $EscapeMode = switch ($Ext)
                 {
                     '.json' { 'Json' }
                     '.html' { 'Html' }
                     '.htm' { 'Html' }
                     default { 'None' }
                 }
-                $newContent = Convert-RevealString -Text $content -EscapeMode $escapeMode
+                $NewContent = Convert-RevealString -Text $Content -EscapeMode $EscapeMode
 
-                if ($script:fileHits -gt 0)
+                if ($script:FileHits -gt 0)
                 {
-                    Set-Content -Path $file.FullName -Value $newContent -Encoding utf8 -NoNewline
+                    Set-Content -Path $file.FullName -Value $NewContent -Encoding utf8 -NoNewline
                 }
             }
 
-            if ($script:fileHits -gt 0)
+            if ($script:FileHits -gt 0)
             {
-                $totalHits += $script:fileHits
-                Write-Host ("  {0}: revealed {1} token occurrence(s)" -f $file.Name, $script:fileHits)
+                $TotalHits += $script:FileHits
+                Write-Host ("  {0}: revealed {1} token occurrence(s)" -f $file.Name, $script:FileHits)
             }
         }
 
         if (Test-Path -Path $OutputZip) { Remove-Item -Path $OutputZip -Force }
-        Compress-Archive -Path (Join-Path $tmpRoot '*') -DestinationPath $OutputZip -Force
+        Compress-Archive -Path (Join-Path $TmpRoot '*') -DestinationPath $OutputZip -Force
 
         Write-Host ""
-        Write-Host ("Done. Revealed {0} token occurrence(s) across {1} member file(s)." -f $totalHits, @($files).Count) -ForegroundColor Green
+        Write-Host ("Done. Revealed {0} token occurrence(s) across {1} member file(s)." -f $TotalHits, @($Files).Count) -ForegroundColor Green
         Write-Host ("Output: {0}" -f $OutputZip) -ForegroundColor Green
         if ($All)
         {
@@ -337,6 +337,6 @@ function Invoke-RdaReveal
     }
     finally
     {
-        if (Test-Path -Path $tmpRoot) { Remove-Item -Path $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -Path $TmpRoot) { Remove-Item -Path $TmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

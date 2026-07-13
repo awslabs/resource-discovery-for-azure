@@ -6,41 +6,41 @@ if ($Task -eq 'Processing')
 
     if ($CloudServices)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $CloudServices)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $roles = $data.roleProfile
+            $Roles = $Data.roleProfile
 
-            $obj = @{
+            $Obj = @{
                 'ID'                   = $1.id;
-                'Subscription'         = $sub1.Name;
+                'Subscription'         = $Sub1.Name;
                 'ResourceGroup'        = $1.RESOURCEGROUP;
                 'Name'                 = $1.name;
                 'Location'             = $1.location;
             }
 
-            $obj | Add-Member -MemberType NoteProperty -Name Roles -Value NotSet
-            $obj.Roles = [System.Collections.Generic.List[object]]::new()
+            $Obj | Add-Member -MemberType NoteProperty -Name Roles -Value NotSet
+            $Obj.Roles = [System.Collections.Generic.List[object]]::new()
 
-            foreach ($roleProfile in $roles)
+            foreach ($roleProfile in $Roles)
             {
-                $roleProfileObj = @{
+                $RoleProfileObj = @{
                     'RoleName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $roleProfile.name } else { $roleProfile.name };
                     'SkuName'     = $roleProfile.sku.name;
                     'SkuTier'     = $roleProfile.sku.tier;
                     'SkuCapacity'     = $roleProfile.sku.capacity;
                 }
 
-                $obj.Roles.Add($roleProfileObj)
+                $Obj.Roles.Add($RoleProfileObj)
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

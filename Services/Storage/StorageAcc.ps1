@@ -2,41 +2,41 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $storageacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
+    $Storageacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
 
-    if ($storageacc)
+    if ($Storageacc)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $storageacc)
+        foreach ($1 in $Storageacc)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $timecreated = $data.creationTime
-            $timecreated = [datetime]$timecreated
-            $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Timecreated = $Data.creationTime
+            $Timecreated = [datetime]$Timecreated
+            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
 
-            if ($data.isHnsEnabled) { $hnsEnabled = $true } else { $hnsEnabled = $false }
+            if ($Data.isHnsEnabled) { $HnsEnabled = $true } else { $HnsEnabled = $false }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                                   = $1.id;
-                'Subscription'                         = $sub1.Name;
+                'Subscription'                         = $Sub1.Name;
                 'ResourceGroup'                        = $1.RESOURCEGROUP;
                 'Name'                                 = $1.NAME;
                 'Location'                             = $1.LOCATION;
                 'SKU'                                  = $1.sku.name;
                 'Tier'                                 = $1.sku.tier;
                 'Kind'                                 = $1.kind;
-                'AccessTier'                           = $data.accessTier;
-                'PrimaryLocation'                      = $data.primaryLocation;
-                'StatusOfPrimary'                      = $data.statusOfPrimary;
-                'HierarchicalNamespace'                = $hnsEnabled;
-                'CreatedTime'                          = $timecreated;
+                'AccessTier'                           = $Data.accessTier;
+                'PrimaryLocation'                      = $Data.primaryLocation;
+                'StatusOfPrimary'                      = $Data.statusOfPrimary;
+                'HierarchicalNamespace'                = $HnsEnabled;
+                'CreatedTime'                          = $Timecreated;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

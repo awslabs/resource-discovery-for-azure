@@ -6,34 +6,34 @@ if ($Task -eq 'Processing')
 
     if ($COSMOS)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $COSMOS)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $GeoReplicate = if ($data.failoverPolicies.count -gt 1) { 'Enabled' } else { 'Disabled' }
-            $FreeTier = if ($data.enableFreeTier -eq $true) { 'Opted In' } else { 'Opted Out' }
+            $GeoReplicate = if ($Data.failoverPolicies.count -gt 1) { 'Enabled' } else { 'Disabled' }
+            $FreeTier = if ($Data.enableFreeTier -eq $true) { 'Opted In' } else { 'Opted Out' }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                        = $1.id;
-                'Subscription'              = $sub1.Name;
+                'Subscription'              = $Sub1.Name;
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
-                'EnabledAPITypes'           = $data.EnabledApiTypes;
-                'BackupPolicy'              = $data.backupPolicy.type;
-                'BackupStorageRedundancy'   = $data.backupPolicy.periodicModeProperties.backupStorageRedundancy;
-                'AccountOfferType'          = $data.databaseAccountOfferType;
+                'EnabledAPITypes'           = $Data.EnabledApiTypes;
+                'BackupPolicy'              = $Data.backupPolicy.type;
+                'BackupStorageRedundancy'   = $Data.backupPolicy.periodicModeProperties.backupStorageRedundancy;
+                'AccountOfferType'          = $Data.databaseAccountOfferType;
                 'ReplicateDataGlobally'     = $GeoReplicate;
                 'FreeTierDiscount'          = $FreeTier;
-                'DefaultConsistency'        = $data.consistencyPolicy.defaultConsistencyLevel;
+                'DefaultConsistency'        = $Data.consistencyPolicy.defaultConsistencyLevel;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

@@ -3,22 +3,22 @@
 # Run with: Invoke-Pester ./Tests/DataIntegrity.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
     {
         Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
     {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
-    $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("DataIntTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+    $script:ExtractPath = Join-Path $TmpBase ("DataIntTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
-    $invFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
-    $script:Inventory = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
+    $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+    $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
 
     # Read all file contents for scanning
     $script:AllContent = @{}
@@ -58,30 +58,30 @@ AfterAll {
 # ============================================================
 Describe "PII Leak Scan" {
     It "Should not contain /subscriptions/ resource paths in any file" {
-        $pattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
+        $Pattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
         foreach ($fileName in $script:AllContent.Keys)
         {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
-            $script:AllContent[$fileName] | Should -Not -Match $pattern -Because "File '$fileName' should not contain Azure resource paths"
+            $script:AllContent[$fileName] | Should -Not -Match $Pattern -Because "File '$fileName' should not contain Azure resource paths"
         }
     }
 
     It "Should not contain Azure tenant ID patterns in any file" {
-        $pattern = '"tenant[Ii][Dd]"\s*:\s*"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"'
+        $Pattern = '"tenant[Ii][Dd]"\s*:\s*"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"'
         foreach ($fileName in $script:AllContent.Keys)
         {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
-            $script:AllContent[$fileName] | Should -Not -Match $pattern -Because "File '$fileName' should not contain tenant IDs"
+            $script:AllContent[$fileName] | Should -Not -Match $Pattern -Because "File '$fileName' should not contain tenant IDs"
         }
     }
 
     It "Should not contain email addresses in any file" {
-        $pattern = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        $Pattern = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
         foreach ($fileName in $script:AllContent.Keys)
         {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
-            $matches = [regex]::Matches($script:AllContent[$fileName], $pattern)
-            $matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses"
+            $Matches = [regex]::Matches($script:AllContent[$fileName], $Pattern)
+            $Matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses"
         }
     }
 
@@ -100,15 +100,15 @@ Describe "PII Leak Scan" {
 # ============================================================
 Describe "Cross-Reference Integrity" {
     It "Every VMDisk AssociatedResource should match a VM ID or be null" {
-        $disks = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
-        if ($disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
-        $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Disks = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
+        if ($Disks.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
+        $VmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($disk in $disks)
+        foreach ($disk in $Disks)
         {
             if ($null -ne $disk -and ![string]::IsNullOrEmpty($disk.AssociatedResource))
             {
-                $disk.AssociatedResource | Should -BeIn $vmIds -Because "Disk '$($disk.ID)' should reference a known VM"
+                $disk.AssociatedResource | Should -BeIn $VmIds -Because "Disk '$($disk.ID)' should reference a known VM"
                 $Checked++
             }
         }
@@ -116,15 +116,15 @@ Describe "Cross-Reference Integrity" {
     }
 
     It "Every AVD HostId should match a VM ID or be null" {
-        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
-        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
-        $vmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
+        $Avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($Avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $VmIds = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID }
         $Checked = 0
-        foreach ($item in $avd)
+        foreach ($item in $Avd)
         {
             if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId))
             {
-                $item.HostId | Should -BeIn $vmIds -Because "AVD HostId should reference a known VM"
+                $item.HostId | Should -BeIn $VmIds -Because "AVD HostId should reference a known VM"
                 $Checked++
             }
         }
@@ -132,10 +132,10 @@ Describe "Cross-Reference Integrity" {
     }
 
     It "AVD Hostname should differ from HostId" {
-        $avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
-        if ($avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Avd = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($Avd.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $Checked = 0
-        foreach ($item in $avd)
+        foreach ($item in $Avd)
         {
             if ($null -ne $item -and ![string]::IsNullOrEmpty($item.HostId) -and ![string]::IsNullOrEmpty($item.Hostname))
             {
@@ -152,27 +152,27 @@ Describe "Cross-Reference Integrity" {
 # ============================================================
 Describe "Deterministic Mapping" {
     It "All resources should share the same subscription value per real subscription" {
-        $subs = @()
+        $Subs = @()
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.Subscription) { $subs += $_.Subscription } }
+            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.Subscription) { $Subs += $_.Subscription } }
         }
-        $uniqueSubs = $subs | Select-Object -Unique
+        $UniqueSubs = $Subs | Select-Object -Unique
         # Unique subs should be far fewer than total resources
-        $uniqueSubs.Count | Should -BeLessOrEqual $subs.Count -Because "Subscription values should be reused (deterministic)"
+        $UniqueSubs.Count | Should -BeLessOrEqual $Subs.Count -Because "Subscription values should be reused (deterministic)"
         # For a single-subscription environment, should be exactly 1
-        if ($subs.Count -gt 1)
+        if ($Subs.Count -gt 1)
         {
-            $uniqueSubs.Count | Should -BeLessThan $subs.Count -Because "Multiple resources should share subscription values"
+            $UniqueSubs.Count | Should -BeLessThan $Subs.Count -Because "Multiple resources should share subscription values"
         }
     }
 
     It "ResourceGroup values should be reused across resources in the same RG" {
-        $rgs = @()
+        $Rgs = @()
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.ResourceGroup) { $rgs += $_.ResourceGroup } }
+            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.ResourceGroup) { $Rgs += $_.ResourceGroup } }
         }
-        $uniqueRGs = $rgs | Select-Object -Unique
-        $uniqueRGs.Count | Should -BeLessOrEqual $rgs.Count -Because "ResourceGroup values should be reused (deterministic)"
+        $UniqueRGs = $Rgs | Select-Object -Unique
+        $UniqueRGs.Count | Should -BeLessOrEqual $Rgs.Count -Because "ResourceGroup values should be reused (deterministic)"
     }
 }
 
@@ -230,7 +230,7 @@ Describe "Non-Sensitive Fields Preserved" {
             Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
             return
         }
-        $obfPattern = '^(prod|nonprod)_'
+        $ObfPattern = '^(prod|nonprod)_'
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Tags' -and $null -ne $_.Tags)
@@ -239,7 +239,7 @@ Describe "Non-Sensitive Fields Preserved" {
                     {
                         if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
                         {
-                            $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, never raw, when obfuscating"
+                            $tag.Value | Should -Match $ObfPattern -Because "tag values must be obfuscated, never raw, when obfuscating"
                         }
                     }
                 }
@@ -312,19 +312,19 @@ Describe "Generic per-property leak scan" {
             Set-ItResult -Skipped -Because "test only meaningful in obfuscated mode"
             return
         }
-        $azureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
+        $AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
         $script:Inventory.PSObject.Properties |
             Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
             ForEach-Object {
-                $collector = $_.Name
+                $Collector = $_.Name
                 @($_.Value) | ForEach-Object {
                     if ($null -eq $_) { return }
                     foreach ($prop in $_.PSObject.Properties)
                     {
-                        if ($null -ne $prop.Value -and $prop.Value -is [string] -and $prop.Value -match $azureIdPattern)
+                        if ($null -ne $prop.Value -and $prop.Value -is [string] -and $prop.Value -match $AzureIdPattern)
                         {
-                            $hint = "[{0}.{1}]" -f $collector, $prop.Name
-                            $prop.Value | Should -Not -Match $azureIdPattern -Because "Field $hint contains raw Azure resource path"
+                            $Hint = "[{0}.{1}]" -f $Collector, $prop.Name
+                            $prop.Value | Should -Not -Match $AzureIdPattern -Because "Field $Hint contains raw Azure resource path"
                         }
                     }
                 }

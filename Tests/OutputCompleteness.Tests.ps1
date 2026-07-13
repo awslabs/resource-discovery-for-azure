@@ -3,23 +3,23 @@
 # Run with: Invoke-Pester ./Tests/OutputCompleteness.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
     {
         Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath))
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
     {
         throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
     }
-    $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("CompleteTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+    $script:ExtractPath = Join-Path $TmpBase ("CompleteTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
     $script:AllFiles = Get-ChildItem -Path $script:ExtractPath -File
-    $invFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
-    $script:Inventory = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
+    $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+    $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
 }
 
 AfterAll {
@@ -28,23 +28,23 @@ AfterAll {
 
 Describe "Zip File Contents" {
     It "Should contain an HTML report file" {
-        $html = $script:AllFiles | Where-Object { $_.Extension -eq '.html' }
-        $html | Should -Not -BeNullOrEmpty
+        $Html = $script:AllFiles | Where-Object { $_.Extension -eq '.html' }
+        $Html | Should -Not -BeNullOrEmpty
     }
 
     It "Should contain an inventory JSON file" {
-        $json = $script:AllFiles | Where-Object { $_.Name -like 'Inventory_*' }
-        $json | Should -Not -BeNullOrEmpty
+        $Json = $script:AllFiles | Where-Object { $_.Name -like 'Inventory_*' }
+        $Json | Should -Not -BeNullOrEmpty
     }
 
     It "Should contain at least one metrics JSON file" {
-        $metrics = $script:AllFiles | Where-Object { $_.Name -like 'Metrics_*' }
-        $metrics | Should -Not -BeNullOrEmpty
+        $Metrics = $script:AllFiles | Where-Object { $_.Name -like 'Metrics_*' }
+        $Metrics | Should -Not -BeNullOrEmpty
     }
 
     It "Should contain a consumption CSV file" {
-        $csv = $script:AllFiles | Where-Object { $_.Name -like 'Consumption_*' }
-        $csv | Should -Not -BeNullOrEmpty
+        $Csv = $script:AllFiles | Where-Object { $_.Name -like 'Consumption_*' }
+        $Csv | Should -Not -BeNullOrEmpty
     }
 
     It "Should not contain any unexpected file types" {
@@ -55,7 +55,7 @@ Describe "Zip File Contents" {
         # (DebugLog_*, ErrorLog_*, Heartbeat_*) and the transcript .txt are
         # LOCAL-only and must NEVER ship - so a .log with any other name, or any
         # other unexpected extension, still fails this assertion.
-        $allowedExtensions = @('.html', '.json', '.csv')
+        $AllowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles)
         {
             if ($file.Extension -eq '.log')
@@ -64,14 +64,14 @@ Describe "Zip File Contents" {
             }
             else
             {
-                $file.Extension | Should -BeIn $allowedExtensions -Because "File '$($file.Name)' has unexpected extension"
+                $file.Extension | Should -BeIn $AllowedExtensions -Because "File '$($file.Name)' has unexpected extension"
             }
         }
     }
 
     It "Should not contain dictionary or transcript files" {
-        $leaked = $script:AllFiles | Where-Object { $_.Name -like 'ObfuscationDictionary_*' -or $_.Name -like 'Transcript_*' }
-        $leaked | Should -BeNullOrEmpty
+        $Leaked = $script:AllFiles | Where-Object { $_.Name -like 'ObfuscationDictionary_*' -or $_.Name -like 'Transcript_*' }
+        $Leaked | Should -BeNullOrEmpty
     }
 }
 
@@ -81,8 +81,8 @@ Describe "Inventory JSON Structure" {
     }
 
     It "Should have at least one resource type with data" {
-        $populated = $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' }
-        $populated.Count | Should -BeGreaterThan 0 -Because "At least one service should have discovered resources"
+        $Populated = $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' }
+        $Populated.Count | Should -BeGreaterThan 0 -Because "At least one service should have discovered resources"
     }
 
     It "Every resource should have ID, Name, and Location fields" {
@@ -100,20 +100,20 @@ Describe "Inventory JSON Structure" {
 
 Describe "Metrics JSON Structure" {
     It "Every metrics file should have a Metrics array" {
-        $metricsFiles = Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json"
-        foreach ($mf in $metricsFiles)
+        $MetricsFiles = Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json"
+        foreach ($mf in $MetricsFiles)
         {
-            $data = Get-Content $mf.FullName -Raw | ConvertFrom-Json
-            $data.PSObject.Properties.Name | Should -Contain 'Metrics'
+            $Data = Get-Content $mf.FullName -Raw | ConvertFrom-Json
+            $Data.PSObject.Properties.Name | Should -Contain 'Metrics'
         }
     }
 
     It "Each metric entry should have Service, Metric, and MetricValue fields" {
-        $metricsFiles = Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json"
-        foreach ($mf in $metricsFiles)
+        $MetricsFiles = Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json"
+        foreach ($mf in $MetricsFiles)
         {
-            $data = Get-Content $mf.FullName -Raw | ConvertFrom-Json
-            foreach ($m in @($data.Metrics))
+            $Data = Get-Content $mf.FullName -Raw | ConvertFrom-Json
+            foreach ($m in @($Data.Metrics))
             {
                 if ($null -ne $m)
                 {
@@ -128,8 +128,8 @@ Describe "Metrics JSON Structure" {
 
 Describe "Non-Sensitive Fields Preserved" {
     It "VM Location should be a real Azure region (not obfuscated)" {
-        $vms = @($script:Inventory.VirtualMachines)
-        foreach ($vm in $vms)
+        $Vms = @($script:Inventory.VirtualMachines)
+        foreach ($vm in $Vms)
         {
             if ($null -ne $vm)
             {
@@ -139,8 +139,8 @@ Describe "Non-Sensitive Fields Preserved" {
     }
 
     It "VM Size should be a real Azure VM size" {
-        $vms = @($script:Inventory.VirtualMachines)
-        foreach ($vm in $vms)
+        $Vms = @($script:Inventory.VirtualMachines)
+        foreach ($vm in $Vms)
         {
             if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size))
             {
@@ -153,8 +153,8 @@ Describe "Non-Sensitive Fields Preserved" {
     }
 
     It "VM OS should be a real OS type" {
-        $vms = @($script:Inventory.VirtualMachines)
-        foreach ($vm in $vms)
+        $Vms = @($script:Inventory.VirtualMachines)
+        foreach ($vm in $Vms)
         {
             if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType))
             {
@@ -164,8 +164,8 @@ Describe "Non-Sensitive Fields Preserved" {
     }
 
     It "Storage SKU should be a real Azure storage SKU" {
-        $storage = @($script:Inventory.StorageAcc)
-        foreach ($sa in $storage)
+        $Storage = @($script:Inventory.StorageAcc)
+        foreach ($sa in $Storage)
         {
             if ($null -ne $sa -and ![string]::IsNullOrEmpty($sa.SKU))
             {

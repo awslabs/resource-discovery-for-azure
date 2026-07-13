@@ -6,27 +6,27 @@ if ($Task -eq 'Processing')
 
     if ($Synapse)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $Synapse)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $obj = @{
+            $Obj = @{
                 'ID'                           = $1.id;
-                'Subscription'                 = $sub1.Name;
+                'Subscription'                 = $Sub1.Name;
                 'ResourceGroup'                = $1.RESOURCEGROUP;
                 'Name'                         = $1.NAME;
                 'Location'                     = $1.LOCATION;
-                'WorkspaceType'                = [string]$data.extraProperties.WorkspaceType;
-                'ManagedVirtualNetwork'        = $data.managedVirtualNetwork;
-                'ManagedResourceGroup'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.managedResourceGroupName };
+                'WorkspaceType'                = [string]$Data.extraProperties.WorkspaceType;
+                'ManagedVirtualNetwork'        = $Data.managedVirtualNetwork;
+                'ManagedResourceGroup'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.managedResourceGroupName };
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

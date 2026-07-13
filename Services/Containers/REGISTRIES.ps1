@@ -6,29 +6,29 @@ if ($Task -eq 'Processing')
 
     if ($REGISTRIES)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $REGISTRIES)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $timecreated = [datetime]($data.creationDate) | Get-Date -Format "yyyy-MM-dd HH:mm"
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Timecreated = [datetime]($Data.creationDate) | Get-Date -Format "yyyy-MM-dd HH:mm"
 
-            $obj = @{
+            $Obj = @{
                 'ID'                        = $1.id;
-                'Subscription'              = $sub1.Name;
+                'Subscription'              = $Sub1.Name;
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'SKU'                       = $1.sku.name;
-                'State'                     = $data.provisioningState;
-                'Encryption'                = $data.encryption.status;
-                'CreatedTime'               = $timecreated;
+                'State'                     = $Data.provisioningState;
+                'Encryption'                = $Data.encryption.status;
+                'CreatedTime'               = $Timecreated;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

@@ -8,33 +8,33 @@ if ($Task -eq 'Processing')
 
     if ($RedisCache)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($redisCacheInstance in $RedisCache)
         {
-            $subscription = $Sub | Where-Object { $_.id -eq $redisCacheInstance.subscriptionId }
-            $data = $redisCacheInstance.Properties
+            $Subscription = $Sub | Where-Object { $_.id -eq $redisCacheInstance.subscriptionId }
+            $Data = $redisCacheInstance.Properties
 
             if ($redisCacheInstance.Type -eq 'microsoft.cache/redis')
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                    = $redisCacheInstance.id;
-                    'Subscription'          = $subscription.Name;
+                    'Subscription'          = $Subscription.Name;
                     'ResourceGroup'         = $redisCacheInstance.ResourceGroup;
                     'Name'                  = $redisCacheInstance.Name;
                     'Location'              = $redisCacheInstance.Location;
-                    'Sku'                   = $data.sku.name;
-                    'Capacity'              = $data.sku.capacity;
-                    'Family'                = $data.sku.family;
+                    'Sku'                   = $Data.sku.name;
+                    'Capacity'              = $Data.sku.capacity;
+                    'Family'                = $Data.sku.family;
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
             else
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                    = $redisCacheInstance.id;
-                    'Subscription'          = $subscription.Name;
+                    'Subscription'          = $Subscription.Name;
                     'ResourceGroup'         = $redisCacheInstance.ResourceGroup;
                     'Name'                  = $redisCacheInstance.Name;
                     'Location'              = $redisCacheInstance.Location;
@@ -43,10 +43,10 @@ if ($Task -eq 'Processing')
                     'Family'                = 'enterprise';
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
         }
 
-        $tmp
+        $Tmp
     }
 }

@@ -22,11 +22,11 @@
 
 function GetLocalVersion()
 {
-    $versionJsonPath = "./Version.json"
-    if (Test-Path $versionJsonPath)
+    $VersionJsonPath = "./Version.json"
+    if (Test-Path $VersionJsonPath)
     {
-        $localVersionJson = Get-Content $versionJsonPath | ConvertFrom-Json
-        return ('{0}.{1}.{2}' -f $localVersionJson.MajorVersion, $localVersionJson.MinorVersion, $localVersionJson.BuildVersion)
+        $LocalVersionJson = Get-Content $VersionJsonPath | ConvertFrom-Json
+        return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
     }
     else
     {
@@ -49,8 +49,8 @@ Function Global:Protect-FreeTextValue([string]$Value)
     if ($null -eq $Global:FreeTextDictionary) { return $Value }
     if (-not $Global:FreeTextDictionary.ContainsKey($Value))
     {
-        $tfPrefix = if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
-        $Global:FreeTextDictionary[$Value] = $tfPrefix + [guid]::NewGuid().ToString()
+        $TfPrefix = if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+        $Global:FreeTextDictionary[$Value] = $TfPrefix + [guid]::NewGuid().ToString()
     }
     return $Global:FreeTextDictionary[$Value]
 }
@@ -88,14 +88,14 @@ Function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
 {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
 
-    $result = $Text
+    $Result = $Text
     if ($null -ne $ValueMap -and $ValueMap.Count -gt 0)
     {
         foreach ($real in ($ValueMap.Keys | Sort-Object -Property Length -Descending))
         {
-            if (-not [string]::IsNullOrEmpty($real) -and $result.Contains($real))
+            if (-not [string]::IsNullOrEmpty($real) -and $Result.Contains($real))
             {
-                $result = $result.Replace($real, $ValueMap[$real])
+                $Result = $Result.Replace($real, $ValueMap[$real])
             }
         }
     }
@@ -103,18 +103,18 @@ Function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
     # Auth artifacts first (highest severity): a SAS signature / token value in a
     # URL or error must never ship even to the ingestion party. Mask the VALUE of
     # sig=/signature=/sas=/(access|bearer)token=... and a 'Bearer <token>' header.
-    $result = [regex]::Replace($result, '(?i)\b(sig|signature|sas|accesstoken|access_token|bearertoken)=[^&\s"''<>]+', '$1=<redacted>')
-    $result = [regex]::Replace($result, '(?i)\bBearer\s+[A-Za-z0-9._\-]+', 'Bearer <redacted>')
+    $Result = [regex]::Replace($Result, '(?i)\b(sig|signature|sas|accesstoken|access_token|bearertoken)=[^&\s"''<>]+', '$1=<redacted>')
+    $Result = [regex]::Replace($Result, '(?i)\bBearer\s+[A-Za-z0-9._\-]+', 'Bearer <redacted>')
 
-    $result = [regex]::Replace($result, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '<email>')
-    $result = [regex]::Replace($result, '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '<ip>')
-    $result = [regex]::Replace($result, '(?i)\b[a-z0-9][a-z0-9-]*\.(?:blob|file|queue|table|dfs|vault|database|servicebus|azurewebsites|documents|search|azurecr|azuredatabricks|cognitiveservices|azconfig|azurefd|azure-api)\.[a-z0-9.]+\b', '<host>')
-    $result = [regex]::Replace($result, '(?i)\b[a-z0-9][a-z0-9-]*\.(?:cloudapp\.azure\.com|trafficmanager\.net|cache\.windows\.net)\b', '<host>')
-    $result = [regex]::Replace($result, '(?i)/home/[a-z0-9._-]+', '/home/<user>')
-    $result = [regex]::Replace($result, '(?i)C:\\Users\\[a-z0-9._-]+', 'C:\Users\<user>')
-    $result = [regex]::Replace($result, '(?<!_)\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', '<guid>')
+    $Result = [regex]::Replace($Result, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '<email>')
+    $Result = [regex]::Replace($Result, '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '<ip>')
+    $Result = [regex]::Replace($Result, '(?i)\b[a-z0-9][a-z0-9-]*\.(?:blob|file|queue|table|dfs|vault|database|servicebus|azurewebsites|documents|search|azurecr|azuredatabricks|cognitiveservices|azconfig|azurefd|azure-api)\.[a-z0-9.]+\b', '<host>')
+    $Result = [regex]::Replace($Result, '(?i)\b[a-z0-9][a-z0-9-]*\.(?:cloudapp\.azure\.com|trafficmanager\.net|cache\.windows\.net)\b', '<host>')
+    $Result = [regex]::Replace($Result, '(?i)/home/[a-z0-9._-]+', '/home/<user>')
+    $Result = [regex]::Replace($Result, '(?i)C:\\Users\\[a-z0-9._-]+', 'C:\Users\<user>')
+    $Result = [regex]::Replace($Result, '(?<!_)\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', '<guid>')
 
-    return $result
+    return $Result
 }
 
 # Runs `az graph query` and returns the parsed JSON result. Azure CLI

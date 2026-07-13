@@ -2,45 +2,45 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $virtualMachines = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
-    $disk = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' }
+    $VirtualMachines = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
+    $Disk = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' }
 
-    $vmsizemap = @{}
+    $Vmsizemap = @{}
 
-    foreach ($location in ($virtualMachines | Select-Object -ExpandProperty location -Unique))
+    foreach ($location in ($VirtualMachines | Select-Object -ExpandProperty location -Unique))
     {
-        $savedDebugPref = $DebugPreference
+        $SavedDebugPref = $DebugPreference
         $DebugPreference = 'SilentlyContinue'
-        $skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
-        $DebugPreference = $savedDebugPref
+        $Skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        $DebugPreference = $SavedDebugPref
 
-        foreach ($vmsize in $skus)
+        foreach ($vmsize in $Skus)
         {
-            $cpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
-            $memCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
-            if ($null -ne $cpuCap -and -not $vmsizemap.ContainsKey($vmsize.Name))
+            $CpuCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'vCPUs' }).Value
+            $MemCap = ($vmsize.Capabilities | Where-Object { $_.Name -eq 'MemoryGB' }).Value
+            if ($null -ne $CpuCap -and -not $Vmsizemap.ContainsKey($vmsize.Name))
             {
-                $vmsizemap[$vmsize.Name] = @{
-                    CPU = [int]$cpuCap
-                    RAM = [math]::Max([decimal]$memCap, 0)
+                $Vmsizemap[$vmsize.Name] = @{
+                    CPU = [int]$CpuCap
+                    RAM = [math]::Max([decimal]$MemCap, 0)
                 }
             }
         }
     }
 
-    if ($virtualMachines)
+    if ($VirtualMachines)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($vm in $virtualMachines)
+        foreach ($vm in $VirtualMachines)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $vm.subscriptionId }
-            $data = $vm.PROPERTIES
-            $timecreated = if ($null -ne $data.timeCreated) { [datetime]($data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Sub1 = $SUB | Where-Object { $_.id -eq $vm.subscriptionId }
+            $Data = $vm.PROPERTIES
+            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
 
             $Lic = ''
 
-            switch ($data.licenseType)
+            switch ($Data.licenseType)
             {
                 'Windows_Server' { $Lic = 'AHUB for Windows' }
                 'Windows_Client' { $Lic = 'Windows Client Multi-Tenant' }
@@ -50,58 +50,58 @@ If ($Task -eq 'Processing')
 
             $Lic = if ($Lic) { $Lic } else { 'License Included' }
 
-            if ($data.storageProfile.osDisk.managedDisk.id)
+            if ($Data.storageProfile.osDisk.managedDisk.id)
             {
-                $OSDisk = ($disk | Where-Object { $_.id -eq $data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).sku.name
-                $OSDiskSize = ($disk | Where-Object { $_.id -eq $data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).Properties.diskSizeGB
+                $OSDisk = ($Disk | Where-Object { $_.id -eq $Data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).sku.name
+                $OSDiskSize = ($Disk | Where-Object { $_.id -eq $Data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).Properties.diskSizeGB
             }
             else
             {
-                $OSDisk = if ($data.storageProfile.osDisk.vhd.uri) { 'Custom VHD' } else { 'None' }
-                $OSDiskSize = $data.storageProfile.osDisk.diskSizeGB
+                $OSDisk = if ($Data.storageProfile.osDisk.vhd.uri) { 'Custom VHD' } else { 'None' }
+                $OSDiskSize = $Data.storageProfile.osDisk.diskSizeGB
             }
 
-            $cpus = $vmsizemap[$data.hardwareProfile.vmSize].CPU;
-            $ram = $vmsizemap[$data.hardwareProfile.vmSize].RAM;
+            $Cpus = $Vmsizemap[$Data.hardwareProfile.vmSize].CPU;
+            $Ram = $Vmsizemap[$Data.hardwareProfile.vmSize].RAM;
 
-            $cpus = if ($null -ne $cpus) { $cpus } else { '0' }
-            $ram = if ($null -ne $ram) { $ram } else { '0' }
+            $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
+            $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
 
-            $powerState = if ($null -ne $data.extended.instanceView.powerState.displayStatus) { $data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }
+            $PowerState = if ($null -ne $Data.extended.instanceView.powerState.displayStatus) { $Data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }
 
-            $tags = if (![string]::IsNullOrEmpty($vm.tags.psobject.properties)) { $vm.tags.psobject.properties | Select-Object Name, Value } else { $null }
+            $Tags = if (![string]::IsNullOrEmpty($vm.tags.psobject.properties)) { $vm.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
-            $obfuscatedId = if (![string]::IsNullOrEmpty($data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $data.virtualMachineScaleSet.id } } else { $null }
+            $ObfuscatedId = if (![string]::IsNullOrEmpty($Data.virtualMachineScaleSet.id)) { if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.virtualMachineScaleSet.id)) { $ResourceIdDictionary[$Data.virtualMachineScaleSet.id] } else { 'obfuscated' } } else { $Data.virtualMachineScaleSet.id } } else { $null }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                            = $vm.id;
-                'Subscription'                  = $sub1.Name;
+                'Subscription'                  = $Sub1.Name;
                 'ResourceGroup'                 = $vm.RESOURCEGROUP;
                 'Name'                          = $vm.NAME;
                 'Location'                      = $vm.LOCATION;
-                'AvailabilitySet'               = if ($null -ne $data.availabilitySet) { 'true' } else { 'false' }
-                'Size'                          = $data.hardwareProfile.vmSize;
-                'CPU'                           = $cpus;
-                'Memory'                        = $ram;
-                'Set'                           = $obfuscatedId;
-                'ImageReference'                = $data.storageProfile.imageReference.publisher;
-                'ImageVersion'                  = $data.storageProfile.imageReference.exactVersion;
-                'ImageSku'                      = $data.storageProfile.imageReference.sku;
-                'ImageOffer'                    = $data.storageProfile.imageReference.offer;
+                'AvailabilitySet'               = if ($null -ne $Data.availabilitySet) { 'true' } else { 'false' }
+                'Size'                          = $Data.hardwareProfile.vmSize;
+                'CPU'                           = $Cpus;
+                'Memory'                        = $Ram;
+                'Set'                           = $ObfuscatedId;
+                'ImageReference'                = $Data.storageProfile.imageReference.publisher;
+                'ImageVersion'                  = $Data.storageProfile.imageReference.exactVersion;
+                'ImageSku'                      = $Data.storageProfile.imageReference.sku;
+                'ImageOffer'                    = $Data.storageProfile.imageReference.offer;
                 'HybridBenefit'                 = $Lic;
-                'OSType'                        = $data.storageProfile.osDisk.osType;
-                'OSVersion'                     = $data.extended.instanceView.osversion;
+                'OSType'                        = $Data.storageProfile.osDisk.osType;
+                'OSVersion'                     = $Data.extended.instanceView.osversion;
                 'OSDisk'                        = $OSDisk;
                 'OSDiskSizeGB'                  = $OSDiskSize;
-                'PowerState'                    = $powerState;
+                'PowerState'                    = $PowerState;
                 'Zones'                         = $vm.zones.count;
-                'CreatedTime'                   = $timecreated;
-                'Tags'                          = $tags;
+                'CreatedTime'                   = $Timecreated;
+                'Tags'                          = $Tags;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

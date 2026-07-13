@@ -6,14 +6,14 @@ if ($Task -eq 'Processing')
 
     if ($AKS)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $AKS)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            foreach ($2 in $data.agentPoolProfiles)
+            foreach ($2 in $Data.agentPoolProfiles)
             {
                 # Recomputed on every node-pool iteration (not hoisted above this
                 # loop): the cluster's tags are the SAME real values across all of
@@ -25,18 +25,18 @@ if ($Task -eq 'Processing')
                 # Select-Object projection per row gives each row its own object
                 # instances so the same real tag value still yields the same
                 # token (determinism, P1), without aliasing across rows.
-                $tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
+                $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
-                $obj = @{
+                $Obj = @{
                     'ID'                        = $1.id;
-                    'Subscription'              = $sub1.Name;
+                    'Subscription'              = $Sub1.Name;
                     'ResourceGroup'             = $1.RESOURCEGROUP;
                     'Name'                      = $1.NAME;
                     'Location'                  = $1.LOCATION;
                     'Sku'                       = $1.sku.name;
                     'SkuTier'                   = $1.sku.tier;
-                    'KubernetesVersion'         = $data.kubernetesVersion;
-                    'LoadBalancerSku'           = $data.networkProfile.loadBalancerSku;
+                    'KubernetesVersion'         = $Data.kubernetesVersion;
+                    'LoadBalancerSku'           = $Data.networkProfile.loadBalancerSku;
                     'NodePoolName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $2.name } else { $2.name };
                     'PoolProfileType'           = $2.type;
                     'PoolMode'                  = $2.mode;
@@ -49,13 +49,13 @@ if ($Task -eq 'Processing')
                     'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' }
                     'MaxPodsPerNode'            = $2.maxPods;
                     'OrchestratorVersion'       = $2.orchestratorVersion;
-                    'Tags'                      = $tags;
+                    'Tags'                      = $Tags;
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
         }
 
-        $tmp
+        $Tmp
     }
 }

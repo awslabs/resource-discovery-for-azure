@@ -6,13 +6,13 @@ If ($Task -eq 'Processing')
 
     if ($AzureML)
     {
-        $tmp = @()
+        $Tmp = @()
 
         foreach ($1 in $AzureML)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $timecreated = [datetime]($data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm"
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Timecreated = [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm"
 
             # The four cross-resource references (storage / key vault / app insights /
             # container registry) are *optional* on an Azure ML workspace - a workspace
@@ -22,40 +22,40 @@ If ($Task -eq 'Processing')
             # aborts the entire subscription. Guard every reference and emit $null
             # (or, for obfuscated runs, the literal string 'obfuscated' to match the
             # rest of this module's lossy fallback pattern) when the field is absent.
-            $StorageAcc = if ([string]::IsNullOrEmpty($data.storageAccount)) { $null } else { $data.storageAccount.split('/')[8] }
-            $KeyVault = if ([string]::IsNullOrEmpty($data.keyVault)) { $null } else { $data.keyVault.split('/')[8] }
-            $Insight = if ([string]::IsNullOrEmpty($data.applicationInsights)) { $null } else { $data.applicationInsights.split('/')[8] }
-            $containerRegistry = if ([string]::IsNullOrEmpty($data.containerRegistry)) { $null } else { $data.containerRegistry.split('/')[8] }
+            $StorageAcc = if ([string]::IsNullOrEmpty($Data.storageAccount)) { $null } else { $Data.storageAccount.split('/')[8] }
+            $KeyVault = if ([string]::IsNullOrEmpty($Data.keyVault)) { $null } else { $Data.keyVault.split('/')[8] }
+            $Insight = if ([string]::IsNullOrEmpty($Data.applicationInsights)) { $null } else { $Data.applicationInsights.split('/')[8] }
+            $ContainerRegistry = if ([string]::IsNullOrEmpty($Data.containerRegistry)) { $null } else { $Data.containerRegistry.split('/')[8] }
 
             # Obfuscate cross-reference names when dictionary is populated
             if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
             {
-                $StorageAcc = if (![string]::IsNullOrEmpty($data.storageAccount) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.storageAccount)) { $ResourceIdDictionary[$data.storageAccount] } else { 'obfuscated' }
-                $KeyVault = if (![string]::IsNullOrEmpty($data.keyVault) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.keyVault)) { $ResourceIdDictionary[$data.keyVault] } else { 'obfuscated' }
-                $Insight = if (![string]::IsNullOrEmpty($data.applicationInsights) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.applicationInsights)) { $ResourceIdDictionary[$data.applicationInsights] } else { 'obfuscated' }
-                $containerRegistry = if (![string]::IsNullOrEmpty($data.containerRegistry) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($data.containerRegistry)) { $ResourceIdDictionary[$data.containerRegistry] } else { 'obfuscated' }
+                $StorageAcc = if (![string]::IsNullOrEmpty($Data.storageAccount) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.storageAccount)) { $ResourceIdDictionary[$Data.storageAccount] } else { 'obfuscated' }
+                $KeyVault = if (![string]::IsNullOrEmpty($Data.keyVault) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.keyVault)) { $ResourceIdDictionary[$Data.keyVault] } else { 'obfuscated' }
+                $Insight = if (![string]::IsNullOrEmpty($Data.applicationInsights) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.applicationInsights)) { $ResourceIdDictionary[$Data.applicationInsights] } else { 'obfuscated' }
+                $ContainerRegistry = if (![string]::IsNullOrEmpty($Data.containerRegistry) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.containerRegistry)) { $ResourceIdDictionary[$Data.containerRegistry] } else { 'obfuscated' }
             }
 
-            $obj = @{
+            $Obj = @{
                 'ID'                        = $1.id;
-                'Subscription'              = $sub1.Name;
+                'Subscription'              = $Sub1.Name;
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'SKU'                       = $1.sku.name;
-                'FriendlyName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.friendlyName } else { $data.friendlyName };
-                'Description'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.description } else { $data.description };
-                'ContainerRegistry'         = $containerRegistry;
-                'StorageHNSEnabled'         = $data.storageHnsEnabled;
+                'FriendlyName'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.friendlyName } else { $Data.friendlyName };
+                'Description'               = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };
+                'ContainerRegistry'         = $ContainerRegistry;
+                'StorageHNSEnabled'         = $Data.storageHnsEnabled;
                 'StorageAccount'            = $StorageAcc;
                 'KeyVault'                  = $KeyVault;
-                'CreatedTime'               = $timecreated;
+                'CreatedTime'               = $Timecreated;
                 'ApplicationInsight'        = $Insight;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

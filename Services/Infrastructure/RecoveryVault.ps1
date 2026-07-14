@@ -11,7 +11,6 @@ if ($Task -eq 'Processing')
         foreach ($1 in $RECOVAULT)
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $Data = $1.PROPERTIES
 
             $Obj = @{
                 'ID'                 = $1.id;

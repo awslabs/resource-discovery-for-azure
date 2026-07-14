@@ -98,6 +98,12 @@ function Convert-RevealString
 function Invoke-RdaReveal
 {
     [CmdletBinding()]
+    # $TokenPattern is assigned below and read by Convert-RevealString via
+    # PowerShell parent-scope (dynamic) variable lookup, which PSScriptAnalyzer
+    # cannot follow across the function boundary - so it false-positives
+    # PSUseDeclaredVarsMoreThanAssignments. Suppress that one finding here.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'TokenPattern',
+        Justification = 'Read cross-scope by Convert-RevealString via parent-scope dynamic lookup.')]
     param(
         [Parameter(Mandatory = $true)]
         [string]   $InputZip,

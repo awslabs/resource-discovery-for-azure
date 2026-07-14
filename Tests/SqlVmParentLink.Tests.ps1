@@ -19,7 +19,7 @@
 # also covers the three fallback paths. No live Azure.
 
 BeforeAll {
-    $script:Collector = Join-Path $PSScriptRoot '..' 'Services' 'Data' 'SQLVM.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
+    $script:Collector = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Data', 'SQLVM.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
 
     # Real-shaped (lowercased, as the central inventory does via .tolower()) ARM ids.
     # All GUIDs below are the canonical Azure documentation placeholder

@@ -80,8 +80,8 @@ Describe "PII Leak Scan" {
         foreach ($fileName in $script:AllContent.Keys)
         {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
-            $Matches = [regex]::Matches($script:AllContent[$fileName], $Pattern)
-            $Matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses"
+            $EmailMatches = [regex]::Matches($script:AllContent[$fileName], $Pattern)
+            $EmailMatches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses"
         }
     }
 

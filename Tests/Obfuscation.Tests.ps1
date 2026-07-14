@@ -130,8 +130,8 @@ Describe "Email Address Leak Check" {
         foreach ($fileName in $script:AllContent.Keys)
         {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
-            $Matches = [regex]::Matches($script:AllContent[$fileName], $EmailPattern)
-            $Matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses (found: $($Matches.Value -join ', '))"
+            $EmailMatches = [regex]::Matches($script:AllContent[$fileName], $EmailPattern)
+            $EmailMatches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses (found: $($EmailMatches.Value -join ', '))"
         }
     }
 }
@@ -1013,7 +1013,7 @@ Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (
         }
 
         $script:TagTokenPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        $script:RiSourcePath = Join-Path $PSScriptRoot '..' 'ResourceInventory.ps1'
+        $script:RiSourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'ResourceInventory.ps1'
     }
 
     It "keeps mixed-case tag KEYS verbatim and masks VALUES to tokens (Req 4.1, 4.2, 4.5)" {
@@ -1168,7 +1168,7 @@ Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
             }
         }
         $script:AksSub = @([PSCustomObject]@{ id = 'sub-regress'; Name = 'sub-regress' })
-        $script:AksModule = Join-Path $PSScriptRoot '..' 'Services' 'Containers' 'AKS.ps1'
+        $script:AksModule = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Containers', 'AKS.ps1'
     }
 
     It "AKS.ps1 module file is present for direct invocation" {

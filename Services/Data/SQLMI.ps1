@@ -13,7 +13,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Databases = $SQLSERVERMIDB | Where-Object { $_.Id -contains $1.Id }
+            $Databases = $SQLSERVERMIDB | Where-Object { $_.Id -like "$($1.Id)/databases/*" }
 
             $Obj = @{
                 'ID'                            = $1.id;

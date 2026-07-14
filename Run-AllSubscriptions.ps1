@@ -1694,6 +1694,14 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         {
             Write-Host ""
             Write-Host ("Consumption Failures:    {0} subscription(s)" -f $ConsumptionFailures.Count) -ForegroundColor Yellow
+            # List the affected subscriptions by name so the operator knows exactly
+            # which subs are missing billing data (e.g. to go request Reader access
+            # on them). Mirrors the metrics-failure block below. Exclude the '(auth)'
+            # sentinel used for the whole-phase skip - it is not a specific sub.
+            foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object Name -Unique))
+            {
+                Write-Host ("  - {0} ({1})" -f $cf.Name, $cf.Id) -ForegroundColor Yellow
+            }
             # The consumption failure message is repeated verbatim across every sub
             # when the cause is a broken Az module - dedupe to avoid screen wall.
             $UniqueMessages = @($ConsumptionFailures | Select-Object -ExpandProperty Message -Unique)

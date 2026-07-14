@@ -454,11 +454,23 @@ function Save-CompletedSubscriptionIds
     }
     try
     {
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+        # Atomic write: serialize to a sibling temp file, then swap it into place
+        # with File.Move(overwrite). A move within the same volume is a rename,
+        # which is atomic - so a crash / SIGKILL / disk-full DURING the write can
+        # never leave a truncated or half-written resume-state file. That matters
+        # because Get-CompletedSubscriptionIds treats an unparseable file as
+        # "start fresh", which would silently discard all recorded progress and
+        # reprocess every subscription from scratch (potentially hours of work in
+        # a large tenant / Cloud Shell run that gets killed). The temp file shares
+        # the target directory so the move stays on the same volume.
+        $TmpPath = "$Path.tmp"
+        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8
+        [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch
     {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
+        Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
     }
 }
 

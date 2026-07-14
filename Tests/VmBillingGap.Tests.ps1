@@ -20,7 +20,7 @@
 # per-VM join is impossible in an obfuscated report).
 
 BeforeAll {
-    $script:SummaryScript = Join-Path $PSScriptRoot '..' 'Extension' 'Summary.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
+    $script:SummaryScript = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Extension', 'Summary.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
     $script:WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("VmBillingGap_" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
 

@@ -157,9 +157,8 @@ try
         }
         foreach ($k in $Scenario.Args.Keys) { $Splat[$k] = $Scenario.Args[$k] }
 
-        $GenOk = $true
         try { & $InventoryPs1 @Splat *>&1 | Out-Null }
-        catch { $GenOk = $false; Write-Host ("  generation error: {0}" -f $_.Exception.Message) -ForegroundColor Red }
+        catch { Write-Host ("  generation error: {0}" -f $_.Exception.Message) -ForegroundColor Red }
 
         $Zip = Get-ChildItem $OutDir -Filter 'ResourcesReport_*.zip' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1

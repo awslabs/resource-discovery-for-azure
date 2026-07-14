@@ -30,6 +30,11 @@ if ($Task -eq 'Processing')
                 'Protocol'                          = [string]$Data.protocolTypes;
                 'MaxThroughputMiBs'                 = [string]$Data.throughputMibps;
                 'LDAP'                              = $Data.ldapEnabled;
+                # Migration phase: encryptionKeySource = 'Microsoft.KeyVault' means the volume
+                # uses a customer-managed key (CMK must be handled before migration);
+                # 'Microsoft.NetApp' is the platform-managed default. Surfaced for AWS
+                # migration planning.
+                'EncryptionKeySource'               = $Data.encryptionKeySource;
             }
 
             $Tmp += $Obj

@@ -29,6 +29,12 @@ if ($Task -eq 'Processing')
                 'Incremental'                           = $Data.incremental;
                 'CreatedTime'                           = $Timecreated;
                 'SourceResourceId'                      = if (![string]::IsNullOrEmpty($Data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.creationData.sourceResourceId)) { $ResourceIdDictionary[$Data.creationData.sourceResourceId] } else { 'obfuscated' } } else { $Data.creationData.sourceResourceId };
+                # Migration phase: a CustomerKey / PlatformAndCustomerKeys snapshot is encrypted
+                # with a customer-managed key (referenced by the disk-encryption-set below); the
+                # key must be handled before the snapshot can be migrated. Surfaced for AWS
+                # migration planning.
+                'EncryptionType'                        = $Data.encryption.type;
+                'DiskEncryptionSet'                     = if (![string]::IsNullOrEmpty($Data.encryption.diskEncryptionSetId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.encryption.diskEncryptionSetId)) { $ResourceIdDictionary[$Data.encryption.diskEncryptionSetId] } else { 'obfuscated' } } else { $Data.encryption.diskEncryptionSetId };
             }
 
             $Tmp += $Obj

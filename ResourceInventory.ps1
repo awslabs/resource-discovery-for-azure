@@ -1536,7 +1536,49 @@ function ExecuteInventoryProcessing()
                 }
             }
 
-            Set-AzContext -Subscription $sub.id | Out-Null
+            # Switch the Azure context to the TARGET subscription before pulling
+            # its billing data. This MUST succeed AND MUST land on $sub.id:
+            # Get-UsageAggregates reads whatever subscription the current context
+            # points at, so a silently-failed switch (e.g. the identity has no
+            # access to this subscription) would leave the context on the PREVIOUS
+            # subscription and attribute THAT subscription's consumption to this
+            # one - a data-integrity bug and a cross-subscription data leak. The
+            # production $ErrorActionPreference = 'SilentlyContinue' would swallow
+            # the failure, so force it terminating here and then verify the
+            # resulting context actually matches the target. On failure, record
+            # per-sub health (mirroring the catch block below) and skip ONLY this
+            # subscription's consumption rather than pulling the wrong sub's data.
+            $ContextOk = $false
+            $ContextSwitchError = $null
+            try
+            {
+                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+            }
+            catch
+            {
+                $ContextSwitchError = $_.Exception.Message
+            }
+
+            if (-not $ContextOk)
+            {
+                $SkipMessage = ("Consumption SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(if ($ContextSwitchError) { " ($ContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                Write-Log -Message ("Consumption: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
+
+                if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+                if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+                $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $SkipMessage
+                    Complete         = $false
+                    PageAtFailure    = 0
+                    RecordsCollected = 0
+                }
+
+                continue
+            }
+
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
             # Track consumption health per-subscription so the wrapper can report

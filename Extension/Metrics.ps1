@@ -1,15 +1,16 @@
 #requires -Version 7.0
-param(  $Subscriptions,
-    $Resources,
-    $Task,
-    $ConcurrencyLimit,
-    $FilePath,
-    $ResourceIdDictionary,
-    $ResourceNameDictionary,
-    [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary,
-    [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary,
-    $Obfuscate,
-    $MetricsLookbackDays = 31
+param(
+    $Subscriptions,
+    $Resources, # The massive list of raw discovered infrastructure items (VMs, Disks, DBs)
+    $Task, # String tracking the script task mode (e.g., 'Processing')
+    $ConcurrencyLimit, # Number of concurrent threads allowed to run simultaneously
+    $FilePath, # Root destination directory path for saving JSON data chunks
+    $ResourceIdDictionary, # Map dictionary to replace original Resource IDs with obfuscated GUID values
+    $ResourceNameDictionary, # Map dictionary to mask the actual human-readable names of the items
+    [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, # Map dictionary to obfuscate subscription names
+    [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, # Map dictionary to obfuscate resource group names
+    $Obfuscate, # Boolean flag toggle indicating whether sensitive infrastructure details should be masked
+    $MetricsLookbackDays = 31 # Default tracking duration window determining how far back to ask Azure for data
 )
 
 # Shared cross-cutting helpers (Write-RdaProgress). This extension is invoked via
@@ -48,19 +49,28 @@ if ($Task -eq 'Processing')
     {
         Write-Log -Message ('[Metrics] ' + $Line) -NoConsole -ToDebugLog
     }
-
+    # Instantiate a clean, empty generic PowerShell Custom Object container
     $Tmp = New-Object PSObject
+
+    # Attach a custom note property placeholder string to hold metrics arrays later on
     $Tmp | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
+
+    # Swap the placeholder property value for a highly optimized, thread-safe concurrent collection bucket
     $Tmp.Metrics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
+    # Create a dynamic, variable-length list array to track specific metric request definitions
     $MetricDefs = [System.Collections.Generic.List[object]]::new()
 
+    # Convert the lookback parameter integer into a clean negative integer value for time calculations
     $MetricsLookbackPeriodDays = -1 * [math]::Abs([int]$MetricsLookbackDays)
-    $MetricStartTime = (Get-Date).AddDays($MetricsLookbackPeriodDays)
-    $MetricEndTime = (Get-Date)
 
+    # Calculate the exact starting time date object by rolling back the calendar based on the lookback value
+    $MetricStartTime = (Get-Date).AddDays($MetricsLookbackPeriodDays)
+
+    # Record the precise real-time timestamp representing the current end time marker
+    $MetricEndTime = (Get-Date)
+    # Establish an offset timestamp rolled back exactly 24 hours ago
     $MetricTimeOneDay = (Get-Date).AddDays(-1)
-    $MetricTimeSevenDay = (Get-Date).AddDays(-7)
 
     # Build a fast id -> subscription lookup once. The per-resource loops below
     # previously scanned the entire $Subscriptions list with Where-Object for
@@ -86,22 +96,38 @@ if ($Task -eq 'Processing')
         foreach ($virtualMachine in $VirtualMachines)
         {
             $Subscription = $SubLookup[$virtualMachine.subscriptionId]
-            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++;
-                    MetricName = 'Percentage CPU'; StartTime = $MetricStartTime; EndTime = $MetricEndTime;
-                    Interval = '00:15:00'; Aggregation = 'Maximum'; Measure = 'Average';
+            # Construct and append a custom configuration object onto the main definitions table for CPU metrics
+            $MetricDefs.Add([PSCustomObject]@{
+                    MetricIndex = $MetricCountId++;
+                    MetricName = 'Percentage CPU';
+                    StartTime = $MetricStartTime;
+                    EndTime = $MetricEndTime;
+                    Interval = '00:15:00';
+                    Aggregation = 'Maximum';
+                    Measure = 'Average';
                     Id = $virtualMachine.Id;
-                    SubName = $Subscription.Name; ResourceGroup = $virtualMachine.ResourceGroup;
-                    Name = $virtualMachine.Name; Location = $virtualMachine.Location;
-                    Service = 'Virtual Machines'; Series = 'true'
+                    SubName = $Subscription.Name;
+                    ResourceGroup = $virtualMachine.ResourceGroup;
+                    Name = $virtualMachine.Name;
+                    Location = $virtualMachine.Location;
+                    Service = 'Virtual Machines';
+                    Series = 'true'
                 })
-            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++;
+            # Construct and append an additional layout tracking object focused strictly on VM memory capacity
+            $MetricDefs.Add([PSCustomObject]@{
+                    MetricIndex = $MetricCountId++;
                     MetricName = 'Available Memory Bytes';
                     StartTime = $MetricStartTime;
                     EndTime = $MetricEndTime;
-                    Interval = '00:15:00'; Aggregation = 'Minimum'; Measure = 'Average';
-                    Id = $virtualMachine.Id; SubName = $Subscription.Name;
+                    Interval = '00:15:00';
+                    Aggregation = 'Minimum';
+                    Measure = 'Average';
+                    Id = $virtualMachine.Id;
+                    SubName = $Subscription.Name;
                     ResourceGroup = $virtualMachine.ResourceGroup;
-                    Name = $virtualMachine.Name; Location = $virtualMachine.Location; Service = 'Virtual Machines';
+                    Name = $virtualMachine.Name;
+                    Location = $virtualMachine.Location;
+                    Service = 'Virtual Machines';
                     Series = 'true'
                 })
         }
@@ -398,7 +424,6 @@ if ($Task -eq 'Processing')
             Write-Verbose ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $RangeIdx, $Defs.Count, $MetricsProcessed, $MetricCount)
 
             $Defs | ForEach-Object -Parallel {
-                $TotalCount = $using:MetricCount
                 $AzContext = $using:MetricAzContext
                 $CallTimeoutSeconds = $using:MetricTimeoutSeconds
                 $CallMaxRetries = $using:MetricMaxRetries
@@ -418,7 +443,6 @@ if ($Task -eq 'Processing')
 
                 $MetricError = $false
                 $MetricName = $_.MetricName
-                $MetricId = $_.Id
                 $MetricService = $_.Service
 
                 # Per-call diagnostics: outcome is one of Success / Timeout /

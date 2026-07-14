@@ -556,7 +556,7 @@ if ($ExtractionRunTime -is [TimeSpan])
 $ReportTimeText = ''
 if ($ReportingRunTime -is [TimeSpan])
 {
-    $ReportTimeText = ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##'))
+    $ReportTimeText = if ($ReportingRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$ReportingRunTime.TotalSeconds) } else { ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##')) }
 }
 $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { (ConvertTo-HtmlSafe ([string]$PlatOS)) }
 

@@ -1675,6 +1675,31 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                 foreach ($e in $UnknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
                 Write-Host "    Verify manually: az group list --subscription <id>" -ForegroundColor Yellow
             }
+
+            # Persist the per-subscription access verdict to the diagnostic log so it
+            # outlives the console/transcript and can be attached to a ticket or e-mail.
+            # This is the durable record behind the on-screen labels above: which
+            # 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume)
+            # vs genuinely empty (no action). Reuses the run's $DiagFile if one already
+            # exists (e.g. from a failure), otherwise creates one.
+            if ($null -eq $DiagFile)
+            {
+                $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_diagnostics_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
+            }
+            $EmptyDiag = @()
+            $EmptyDiag += "==== Subscriptions with 0 resources - access verdict ===="
+            $EmptyDiag += "Timestamp: $(Get-Date -Format 'o')"
+            foreach ($e in $NoAccessSubs)       { $EmptyDiag += ("NO_ACCESS      {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id) }
+            foreach ($e in $GenuinelyEmptySubs) { $EmptyDiag += ("EMPTY          {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id) }
+            foreach ($e in $UnknownSubs)        { $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id) }
+            $EmptyDiag += ""
+            try
+            {
+                $EmptyDiag | Out-File -FilePath $DiagFile -Append -Encoding utf8
+                Write-Host ("  Access verdict written to diagnostic log: {0}" -f $DiagFile) -ForegroundColor DarkGray
+            }
+            catch { Write-Verbose ("Diagnostic log write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
+
             Write-Host ""
         }
 

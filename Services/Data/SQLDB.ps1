@@ -22,8 +22,8 @@ if ($Task -eq 'Processing')
                 $DBServer = if ($ResourceIdDictionary.ContainsKey($ServerParentId)) { $ResourceIdDictionary[$ServerParentId] } else { 'obfuscated' }
                 $PoolId = if ($PoolId -ne "None" -and ![string]::IsNullOrEmpty($Data.elasticPoolId) -and $ResourceIdDictionary.ContainsKey($Data.elasticPoolId)) { $ResourceIdDictionary[$Data.elasticPoolId] } else { if ($PoolId -ne "None") { 'obfuscated' } else { $PoolId } }
             }
-            if ($1.kind.Contains("vcore")) { $SqlType = "vcore" } else { $SqlType = "dtu" }
-            if ($1.kind.Contains("serverless")) { $ComputeTier = "Serverless" } else { $ComputeTier = "Provisioned" }
+            if ($1.kind -like '*vcore*') { $SqlType = "vcore" } else { $SqlType = "dtu" }
+            if ($1.kind -like '*serverless*') { $ComputeTier = "Serverless" } else { $ComputeTier = "Provisioned" }
 
             $Obj = @{
                 'ID'                         = $1.id;

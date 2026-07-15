@@ -351,10 +351,12 @@ foreach ($Folder in $Folders)
             Stop-Job -Job $RevealJob -ErrorAction SilentlyContinue
             Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue
             $RevealJob = $null
-            # A Stop-Job mid-compress can leave a truncated zip at $OutPath.
-            # Delete it so it is neither swept into the consolidated outer zip nor
-            # mistaken for completed work by a later -Resume.
+            # A Stop-Job mid-compress leaves the engine's *.partial.zip behind
+            # (the final $OutPath only ever appears after a successful atomic
+            # rename). Delete both defensively so neither is swept into the
+            # consolidated outer zip nor mistaken for completed work by -Resume.
             Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (($OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
             $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = ("timed out after {0} minutes" -f ($RevealTimeoutSeconds / 60)) }
             continue
         }
@@ -376,9 +378,11 @@ foreach ($Folder in $Folders)
     catch
     {
         if ($null -ne $RevealJob) { Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue }
-        # Drop any partial/truncated output the failed reveal may have left, so it
-        # is not consolidated or treated as done on a later -Resume.
+        # Drop any partial/truncated output the failed reveal may have left (both
+        # the engine's *.partial.zip and, defensively, the final name) so neither
+        # is consolidated or treated as done on a later -Resume.
         Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (($OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
         $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = $_.Exception.Message }
     }
 }
@@ -386,7 +390,11 @@ foreach ($Folder in $Folders)
 Write-RdaProgress -Activity 'Revealing per-subscription reports' -Completed
 
 # Consolidate the revealed per-sub zips into one outer zip for upload.
-$StagedZips = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter '*.zip' -File -ErrorAction SilentlyContinue)
+# Exclude *.partial.zip: the single-report engine compresses to a sibling
+# .partial.zip and atomically renames it to the final name on success, so a
+# .partial.zip only ever exists if a reveal was hard-killed mid-compress. Such
+# a truncated file must never be folded into the consolidated outer zip.
+$StagedZips = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter '*.zip' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.partial.zip' })
 $ConsolidationError = $null
 if ($StagedZips.Count -gt 0)
 {

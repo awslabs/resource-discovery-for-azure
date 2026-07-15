@@ -1439,3 +1439,18 @@ Describe "Reveal-Obfuscation backward compatibility with older dictionaries (Req
         }
     }
 }
+
+Describe 'Reveal atomic output packaging (F3)' {
+    # The engine compresses to a sibling *.partial.zip and atomically renames it
+    # to the final name on success, so a hard kill mid-compress can only truncate
+    # the .partial.zip, never the final output the all-subscriptions -Resume and
+    # consolidation trust. On a clean run the partial must be renamed away.
+    It 'produces the final zip and leaves no *.partial.zip sibling after a successful reveal' {
+        $Out = Join-Path $script:TmpDir ("atomic_" + [guid]::NewGuid().ToString('N').Substring(0, 8) + ".zip")
+        & $script:RevealScript -InputZip $script:InputZip -DictionaryPath $script:DictPath -Fields Subscription -OutputZip $Out *>&1 | Out-Null
+
+        Test-Path -LiteralPath $Out | Should -BeTrue -Because 'the atomic rename must leave the completed archive at the final name'
+        $Partial = ($Out -replace '\.zip$', '') + '.partial.zip'
+        Test-Path -LiteralPath $Partial | Should -BeFalse -Because 'the temp .partial.zip must be renamed away, never left behind on a successful reveal'
+    }
+}

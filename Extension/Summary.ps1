@@ -384,7 +384,20 @@ function New-ServiceTable
                 # Render arrays joined. Truncate ID arrays for readability.
                 $Joined = ($Val | ForEach-Object {
                         if ($null -eq $_) { return '' }
-                        if ($_ -is [psobject] -and -not ($_ -is [string])) { '(obj)' } else { [string]$_ }
+                        if ($_ -is [string]) { return [string]$_ }
+                        # Tag-style objects ({ Name; Value }) - e.g. the Tags column -
+                        # render as key=value instead of an opaque placeholder. Any
+                        # other object falls back to its default string form (e.g.
+                        # "@{...}") rather than "(obj)".
+                        if ($_ -is [psobject])
+                        {
+                            $ElemProps = @($_.PSObject.Properties.Name)
+                            if (($ElemProps -contains 'Name') -and ($ElemProps -contains 'Value'))
+                            {
+                                return ('{0}={1}' -f $_.Name, $_.Value)
+                            }
+                        }
+                        [string]$_
                     }) -join ', '
                 if ($Joined.Length -gt 200) { $Joined = $Joined.Substring(0, 200) + '...' }
                 [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $Joined))

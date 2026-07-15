@@ -39,7 +39,8 @@ BeforeAll {
             [string]$SubName = 'Contoso Prod',
             [switch]$Obfuscated,
             [switch]$NoHtml,
-            [switch]$BadInventory
+            [switch]$BadInventory,
+            [switch]$WithTags
         )
         $Id = [guid]::NewGuid().ToString('N').Substring(0, 12)
         $Dir = Join-Path $Root ("ResourcesReport$Id")
@@ -59,7 +60,18 @@ BeforeAll {
                 for ($i = 0; $i -lt $Services[$Svc]; $i++)
                 {
                     $RecName = if ($Obfuscated) { 'prod_' + [guid]::NewGuid().ToString() } else { "$Svc-$i" }
-                    $Recs += [ordered]@{ Name = $RecName; Subscription = $EffSubName; Location = 'eastus'; ResourceGroup = 'rg-app' }
+                    $Rec = [ordered]@{ Name = $RecName; Subscription = $EffSubName; Location = 'eastus'; ResourceGroup = 'rg-app' }
+                    if ($WithTags)
+                    {
+                        # Tag shape as it appears in a real Inventory json: an array
+                        # of { Name; Value } objects (the thing that used to render
+                        # as "(obj)").
+                        $Rec['Tags'] = @(
+                            [ordered]@{ Name = 'env'; Value = 'prod' },
+                            [ordered]@{ Name = 'owner'; Value = 'team-a' }
+                        )
+                    }
+                    $Recs += $Rec
                 }
                 $Inv[$Svc] = $Recs
             }
@@ -73,7 +85,7 @@ BeforeAll {
         return $Dir
     }
 
-    function New-Run { $d = Join-Path $script:TmpRoot ('run_' + [guid]::NewGuid().ToString('N').Substring(0, 8)); New-Item -ItemType Directory -Path $d -Force | Out-Null; $d }
+    function New-Run { $Dir = Join-Path $script:TmpRoot ('run_' + [guid]::NewGuid().ToString('N').Substring(0, 8)); New-Item -ItemType Directory -Path $Dir -Force | Out-Null; $Dir }
     function Get-Card { param($Html, $Label) ([regex]::Match($Html, ('<div class="n">([0-9,]+)</div><div class="l">' + [regex]::Escape($Label)))).Groups[1].Value }
 }
 
@@ -185,5 +197,170 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         $Html = Get-Content -Path $Out -Raw
         (Get-Card $Html 'Total resources') | Should -Be '2' -Because 'only the recent folder is in scope'
         (Get-Card $Html 'Subscriptions') | Should -Be '1'
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
+
+    BeforeAll {
+        # Build a synthetic consolidated outer zip that mirrors the real layout:
+        # an outer zip whose members are per-subscription ResourcesReport*.zip
+        # files, each of which contains that sub's loose Inventory_*.json + .html
+        # at the archive root (flat) - exactly what a customer bundle looks like.
+        function New-ConsolidatedZip
+        {
+            param([Parameter(Mandatory)][string]$Root, [switch]$WithTags)
+            $SrcDir = Join-Path $Root ('src_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            $InnerDir = Join-Path $Root ('inner_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+            New-Item -ItemType Directory -Path $SrcDir, $InnerDir -Force | Out-Null
+
+            $F1 = New-SubFolder -Root $SrcDir -Services @{ VirtualMachines = 2; StorageAcc = 1 } -SubName 'Sub A' -WithTags:$WithTags
+            $F2 = New-SubFolder -Root $SrcDir -Services @{ AppServices = 3 } -SubName 'Sub B' -WithTags:$WithTags
+            foreach ($F in @($F1, $F2))
+            {
+                $Base = Split-Path $F -Leaf                       # ResourcesReport<id>
+                $InnerZip = Join-Path $InnerDir ($Base + '.zip')  # ResourcesReport<id>.zip
+                # Flat entries at the archive root, matching the real per-sub zip.
+                Compress-Archive -Path (Join-Path $F '*') -DestinationPath $InnerZip -Force
+            }
+            $Outer = Join-Path $Root ('AllSubscriptions_ResourcesReport_test_' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.zip')
+            Compress-Archive -Path (Join-Path $InnerDir '*') -DestinationPath $Outer -Force
+            return $Outer
+        }
+    }
+
+    It 'reconstructs per-sub folders and builds a summary whose link targets exist' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run
+        $OutDir = Join-Path $Run 'rebuilt'
+
+        $Html = New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir
+        Test-Path -Path $Html | Should -BeTrue
+        $Content = Get-Content -Path $Html -Raw
+        (Get-Card $Content 'Total resources') | Should -Be '6' -Because '2+1+3 across the two subs'
+        (Get-Card $Content 'Subscriptions') | Should -Be '2'
+
+        # Every per-sub folder was reconstructed with its .html (the link target).
+        $SubFolders = @(Get-ChildItem -Path $OutDir -Directory -Filter 'ResourcesReport*')
+        $SubFolders.Count | Should -Be 2
+        foreach ($Sf in $SubFolders)
+        {
+            @(Get-ChildItem -Path $Sf.FullName -Filter '*.html' -File).Count | Should -BeGreaterThan 0
+        }
+
+        # Each href in the table resolves to a real file under the output dir.
+        $Links = [regex]::Matches($Content, 'href="([^"]+\.html)"') | ForEach-Object { $_.Groups[1].Value }
+        $Links.Count | Should -Be 2
+        foreach ($L in $Links)
+        {
+            Test-Path -Path (Join-Path $OutDir $L) | Should -BeTrue -Because "link '$L' must resolve on disk"
+        }
+    }
+
+    It 'emits a portable bundle with -PackageZip' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run
+        $OutDir = Join-Path $Run 'rebuilt_pkg'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+        Test-Path -Path ($OutDir + '.zip') | Should -BeTrue -Because '-PackageZip zips the reconstructed folder'
+    }
+
+    It 'throws on an archive that holds no per-subscription reports' {
+        $Run = New-Run
+        $Junk = Join-Path $Run 'junk.zip'
+        'nothing useful' | Out-File -FilePath (Join-Path $Run 'readme.txt') -Encoding utf8
+        Compress-Archive -Path (Join-Path $Run 'readme.txt') -DestinationPath $Junk -Force
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Junk -OutputDirectory (Join-Path $Run 'rebuilt_junk') } | Should -Throw
+    }
+
+    It 're-renders per-sub reports so Tags show key=value, not (obj)' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run -WithTags
+        $OutDir = Join-Path $Run 'rebuilt_tags'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir | Out-Null
+
+        # A per-sub report (not the aggregate MainSummary) must now render tags
+        # as key=value with no "(obj)" placeholder, proving the re-render used the
+        # current Summary.ps1 rather than the stale html baked into the zip.
+        $SubHtml = Get-ChildItem -Path $OutDir -Recurse -Filter '*.html' -File |
+            Where-Object { $_.Name -notlike 'MainSummary*' } | Select-Object -First 1
+        $SubHtml | Should -Not -BeNullOrEmpty
+        $Content = Get-Content -Path $SubHtml.FullName -Raw
+        $Content | Should -Not -Match '\(obj\)'
+        $Content | Should -Match 'env=prod'
+        # And it is a freshly rendered report, not the stub that was in the zip.
+        $Content | Should -Not -Match 'stub per-sub report'
+    }
+
+    It 'keeps the original per-sub html verbatim with -KeepOriginalReports' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run -WithTags
+        $OutDir = Join-Path $Run 'rebuilt_keep'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -KeepOriginalReports | Out-Null
+
+        $SubHtml = Get-ChildItem -Path $OutDir -Recurse -Filter '*.html' -File |
+            Where-Object { $_.Name -notlike 'MainSummary*' } | Select-Object -First 1
+        (Get-Content -Path $SubHtml.FullName -Raw) | Should -Match 'stub per-sub report' -Because 'the original zip html is preserved, not re-rendered'
+    }
+
+    It 'excludes a leftover *_revealed.zip so no de-obfuscated report leaks into the reconstruction or the -PackageZip bundle' {
+        # Regression for the PII leak vector: the reveal engine names only the OUTER
+        # zip *_revealed.zip and rewrites the inner html/json members IN PLACE (their
+        # names carry no _revealed marker). A member-name-only filter would let those
+        # real-data members through; the guard must exclude at the zip/folder
+        # SELECTION level. Build a consolidated zip that carries one legitimate
+        # obfuscated inner report PLUS a leftover ResourcesReport_<id>_revealed.zip
+        # whose members hold a real (identifiable) marker, then assert the marker
+        # never reaches the reconstruction or the shareable bundle.
+        $Run = New-Run
+        $Marker = 'REAL-IDENTIFIER-DO-NOT-LEAK'
+        $Stage = Join-Path $Run ('revsrc_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $InnerDir = Join-Path $Run ('revinner_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $Stage, $InnerDir -Force | Out-Null
+
+        # Legitimate obfuscated per-sub report -> ResourcesReport<id>.zip
+        $Good = New-SubFolder -Root $Stage -Services @{ VirtualMachines = 2 } -Obfuscated
+        $GoodBase = Split-Path $Good -Leaf
+        Compress-Archive -Path (Join-Path $Good '*') -DestinationPath (Join-Path $InnerDir ($GoodBase + '.zip')) -Force
+
+        # Leftover de-obfuscated report: members keep their normal names (real data),
+        # only the inner zip carries the _revealed suffix.
+        $RevId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+        $RevSrc = Join-Path $Run ('rev_' + $RevId)
+        New-Item -ItemType Directory -Path $RevSrc -Force | Out-Null
+        ([ordered]@{ Version = '3.2.3'; VirtualMachines = @([ordered]@{ Name = $Marker; Subscription = $Marker; Location = 'eastus'; ResourceGroup = 'rg-app' }) } | ConvertTo-Json -Depth 10) |
+            Out-File -FilePath (Join-Path $RevSrc "Inventory_$RevId.json") -Encoding utf8
+        ('<!DOCTYPE html><html><body>' + $Marker + '</body></html>') | Out-File -FilePath (Join-Path $RevSrc "ResourcesReport_$RevId.html") -Encoding utf8
+        Compress-Archive -Path (Join-Path $RevSrc '*') -DestinationPath (Join-Path $InnerDir ("ResourcesReport_${RevId}_revealed.zip")) -Force
+
+        $Outer = Join-Path $Run ('AllSubscriptions_ResourcesReport_revtest_' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.zip')
+        Compress-Archive -Path (Join-Path $InnerDir '*') -DestinationPath $Outer -Force
+
+        $OutDir = Join-Path $Run 'rebuilt_rev'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+
+        # The legit obfuscated sub is still reconstructed; the revealed one is not.
+        @(Get-ChildItem -Path $OutDir -Directory -Filter 'ResourcesReport*').Count | Should -Be 1
+        @(Get-ChildItem -Path $OutDir -Recurse -Force | Where-Object { $_.Name -like '*_revealed*' }).Count |
+            Should -Be 0 -Because 'no *_revealed* artefact may be reconstructed on disk'
+
+        # The real identifier must appear nowhere in the reconstructed folder.
+        @(Get-ChildItem -Path $OutDir -Recurse -File | Where-Object { (Get-Content -Path $_.FullName -Raw) -match [regex]::Escape($Marker) }).Count |
+            Should -Be 0 -Because 'the de-obfuscated marker must not land in the reconstruction'
+
+        # ...nor in the shareable -PackageZip bundle.
+        $Bundle = $OutDir + '.zip'
+        Test-Path -Path $Bundle | Should -BeTrue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Bundle)
+        try
+        {
+            @($Archive.Entries | Where-Object { $_.FullName -like '*_revealed*' }).Count |
+                Should -Be 0 -Because 'the portable bundle must carry no *_revealed* entry'
+        }
+        finally { $Archive.Dispose() }
     }
 }

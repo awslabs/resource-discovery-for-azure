@@ -417,3 +417,215 @@ $ChartsHtml
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
 }
+
+# =============================================================================
+# New-RdaAllSubHtmlSummaryFromZip
+#
+# Receiver-side convenience: build a working aggregate summary from a
+# CONSOLIDATED outer zip (AllSubscriptions_ResourcesReport_*.zip) - the artifact
+# a customer/operator hands you. That zip contains one per-subscription .zip per
+# sub (NOT extracted folders) and carries no summary, so the summary's
+# folder-relative links have nothing to resolve against until the inner zips are
+# unpacked. This function does exactly that reconstruction, then calls
+# New-RdaAllSubHtmlSummary against it:
+#   1. Expand the outer zip to a temp staging dir.
+#   2. Extract each inner ResourcesReport*.zip into its own ResourcesReport*/
+#      folder under -OutputDirectory, pulling only the per-sub .html (the link
+#      target) and Inventory_*.json (the summary's input). The per-sub HTML is
+#      self-contained, so navigation works without the bulky csv/metrics members.
+#   3. Build MainSummary.html in -OutputDirectory (links now resolve on disk).
+#   4. Optionally (-PackageZip) zip that folder into a portable bundle whose
+#      links survive being moved/emailed.
+#
+# Backward-compatible: works on any consolidated zip, old or new, because it only
+# relies on the long-standing inner-zip layout. Falls back to already-extracted
+# ResourcesReport*/ folders if the archive contains those instead of inner zips.
+# =============================================================================
+function New-RdaAllSubHtmlSummaryFromZip
+{
+    param(
+        # Consolidated outer zip (AllSubscriptions_ResourcesReport_*.zip).
+        [Parameter(Mandatory = $true)] $InputZip,
+
+        # Durable folder to reconstruct into + write MainSummary.html. The per-sub
+        # folders MUST live next to the html for its relative links to resolve, so
+        # this is NOT a temp dir. Defaults to <zipdir>/<zipbasename>_MainSummary.
+        $OutputDirectory,
+
+        # Explicit output path for the summary html. Defaults to
+        # <OutputDirectory>/MainSummary.html.
+        $HtmlFile,
+
+        # Tier 2 (run-wide by-service donut/bar charts).
+        [switch]$Detailed,
+
+        # Also emit a portable zip of the reconstructed folder (summary + per-sub
+        # HTMLs) whose links survive extraction elsewhere.
+        [switch]$PackageZip,
+
+        # By default each per-subscription report is RE-RENDERED from its
+        # Inventory_*.json with the current Extension/Summary.ps1, so drill-down
+        # reports reflect the latest renderer (e.g. the Tags column fix) instead of
+        # whatever version produced the html inside the source zip. Pass this to
+        # keep the original per-sub html verbatim instead.
+        [switch]$KeepOriginalReports,
+
+        # Display-only header fields (forwarded to New-RdaAllSubHtmlSummary).
+        $TenantId,
+        $Version,
+        $PlatOS
+    )
+
+    $ErrorActionPreference = 'Stop'
+
+    if ([string]::IsNullOrWhiteSpace($InputZip) -or -not (Test-Path -LiteralPath $InputZip -PathType Leaf))
+    {
+        throw "New-RdaAllSubHtmlSummaryFromZip: -InputZip not found: '$InputZip'."
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $ZipItem = Get-Item -LiteralPath $InputZip
+    if ([string]::IsNullOrWhiteSpace($OutputDirectory))
+    {
+        $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($ZipItem.Name)
+        $OutputDirectory = Join-Path $ZipItem.DirectoryName ($BaseName + '_MainSummary')
+    }
+    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
+
+    if ([string]::IsNullOrWhiteSpace($HtmlFile))
+    {
+        $HtmlFile = Join-Path $OutputDirectory 'MainSummary.html'
+    }
+
+    # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
+    # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
+    $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $Staging -Force | Out-Null
+    try
+    {
+        Expand-Archive -LiteralPath $InputZip -DestinationPath $Staging -Force
+        # Exclude any leftover *_revealed.zip (de-obfuscated single-report archive
+        # from a prior Reveal run) at SELECTION time: the reveal engine renames only
+        # the OUTER zip with the _revealed suffix and rewrites the inner html/json
+        # members IN PLACE (their names keep no _revealed marker), so a member-name
+        # filter alone would let real-data reports through. Mirrors Reveal.ps1.
+        $InnerZips = @(Get-ChildItem -LiteralPath $Staging -Recurse -Filter 'ResourcesReport*.zip' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notlike '*_revealed*' })
+
+        $Reconstructed = 0
+        foreach ($InnerZip in $InnerZips)
+        {
+            # Folder named after the inner zip base (ResourcesReport_<stamp>), which
+            # matches the ResourcesReport* glob New-RdaAllSubHtmlSummary discovers.
+            $FolderName = [System.IO.Path]::GetFileNameWithoutExtension($InnerZip.Name)
+            $Dest = Join-Path $OutputDirectory $FolderName
+            New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+            $Archive = [System.IO.Compression.ZipFile]::OpenRead($InnerZip.FullName)
+            try
+            {
+                foreach ($Entry in $Archive.Entries)
+                {
+                    # Never pull a *_revealed* (de-obfuscated) report across: it holds
+                    # real identifiers and would otherwise ride along in a shareable
+                    # -PackageZip bundle. Only the obfuscated per-sub html + the
+                    # Inventory json (the summary's input) are reconstructed.
+                    if (($Entry.Name -like 'Inventory_*.json') -or (($Entry.Name -like '*.html') -and ($Entry.Name -notlike '*_revealed*')))
+                    {
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, (Join-Path $Dest $Entry.Name), $true)
+                    }
+                }
+            }
+            finally { $Archive.Dispose() }
+            $Reconstructed++
+        }
+
+        # Fallback for an archive that already holds extracted ResourcesReport*/
+        # folders instead of inner zips: copy their html + Inventory json across.
+        if ($Reconstructed -eq 0)
+        {
+            $ExtractedFolders = @(Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notlike '*_revealed*' })
+            foreach ($Ef in $ExtractedFolders)
+            {
+                $Files = @(Get-ChildItem -LiteralPath $Ef.FullName -File -ErrorAction SilentlyContinue | Where-Object { ($_.Name -like 'Inventory_*.json') -or (($_.Name -like '*.html') -and ($_.Name -notlike '*_revealed*')) })
+                if ($Files.Count -eq 0) { continue }
+                $Dest = Join-Path $OutputDirectory $Ef.Name
+                New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+                foreach ($F in $Files) { Copy-Item -LiteralPath $F.FullName -Destination (Join-Path $Dest $F.Name) -Force }
+                $Reconstructed++
+            }
+        }
+    }
+    finally
+    {
+        Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Reconstructed -eq 0)
+    {
+        throw "New-RdaAllSubHtmlSummaryFromZip: no per-subscription reports found inside '$InputZip'. Is this a consolidated AllSubscriptions_ResourcesReport_*.zip?"
+    }
+
+    # Re-render each per-subscription report from its Inventory_*.json with the
+    # CURRENT Extension/Summary.ps1, so drill-down reports reflect the latest
+    # renderer (e.g. the Tags column fix) rather than whatever version produced
+    # the html inside the source zip. The per-sub report is built entirely from
+    # the inventory json; only the optional consumption billing-coverage banner
+    # (which needs the csv, not extracted) is skipped. Fail-soft per sub: one that
+    # cannot be re-rendered keeps its original html so its drill-down link still
+    # resolves. $PSScriptRoot here is the Functions/ folder (where this function is
+    # defined), so the sibling Extension/Summary.ps1 resolves from the repo root.
+    if (-not $KeepOriginalReports)
+    {
+        $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'
+        if (Test-Path -Path $SummaryScript -PathType Leaf)
+        {
+            $ReRendered = 0
+            foreach ($SubDir in @(Get-ChildItem -LiteralPath $OutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue))
+            {
+                $InvJson = Get-ChildItem -LiteralPath $SubDir.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($null -eq $InvJson) { continue }
+                # Overwrite the folder's existing html in place (single html per
+                # folder keeps the summary's link stable); derive a name if none.
+                $ExistingHtml = Get-ChildItem -LiteralPath $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+                $TargetHtml = if ($null -ne $ExistingHtml) { $ExistingHtml.FullName } else { Join-Path $SubDir.FullName ($SubDir.Name + '.html') }
+                try
+                {
+                    & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $TargetHtml -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
+                    $ReRendered++
+                }
+                catch
+                {
+                    Write-Host ("  Re-render skipped for {0} (kept original): {1}" -f $SubDir.Name, $_.Exception.Message) -ForegroundColor Yellow
+                }
+            }
+            Write-Host ("Re-rendered {0} per-subscription report(s) with the current renderer." -f $ReRendered) -ForegroundColor Green
+        }
+        else
+        {
+            Write-Host ("Extension/Summary.ps1 not found at '{0}'; keeping original per-sub reports." -f $SummaryScript) -ForegroundColor Yellow
+        }
+    }
+
+    # Build the summary against the reconstructed folder (links resolve on disk).
+    New-RdaAllSubHtmlSummary -RunOutputDirectory $OutputDirectory -HtmlFile $HtmlFile -Detailed:$Detailed `
+        -TenantId $TenantId -Version $Version -PlatOS $PlatOS
+
+    Write-Host ("Reconstructed {0} per-subscription report(s) into: {1}" -f $Reconstructed, $OutputDirectory) -ForegroundColor Green
+    Write-Host ("Open this summary (links resolve from here): {0}" -f $HtmlFile) -ForegroundColor Green
+
+    # Optional portable bundle: zip the reconstructed folder so the summary and
+    # its per-sub reports travel together with working links.
+    if ($PackageZip)
+    {
+        $PackageZipPath = $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
+        if (Test-Path -LiteralPath $PackageZipPath) { Remove-Item -LiteralPath $PackageZipPath -Force -ErrorAction SilentlyContinue }
+        Compress-Archive -Path (Join-Path $OutputDirectory '*') -DestinationPath $PackageZipPath -Force
+        Write-Host ("Portable summary bundle (links survive extraction): {0}" -f $PackageZipPath) -ForegroundColor Green
+    }
+
+    return $HtmlFile
+}

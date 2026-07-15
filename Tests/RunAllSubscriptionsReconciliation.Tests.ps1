@@ -42,7 +42,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -263,5 +263,125 @@ Describe 'Get-ConsumptionAccessOutcome classification' {
         Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 429 (TooManyRequests)' | Should -Be 'Unavailable'
         Get-ConsumptionAccessOutcome -ErrorMessage 'A task was canceled (timeout)' | Should -Be 'Unavailable'
         Get-ConsumptionAccessOutcome -ErrorMessage 'The remote name could not be resolved' | Should -Be 'Unavailable'
+    }
+}
+
+Describe 'Interrupted-parallel-run stream-state fold-in (F2)' {
+    # Reproduces the exact startup fold-in Run-AllSubscriptions.ps1 performs when
+    # -Resume/-ResumeFailedOnly runs after a PARALLEL run was killed before its
+    # end-of-run merge: discover per-stream files, read their Completed /
+    # FailedAttempts (the same keys Write-StreamState persists), union the
+    # completed ids, and reconcile failures via Merge-FailedAttempts. Guards the
+    # "-ResumeFailedOnly wrongly reports Nothing to retry" bug at the helper level
+    # (the wrapper body itself needs a live Azure session to run end to end).
+    BeforeEach {
+        $script:F2Dir = Join-Path $script:TestRoot ("f2_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:F2Dir -Force | Out-Null
+    }
+
+    AfterEach {
+        if (Test-Path $script:F2Dir) { Remove-Item -Path $script:F2Dir -Recurse -Force }
+    }
+
+    It 'recovers a failure that lives only in an unmerged per-stream file' {
+        $Tenant = 'tenant-f2a'
+        @{ Tenant = $Tenant; StreamId = 0; Completed = @('sub-ok'); FailedAttempts = @() } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-0.json")
+        @{ Tenant = $Tenant; StreamId = 1; Completed = @(); FailedAttempts = @(
+                [pscustomobject]@{ Id = 'sub-fail'; Name = 'Sub Fail'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'throttled'; Attempts = 1 }
+            )
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-1.json")
+
+        $StrandedCompleted = @()
+        $StrandedFailed = @()
+        foreach ($StreamFile in Get-StreamResumeStateFiles -InventoryRoot $script:F2Dir -Tenant $Tenant)
+        {
+            $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+            if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+        }
+        $CompletedIds = @($StrandedCompleted | Sort-Object -Unique)
+        $Failed = Merge-FailedAttempts -ExistingFailedAttempts @() -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
+
+        @($Failed).Count | Should -Be 1 -Because 'the failure stranded in the per-stream file must be recovered, not reported as Nothing to retry'
+        $Failed[0].Id | Should -Be 'sub-fail'
+        $CompletedIds | Should -Contain 'sub-ok' -Because 'completed ids from a per-stream file are folded in too'
+    }
+
+    It 'prunes a stranded failure when the same sub completed in another stream' {
+        $Tenant = 'tenant-f2b'
+        @{ Tenant = $Tenant; StreamId = 0; Completed = @('sub-x'); FailedAttempts = @() } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-0.json")
+        @{ Tenant = $Tenant; StreamId = 1; Completed = @(); FailedAttempts = @(
+                [pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-05-01T00:00:00Z'; Reason = 'transient'; Attempts = 1 }
+            )
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-1.json")
+
+        $StrandedCompleted = @()
+        $StrandedFailed = @()
+        foreach ($StreamFile in Get-StreamResumeStateFiles -InventoryRoot $script:F2Dir -Tenant $Tenant)
+        {
+            $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+            if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+        }
+        $CompletedIds = @($StrandedCompleted | Sort-Object -Unique)
+        $Failed = Merge-FailedAttempts -ExistingFailedAttempts @() -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
+
+        @($Failed).Count | Should -Be 0 -Because 'a sub that completed in one stream must not be retried just because another stream logged an earlier failure'
+    }
+}
+
+Describe 'Resolve-AccessPreflight (up-front access gate decision)' {
+    # Pure decision function behind the wrapper's up-front access gate. Given the
+    # per-sub probe results (State in Empty/NoAccess/Unknown), it decides whether
+    # the run must STOP (default) or may proceed skipping the inaccessible subs
+    # (-AllowPartialAccess). 'Empty' means the identity CAN read the sub.
+    It 'does not block when every subscription is readable (all Empty)' {
+        $Probed = @(
+            [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+            [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'Empty' }
+        )
+        $D = Resolve-AccessPreflight -Probed $Probed
+        $D.ShouldBlock | Should -BeFalse
+        @($D.Inaccessible).Count | Should -Be 0
+    }
+
+    It 'blocks by default when any subscription is NoAccess' {
+        $Probed = @(
+            [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+            [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'NoAccess' }
+        )
+        $D = Resolve-AccessPreflight -Probed $Probed
+        $D.ShouldBlock | Should -BeTrue -Because 'the default gate must stop the run when the identity cannot read a sub'
+        @($D.Inaccessible).Count | Should -Be 1
+        $D.InaccessibleIds | Should -Contain 's2'
+    }
+
+    It 'treats a persistent Unknown as inaccessible (never silently skipped)' {
+        $Probed = @([pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Unknown' })
+        $D = Resolve-AccessPreflight -Probed $Probed
+        $D.ShouldBlock | Should -BeTrue
+        $D.InaccessibleIds | Should -Contain 's1'
+    }
+
+    It 'does NOT block when -AllowPartialAccess is set, but still reports the inaccessible subs to skip' {
+        $Probed = @(
+            [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+            [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'NoAccess' }
+            [pscustomobject]@{ Id = 's3'; Name = 'Three'; State = 'Unknown' }
+        )
+        $D = Resolve-AccessPreflight -Probed $Probed -AllowPartialAccess
+        $D.ShouldBlock | Should -BeFalse -Because '-AllowPartialAccess lets the run proceed with the accessible subs'
+        @($D.Inaccessible).Count | Should -Be 2
+        $D.InaccessibleIds | Should -Contain 's2'
+        $D.InaccessibleIds | Should -Contain 's3'
+    }
+
+    It 'returns a clean no-block result for an empty probe set' {
+        $D = Resolve-AccessPreflight -Probed @()
+        $D.ShouldBlock | Should -BeFalse
+        @($D.Inaccessible).Count | Should -Be 0
+        @($D.InaccessibleIds).Count | Should -Be 0
     }
 }

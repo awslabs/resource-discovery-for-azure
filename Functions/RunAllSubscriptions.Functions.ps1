@@ -209,6 +209,62 @@ function Get-SubscriptionAccessState
     return 'Unknown'
 }
 
+# Probe control-plane READ access for a set of subscriptions up front, before any
+# per-subscription work. Reuses Get-SubscriptionAccessState (one cheap
+# `az group list` per sub): 'Empty' == the identity CAN read the subscription
+# (accessible, whether or not it has resources), 'NoAccess' == no role on it,
+# 'Unknown' == an inconclusive/transient failure. A transient 'Unknown' is retried
+# a few times with a short backoff before it is accepted, so a throttle/network
+# blip is not mistaken for a permission gap. Returns one record per sub -
+# { Id, Name, State } with State in Empty/NoAccess/Unknown. This is side-effecting
+# (makes az calls); the proceed/skip DECISION is factored into the pure
+# Resolve-AccessPreflight below so it can be unit-tested without a live session.
+function Test-SubscriptionAccessAll
+{
+    param(
+        [Parameter(Mandatory = $true)]$Subscriptions,
+        [int]$UnknownRetries = 2,
+        [int]$RetryDelaySeconds = 2
+    )
+    $Probed = @()
+    foreach ($Sub in @($Subscriptions))
+    {
+        $State = Get-SubscriptionAccessState -SubscriptionId $Sub.Id
+        $Attempt = 0
+        while ($State -eq 'Unknown' -and $Attempt -lt $UnknownRetries)
+        {
+            Start-Sleep -Seconds $RetryDelaySeconds
+            $State = Get-SubscriptionAccessState -SubscriptionId $Sub.Id
+            $Attempt++
+        }
+        $Probed += [pscustomobject]@{ Id = $Sub.Id; Name = $Sub.Name; State = $State }
+    }
+    return $Probed
+}
+
+# Decide, from the up-front access probe results, whether the run may proceed.
+# Pure (no Azure/az calls) so the gate policy is unit-testable in isolation. A
+# subscription is "inaccessible" when the identity has no role ('NoAccess') or the
+# probe stayed inconclusive after retries ('Unknown' - treated as blocking so a
+# genuine access/throttling problem is never silently skipped). Returns:
+#   Inaccessible    - the probe records the identity cannot (or may not) read
+#   InaccessibleIds - the ids to drop from scope when -AllowPartialAccess is set
+#   ShouldBlock     - $true when there is >=1 inaccessible sub AND
+#                     -AllowPartialAccess was NOT set: the caller must STOP.
+function Resolve-AccessPreflight
+{
+    param(
+        [object]$Probed,
+        [switch]$AllowPartialAccess
+    )
+    $Inaccessible = @(@($Probed) | Where-Object { $_ -and ($_.State -eq 'NoAccess' -or $_.State -eq 'Unknown') })
+    return [pscustomobject]@{
+        Inaccessible    = $Inaccessible
+        InaccessibleIds = @($Inaccessible | ForEach-Object { $_.Id })
+        ShouldBlock     = ($Inaccessible.Count -gt 0 -and -not $AllowPartialAccess)
+    }
+}
+
 # === Pre-flight checks ===
 #
 # Detect the most common environment problems that make a long run pointless,

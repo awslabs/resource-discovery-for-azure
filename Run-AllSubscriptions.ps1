@@ -30,6 +30,19 @@ param (
     # this only when you intentionally have Reader on a subset of the tenant.
     [switch]$AllowPartialAccess,
 
+    # Produce an aggregate "main" HTML summary across all per-subscription reports
+    # from this run - run-wide totals, a per-subscription table with links to each
+    # per-sub report, and run-health banners - written to
+    # InventoryReports/MainSummary_<timestamp>.html. Built purely from the on-disk
+    # per-subscription reports (no Azure calls). Off by default.
+    [switch]$MainSummary,
+
+    # With -MainSummary, also parse each per-subscription inventory to render a
+    # run-wide by-service breakdown (donut + top-services bar chart). Slightly
+    # slower on very large tenants (one JSON parse per subscription). No effect
+    # without -MainSummary.
+    [switch]$Detailed,
+
     # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
     # the inner script's own default. The inner script uses this as the throttle
     # for its metrics-collection runspace pool (Get-AzMetric calls in
@@ -1691,6 +1704,44 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         else
         {
             Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
+        }
+
+        # Optional aggregate "main" HTML summary across all per-subscription
+        # reports from THIS run (opt-in via -MainSummary; -Detailed adds run-wide
+        # by-service charts). Built purely from the on-disk per-sub artefacts
+        # (Inventory_*.json + sibling .html) scoped to $RunStartTime - no Azure
+        # calls. A failure here must never fail the run: the per-sub reports and
+        # the consolidated zip are already written, so any error is downgraded to
+        # a warning.
+        if ($MainSummary)
+        {
+            try
+            {
+                $MainSummaryPath = Join-Path $PSScriptRoot 'Extension/MainSummary.ps1'
+                $MainSummaryFile = Join-Path $InventoryRoot ("MainSummary_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+                # Source the version from Version.json rather than $Global:Version:
+                # in parallel mode the inner script runs in child processes, so the
+                # wrapper's $Global:Version is never set. Fall back to it (and then
+                # blank) if the file can't be read.
+                $MainVer = $Global:Version
+                try
+                {
+                    $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+                    $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
+                }
+                catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
+                & $MainSummaryPath -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime `
+                    -FailedSubscriptions $FailedSubscriptions `
+                    -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+                    -MetricsFailedSubs $Global:MetricsFailedSubs `
+                    -CollectorFailures $Global:CollectorFailures `
+                    -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
+                    -Detailed:$Detailed
+            }
+            catch
+            {
+                Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+            }
         }
 
         # Clean up resume state on a fully successful run (all subs processed, no failures

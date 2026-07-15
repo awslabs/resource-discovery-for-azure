@@ -245,6 +245,26 @@ To include every subscription regardless of state, pass `-IncludeDisabled`:
 
 The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
 
+#### Subscription access check (up-front)
+
+Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
+
+The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+
+By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
+```
+
+If you *intentionally* have access to only a subset of the tenant, pass `-AllowPartialAccess` to skip the unreadable subscriptions and inventory the rest instead of stopping:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -AllowPartialAccess
+```
+
+On `-Resume`, only the subscriptions that still need processing are probed. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs.
+
 #### Resuming an interrupted run
 
 For tenants with many subscriptions, the run can be cut short by environment-level limits — for example, an Azure Cloud Shell session that ends when a Conditional Access policy enforces a maximum session lifetime. The wrapper supports resuming:
@@ -484,6 +504,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
 | `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
+| `AllowPartialAccess` | Switch | Change the up-front access check from hard-stop to skip-and-continue. By default the wrapper verifies read access to every in-scope subscription before any work and **stops** if any is unreadable (see [Subscription access check](#subscription-access-check-up-front)). With this switch, unreadable subscriptions are skipped (and listed) and the run proceeds with the accessible ones. | False | `-AllowPartialAccess` |
 | `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |

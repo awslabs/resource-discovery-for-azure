@@ -329,8 +329,21 @@ function Invoke-RdaReveal
             }
         }
 
-        if (Test-Path -Path $OutputZip) { Remove-Item -Path $OutputZip -Force }
-        Compress-Archive -Path (Join-Path $TmpRoot '*') -DestinationPath $OutputZip -Force
+        # Atomic output: compress to a sibling *.partial.zip, then swap it into
+        # place with File.Move(overwrite). A same-volume move is a rename, so a
+        # hard kill (SIGKILL / shell timeout) DURING Compress-Archive can never
+        # leave a truncated zip at $OutputZip. This matters for the
+        # all-subscriptions reveal (Reveal.ps1), whose -Resume trusts the presence
+        # of the output zip to mean "this folder is done" and whose consolidation
+        # sweeps every *.zip in staging: a partial file left at the FINAL name
+        # would be both skipped on resume AND folded into the outer zip. The
+        # .partial.zip name is excluded from that consolidation sweep, so only the
+        # completed archive ever appears at $OutputZip. (Compress-Archive appends
+        # .zip when the destination lacks it, so the temp deliberately ends .zip.)
+        $OutputZipPartial = ($OutputZip -replace '\.zip$', '') + '.partial.zip'
+        if (Test-Path -Path $OutputZipPartial) { Remove-Item -Path $OutputZipPartial -Force }
+        Compress-Archive -Path (Join-Path $TmpRoot '*') -DestinationPath $OutputZipPartial -Force
+        [System.IO.File]::Move($OutputZipPartial, $OutputZip, $true)
 
         Write-Host ""
         Write-Host ("Done. Revealed {0} token occurrence(s) across {1} member file(s)." -f $TotalHits, @($Files).Count) -ForegroundColor Green

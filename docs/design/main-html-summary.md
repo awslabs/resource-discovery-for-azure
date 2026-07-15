@@ -1,8 +1,17 @@
 # Design Spec — Main HTML Summary (aggregate report across subscriptions)
 
-Status: DRAFT / design-only (no code in this branch)
+Status: IMPLEMENTED. Shipped as the `New-RdaAllSubHtmlSummary` function in
+`Functions/AllSubHtmlSummary.Functions.ps1`, invoked by `Run-AllSubscriptions.ps1`
+behind the `-MainSummary` switch (`-Detailed` for the Tier 2 service charts). The
+shared render helpers (`ConvertTo-HtmlSafe` / `New-DonutChart` / `New-BarChart`)
+were extracted into that same function file and are dot-sourced by BOTH the
+per-subscription report (`Extension/Summary.ps1`) and the aggregate builder, so
+there is a single copy. This doc is retained as the design rationale; where it
+still says `Extension/MainSummary.ps1` (an earlier standalone-script form, now
+removed) read it as the `New-RdaAllSubHtmlSummary` function.
 Author: RDA maintainers
-Related: `Extension/Summary.ps1` (per-subscription HTML), `Run-AllSubscriptions.ps1`
+Related: `Functions/AllSubHtmlSummary.Functions.ps1` (builder + shared helpers),
+`Extension/Summary.ps1` (per-subscription HTML), `Run-AllSubscriptions.ps1`
 (multi-sub wrapper), `Run-AllSubscriptions.Stream.ps1` (parallel streaming variant)
 
 ---

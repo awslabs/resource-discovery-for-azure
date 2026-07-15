@@ -1,23 +1,28 @@
-# MainSummary.ps1 unit tests
+# New-RdaAllSubHtmlSummary unit tests
 # =============================================================================
-# Offline, self-contained tests for the aggregate "main" HTML summary
-# (Extension/MainSummary.ps1). They build a synthetic set of per-subscription
-# report folders (each a ResourcesReport<id>/ with a loose Inventory_*.json and
-# a stub .html) in a temp dir, invoke MainSummary.ps1 against them, and assert
-# on the produced HTML: run totals equal the sum of fixtures, one row per
-# subscription, self-containment (no external CDN refs), obfuscation posture
-# detection, health banners, -Detailed charts, -SinceTime scoping, and
-# fail-soft behaviour on an unreadable inventory.
+# Offline, self-contained tests for the aggregate all-subscriptions HTML summary
+# (New-RdaAllSubHtmlSummary in Functions/AllSubHtmlSummary.Functions.ps1). They
+# build a synthetic set of per-subscription report folders (each a
+# ResourcesReport<id>/ with a loose Inventory_*.json and a stub .html) in a temp
+# dir, invoke the builder against them, and assert on the produced HTML: run
+# totals equal the sum of fixtures, one row per subscription, self-containment
+# (no external CDN refs), obfuscation posture detection, health banners,
+# -Detailed charts, -SinceTime scoping, and fail-soft behaviour on an unreadable
+# inventory.
 #
-# No live Azure. The only literal GUID is the Azure docs placeholder; obfuscated
-# fixtures mint prod_/nonprod_ tokens at runtime so no real GUID lives here.
+# No live Azure and no literal GUIDs of any kind: obfuscated fixtures mint
+# prod_/nonprod_ tokens at runtime with [guid]::NewGuid(), so no real (or
+# hard-coded) GUID lives in this file.
 # =============================================================================
 
 BeforeAll {
-    $script:Script = Join-Path (Split-Path $PSScriptRoot -Parent) 'Extension/MainSummary.ps1'
-    if (-not (Test-Path $script:Script)) { throw "MainSummary.ps1 not found at $script:Script" }
+    # Dot-source the function library under test so New-RdaAllSubHtmlSummary (and
+    # its render helpers) load into the test scope.
+    $FunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
+    if (-not (Test-Path $FunctionsFile)) { throw "AllSubHtmlSummary.Functions.ps1 not found at $FunctionsFile" }
+    . $FunctionsFile
 
-    $script:TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('MainSummaryTest_' + [guid]::NewGuid().ToString())
+    $script:TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('AllSubHtmlSummaryTest_' + [guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $script:TmpRoot -Force | Out-Null
 
     # Build one synthetic per-subscription report folder.
@@ -76,7 +81,7 @@ AfterAll {
     if ($script:TmpRoot -and (Test-Path $script:TmpRoot)) { Remove-Item -Path $script:TmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-Describe 'MainSummary aggregate report' {
+Describe 'New-RdaAllSubHtmlSummary aggregate report' {
 
     It 'produces a self-contained HTML whose totals equal the sum of the fixtures' {
         $Run = New-Run
@@ -84,7 +89,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{ AppServices = 2 } -SubName 'Sub B' | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
         $Html = Get-Content -Path $Out -Raw
 
         Test-Path -Path $Out | Should -BeTrue
@@ -103,7 +108,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 1 } -SubName 'Sub C' | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
         $Html = Get-Content -Path $Out -Raw
         ([regex]::Matches($Html, '<tr>')).Count | Should -Be 4 -Because '3 subscription rows + 1 header row'
     }
@@ -114,7 +119,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{} -SubName 'Empty Sub' | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $Out -FailedSubscriptions @('BrokenSub1', 'BrokenSub2') | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -FailedSubscriptions @('BrokenSub1', 'BrokenSub2') | Out-Null
         $Html = Get-Content -Path $Out -Raw
         (Get-Card $Html 'Empty (0 resources)') | Should -Be '1'
         (Get-Card $Html 'Failed') | Should -Be '2'
@@ -127,7 +132,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 3; StorageAcc = 2 } -Obfuscated | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
         $Html = Get-Content -Path $Out -Raw
         $Html | Should -Match 'privacy-banner obfuscated'
         $Html | Should -Not -Match 'privacy-banner identifiable'
@@ -138,7 +143,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Contoso Production' | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
         $Html = Get-Content -Path $Out -Raw
         $Html | Should -Match 'privacy-banner identifiable'
     }
@@ -148,11 +153,11 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1; AppServices = 1 } -SubName 'Sub A' | Out-Null
 
         $OutPlain = Join-Path $Run 'plain.html'
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $OutPlain | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $OutPlain | Out-Null
         ((Get-Content $OutPlain -Raw) -match '<svg') | Should -BeFalse -Because 'Tier 1 (default) renders no charts'
 
         $OutDetailed = Join-Path $Run 'detailed.html'
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $OutDetailed -Detailed | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $OutDetailed -Detailed | Out-Null
         ([regex]::Matches((Get-Content $OutDetailed -Raw), '<svg')).Count | Should -Be 2 -Because 'donut + bar'
     }
 
@@ -162,7 +167,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -BadInventory | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        { & $script:Script -RunOutputDirectory $Run -HtmlFile $Out } | Should -Not -Throw
+        { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out } | Should -Not -Throw
         $Html = Get-Content -Path $Out -Raw
         (Get-Card $Html 'Total resources') | Should -Be '4' -Because 'the good sub still counts; the bad one is skipped'
         $Html | Should -Match 'unreadable inventory'
@@ -176,7 +181,7 @@ Describe 'MainSummary aggregate report' {
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'New Sub' | Out-Null
         $Out = Join-Path $Run 'main.html'
 
-        & $script:Script -RunOutputDirectory $Run -HtmlFile $Out -SinceTime (Get-Date).AddHours(-1) | Out-Null
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -SinceTime (Get-Date).AddHours(-1) | Out-Null
         $Html = Get-Content -Path $Out -Raw
         (Get-Card $Html 'Total resources') | Should -Be '2' -Because 'only the recent folder is in scope'
         (Get-Card $Html 'Subscriptions') | Should -Be '1'

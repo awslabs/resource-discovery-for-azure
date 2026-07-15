@@ -1717,7 +1717,18 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         {
             try
             {
-                $MainSummaryPath = Join-Path $PSScriptRoot 'Extension/MainSummary.ps1'
+                # The aggregate summary builder lives in a dot-sourced function
+                # library (Functions/AllSubHtmlSummary.Functions.ps1), which also
+                # holds the render helpers shared with Extension/Summary.ps1. It is
+                # loaded ONLY here, inside the -MainSummary branch, so the HTML/chart
+                # code is never pulled into a run that did not ask for it. A missing
+                # file throws into the surrounding catch and downgrades to a warning.
+                $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
+                if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
+                {
+                    throw "Main summary functions not found at '$AllSubSummaryFunctions'."
+                }
+                . $AllSubSummaryFunctions
                 $MainSummaryFile = Join-Path $InventoryRoot ("MainSummary_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
                 # Source the version from Version.json rather than $Global:Version:
                 # in parallel mode the inner script runs in child processes, so the
@@ -1730,7 +1741,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                     $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
                 }
                 catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
-                & $MainSummaryPath -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime `
+                New-RdaAllSubHtmlSummary -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime `
                     -FailedSubscriptions $FailedSubscriptions `
                     -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
                     -MetricsFailedSubs $Global:MetricsFailedSubs `

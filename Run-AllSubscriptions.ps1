@@ -698,44 +698,6 @@ if ($Excluded.Count -gt 0)
 }
 Write-Host ("Subscriptions to process: {0}" -f $Subscriptions.Count) -ForegroundColor Cyan
 
-# ---------------------------------------------------------------------------
-# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
-# -SkipConsumption was passed. If the signed-in identity is not authorized to
-# read consumption data, every subscription's consumption phase would fail and
-# the run would produce reports silently missing the billing data the operator
-# explicitly asked for. That is a HARD failure - fail fast, before spending
-# time on inventory and metrics, rather than hand back an incomplete report.
-#
-# Scope note: consumption/billing RBAC is usually uniform across a tenant, so we
-# probe the FIRST eligible subscription as the access signal. We hard-fail ONLY
-# on a clear authorization denial; a transient/token error (Conditional Access,
-# expired token, throttling) is NOT treated as a hard failure here - that is the
-# recoverable class the per-subscription consumption phase already handles and
-# reports. Operators who genuinely have mixed per-subscription billing access
-# can use -SkipConsumption.
-if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
-{
-    $ConsumptionProbeSub = $Subscriptions[0]
-    Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
-    $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
-    if ($ConsumptionAccess -eq 'Denied')
-    {
-        Write-Host ""
-        Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
-        Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
-        Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
-        Exit-Wrapper -Code 1
-    }
-    elseif ($ConsumptionAccess -eq 'Unavailable')
-    {
-        Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
-    }
-    else
-    {
-        Write-Host "Consumption access confirmed." -ForegroundColor Green
-    }
-}
-
 # Always seed $CompletedIds from the existing state file. -Resume only
 # controls whether we *use* that list to skip subscriptions; reading it
 # either way ensures the per-iteration writes below append to existing
@@ -890,6 +852,48 @@ if ($ScopeForProbe.Count -gt 0)
     else
     {
         Write-Host ("  Access verified: all {0} in-scope subscription(s) are readable." -f $ScopeForProbe.Count) -ForegroundColor Green
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
+# -SkipConsumption was passed. If the signed-in identity is not authorized to
+# read consumption data, every subscription's consumption phase would fail and
+# the run would produce reports silently missing the billing data the operator
+# explicitly asked for. That is a HARD failure - fail fast, before spending
+# time on inventory and metrics, rather than hand back an incomplete report.
+#
+# Runs AFTER the access gate above, so $Subscriptions[0] is already known to be
+# control-plane-readable (inaccessible subs have either hard-stopped the run or,
+# under -AllowPartialAccess, been removed from $Subscriptions) - a 403 here is
+# therefore a genuine BILLING-RBAC denial, not just "no role on that sub".
+# consumption/billing RBAC is usually uniform across a tenant, so we probe the
+# FIRST subscription as the access signal. We hard-fail ONLY on a clear
+# authorization denial; a transient/token error (Conditional Access, expired
+# token, throttling) is NOT treated as a hard failure here - that is the
+# recoverable class the per-subscription consumption phase already handles and
+# reports. Operators who genuinely have mixed per-subscription billing access
+# can use -SkipConsumption.
+if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
+{
+    $ConsumptionProbeSub = $Subscriptions[0]
+    Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
+    $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
+    if ($ConsumptionAccess -eq 'Denied')
+    {
+        Write-Host ""
+        Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
+        Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
+        Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
+        Exit-Wrapper -Code 1
+    }
+    elseif ($ConsumptionAccess -eq 'Unavailable')
+    {
+        Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host "Consumption access confirmed." -ForegroundColor Green
     }
 }
 

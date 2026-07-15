@@ -19,6 +19,17 @@ param (
     [switch]$ResumeFailedOnly,
     [switch]$IncludeDisabled,
 
+    # By DEFAULT the wrapper verifies control-plane read access to EVERY in-scope
+    # subscription up front (one cheap `az group list` per sub) and HARD-STOPS
+    # before doing any work if the signed-in identity cannot read one or more of
+    # them - so an auth/permission gap is surfaced and fixed up front instead of
+    # producing a report silently missing subscriptions (and risking the
+    # consumption cross-attribution class of bug). Pass -AllowPartialAccess to
+    # override that gate: the inaccessible subscriptions are SKIPPED (listed
+    # loudly in the summary) and the run proceeds with the accessible ones. Use
+    # this only when you intentionally have Reader on a subset of the tenant.
+    [switch]$AllowPartialAccess,
+
     # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
     # the inner script's own default. The inner script uses this as the throttle
     # for its metrics-collection runspace pool (Get-AzMetric calls in
@@ -734,6 +745,57 @@ $CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $Ten
 # below preserve any existing failure history; -ResumeFailedOnly is what
 # uses it to filter the subscription list.
 $FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
+
+# Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
+# A parallel run persists each stream's Completed/FailedAttempts to its own
+# .resume-state-<tenant>-stream-<N>.json and only merges them into the unified
+# file at end-of-run. If that run was killed before the merge (Ctrl+C, SIGKILL,
+# Cloud Shell timeout), the failures live ONLY in the per-stream files while the
+# unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
+# sees no failures, and wrongly reports "Nothing to retry" - silently dropping
+# the retry set. Read (do NOT delete) the per-stream files here so BOTH -Resume
+# (skip-completed) and -ResumeFailedOnly (retry list) see the full picture; the
+# end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
+# cleanly-finished parallel run deletes its per-stream files, so this finds none.
+# Runs at startup before any stream is launched, so it cannot race live streams.
+if ($Resume -or $ResumeFailedOnly)
+{
+    $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
+    if ($StrandedStreamFiles.Count -gt 0)
+    {
+        $StrandedCompleted = @()
+        $StrandedFailed = @()
+        foreach ($StreamFile in $StrandedStreamFiles)
+        {
+            try
+            {
+                $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+                if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+                if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+            }
+            catch
+            {
+                Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
+            }
+        }
+        if ($StrandedCompleted.Count -gt 0)
+        {
+            $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)
+        }
+        # Same recency-wins / prune-on-completed reconciliation the end-of-run
+        # merge uses, so a sub that later succeeded in another stream is dropped.
+        $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
+        if ($StrandedCompleted.Count -gt 0 -or @($StrandedFailed).Count -gt 0)
+        {
+            Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
+            # Heal the unified file immediately so even a re-interrupted run keeps
+            # the recovered picture. Per-stream files are intentionally left for
+            # the end-of-run merge to reconcile and clean up.
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+        }
+    }
+}
+
 if ($Resume)
 {
     if ($CompletedIds.Count -gt 0)
@@ -783,6 +845,51 @@ if ($ResumeFailedOnly)
         # processing nothing.
         Write-Host "WARNING: FailedAttempts list contained IDs but none are visible in the current subscription set. Verify access and -IncludeDisabled flag matches the prior run." -ForegroundColor Yellow
         Exit-Wrapper -Code 0
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Up-front access gate. Before ANY per-subscription work, verify the signed-in
+# identity can actually read every in-scope subscription. Azure Resource Graph
+# returns 0 rows (not a 403) for a subscription the identity has no role on, so a
+# permission gap is otherwise invisible until the report comes back silently
+# missing subscriptions - and can feed the consumption cross-attribution class of
+# bug. Catch it here instead. By default any inaccessible subscription HARD-STOPS
+# the run so the operator fixes access first; -AllowPartialAccess overrides that
+# to skip the inaccessible ones and continue. On -Resume only the subscriptions
+# this run will actually process (not already-completed ones) are probed. Runs
+# once in the parent, before the sequential/parallel split, so it gates both.
+$ScopeForProbe = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
+if ($ScopeForProbe.Count -gt 0)
+{
+    Write-Host ("Verifying subscription access up front for {0} subscription(s)..." -f $ScopeForProbe.Count) -ForegroundColor Cyan
+    $AccessProbed = Test-SubscriptionAccessAll -Subscriptions $ScopeForProbe
+    $AccessDecision = Resolve-AccessPreflight -Probed $AccessProbed -AllowPartialAccess:$AllowPartialAccess
+    if ($AccessDecision.Inaccessible.Count -gt 0)
+    {
+        Write-Host ("  {0} subscription(s) are NOT readable by the signed-in identity:" -f $AccessDecision.Inaccessible.Count) -ForegroundColor Red
+        foreach ($NA in $AccessDecision.Inaccessible)
+        {
+            $Label = if ($NA.State -eq 'Unknown') { 'access probe inconclusive after retries' } else { 'no role on the subscription' }
+            Write-Host ("    - {0} ({1}) - {2}" -f $NA.Name, $NA.Id, $Label) -ForegroundColor Red
+        }
+        if ($AccessDecision.ShouldBlock)
+        {
+            Write-Host "  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
+            Write-Host "  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)" -ForegroundColor Red
+            Exit-Wrapper -Code 1
+        }
+        Write-Host "  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow
+        $Subscriptions = @($Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains $_.Id })
+        if ($Subscriptions.Count -eq 0)
+        {
+            Write-Host "No accessible subscriptions remain in scope; nothing to process." -ForegroundColor Yellow
+            Exit-Wrapper -Code 1
+        }
+    }
+    else
+    {
+        Write-Host ("  Access verified: all {0} in-scope subscription(s) are readable." -f $ScopeForProbe.Count) -ForegroundColor Green
     }
 }
 

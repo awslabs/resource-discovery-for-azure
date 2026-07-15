@@ -82,6 +82,20 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
     throw "Summary.ps1: -HtmlFile output path is required."
 }
 
+# Shared HTML-summary render helpers (ConvertTo-HtmlSafe / New-DonutChart /
+# New-BarChart) live in Functions/AllSubHtmlSummary.Functions.ps1 - the single
+# source of truth also used by the aggregate all-subscriptions summary. They are
+# NOT in Common.Functions.ps1 on purpose: only the HTML-rendering paths need
+# them, so they are dot-sourced only here (and by the wrapper's -MainSummary
+# branch) rather than loaded into every entry point. This script sits in
+# Extension/, so resolve the sibling Functions/ folder from the repo root.
+$RenderFunctionsFile = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
+if (-not (Test-Path -Path $RenderFunctionsFile -PathType Leaf))
+{
+    throw "Summary.ps1: shared render helpers not found at '$RenderFunctionsFile'."
+}
+. $RenderFunctionsFile
+
 # Self-measure the HTML render (JSON read + all fragment building). Summary CANNOT
 # measure the collection phases - they already ran and are passed in via
 # -PhaseTimings - but it CAN time its own render, so the report shows its own
@@ -218,139 +232,13 @@ if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Ver
     $Version = [string]$Inventory.Version
 }
 
-# === HTML helpers =============================================================
+# === HTML + chart helpers ====================================================
 #
-# All output is HTML-escaped by default. The report embeds JSON-derived strings
-# from a downstream system (Azure Resource Graph) which could legitimately
-# contain HTML-significant characters in a name or tag. Escaping at the edge
-# is the only safe pattern; we never trust the input.
-function ConvertTo-HtmlSafe
-{
-    param([Parameter(ValueFromPipeline = $true)]$Value)
-    process
-    {
-        if ($null -eq $Value) { return '' }
-        $S = [string]$Value
-        $S = $S.Replace('&', '&amp;')
-        $S = $S.Replace('<', '&lt;')
-        $S = $S.Replace('>', '&gt;')
-        $S = $S.Replace('"', '&quot;')
-        $S = $S.Replace("'", '&#39;')
-        return $S
-    }
-}
-
-# === Chart helpers ============================================================
-#
-# Hand-rolled SVG. Two chart types: donut (proportions) and horizontal bar
-# (top-N counts). Both produce strings that drop straight into the HTML body.
-# No JS, no external library, ~5 KB combined.
-
-function New-DonutChart
-{
-    param(
-        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
-        [int]$Size = 240,
-        [int]$Thickness = 50
-    )
-
-    $Total = ($Data | Measure-Object -Property Value -Sum).Sum
-    if ($Total -le 0) { return '<div class="empty">No data</div>' }
-
-    $Cx = $Size / 2
-    $Cy = $Size / 2
-    $Radius = ($Size / 2) - 10
-    $InnerRadius = $Radius - $Thickness
-
-    # Color palette - colorblind-friendly (Okabe-Ito + neutrals). Wraps if
-    # there are more services than colors, which is fine for visual purpose.
-    $Palette = @(
-        '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9',
-        '#D55E00', '#F0E442', '#999999', '#332288', '#117733',
-        '#88CCEE', '#DDCC77', '#CC6677', '#AA4499', '#882255'
-    )
-
-    $Svg = New-Object System.Text.StringBuilder
-    [void]$Svg.Append("<svg viewBox='0 0 $Size $Size' class='chart-donut' role='img' aria-label='Resource count by service'>")
-
-    $AngleStart = -90.0
-    $i = 0
-    foreach ($item in $Data)
-    {
-        $Value = [double]$item.Value
-        if ($Value -le 0) { $i++; continue }
-        $Sweep = ($Value / $Total) * 360.0
-        $AngleEnd = $AngleStart + $Sweep
-
-        $X1 = $Cx + ($Radius * [math]::Cos($AngleStart * [math]::PI / 180.0))
-        $Y1 = $Cy + ($Radius * [math]::Sin($AngleStart * [math]::PI / 180.0))
-        $X2 = $Cx + ($Radius * [math]::Cos($AngleEnd * [math]::PI / 180.0))
-        $Y2 = $Cy + ($Radius * [math]::Sin($AngleEnd * [math]::PI / 180.0))
-        $LargeArc = if ($Sweep -gt 180) { 1 } else { 0 }
-
-        $Color = $Palette[$i % $Palette.Count]
-        $Label = ConvertTo-HtmlSafe $item.Label
-        $Pct = [math]::Round(($Value / $Total) * 100, 1)
-        $TitleText = "$Label`: $Value ($Pct%)"
-
-        $Path = "M $Cx $Cy L $X1 $Y1 A $Radius $Radius 0 $LargeArc 1 $X2 $Y2 Z"
-        [void]$Svg.AppendFormat("<path d='{0}' fill='{1}'><title>{2}</title></path>", $Path, $Color, $TitleText)
-
-        $AngleStart = $AngleEnd
-        $i++
-    }
-
-    # Inner cutout to make it a donut
-    [void]$Svg.AppendFormat("<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $Cx, $Cy, $InnerRadius)
-    [void]$Svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $Cx, ($Cy - 6), $Total)
-    [void]$Svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $Cx, ($Cy + 14))
-
-    [void]$Svg.Append('</svg>')
-    return $Svg.ToString()
-}
-
-function New-BarChart
-{
-    param(
-        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
-        [int]$Width = 480,
-        [int]$RowHeight = 26,
-        [int]$LabelWidth = 160
-    )
-
-    if ($Data.Count -eq 0) { return '<div class="empty">No data</div>' }
-
-    $MaxValue = ($Data | Measure-Object -Property Value -Maximum).Maximum
-    if ($MaxValue -le 0) { return '<div class="empty">No data</div>' }
-
-    $Height = $RowHeight * $Data.Count + 8
-    $BarAreaWidth = $Width - $LabelWidth - 60
-
-    $Svg = New-Object System.Text.StringBuilder
-    [void]$Svg.Append("<svg viewBox='0 0 $Width $Height' class='chart-bar' role='img' aria-label='Top services by count'>")
-
-    $i = 0
-    foreach ($item in $Data)
-    {
-        $y = ($i * $RowHeight) + 4
-        $Label = ConvertTo-HtmlSafe $item.Label
-        $Value = [int]$item.Value
-        $BarWidth = [int](($Value / $MaxValue) * $BarAreaWidth)
-        if ($BarWidth -lt 1) { $BarWidth = 1 }
-
-        # Label on the left
-        [void]$Svg.AppendFormat("<text x='{0}' y='{1}' class='bar-label' text-anchor='end'>{2}</text>", ($LabelWidth - 8), ($y + 17), $Label)
-        # Bar
-        [void]$Svg.AppendFormat("<rect x='{0}' y='{1}' width='{2}' height='{3}' rx='3' class='bar-fill' />", $LabelWidth, $y, $BarWidth, ($RowHeight - 8))
-        # Count to the right of the bar
-        [void]$Svg.AppendFormat("<text x='{0}' y='{1}' class='bar-value'>{2}</text>", ($LabelWidth + $BarWidth + 6), ($y + 17), $Value)
-
-        $i++
-    }
-
-    [void]$Svg.Append('</svg>')
-    return $Svg.ToString()
-}
+# ConvertTo-HtmlSafe / New-DonutChart / New-BarChart now live in
+# Functions/AllSubHtmlSummary.Functions.ps1 (dot-sourced near the top of this
+# script) so the per-subscription report and the aggregate all-subscriptions
+# summary share ONE copy instead of duplicating them. Behaviour is unchanged;
+# see that file for the definitions.
 
 # === Per-service table builder ================================================
 #

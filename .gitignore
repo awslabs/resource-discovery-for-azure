@@ -498,6 +498,7 @@ ObfuscationDictionary_*
 # Local-only working notes — must not land in any public commit
 .exploration/
 .kiro/
+.sisyphus/
 docs/components/
 .scrub-review/
 testResults.xml

@@ -2441,12 +2441,16 @@ if ($Obfuscate.IsPresent)
             foreach ($ftReal in $Global:FreeTextDictionary.Keys) { if (-not [string]::IsNullOrEmpty($ftReal) -and -not $DiagScrubMap.ContainsKey($ftReal)) { $DiagScrubMap[$ftReal] = $Global:FreeTextDictionary[$ftReal] } }
         }
 
-        $PhaseTimingsSeconds = [ordered]@{}
+        # Phase durations rendered as "Nmin SS sec" (zero-padded seconds), e.g.
+        # 245.3s -> "4min 05 sec". Kept as pre-formatted strings so the emit
+        # below just prints them.
+        $PhaseTimingsText = [ordered]@{}
         if ($null -ne $script:PhaseTimings)
         {
-            foreach ($phaseName in $script:PhaseTimings.Keys)
+            foreach ($PhaseName in $script:PhaseTimings.Keys)
             {
-                $PhaseTimingsSeconds[$phaseName] = [math]::Round(([TimeSpan]$script:PhaseTimings[$phaseName]).TotalSeconds, 1)
+                $PhaseTotalSec = [int][math]::Round(([TimeSpan]$script:PhaseTimings[$PhaseName]).TotalSeconds)
+                $PhaseTimingsText[$PhaseName] = ('{0}min {1:D2} sec' -f [int][math]::Floor($PhaseTotalSec / 60), ($PhaseTotalSec % 60))
             }
         }
 
@@ -2479,10 +2483,10 @@ if ($Obfuscate.IsPresent)
         $DiagLines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
         $DiagLines.Add(('Tool version    : {0}' -f [string]$Global:Version))
         $DiagLines.Add('')
-        $DiagLines.Add('Phase timings (seconds):')
-        if ($PhaseTimingsSeconds.Count -gt 0)
+        $DiagLines.Add('Phase timings:')
+        if ($PhaseTimingsText.Count -gt 0)
         {
-            foreach ($phaseName in $PhaseTimingsSeconds.Keys) { $DiagLines.Add(('  {0}: {1}' -f $phaseName, $PhaseTimingsSeconds[$phaseName])) }
+            foreach ($PhaseName in $PhaseTimingsText.Keys) { $DiagLines.Add(('  {0}: {1}' -f $PhaseName, $PhaseTimingsText[$PhaseName])) }
         }
         else
         {

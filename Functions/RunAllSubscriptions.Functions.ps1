@@ -814,11 +814,18 @@ function Get-ConsumptionAccessOutcome
 
 # Probe whether the signed-in identity can actually READ consumption/billing
 # data for a subscription, by issuing the same Get-UsageAggregates call the
-# consumption phase uses (a tiny 1-day window). Returns 'Ok' / 'Denied' /
-# 'Unavailable' via Get-ConsumptionAccessOutcome. A subscription with access but
+# consumption phase uses (a tiny 1-day window). A subscription with access but
 # zero usage returns an empty result (not an error) -> 'Ok'. A failure to switch
 # context is treated as 'Unavailable' (a session/token problem, not a
 # consumption-authorization denial).
+#
+# Returns a [pscustomobject] with:
+#   Outcome - 'Ok' / 'Denied' / 'Unavailable' (verdict via Get-ConsumptionAccessOutcome).
+#   Detail  - $null on success, otherwise the underlying exception message so the
+#             caller can tell the operator WHY the probe failed (e.g. the legacy
+#             Get-UsageAggregates API is unsupported on this subscription type, a
+#             token needs refreshing, or a 429 throttle). The verdict logic is
+#             unchanged - Detail is purely for diagnosability.
 function Test-ConsumptionAccess
 {
     param([Parameter(Mandatory = $true)][string]$SubscriptionId)
@@ -829,18 +836,32 @@ function Test-ConsumptionAccess
     }
     catch
     {
-        return 'Unavailable'
+        return [pscustomobject]@{
+            Outcome = 'Unavailable'
+            Detail  = ('could not switch Az context to the probe subscription: {0}' -f $_.Exception.Message)
+        }
     }
 
-    $ProbeEnd = (Get-Date).Date
+    # Get-UsageAggregates with Daily granularity requires the reported times to
+    # be at UTC midnight (00:00:00Z). A local-midnight value ((Get-Date).Date)
+    # serialises with the host's UTC offset, so for any operator NOT in UTC the
+    # API rejects it with "InvalidInput: The reportedstarttime ... must have the
+    # time set to midnight (0:00:00Z)" - which the probe then misclassified as a
+    # transient/token 'Unavailable' on every run. Use explicit UTC midnight so
+    # the probe actually tests billing access instead of tripping on a malformed
+    # time. ([DateTime]::UtcNow.Date is 00:00:00 with Kind=Utc -> serialises as Z.)
+    $ProbeEnd = [DateTime]::UtcNow.Date
     $ProbeStart = $ProbeEnd.AddDays(-1)
     try
     {
         $null = Get-UsageAggregates -ReportedStartTime $ProbeStart -ReportedEndTime $ProbeEnd -AggregationGranularity 'Daily' -ErrorAction Stop
-        return 'Ok'
+        return [pscustomobject]@{ Outcome = 'Ok'; Detail = $null }
     }
     catch
     {
-        return (Get-ConsumptionAccessOutcome -ErrorMessage $_.Exception.Message)
+        return [pscustomobject]@{
+            Outcome = (Get-ConsumptionAccessOutcome -ErrorMessage $_.Exception.Message)
+            Detail  = $_.Exception.Message
+        }
     }
 }

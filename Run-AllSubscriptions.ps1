@@ -892,17 +892,25 @@ if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
     $ConsumptionProbeSub = $Subscriptions[0]
     Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
     $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
-    if ($ConsumptionAccess -eq 'Denied')
+    if ($ConsumptionAccess.Outcome -eq 'Denied')
     {
         Write-Host ""
         Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
         Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
+        if (-not [string]::IsNullOrWhiteSpace($ConsumptionAccess.Detail))
+        {
+            Write-Host ("Reason: {0}" -f $ConsumptionAccess.Detail) -ForegroundColor Red
+        }
         Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
         Exit-Wrapper -Code 1
     }
-    elseif ($ConsumptionAccess -eq 'Unavailable')
+    elseif ($ConsumptionAccess.Outcome -eq 'Unavailable')
     {
         Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
+        if (-not [string]::IsNullOrWhiteSpace($ConsumptionAccess.Detail))
+        {
+            Write-Host ("  Probe error (why it could not be verified): {0}" -f $ConsumptionAccess.Detail) -ForegroundColor DarkYellow
+        }
     }
     else
     {

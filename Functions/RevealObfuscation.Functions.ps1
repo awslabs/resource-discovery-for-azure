@@ -269,10 +269,20 @@ function Invoke-RdaReveal
 
     try
     {
+        # Phase progress (Expanding -> Scanning -> Compressing) so a single
+        # report's reveal is not a black box while the opaque Expand-Archive /
+        # Compress-Archive run. Uses the shared Write-RdaProgress when it is
+        # loaded (single-report mode via Reveal.ps1, which dot-sources
+        # Common.Functions); in the all-subscriptions child job the helper is
+        # absent AND the job's output is suppressed, so guard on its presence and
+        # no-op there (the wrapper shows a per-folder heartbeat instead).
+        $EmitProgress = [bool](Get-Command -Name Write-RdaProgress -ErrorAction SilentlyContinue)
+        if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Expanding archive' -Index 1 -Total 3 }
         Expand-Archive -Path $InputZip -DestinationPath $TmpRoot -Force
 
         $TotalHits = 0
         $Files = Get-ChildItem -Path $TmpRoot -Recurse -File
+        if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem ('Scanning {0} member file(s)' -f @($Files).Count) -Index 2 -Total 3 }
         foreach ($file in $Files)
         {
             $script:FileHits = 0
@@ -340,10 +350,12 @@ function Invoke-RdaReveal
         # .partial.zip name is excluded from that consolidation sweep, so only the
         # completed archive ever appears at $OutputZip. (Compress-Archive appends
         # .zip when the destination lacks it, so the temp deliberately ends .zip.)
+        if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Compressing output' -Index 3 -Total 3 }
         $OutputZipPartial = ($OutputZip -replace '\.zip$', '') + '.partial.zip'
         if (Test-Path -Path $OutputZipPartial) { Remove-Item -Path $OutputZipPartial -Force }
         Compress-Archive -Path (Join-Path $TmpRoot '*') -DestinationPath $OutputZipPartial -Force
         [System.IO.File]::Move($OutputZipPartial, $OutputZip, $true)
+        if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -Completed }
 
         Write-Host ""
         Write-Host ("Done. Revealed {0} token occurrence(s) across {1} member file(s)." -f $TotalHits, @($Files).Count) -ForegroundColor Green

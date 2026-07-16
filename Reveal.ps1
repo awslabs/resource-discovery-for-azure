@@ -356,7 +356,25 @@ foreach ($Folder in $Folders)
             Invoke-RdaReveal -InputZip $InputZip -DictionaryPath $DictionaryPath -Fields $Fields -OutputZip $OutputZip *> $null
         } -ArgumentList $RevealFunctions, $Zip.FullName, $Dict.FullName, $Fields, $OutPath
 
-        $Finished = Wait-Job -Job $RevealJob -Timeout $RevealTimeoutSeconds
+        # Poll the job in short slices so the operator sees a live per-folder
+        # heartbeat (elapsed vs cap) instead of one frozen line for the whole
+        # reveal: a big folder's Expand/Compress can run for minutes and the
+        # child job's own output is suppressed, so without this the run looks
+        # hung. $Finished stays $null iff the per-folder cap ($RevealTimeoutSeconds)
+        # is reached, which drives the existing timeout-abandon path below.
+        $FolderStart = [DateTime]::UtcNow
+        $Deadline = $FolderStart.AddSeconds($RevealTimeoutSeconds)
+        $Finished = $null
+        while ($true)
+        {
+            $Finished = Wait-Job -Job $RevealJob -Timeout 3
+            if ($null -ne $Finished) { break }
+            if ([DateTime]::UtcNow -ge $Deadline) { break }
+            $ElapsedSec = [int]([DateTime]::UtcNow - $FolderStart).TotalSeconds
+            Write-RdaProgress -Activity 'Revealing per-subscription reports' `
+                -CurrentItem ('{0}  [elapsed {1}s / cap {2}s]' -f $Folder.Name, $ElapsedSec, $RevealTimeoutSeconds) `
+                -Index $FolderIndex -Total $FolderTotal
+        }
 
         if ($null -eq $Finished)
         {

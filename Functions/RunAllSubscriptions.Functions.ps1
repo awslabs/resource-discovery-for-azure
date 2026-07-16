@@ -904,6 +904,15 @@ function Get-RunSummaryLogContent
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
         [int]$ConsumptionRecordCount = 0,
+        # Host size and resolved parallelism (run-environment metadata, not
+        # identifiers). Emitted in both modes. Defaults mean "not supplied" and
+        # the whole section is omitted (keeps standalone/offline callers clean).
+        [int]$HostVCpu = 0,
+        [double]$HostRamGB = 0,
+        [int]$Streams = 0,
+        [string]$StreamsSource,
+        [int]$Concurrency = 0,
+        [string]$ConcurrencySource,
         # When set, emit counts only (no names / ids / raw messages).
         [switch]$Obfuscated
     )
@@ -997,6 +1006,31 @@ function Get-RunSummaryLogContent
         $Emitted++
     }
     if ($Emitted -eq 0) { $Lines.Add('  (defaults - no switches or values passed)') }
+
+    # --- Host / parallelism --------------------------------------------------
+    # vCPU/RAM counts and the resolved streams/concurrency (auto vs explicit) are
+    # run-environment metadata, not identifiers, so they are emitted in BOTH
+    # modes. Each line is guarded on a supplied value; when nothing is passed
+    # (standalone/offline callers) the whole section is omitted.
+    $HostLines = [System.Collections.Generic.List[string]]::new()
+    if ($HostVCpu -gt 0) { $HostLines.Add(('  Host vCPU         : {0}' -f $HostVCpu)) }
+    if ($HostRamGB -gt 0) { $HostLines.Add(('  Host RAM (GB)     : {0}' -f $HostRamGB)) }
+    if ($Streams -gt 0)
+    {
+        $StreamsSrcText = if (-not [string]::IsNullOrEmpty($StreamsSource)) { ' ({0})' -f $StreamsSource } else { '' }
+        $HostLines.Add(('  Parallel streams  : {0}{1}' -f $Streams, $StreamsSrcText))
+    }
+    if ($Concurrency -gt 0)
+    {
+        $ConcurrencySrcText = if (-not [string]::IsNullOrEmpty($ConcurrencySource)) { ' ({0})' -f $ConcurrencySource } else { '' }
+        $HostLines.Add(('  Concurrency limit : {0}{1}' -f $Concurrency, $ConcurrencySrcText))
+    }
+    if ($HostLines.Count -gt 0)
+    {
+        $Lines.Add('')
+        $Lines.Add('Host / parallelism:')
+        foreach ($HostLine in $HostLines) { $Lines.Add($HostLine) }
+    }
 
     # --- Subscription tally --------------------------------------------------
     $Lines.Add('')

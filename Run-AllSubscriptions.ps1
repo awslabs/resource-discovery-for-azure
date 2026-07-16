@@ -30,17 +30,17 @@ param (
     # this only when you intentionally have Reader on a subset of the tenant.
     [switch]$AllowPartialAccess,
 
-    # Produce an aggregate "main" HTML summary across all per-subscription reports
-    # from this run - run-wide totals, a per-subscription table with links to each
-    # per-sub report, and run-health banners - written to
-    # InventoryReports/MainSummary_<timestamp>.html. Built purely from the on-disk
-    # per-subscription reports (no Azure calls). Off by default.
+    # DEPRECATED / no-op: the aggregate "main" HTML summary (run-wide totals, a
+    # per-subscription table with links to each per-sub report, and run-health
+    # banners) is now produced on EVERY run and folded into the consolidated
+    # AllSubscriptions zip as MainSummary.html, so the single bundle the customer
+    # receives is self-contained. This switch is retained only for backward
+    # compatibility with existing callers/scripts and has no effect.
     [switch]$MainSummary,
 
-    # With -MainSummary, also parse each per-subscription inventory to render a
-    # run-wide by-service breakdown (donut + top-services bar chart). Slightly
-    # slower on very large tenants (one JSON parse per subscription). No effect
-    # without -MainSummary.
+    # Also parse each per-subscription inventory to render a run-wide by-service
+    # breakdown (donut + top-services bar chart) in the MainSummary. Slightly
+    # slower on very large tenants (one JSON parse per subscription).
     [switch]$Detailed,
 
     # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
@@ -1714,23 +1714,25 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
             Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
         }
 
-        # Optional aggregate "main" HTML summary across all per-subscription
-        # reports from THIS run (opt-in via -MainSummary; -Detailed adds run-wide
-        # by-service charts). Built purely from the on-disk per-sub artefacts
-        # (Inventory_*.json + sibling .html) scoped to $RunStartTime - no Azure
-        # calls. A failure here must never fail the run: the per-sub reports and
-        # the consolidated zip are already written, so any error is downgraded to
-        # a warning.
-        if ($MainSummary)
+        # Aggregate "main" HTML summary across all per-subscription reports from
+        # THIS run. Built on EVERY run that produced a consolidated zip (it was
+        # previously opt-in via -MainSummary; that switch is now implied and the
+        # summary is always produced + folded into the bundle below). -Detailed
+        # still adds the run-wide by-service charts. Built purely from the on-disk
+        # per-sub artefacts (Inventory_*.json + sibling .html) scoped to
+        # $RunStartTime - no Azure calls. A failure here must never fail the run:
+        # the per-sub reports and the consolidated zip are already written, so any
+        # error is downgraded to a warning and $MainSummaryFile is left $null.
+        $MainSummaryFile = $null
+        if ($null -ne $OuterZipFile)
         {
             try
             {
                 # The aggregate summary builder lives in a dot-sourced function
                 # library (Functions/AllSubHtmlSummary.Functions.ps1), which also
-                # holds the render helpers shared with Extension/Summary.ps1. It is
-                # loaded ONLY here, inside the -MainSummary branch, so the HTML/chart
-                # code is never pulled into a run that did not ask for it. A missing
-                # file throws into the surrounding catch and downgrades to a warning.
+                # holds the render helpers shared with Extension/Summary.ps1. A
+                # missing file throws into the surrounding catch and downgrades to
+                # a warning.
                 $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
                 if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
                 {
@@ -1755,7 +1757,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                     -MetricsFailedSubs $Global:MetricsFailedSubs `
                     -CollectorFailures $Global:CollectorFailures `
                     -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
-                    -Detailed:$Detailed
+                    -Detailed:$Detailed -Obfuscated:$Obfuscate
             }
             catch
             {
@@ -1811,6 +1813,12 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         # treating them as "successful" in the summary is misleading.
         $EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
         $NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
+        # Initialised here (not only inside the 0-resource branch below) so the
+        # run-summary finalization can read them unconditionally even when there
+        # were no empty subscriptions to classify.
+        $NoAccessSubs = @()
+        $GenuinelyEmptySubs = @()
+        $UnknownSubs = @()
         if ($SubResourceCounts.Count -gt 0)
         {
             $TotalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
@@ -2010,6 +2018,105 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
         }
         Write-Host "=========================================" -ForegroundColor Green
+
+        # --- Fold run-level extras into the consolidated bundle --------------
+        # Make the single AllSubscriptions zip the customer receives self-contained.
+        # It already holds the per-subscription inner zips (the ingestion payload,
+        # left untouched); here we ADD a run-level RunSummary.log (parameters + sub
+        # tally + health) and the unified MainSummary.html, plus a copy of each
+        # per-subscription HTML so the summary's drill-down links resolve straight
+        # out of the extracted zip. Only additive members are folded in and NO loose
+        # *.json is added, so the ingestion contract (inner-zip *.json members) is
+        # unchanged and nothing is double-ingested. Best-effort: any failure is a
+        # warning - the per-sub reports and the outer zip are already written.
+        if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+        {
+            try
+            {
+                $BundleStage = Join-Path $InventoryRoot ('.rda-bundle-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+                New-Item -ItemType Directory -Path $BundleStage -Force | Out-Null
+
+                # Version is display-only. Prefer Version.json (in parallel mode the
+                # wrapper's $Global:Version is never set - child processes set it),
+                # fall back to $Global:Version then blank.
+                $BundleVer = $Global:Version
+                try
+                {
+                    $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+                    $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
+                }
+                catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
+
+                # 1. RunSummary.log - run-level parameters + tally + health. Obfuscated
+                #    runs emit counts only (the wrapper holds no per-sub obfuscation
+                #    dictionary); default runs include per-sub detail.
+                $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+                $RunSummaryLines = Get-RunSummaryLogContent `
+                    -InvocationParameters $PSBoundParameters `
+                    -Version $BundleVer `
+                    -StartTime $RunStartTime -EndTime (Get-Date) `
+                    -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
+                    -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
+                    -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
+                    -FailedSubscriptions $FailedSubscriptions `
+                    -CollectorFailures $Global:CollectorFailures `
+                    -MetricsFailedSubs $Global:MetricsFailedSubs `
+                    -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+                    -ConsumptionRecordCount $ConsumptionRecordTotal `
+                    -Obfuscated:$Obfuscate
+                $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
+
+                # 2. Unified MainSummary.html at the bundle root (renamed from the
+                #    timestamped file; its links are relative to sibling folders, so
+                #    renaming the summary itself does not break them). The drill-down
+                #    link folders are then renamed from ResourcesReport<stamp>/ to
+                #    HTML<stamp>/ (see step 3) - these bundle folders carry ONLY the
+                #    report HTML, so the HTML prefix distinguishes them at a glance
+                #    from the sibling ResourcesReport_<stamp>.zip data archives (which
+                #    hold the Inventory/Metrics/Consumption members). Rewrite the
+                #    summary's hrefs to match: only the leading folder token changes
+                #    (href="ResourcesReport... -> href="HTML...); the /<file>.html tail
+                #    is untouched because it is not preceded by href=".
+                $StagedMainSummary = Join-Path $BundleStage 'MainSummary.html'
+                if ($null -ne $MainSummaryFile -and (Test-Path -LiteralPath $MainSummaryFile))
+                {
+                    Copy-Item -LiteralPath $MainSummaryFile -Destination $StagedMainSummary -Force
+                    (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' |
+                        Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
+                }
+
+                # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
+                #    name is the source ResourcesReport<stamp> with the leading
+                #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
+                #    summary links. HTML only - no *.json/csv - so nothing is
+                #    double-ingested and the folder name signals "report HTML, not
+                #    data". Scoped to THIS run by timestamp; a de-obfuscated
+                #    *_revealed* report is never copied across.
+                foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
+                {
+                    $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+                    if ($null -eq $SubHtml) { continue }
+                    $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
+                    $DestDir = Join-Path $BundleStage $HtmlFolderName
+                    New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+                    Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
+                }
+
+                # Fold the staged extras into the existing outer zip (additive; the
+                # inner per-sub zips already inside it are preserved by -Update).
+                $StageItems = @(Get-ChildItem -Path $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+                if ($StageItems.Count -gt 0)
+                {
+                    Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
+                    Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+                }
+                Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            catch
+            {
+                Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+            }
+        }
 
         # Final, last-thing-the-user-sees banner when a requested data phase could not
         # be collected due to authentication. Printed AFTER the summary block so it is

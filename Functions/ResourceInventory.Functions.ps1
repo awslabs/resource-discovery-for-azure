@@ -211,3 +211,166 @@ function Invoke-AzGraphQuerySafe
     }
 }
 
+
+
+# Build + write the shareable Diagnostics_*.log that ships INSIDE the per-sub
+# report zip. Extracted from ResourceInventory.ps1's packaging section so it can
+# run for BOTH obfuscated and default (non-obfuscated) runs - the operator asked
+# for a diagnostic log on every run, not just obfuscated ones.
+#
+# Every free-text field that could carry an identifier (collector/phase failure
+# messages and the subscription id) is run through Protect-DiagnosticText:
+# dictionary-tokenized when an obfuscation dictionary exists (obfuscated run),
+# then any residual GUID/email/host/path masked by class. In a default run the
+# dictionaries are empty, so only the class masking applies - the log is still
+# scrubbed, but the surrounding bundle contains real identifiers, so the header
+# says so. Written as a HUMAN-READABLE .log (NOT .json) so the ingestion server
+# does not table-ingest it; the caller adds it to the zip Path array explicitly.
+#
+# Wrapped in try/catch and returns the written file path on success or $null on
+# failure: the diagnostics log is a troubleshooting aid, not the report, so a
+# construction/write error must never break packaging of the actual inventory.
+# Reads the health globals ($Global:CollectorFailures / $Global:MetricsFailedSubs
+# / $Global:ConsumptionFailedSubs) and obfuscation dictionaries directly; the
+# per-run scalars (report name, timestamp, version) and the phase-timing table
+# are passed in so the function is self-contained and unit-testable.
+function Write-RdaShareableDiagnosticsLog
+{
+    param(
+        [string]$DefaultPath,
+        [string]$ReportName,
+        [string]$RunDateTime,
+        [string]$Version,
+        $PhaseTimings,
+        [switch]$Obfuscated
+    )
+
+    try
+    {
+        # Real-value -> token scrub map for the free-text failure messages. The
+        # four core dictionaries are keyed by the real ARM RESOURCE ID (value =
+        # token), so derive the bare resource NAME (last path segment), RG name
+        # and subscription GUID from those keys and map each to the matching
+        # token - otherwise a bare name/RG/sub-GUID in an exception message would
+        # NOT be tokenized (only a full ARM path would). Tag values and free-text
+        # values are already real-value-keyed. Empty in a default run (no
+        # dictionaries), leaving Protect-DiagnosticText's class masking to act.
+        $DiagScrubMap = @{}
+        if ($null -ne $Global:ResourceIdDictionary)
+        {
+            foreach ($realId in $Global:ResourceIdDictionary.Keys)
+            {
+                if ([string]::IsNullOrEmpty($realId)) { continue }
+                if (-not $DiagScrubMap.ContainsKey($realId)) { $DiagScrubMap[$realId] = $Global:ResourceIdDictionary[$realId] }
+
+                $ShortName = ($realId -split '/')[-1]
+                if (-not [string]::IsNullOrEmpty($ShortName) -and $null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($realId) -and -not $DiagScrubMap.ContainsKey($ShortName))
+                {
+                    $DiagScrubMap[$ShortName] = $Global:ResourceNameDictionary[$realId]
+                }
+                if ($realId -match '(?i)/resourceGroups/([^/]+)')
+                {
+                    $RgName = $Matches[1]
+                    if (-not [string]::IsNullOrEmpty($RgName) -and $null -ne $Global:ResourceResourceGroupDictionary -and $Global:ResourceResourceGroupDictionary.ContainsKey($realId) -and -not $DiagScrubMap.ContainsKey($RgName))
+                    {
+                        $DiagScrubMap[$RgName] = $Global:ResourceResourceGroupDictionary[$realId]
+                    }
+                }
+                if ($realId -match '(?i)/subscriptions/([^/]+)')
+                {
+                    $SubGuid = $Matches[1]
+                    if (-not [string]::IsNullOrEmpty($SubGuid) -and $null -ne $Global:ResourceSubscriptionDictionary -and $Global:ResourceSubscriptionDictionary.ContainsKey($realId) -and -not $DiagScrubMap.ContainsKey($SubGuid))
+                    {
+                        $DiagScrubMap[$SubGuid] = $Global:ResourceSubscriptionDictionary[$realId]
+                    }
+                }
+            }
+        }
+        if ($null -ne $Global:TagValueDictionary)
+        {
+            foreach ($tagReal in $Global:TagValueDictionary.Keys) { if (-not [string]::IsNullOrEmpty($tagReal) -and -not $DiagScrubMap.ContainsKey($tagReal)) { $DiagScrubMap[$tagReal] = $Global:TagValueDictionary[$tagReal] } }
+        }
+        if ($null -ne $Global:FreeTextDictionary)
+        {
+            foreach ($ftReal in $Global:FreeTextDictionary.Keys) { if (-not [string]::IsNullOrEmpty($ftReal) -and -not $DiagScrubMap.ContainsKey($ftReal)) { $DiagScrubMap[$ftReal] = $Global:FreeTextDictionary[$ftReal] } }
+        }
+
+        # Phase durations rendered as "Nmin SS sec" (zero-padded seconds), e.g.
+        # 245.3s -> "4min 05 sec". Kept as pre-formatted strings so the emit
+        # below just prints them.
+        $PhaseTimingsText = [ordered]@{}
+        if ($null -ne $PhaseTimings)
+        {
+            foreach ($PhaseName in $PhaseTimings.Keys)
+            {
+                $PhaseTotalSec = [int][math]::Round(([TimeSpan]$PhaseTimings[$PhaseName]).TotalSeconds)
+                $PhaseTimingsText[$PhaseName] = ('{0}min {1:D2} sec' -f [int][math]::Floor($PhaseTotalSec / 60), ($PhaseTotalSec % 60))
+            }
+        }
+
+        # Health globals. Where-Object { $null -ne $_ } guards the standalone-run
+        # case: these are only nil-initialized by the wrapper, so in a direct
+        # ResourceInventory.ps1 run they can be $null, and @($null) is a ONE-element
+        # array (the single $null) that would otherwise render a phantom "failure"
+        # line. Filtering nulls yields a genuine "0" when there were none.
+        $CollectorFails = @(@($Global:CollectorFailures) | Where-Object { $null -ne $_ })
+        $MetricsSkips = @(@($Global:MetricsFailedSubs) | Where-Object { $null -ne $_ })
+        $ConsumpSkips = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
+
+        $DiagLines = [System.Collections.Generic.List[string]]::new()
+        if ($Obfuscated)
+        {
+            $DiagLines.Add('Resource Discovery for Azure - shareable diagnostics (obfuscated run)')
+            $DiagLines.Add('Safe to share: identifiers are obfuscated/masked. Human-readable')
+            $DiagLines.Add('troubleshooting log - NOT report data, do not ingest into tables.')
+        }
+        else
+        {
+            $DiagLines.Add('Resource Discovery for Azure - diagnostics (default/non-obfuscated run)')
+            $DiagLines.Add('NOTE: this bundle is NOT obfuscated - the report itself contains real')
+            $DiagLines.Add('identifiers. This log masks GUIDs/emails but treat the whole bundle as')
+            $DiagLines.Add('sensitive. Human-readable troubleshooting log - NOT report data, do not')
+            $DiagLines.Add('ingest into tables.')
+        }
+        $DiagLines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+        $DiagLines.Add(('Tool version    : {0}' -f [string]$Version))
+        $DiagLines.Add('')
+        $DiagLines.Add('Phase timings:')
+        if ($PhaseTimingsText.Count -gt 0)
+        {
+            foreach ($PhaseName in $PhaseTimingsText.Keys) { $DiagLines.Add(('  {0}: {1}' -f $PhaseName, $PhaseTimingsText[$PhaseName])) }
+        }
+        else
+        {
+            $DiagLines.Add('  (none recorded)')
+        }
+        $DiagLines.Add('')
+        $DiagLines.Add(('Collector failures: {0}' -f $CollectorFails.Count))
+        foreach ($cfItem in $CollectorFails)
+        {
+            $DiagLines.Add(('  [sub {0}] {1}: {2}' -f (Protect-DiagnosticText ([string]$cfItem.Id) $DiagScrubMap), [string]$cfItem.Module, (Protect-DiagnosticText ([string]$cfItem.Message) $DiagScrubMap)))
+        }
+        $DiagLines.Add('')
+        $DiagLines.Add(('Metrics auth-skipped subscriptions: {0}' -f $MetricsSkips.Count))
+        foreach ($msItem in $MetricsSkips)
+        {
+            $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$msItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$msItem.Message) $DiagScrubMap)))
+        }
+        $DiagLines.Add('')
+        $DiagLines.Add(('Consumption failed/incomplete subscriptions: {0}' -f $ConsumpSkips.Count))
+        foreach ($csItem in $ConsumpSkips)
+        {
+            $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$csItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$csItem.Message) $DiagScrubMap)))
+        }
+
+        $DiagnosticsFile = ($DefaultPath + "Diagnostics_" + $ReportName + "_" + $RunDateTime + ".log")
+        ($DiagLines -join [Environment]::NewLine) | Out-File -FilePath $DiagnosticsFile -Encoding utf8
+        Write-Log -Message ('Shareable diagnostics log written: {0}' -f (Split-Path -Path $DiagnosticsFile -Leaf)) -Severity 'Info'
+        return $DiagnosticsFile
+    }
+    catch
+    {
+        Write-Log -Message ('Could not build/write shareable diagnostics log: {0}' -f $_.Exception.Message) -Severity 'Warning'
+        return $null
+    }
+}

@@ -385,3 +385,91 @@ Describe 'Resolve-AccessPreflight (up-front access gate decision)' {
         @($D.InaccessibleIds).Count | Should -Be 0
     }
 }
+
+Describe 'Get-RunSummaryLogContent run-level shareable log' {
+
+    BeforeAll {
+        # Representative health collections carrying REAL-looking names/ids/messages,
+        # so the obfuscated-mode leak guard is exercised against concrete strings.
+        $script:Failed = @([pscustomobject]@{ Name = 'Contoso-Prod-Sub'; Id = '11111111-1111-1111-1111-111111111111' })
+        $script:NoAccess = @([pscustomobject]@{ Name = 'Fabrikam-Locked'; Id = '22222222-2222-2222-2222-222222222222' })
+        $script:CollectorFails = @([pscustomobject]@{ Id = '33333333-3333-3333-3333-333333333333'; Module = 'StreamAnalytics'; Message = 'threw on Contoso-Prod-Sub resource' })
+        $script:MetricsSkips = @([pscustomobject]@{ Name = 'Fabrikam-Locked'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'no usable token' })
+    }
+
+    It 'obfuscated run emits counts only - no names, ids, or raw messages' {
+        $Lines = Get-RunSummaryLogContent -Obfuscated `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions $script:Failed -EmptyNoAccess $script:NoAccess `
+            -CollectorFailures $script:CollectorFails -MetricsFailedSubs $script:MetricsSkips
+        $Text = ($Lines -join "`n")
+
+        # No identifiers of any kind leak into an obfuscated bundle.
+        $Text | Should -Not -Match 'Contoso'
+        $Text | Should -Not -Match 'Fabrikam'
+        $Text | Should -Not -Match 'StreamAnalytics'
+        $Text | Should -Not -Match '11111111-1111-1111-1111-111111111111'
+        $Text | Should -Not -Match '22222222-2222-2222-2222-222222222222'
+        $Text | Should -Not -Match '33333333-3333-3333-3333-333333333333'
+        $Text | Should -Not -Match 'no usable token'
+        # But the counts ARE present.
+        $Text | Should -Match 'Failed subscriptions\s+:\s+1'
+        $Text | Should -Match 'Collector failures\s+:\s+1'
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+1'
+    }
+
+    It 'non-obfuscated run includes per-subscription detail' {
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions $script:Failed -EmptyNoAccess $script:NoAccess `
+            -CollectorFailures $script:CollectorFails -MetricsFailedSubs $script:MetricsSkips
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Match 'Contoso-Prod-Sub'
+        $Text | Should -Match 'Fabrikam-Locked'
+        $Text | Should -Match 'StreamAnalytics'
+        $Text | Should -Match 'no usable token'
+    }
+
+    It 'drops TenantID / SubscriptionID / InventoryRoot from the parameter list' {
+        $Params = @{
+            TenantID        = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+            SubscriptionID  = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+            InventoryRoot   = '/home/someone/InventoryReports'
+            SkipConsumption = [switch]$true
+            ParallelStreams = 4
+        }
+        $Text = (Get-RunSummaryLogContent -InvocationParameters $Params -Obfuscated) -join "`n"
+
+        $Text | Should -Not -Match 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $Text | Should -Not -Match 'bbbbbbbb-bbbb'
+        $Text | Should -Not -Match '/home/someone'
+        $Text | Should -Match '-SkipConsumption'
+        # Allowlisted tuning knob keeps its value even under obfuscation.
+        $Text | Should -Match '-ParallelStreams 4'
+    }
+
+    It 'omits a non-allowlisted valued parameter value under obfuscation but keeps it otherwise' {
+        $Params = @{ SomeFutureValuedParam = 'secret-value-123' }
+
+        $Obf = (Get-RunSummaryLogContent -InvocationParameters $Params -Obfuscated) -join "`n"
+        $Obf | Should -Not -Match 'secret-value-123'
+        $Obf | Should -Match '-SomeFutureValuedParam <value omitted>'
+
+        $Clear = (Get-RunSummaryLogContent -InvocationParameters $Params) -join "`n"
+        $Clear | Should -Match '-SomeFutureValuedParam secret-value-123'
+    }
+
+    It 'renders a duration when start/end are supplied' {
+        $Start = [datetime]'2026-01-01T00:00:00'
+        $End = $Start.AddSeconds(125)
+        $Text = (Get-RunSummaryLogContent -StartTime $Start -EndTime $End) -join "`n"
+        $Text | Should -Match 'Total duration  : 2m 05s'
+    }
+
+    It 'handles null/empty health collections without throwing (standalone-run safety)' {
+        { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
+                -FailedSubscriptions $null -CollectorFailures $null `
+                -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
+    }
+}

@@ -865,3 +865,197 @@ function Test-ConsumptionAccess
         }
     }
 }
+
+# Build the run-level "RunSummary.log" content for the consolidated
+# AllSubscriptions zip. Pure and deterministic apart from the generation
+# timestamp (no file I/O, no Azure calls) so it is unit-testable offline: the
+# caller writes the returned lines to RunSummary.log and adds that file to the
+# outer zip.
+#
+# Safety posture: the wrapper does NOT hold the per-subscription obfuscation
+# dictionaries (those live in the child ResourceInventory.ps1 scope - in a
+# separate process for parallel runs), so it CANNOT tokenize a real identifier.
+# Therefore an obfuscated run emits COUNTS ONLY - never subscription names, ids,
+# or raw failure messages - so the shipped log is safe to share. A
+# non-obfuscated run emits the per-subscription detail (names / ids / messages),
+# consistent with the rest of that (non-obfuscated) bundle. The TenantID and
+# SubscriptionID parameters are always dropped from the recorded parameter list
+# regardless of mode (the operator asked for the invocation flags, not the
+# targeted identifiers).
+function Get-RunSummaryLogContent
+{
+    param(
+        # PSBoundParameters (or any name -> value map) of the wrapper invocation.
+        [System.Collections.IDictionary]$InvocationParameters = @{},
+        [string]$Version,
+        [datetime]$StartTime,
+        [datetime]$EndTime,
+        [int]$Visible,
+        [int]$Excluded,
+        [int]$Eligible,
+        [int]$Processed,
+        [int]$Skipped,
+        # Per-subscription health collections ({ Name; Id } / { Name; Id; Message }).
+        $EmptyNoAccess = @(),
+        $EmptyGenuinelyEmpty = @(),
+        $EmptyUndetermined = @(),
+        $FailedSubscriptions = @(),
+        $CollectorFailures = @(),
+        $MetricsFailedSubs = @(),
+        $ConsumptionFailedSubs = @(),
+        [int]$ConsumptionRecordCount = 0,
+        # When set, emit counts only (no names / ids / raw messages).
+        [switch]$Obfuscated
+    )
+
+    # Parameters that identify the TARGET rather than describe the run - never
+    # recorded, in either mode. Matched case-insensitively.
+    $ExcludedParamNames = @('TenantID', 'SubscriptionID', 'InventoryRoot')
+
+    # Valued (non-switch) parameters whose VALUE is safe to print verbatim even in
+    # an obfuscated bundle (tuning knobs, never identifiers). Any other valued
+    # parameter has its value omitted under -Obfuscated so a future value-carrying
+    # parameter cannot leak into a shared log.
+    $SafeValueParamNames = @('ParallelStreams', 'ConcurrencyLimit')
+
+    # Normalise possibly-$null collections to real arrays so .Count is stable.
+    $NoAccess = @(@($EmptyNoAccess) | Where-Object { $null -ne $_ })
+    $Empty = @(@($EmptyGenuinelyEmpty) | Where-Object { $null -ne $_ })
+    $Undetermined = @(@($EmptyUndetermined) | Where-Object { $null -ne $_ })
+    $Failed = @(@($FailedSubscriptions) | Where-Object { $null -ne $_ })
+    $Collector = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
+    $Metrics = @(@($MetricsFailedSubs) | Where-Object { $null -ne $_ })
+    $Consumption = @(@($ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
+
+    $Lines = [System.Collections.Generic.List[string]]::new()
+    $Lines.Add('Resource Discovery for Azure - run summary')
+    if ($Obfuscated)
+    {
+        $Lines.Add('Obfuscated run: subscription names/ids and raw error text are omitted')
+        $Lines.Add('(counts only) so this log is safe to share.')
+    }
+    else
+    {
+        $Lines.Add('Non-obfuscated run: contains real subscription names/ids.')
+    }
+    $Lines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+    $Lines.Add(('Tool version    : {0}' -f [string]$Version))
+    if ($StartTime -is [datetime] -and $StartTime -ne [datetime]::MinValue)
+    {
+        $Lines.Add(('Run started     : {0}' -f $StartTime.ToString('yyyy-MM-dd HH:mm:ss')))
+    }
+    if ($EndTime -is [datetime] -and $EndTime -ne [datetime]::MinValue)
+    {
+        $Lines.Add(('Run finished    : {0}' -f $EndTime.ToString('yyyy-MM-dd HH:mm:ss')))
+    }
+    if (($StartTime -is [datetime]) -and ($EndTime -is [datetime]) -and ($EndTime -ge $StartTime) -and ($StartTime -ne [datetime]::MinValue))
+    {
+        $TotalSec = [int][math]::Round((($EndTime - $StartTime).TotalSeconds))
+        $DurText = if ($TotalSec -ge 3600)
+        {
+            '{0}h {1:D2}m {2:D2}s' -f [int][math]::Floor($TotalSec / 3600), [int][math]::Floor(($TotalSec % 3600) / 60), ($TotalSec % 60)
+        }
+        else
+        {
+            '{0}m {1:D2}s' -f [int][math]::Floor($TotalSec / 60), ($TotalSec % 60)
+        }
+        $Lines.Add(('Total duration  : {0}' -f $DurText))
+    }
+
+    # --- Invocation parameters (target identifiers dropped) ------------------
+    $Lines.Add('')
+    $Lines.Add('Parameters:')
+    $ParamNames = @()
+    if ($null -ne $InvocationParameters) { $ParamNames = @($InvocationParameters.Keys | Sort-Object) }
+    $Emitted = 0
+    foreach ($Name in $ParamNames)
+    {
+        if ($ExcludedParamNames -contains $Name) { continue }
+        $Value = $InvocationParameters[$Name]
+        # Switch / boolean parameters: list the flag only when it was enabled.
+        if ($Value -is [switch])
+        {
+            if ($Value.IsPresent) { $Lines.Add(('  -{0}' -f $Name)); $Emitted++ }
+            continue
+        }
+        if ($Value -is [bool])
+        {
+            if ($Value) { $Lines.Add(('  -{0}' -f $Name)); $Emitted++ }
+            continue
+        }
+        # Valued parameter. Print the value verbatim only for known-safe tuning
+        # knobs OR any non-obfuscated run; otherwise omit the value so an
+        # obfuscated bundle never carries a raw parameter value.
+        if (($SafeValueParamNames -contains $Name) -or (-not $Obfuscated))
+        {
+            $Lines.Add(('  -{0} {1}' -f $Name, [string]$Value))
+        }
+        else
+        {
+            $Lines.Add(('  -{0} <value omitted>' -f $Name))
+        }
+        $Emitted++
+    }
+    if ($Emitted -eq 0) { $Lines.Add('  (defaults - no switches or values passed)') }
+
+    # --- Subscription tally --------------------------------------------------
+    $Lines.Add('')
+    $Lines.Add('Subscriptions:')
+    $Lines.Add(('  Visible   : {0}' -f $Visible))
+    $Lines.Add(('  Excluded  : {0} (non-Enabled)' -f $Excluded))
+    $Lines.Add(('  Eligible  : {0}' -f $Eligible))
+    $Lines.Add(('  Skipped   : {0} (already completed / resume)' -f $Skipped))
+    $Lines.Add(('  Processed : {0}' -f $Processed))
+    $Lines.Add(('  Failed    : {0}' -f $Failed.Count))
+    $Lines.Add(('  0 resources - no access   : {0}' -f $NoAccess.Count))
+    $Lines.Add(('  0 resources - empty       : {0}' -f $Empty.Count))
+    $Lines.Add(('  0 resources - undetermined: {0}' -f $Undetermined.Count))
+
+    # --- Health --------------------------------------------------------------
+    $Lines.Add('')
+    $Lines.Add('Health:')
+    $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount))
+    $Lines.Add(('  Failed subscriptions          : {0}' -f $Failed.Count))
+    $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
+    $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
+    $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))
+
+    # Per-subscription detail is emitted ONLY for a non-obfuscated bundle, where
+    # real names already appear throughout the report. An obfuscated bundle stops
+    # at the counts above.
+    if (-not $Obfuscated)
+    {
+        if ($Failed.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Failed subscriptions (detail):')
+            foreach ($FailedSub in $Failed) { $Lines.Add(('  - {0} ({1})' -f [string]$FailedSub.Name, [string]$FailedSub.Id)) }
+        }
+        if ($NoAccess.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('0-resource subscriptions with NO ACCESS (grant Reader, re-run -Resume):')
+            foreach ($NoAccessSub in $NoAccess) { $Lines.Add(('  - {0} ({1})' -f [string]$NoAccessSub.Name, [string]$NoAccessSub.Id)) }
+        }
+        if ($Collector.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Collector failures (detail):')
+            foreach ($CollectorFail in $Collector) { $Lines.Add(('  - [sub {0}] {1}: {2}' -f [string]$CollectorFail.Id, [string]$CollectorFail.Module, [string]$CollectorFail.Message)) }
+        }
+        if ($Metrics.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Metrics auth-skipped subscriptions (detail):')
+            foreach ($MetricSub in $Metrics) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$MetricSub.Name, [string]$MetricSub.Id, [string]$MetricSub.Message)) }
+        }
+        if ($Consumption.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Consumption failed subscriptions (detail):')
+            foreach ($ConsumpSub in $Consumption) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$ConsumpSub.Name, [string]$ConsumpSub.Id, [string]$ConsumpSub.Message)) }
+        }
+    }
+
+    return $Lines.ToArray()
+}

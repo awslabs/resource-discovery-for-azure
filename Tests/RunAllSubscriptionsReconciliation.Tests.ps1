@@ -467,6 +467,27 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Match 'Total duration  : 2m 05s'
     }
 
+    It 'renders the host / parallelism section in both modes when values are supplied' {
+        foreach ($Obf in @($true, $false))
+        {
+            $Text = (Get-RunSummaryLogContent -Obfuscated:$Obf `
+                    -HostVCpu 8 -HostRamGB 32 `
+                    -Streams 4 -StreamsSource 'auto' `
+                    -Concurrency 16 -ConcurrencySource 'explicit') -join "`n"
+
+            $Text | Should -Match 'Host / parallelism:'
+            $Text | Should -Match 'Host vCPU\s+:\s+8'
+            $Text | Should -Match 'Host RAM \(GB\)\s+:\s+32'
+            $Text | Should -Match 'Parallel streams\s+:\s+4 \(auto\)'
+            $Text | Should -Match 'Concurrency limit\s+:\s+16 \(explicit\)'
+        }
+    }
+
+    It 'omits the host / parallelism section entirely when no host values are supplied' {
+        $Text = (Get-RunSummaryLogContent -Visible 1 -Eligible 1 -Processed 1) -join "`n"
+        $Text | Should -Not -Match 'Host / parallelism:'
+    }
+
     It 'handles null/empty health collections without throwing (standalone-run safety)' {
         { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
                 -FailedSubscriptions $null -CollectorFailures $null `

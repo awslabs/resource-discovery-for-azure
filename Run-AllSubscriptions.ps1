@@ -2065,6 +2065,9 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             -MetricsFailedSubs $Global:MetricsFailedSubs `
             -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
             -ConsumptionRecordCount $ConsumptionRecordTotal `
+            -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
+            -Streams $ParallelStreams -StreamsSource $StreamsSrc `
+            -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `
             -Obfuscated:$Obfuscate
         $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
 

@@ -200,7 +200,15 @@ function New-RdaAllSubHtmlSummary
         $PlatOS,
 
         # Tier 2 (per-service aggregate + charts) when set; Tier 1 index-only otherwise.
-        [switch]$Detailed
+        [switch]$Detailed,
+
+        # When set, this summary is part of a shareable (obfuscated) bundle and must
+        # carry NO real identifiers: the tenant id is suppressed and the run-health
+        # banners are rendered as COUNTS ONLY (no subscription names). The caller
+        # (the wrapper) knows the true obfuscation mode and passes it; even without
+        # it, a summary whose sampled per-sub names look obfuscated is treated the
+        # same way (safe default).
+        [switch]$Obfuscated
     )
 
     $ErrorActionPreference = 'Stop'
@@ -282,6 +290,11 @@ function New-RdaAllSubHtmlSummary
         if ($ObfHits -gt ($Samples.Count * 0.7)) { $ObfuscationStatus = 'obfuscated' }
     }
 
+    # Redaction gate for the shareable bundle: explicit -Obfuscated from the caller
+    # OR a sampled-obfuscated posture. When set, the tenant id and health-banner
+    # subscription names (real identifiers the wrapper cannot tokenize) are omitted.
+    $IsObfuscated = $Obfuscated.IsPresent -or ($ObfuscationStatus -eq 'obfuscated')
+
     $SubReports = @($SubReports | Sort-Object -Property Total -Descending)
     $RunTotalResources = [int](($SubReports | Measure-Object -Property Total -Sum).Sum)
     $SubCount = $SubReports.Count
@@ -289,7 +302,7 @@ function New-RdaAllSubHtmlSummary
 
     # --- Render --------------------------------------------------------------
     $Generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
-    $TenantSafe = if ([string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
+    $TenantSafe = if ($IsObfuscated -or [string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
     $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { ConvertTo-HtmlSafe ([string]$PlatOS) }
 
@@ -312,7 +325,14 @@ function New-RdaAllSubHtmlSummary
     $Banners = New-Object System.Text.StringBuilder
     if ($FailedList.Count -gt 0)
     {
-        [void]$Banners.AppendFormat('<div class="banner err"><b>{0} subscription(s) failed to process.</b> These are missing from the totals below: {1}</div>', $FailedList.Count, (ConvertTo-HtmlSafe (($FailedList | ForEach-Object { [string]$_ }) -join ', ')))
+        if ($IsObfuscated)
+        {
+            [void]$Banners.AppendFormat('<div class="banner err"><b>{0} subscription(s) failed to process.</b> These are missing from the totals below.</div>', $FailedList.Count)
+        }
+        else
+        {
+            [void]$Banners.AppendFormat('<div class="banner err"><b>{0} subscription(s) failed to process.</b> These are missing from the totals below: {1}</div>', $FailedList.Count, (ConvertTo-HtmlSafe (($FailedList | ForEach-Object { [string]$_ }) -join ', ')))
+        }
     }
     if ($EmptyCount -gt 0)
     {
@@ -320,11 +340,25 @@ function New-RdaAllSubHtmlSummary
     }
     if ($ConsumpList.Count -gt 0)
     {
-        [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had consumption (billing) issues.</b> Cost data may be incomplete for: {1}</div>', $ConsumpList.Count, (ConvertTo-HtmlSafe (($ConsumpList | ForEach-Object { [string]$_.Name }) -join ', ')))
+        if ($IsObfuscated)
+        {
+            [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had consumption (billing) issues.</b> Cost data may be incomplete for those subscriptions.</div>', $ConsumpList.Count)
+        }
+        else
+        {
+            [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had consumption (billing) issues.</b> Cost data may be incomplete for: {1}</div>', $ConsumpList.Count, (ConvertTo-HtmlSafe (($ConsumpList | ForEach-Object { [string]$_.Name }) -join ', ')))
+        }
     }
     if ($MetricsList.Count -gt 0)
     {
-        [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had metrics issues.</b> Metric data may be incomplete for: {1}</div>', $MetricsList.Count, (ConvertTo-HtmlSafe (($MetricsList | ForEach-Object { [string]$_.Name }) -join ', ')))
+        if ($IsObfuscated)
+        {
+            [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had metrics issues.</b> Metric data may be incomplete for those subscriptions.</div>', $MetricsList.Count)
+        }
+        else
+        {
+            [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had metrics issues.</b> Metric data may be incomplete for: {1}</div>', $MetricsList.Count, (ConvertTo-HtmlSafe (($MetricsList | ForEach-Object { [string]$_.Name }) -join ', ')))
+        }
     }
     if ($CollectorList.Count -gt 0)
     {

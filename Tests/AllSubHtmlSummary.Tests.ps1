@@ -10,9 +10,11 @@
 # -Detailed charts, -SinceTime scoping, and fail-soft behaviour on an unreadable
 # inventory.
 #
-# No live Azure and no literal GUIDs of any kind: obfuscated fixtures mint
-# prod_/nonprod_ tokens at runtime with [guid]::NewGuid(), so no real (or
-# hard-coded) GUID lives in this file.
+# No live Azure and no real GUIDs: obfuscated fixtures mint prod_/nonprod_
+# tokens at runtime with [guid]::NewGuid(). The only literal GUID in this file
+# is the Azure documentation placeholder (12345678-1234-1234-1234-123456789012),
+# used by the obfuscation-redaction tests to prove a passed-in tenant id is
+# suppressed under -Obfuscated.
 # =============================================================================
 
 BeforeAll {
@@ -362,5 +364,48 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
                 Should -Be 0 -Because 'the portable bundle must carry no *_revealed* entry'
         }
         finally { $Archive.Dispose() }
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak guard)' {
+
+    It 'under -Obfuscated suppresses the tenant id and renders health banners counts-only (no subscription names)' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        # Azure documentation placeholder GUID (not a real tenant).
+        $RealTenant = '12345678-1234-1234-1234-123456789012'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated `
+            -TenantId $RealTenant `
+            -FailedSubscriptions @('Contoso-Prod-Sub') `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) `
+            -MetricsFailedSubs @([pscustomobject]@{ Name = 'Northwind-Metrics'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        # No real identifiers reach the shareable summary.
+        $Html | Should -Not -Match ([regex]::Escape($RealTenant))
+        $Html | Should -Not -Match 'Tenant:'
+        $Html | Should -Not -Match 'Contoso-Prod-Sub'
+        $Html | Should -Not -Match 'Fabrikam-Billing'
+        $Html | Should -Not -Match 'Northwind-Metrics'
+        # But the banners (and their counts) still render so the operator sees the health signal.
+        $Html | Should -Match 'failed to process'
+        $Html | Should -Match 'consumption \(billing\) issues'
+        $Html | Should -Match 'metrics issues'
+    }
+
+    It 'without -Obfuscated a non-obfuscated bundle still lists the affected subscription names' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Contoso Production' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out `
+            -TenantId '12345678-1234-1234-1234-123456789012' `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
+        $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
     }
 }

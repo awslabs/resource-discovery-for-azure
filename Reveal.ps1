@@ -70,6 +70,16 @@
     explicit -StagingDirectory, the most recent RevealedStaging_* under the
     inventory root is auto-detected.
 
+.PARAMETER ParallelStreams
+    ALL-SUBSCRIPTIONS MODE. How many per-subscription folders to reveal
+    concurrently. Folders are independent (each has its own report zip +
+    dictionary and writes its own output), so this scales the wall-clock of a
+    large run roughly by the chosen degree. Defaults to 1 (sequential, identical
+    to the prior behaviour). Each concurrent reveal is still bounded by its own
+    -FolderTimeoutMinutes cap. Pick a value near the box's core count; very high
+    values give diminishing returns because each reveal is disk/CPU heavy
+    (Expand-Archive / Compress-Archive).
+
 .PARAMETER FolderTimeoutMinutes
     ALL-SUBSCRIPTIONS MODE. Hard cap, in minutes, on how long a single folder's
     reveal may run before it is abandoned (recorded as a timeout failure) so the
@@ -142,6 +152,10 @@ param(
     [Parameter(ParameterSetName = 'All')]
     [ValidateRange(0.1, 10080)]
     [double]   $FolderTimeoutMinutes = 20,
+
+    [Parameter(ParameterSetName = 'All')]
+    [ValidateRange(1, 64)]
+    [int]      $ParallelStreams = 1,
 
     # ---- Common to both modes ----
     [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')]
@@ -276,8 +290,6 @@ $RevealedCount = 0
 $ResumedCount = 0
 $SkippedItems = @()
 $FailedItems = @()
-$FolderIndex = 0
-$FolderTotal = $Folders.Count
 
 # Hard cap on how long a single folder's reveal may run. A pathological report
 # (e.g. an unusually large or malformed zip) can make Expand-Archive /
@@ -288,13 +300,13 @@ $FolderTotal = $Folders.Count
 # (e.g. 0.5) at a whole >=1s Wait-Job timeout.
 $RevealTimeoutSeconds = [int][math]::Ceiling($FolderTimeoutMinutes * 60)
 
+# Resolve each folder's obfuscated report + dictionary up front, handling the
+# cheap cases synchronously (missing pair -> skip; already-revealed under
+# -Resume -> skip). Everything that needs the reveal engine becomes a queued
+# work item, drained by the bounded pool below.
+$Queue = [System.Collections.Generic.Queue[object]]::new()
 foreach ($Folder in $Folders)
 {
-    $FolderIndex++
-    # Unified progress reporter: interactive bar + non-interactive line + optional
-    # heartbeat. See Write-RdaProgress in Functions/Common.Functions.ps1.
-    Write-RdaProgress -Activity 'Revealing per-subscription reports' -CurrentItem $Folder.Name -Index $FolderIndex -Total $FolderTotal
-
     $Dict = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
 
@@ -333,90 +345,92 @@ foreach ($Folder in $Folders)
         $OutPath = Join-Path $StagingDirectory ($Folder.Name + '_' + $Zip.Name)
     }
 
-    $RevealJob = $null
-    try
+    $Queue.Enqueue([pscustomobject]@{ Folder = $Folder.Name; Zip = $Zip.FullName; Dict = $Dict.FullName; OutPath = $OutPath })
+}
+
+# Bounded job pool. Keep up to -ParallelStreams reveals in flight, each its own
+# child process (so a pathological Expand/Compress can be stopped instead of
+# wedging the batch) bounded by its OWN per-folder deadline ($RevealTimeoutSeconds).
+# The parent reaps every job serially in this one loop, so the shared counters
+# and record lists are mutated only on the parent thread - no cross-thread races.
+# The folders are independent (each has its own report zip + dictionary and
+# writes its own staged output), so revealing several at once is safe and the
+# obfuscation/reveal determinism is per-folder. -ParallelStreams 1 reproduces
+# the original one-at-a-time behaviour.
+$TotalToReveal = $Queue.Count
+$DoneCount = 0
+$Running = [System.Collections.Generic.List[object]]::new()
+
+while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
+{
+    # Fill free slots from the queue, stamping each job with its own deadline.
+    while ($Running.Count -lt $ParallelStreams -and $Queue.Count -gt 0)
     {
-        # Run the single-report reveal as a background job bounded by
-        # $RevealTimeoutSeconds. A folder whose zip is pathological (huge or
-        # malformed) can make Expand-Archive / Compress-Archive run effectively
-        # forever; an in-process call would hang the whole batch there with no
-        # way to interrupt it. A job in a child process can be stopped, so one
-        # bad folder becomes a recorded timeout instead of a dead run.
-        #
-        # The job dot-sources the reveal functions file into its own (child
-        # process) scope, then calls Invoke-RdaReveal. Arguments are passed via
-        # -ArgumentList (object-based), so the [string[]] $Fields array binds
-        # correctly. Invoke-RdaReveal raises terminating errors via throw, which
-        # surface as a job failure and are re-thrown by Receive-Job into the
-        # catch below. Host chatter is redirected away to keep a large run
-        # readable.
-        $RevealJob = Start-Job -ScriptBlock {
+        $Item = $Queue.Dequeue()
+        $Job = Start-Job -ScriptBlock {
             param($RevealFunctions, $InputZip, $DictionaryPath, $Fields, $OutputZip)
             . $RevealFunctions
             Invoke-RdaReveal -InputZip $InputZip -DictionaryPath $DictionaryPath -Fields $Fields -OutputZip $OutputZip *> $null
-        } -ArgumentList $RevealFunctions, $Zip.FullName, $Dict.FullName, $Fields, $OutPath
+        } -ArgumentList $RevealFunctions, $Item.Zip, $Item.Dict, $Fields, $Item.OutPath
+        $LaunchUtc = [DateTime]::UtcNow
+        $Running.Add([pscustomobject]@{ Item = $Item; Job = $Job; StartUtc = $LaunchUtc; Deadline = $LaunchUtc.AddSeconds($RevealTimeoutSeconds) })
+    }
 
-        # Poll the job in short slices so the operator sees a live per-folder
-        # heartbeat (elapsed vs cap) instead of one frozen line for the whole
-        # reveal: a big folder's Expand/Compress can run for minutes and the
-        # child job's own output is suppressed, so without this the run looks
-        # hung. $Finished stays $null iff the per-folder cap ($RevealTimeoutSeconds)
-        # is reached, which drives the existing timeout-abandon path below.
-        $FolderStart = [DateTime]::UtcNow
-        $Deadline = $FolderStart.AddSeconds($RevealTimeoutSeconds)
-        $Finished = $null
-        while ($true)
+    Start-Sleep -Seconds 2
+
+    # Reap finished (Completed/Failed/Stopped) or timed-out jobs; keep the rest.
+    $StillRunning = [System.Collections.Generic.List[object]]::new()
+    foreach ($R in $Running)
+    {
+        if (@('Completed', 'Failed', 'Stopped') -contains $R.Job.State)
         {
-            $Finished = Wait-Job -Job $RevealJob -Timeout 3
-            if ($null -ne $Finished) { break }
-            if ([DateTime]::UtcNow -ge $Deadline) { break }
-            $ElapsedSec = [int]([DateTime]::UtcNow - $FolderStart).TotalSeconds
-            Write-RdaProgress -Activity 'Revealing per-subscription reports' `
-                -CurrentItem ('{0}  [elapsed {1}s / cap {2}s]' -f $Folder.Name, $ElapsedSec, $RevealTimeoutSeconds) `
-                -Index $FolderIndex -Total $FolderTotal
+            try
+            {
+                # Re-throw any terminating error the child raised into the catch.
+                Receive-Job -Job $R.Job -ErrorAction Stop | Out-Null
+                if (Test-Path -LiteralPath $R.Item.OutPath)
+                {
+                    $RevealedCount++
+                }
+                else
+                {
+                    $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = 'reveal completed but produced no output zip' }
+                }
+            }
+            catch
+            {
+                # Drop any partial/truncated output so it is neither consolidated
+                # nor treated as done by a later -Resume.
+                Remove-Item -LiteralPath $R.Item.OutPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath (($R.Item.OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
+                $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = $_.Exception.Message }
+            }
+            Remove-Job -Job $R.Job -Force -ErrorAction SilentlyContinue
+            $DoneCount++
         }
-
-        if ($null -eq $Finished)
+        elseif ([DateTime]::UtcNow -ge $R.Deadline)
         {
-            # Exceeded the per-folder cap. Kill the child process so it cannot
-            # keep the batch hostage, record it, and move on to the next folder.
-            Stop-Job -Job $RevealJob -ErrorAction SilentlyContinue
-            Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue
-            $RevealJob = $null
-            # A Stop-Job mid-compress leaves the engine's *.partial.zip behind
-            # (the final $OutPath only ever appears after a successful atomic
-            # rename). Delete both defensively so neither is swept into the
-            # consolidated outer zip nor mistaken for completed work by -Resume.
-            Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath (($OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
-            $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = ("timed out after {0:0.##} minutes" -f ($RevealTimeoutSeconds / 60)) }
-            continue
-        }
-
-        # Re-throw any terminating error the child raised into the catch below.
-        Receive-Job -Job $RevealJob -ErrorAction Stop | Out-Null
-        Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue
-        $RevealJob = $null
-
-        if (Test-Path -LiteralPath $OutPath)
-        {
-            $RevealedCount++
+            # Exceeded this folder's cap. Kill the child so it cannot hold a slot,
+            # clean any partial output, record the timeout, free the slot.
+            Stop-Job -Job $R.Job -ErrorAction SilentlyContinue
+            Remove-Job -Job $R.Job -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $R.Item.OutPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (($R.Item.OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
+            $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = ("timed out after {0:0.##} minutes" -f ($RevealTimeoutSeconds / 60)) }
+            $DoneCount++
         }
         else
         {
-            $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = 'reveal completed but produced no output zip' }
+            $StillRunning.Add($R)
         }
     }
-    catch
-    {
-        if ($null -ne $RevealJob) { Remove-Job -Job $RevealJob -Force -ErrorAction SilentlyContinue }
-        # Drop any partial/truncated output the failed reveal may have left (both
-        # the engine's *.partial.zip and, defensively, the final name) so neither
-        # is consolidated or treated as done on a later -Resume.
-        Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (($OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
-        $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = $_.Exception.Message }
-    }
+    $Running = $StillRunning
+
+    # Heartbeat: overall done/total plus the in-flight folders and their elapsed.
+    $InFlight = ($Running | ForEach-Object { '{0} [{1}s]' -f $_.Item.Folder, [int]([DateTime]::UtcNow - $_.StartUtc).TotalSeconds }) -join ', '
+    Write-RdaProgress -Activity 'Revealing per-subscription reports' `
+        -CurrentItem ('{0} of {1} done; {2} running: {3}' -f $DoneCount, $TotalToReveal, $Running.Count, $InFlight) `
+        -Index $DoneCount -Total $TotalToReveal
 }
 
 Write-RdaProgress -Activity 'Revealing per-subscription reports' -Completed
@@ -450,7 +464,7 @@ if ($StagedZips.Count -gt 0)
 # ---- Summary ---------------------------------------------------------------
 Write-Host ""
 Write-Host "================ Reveal Summary ================" -ForegroundColor Green
-Write-Host ("Per-subscription folders scanned : {0}" -f $FolderTotal) -ForegroundColor Green
+Write-Host ("Per-subscription folders scanned : {0}" -f $Folders.Count) -ForegroundColor Green
 Write-Host ("Paired (zip + dictionary)        : {0}" -f $PairedCount) -ForegroundColor Green
 Write-Host ("Revealed successfully            : {0}" -f $RevealedCount) -ForegroundColor Green
 Write-Host ("Skipped (already revealed-resume): {0}" -f $ResumedCount) -ForegroundColor $(if ($ResumedCount -gt 0) { 'Cyan' } else { 'Green' })

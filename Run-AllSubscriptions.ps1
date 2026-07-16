@@ -1644,456 +1644,446 @@ Write-Host "All subscriptions processed!" -ForegroundColor Green
 $ExpectedZipCount = @($SubResourceCounts).Count
 if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
 {
-    $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -ge $RunStartTime }
-            })
-        $ActualZipCount = $ActualSubZips.Count
-        if ($ActualZipCount -lt $ExpectedZipCount)
-        {
-            $MissingCount = $ExpectedZipCount - $ActualZipCount
-            Write-Host ""
-            Write-Host "ERROR: Per-subscription output verification failed." -ForegroundColor Red
-            Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $ExpectedZipCount) -ForegroundColor Red
-            Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $ActualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
-            Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
-            Write-Host ""
-            Write-Host "Subscriptions whose inner script reported success this run:" -ForegroundColor Yellow
-            foreach ($S in $SubResourceCounts)
-            {
-                Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $S.Name, $S.Id, $S.Count) -ForegroundColor Yellow
-            }
-            Write-Host ""
-            Write-Host "Likely causes:" -ForegroundColor Yellow
-            Write-Host "  - Antivirus or DLP product quarantined the per-sub zip after the inner script wrote it." -ForegroundColor Yellow
-            Write-Host "  - Cloud Shell ephemeral storage was evicted between worker exit and wrapper consolidation." -ForegroundColor Yellow
-            Write-Host "  - A parallel worker crashed after the inner script logged completion but before flushing the zip to disk." -ForegroundColor Yellow
-            Write-Host "  - Out-of-disk-space write that the inner script swallowed silently." -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
-            Write-Host "Recover by either:" -ForegroundColor Yellow
-            Write-Host "  - Locating the missing per-sub directory under the inventory root and inspecting why its zip is absent, OR" -ForegroundColor Yellow
-            Write-Host "  - Re-running with -Resume to re-collect any unprocessed/missing subscription." -ForegroundColor Yellow
-            if ($WrapperTranscriptStarted)
-            {
-                Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
-            }
-            Exit-Wrapper -Code 2
-        }
-        Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
-    }
-
-    # Consolidate per-subscription ZIPs into a single outer ZIP
-    $OuterZipFile = $null
-
-    if (Test-Path -Path $InventoryRoot -PathType Container)
+    $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    $ActualZipCount = $ActualSubZips.Count
+    if ($ActualZipCount -lt $ExpectedZipCount)
     {
-        # Filter ZIPs by current run timestamp only
-        $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object {
-                Get-ChildItem -Path $_.FullName -Filter "*.zip" -File |
-                    Where-Object { $_.LastWriteTime -ge $RunStartTime }
-                })
-
-            if ($SubZips.Count -gt 0)
-            {
-                $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-                $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
-
-                Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
-                Compress-Archive -Path $SubZips.FullName -DestinationPath $OuterZipFile -Force
-
-                Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
-            }
-            else
-            {
-                Write-Host ("No per-subscription zip files found under {0} to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
-            }
-        }
-        else
-        {
-            Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
-        }
-
-        # Aggregate "main" HTML summary across all per-subscription reports from
-        # THIS run. Built on EVERY run that produced a consolidated zip (it was
-        # previously opt-in via -MainSummary; that switch is now implied and the
-        # summary is always produced + folded into the bundle below). -Detailed
-        # still adds the run-wide by-service charts. Built purely from the on-disk
-        # per-sub artefacts (Inventory_*.json + sibling .html) scoped to
-        # $RunStartTime - no Azure calls. A failure here must never fail the run:
-        # the per-sub reports and the consolidated zip are already written, so any
-        # error is downgraded to a warning and $MainSummaryFile is left $null.
-        $MainSummaryFile = $null
-        if ($null -ne $OuterZipFile)
-        {
-            try
-            {
-                # The aggregate summary builder lives in a dot-sourced function
-                # library (Functions/AllSubHtmlSummary.Functions.ps1), which also
-                # holds the render helpers shared with Extension/Summary.ps1. A
-                # missing file throws into the surrounding catch and downgrades to
-                # a warning.
-                $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
-                if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
-                {
-                    throw "Main summary functions not found at '$AllSubSummaryFunctions'."
-                }
-                . $AllSubSummaryFunctions
-                $MainSummaryFile = Join-Path $InventoryRoot ("MainSummary_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
-                # Source the version from Version.json rather than $Global:Version:
-                # in parallel mode the inner script runs in child processes, so the
-                # wrapper's $Global:Version is never set. Fall back to it (and then
-                # blank) if the file can't be read.
-                $MainVer = $Global:Version
-                try
-                {
-                    $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
-                    $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
-                }
-                catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
-                New-RdaAllSubHtmlSummary -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime `
-                    -FailedSubscriptions $FailedSubscriptions `
-                    -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
-                    -MetricsFailedSubs $Global:MetricsFailedSubs `
-                    -CollectorFailures $Global:CollectorFailures `
-                    -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
-                    -Detailed:$Detailed -Obfuscated:$Obfuscate
-            }
-            catch
-            {
-                Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-            }
-        }
-
-        # Clean up resume state on a fully successful run (all subs processed, no failures
-        # this run AND no pending retries from a prior run). Otherwise leave it so a
-        # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-        if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
-        {
-            try
-            {
-                Remove-Item -Path $ResumeStateFile -Force
-                Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
-            }
-            catch
-            {
-                Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
-            }
-        }
-
-        # Final summary
-        $Elapsed = (Get-Date) - $RunStartTime
+        $MissingCount = $ExpectedZipCount - $ActualZipCount
         Write-Host ""
-        Write-Host "================ Summary ================" -ForegroundColor Green
-        Write-Host ("Subscriptions Visible:   {0}" -f $AllSubscriptions.Count) -ForegroundColor Green
-        if ($Excluded.Count -gt 0)
+        Write-Host "ERROR: Per-subscription output verification failed." -ForegroundColor Red
+        Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $ExpectedZipCount) -ForegroundColor Red
+        Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $ActualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
+        Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Subscriptions whose inner script reported success this run:" -ForegroundColor Yellow
+        foreach ($S in $SubResourceCounts)
         {
-            Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $Excluded.Count) -ForegroundColor Green
+            Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $S.Name, $S.Id, $S.Count) -ForegroundColor Yellow
         }
-        Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundColor Green
-        # In parallel mode, $SkippedCount is not populated by the foreach loop above
-        # (each worker skips independently). Derive it from the difference between
-        # the number of eligible subs and the number of subs that actually ran in
-        # this invocation (the union of $SubResourceCounts entries plus failures).
-        if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0)
-        {
-            $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
-            $DerivedSkip = $Subscriptions.Count - $ActuallyProcessed
-            if ($DerivedSkip -gt 0) { $SkippedCount = $DerivedSkip }
-        }
-        if ($Resume)
-        {
-            Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
-        }
-        Write-Host ("Subscriptions Processed: {0}" -f ($Subscriptions.Count - $SkippedCount)) -ForegroundColor Green
-
-        # Surface the per-subscription resource-count result so the user does not have
-        # to scan individual transcripts to find subs that came back empty. Empty subs
-        # are shown distinctly because they almost always indicate a permission gap;
-        # treating them as "successful" in the summary is misleading.
-        $EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
-        $NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
-        # Initialised here (not only inside the 0-resource branch below) so the
-        # run-summary finalization can read them unconditionally even when there
-        # were no empty subscriptions to classify.
-        $NoAccessSubs = @()
-        $GenuinelyEmptySubs = @()
-        $UnknownSubs = @()
-        if ($SubResourceCounts.Count -gt 0)
-        {
-            $TotalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
-            Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $TotalRes, $NonEmptySubs.Count) -ForegroundColor Green
-        }
-        if ($EmptySubs.Count -gt 0)
-        {
-            # A sub that returned 0 resources is either a permission gap (no role on the
-            # sub) or genuinely empty. Probe each one to label it precisely so the user
-            # knows whether to fix access or ignore it. The probe is one cheap ARM call
-            # per empty sub (only empties, so no cost on normal runs).
-            $NoAccessSubs = @()
-            $GenuinelyEmptySubs = @()
-            $UnknownSubs = @()
-            foreach ($e in $EmptySubs)
-            {
-                switch (Get-SubscriptionAccessState -SubscriptionId $e.Id)
-                {
-                    'NoAccess' { $NoAccessSubs += $e }
-                    'Empty' { $GenuinelyEmptySubs += $e }
-                    default { $UnknownSubs += $e }
-                }
-            }
-
-            Write-Host ""
-            Write-Host ("Subscriptions with 0 resources: {0}" -f $EmptySubs.Count) -ForegroundColor Yellow
-
-            if ($NoAccessSubs.Count -gt 0)
-            {
-                Write-Host ("  NO ACCESS ({0}) - the signed-in identity has no role on these subscriptions:" -f $NoAccessSubs.Count) -ForegroundColor Red
-                foreach ($e in $NoAccessSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Red }
-                Write-Host "    Fix: grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
-            }
-            if ($GenuinelyEmptySubs.Count -gt 0)
-            {
-                Write-Host ("  GENUINELY EMPTY ({0}) - access confirmed, the subscription has no resources:" -f $GenuinelyEmptySubs.Count) -ForegroundColor Yellow
-                foreach ($e in $GenuinelyEmptySubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
-                Write-Host "    No action needed - these are expected to be empty in the report." -ForegroundColor DarkGray
-            }
-            if ($UnknownSubs.Count -gt 0)
-            {
-                Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $UnknownSubs.Count) -ForegroundColor Yellow
-                foreach ($e in $UnknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
-                Write-Host "    Verify manually: az group list --subscription <id>" -ForegroundColor Yellow
-            }
-
-            # Persist the per-subscription access verdict to the diagnostic log so it
-            # outlives the console/transcript and can be attached to a ticket or e-mail.
-            # This is the durable record behind the on-screen labels above: which
-            # 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume)
-            # vs genuinely empty (no action). Reuses the run's $DiagFile if one already
-            # exists (e.g. from a failure), otherwise creates one.
-            if ($null -eq $DiagFile)
-            {
-                $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_diagnostics_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
-            }
-            $EmptyDiag = @()
-            $EmptyDiag += "==== Subscriptions with 0 resources - access verdict ===="
-            $EmptyDiag += "Timestamp: $(Get-Date -Format 'o')"
-            foreach ($e in $NoAccessSubs)
-            {
-                $EmptyDiag += ("NO_ACCESS {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id)
-            }
-            foreach ($e in $GenuinelyEmptySubs)
-            {
-                $EmptyDiag += ("EMPTY {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id)
-            }
-            foreach ($e in $UnknownSubs)
-            {
-                $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id)
-            }
-            $EmptyDiag += ""
-            try
-            {
-                $EmptyDiag | Out-File -FilePath $DiagFile -Append -Encoding utf8
-                Write-Host ("  Access verdict written to diagnostic log: {0}" -f $DiagFile) -ForegroundColor DarkGray
-            }
-            catch
-            {
-                Write-Verbose ("Diagnostic log write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message)
-            }
-            Write-Host ""
-        }
-
-        # Surface consumption (billing) data health. The inner script's consumption
-        # loop populates these globals; if every Get-UsageAggregates call failed
-        # (typically because the Az PowerShell module is broken on disk and cannot
-        # load its bundled MSAL/Azure.Core assemblies) the customer ends up with an
-        # empty consumption sheet and no signal that anything went wrong. Make it
-        # loud here so it's caught before the report is shared.
-        $ConsumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
-        $ConsumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
-        if ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
-        {
-            Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor Green
-        }
-        if ($ConsumptionFailures.Count -gt 0)
-        {
-            Write-Host ""
-            Write-Host ("Consumption Failures:    {0} subscription(s)" -f $ConsumptionFailures.Count) -ForegroundColor Yellow
-            # List the affected subscriptions by name so the operator knows exactly
-            # which subs are missing billing data (e.g. to go request Reader access
-            # on them). Mirrors the metrics-failure block below. Exclude the '(auth)'
-            # sentinel used for the whole-phase skip - it is not a specific sub.
-            foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object Name -Unique))
-            {
-                Write-Host ("  - {0} ({1})" -f $cf.Name, $cf.Id) -ForegroundColor Yellow
-            }
-            # The consumption failure message is repeated verbatim across every sub
-            # when the cause is a broken Az module - dedupe to avoid screen wall.
-            $UniqueMessages = @($ConsumptionFailures | Select-Object -ExpandProperty Message -Unique)
-            foreach ($m in $UniqueMessages)
-            {
-                Write-Host ("  - {0}" -f $m) -ForegroundColor Yellow
-            }
-            if ($UniqueMessages | Where-Object { $_ -match 'context has not been properly initialized|Could not load file or assembly|MSAL|Azure\.Core' })
-            {
-                Write-Host "  This message strongly suggests the Az PowerShell module is broken on disk." -ForegroundColor Yellow
-                Write-Host "  Reinstall with:" -ForegroundColor Yellow
-                Write-Host "    Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
-                Write-Host "    Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck" -ForegroundColor Yellow
-            }
-            Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
-            Write-Host ""
-        }
-
-        # Surface metrics-phase auth health. Mirrors the consumption block above:
-        # metrics were requested (no -SkipMetrics) but skipped because no usable Azure
-        # context/token could be established even after a reconnect attempt. Without
-        # this the metrics sheet is silently empty and looks like "no metric-eligible
-        # resources" rather than an auth failure. Listed per-subscription so the
-        # operator knows exactly which subs are missing metrics.
-        $MetricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
-        if ($MetricsFailures.Count -gt 0)
-        {
-            Write-Host ""
-            Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $MetricsFailures.Count) -ForegroundColor Yellow
-            foreach ($m in ($MetricsFailures | Sort-Object Name -Unique))
-            {
-                Write-Host ("  - {0} ({1})" -f $m.Name, $m.Id) -ForegroundColor Yellow
-            }
-            # The reason is the same across subs (auth), so show it once.
-            $FirstMsg = @($MetricsFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
-            if (-not [string]::IsNullOrEmpty($FirstMsg))
-            {
-                Write-Host ("  Reason: {0}" -f $FirstMsg) -ForegroundColor Yellow
-            }
-            Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
-            Write-Host "  Note: the metrics sheet in the output report will be empty for these subscriptions." -ForegroundColor Yellow
-            Write-Host ""
-        }
-
-        # Surface collector failures (#22). A Services/*/*.ps1 collector threw for a
-        # specific subscription and was caught by ResourceInventory.ps1's circuit
-        # breaker (CreateResourceJobs); that resource type is missing from the
-        # affected subscription's report, not silently empty because none exist.
-        # Grouped by subscription so the operator can see exactly which sub(s) and
-        # which resource type(s) were affected without hunting through per-sub logs.
-        $CollectorFailuresList = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
-        if ($CollectorFailuresList.Count -gt 0)
-        {
-            Write-Host ""
-            Write-Host ("Collector Failures:      {0} failure(s) across {1} subscription(s)" -f $CollectorFailuresList.Count, (@($CollectorFailuresList | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Yellow
-            foreach ($SubGroup in ($CollectorFailuresList | Group-Object -Property Id))
-            {
-                Write-Host ("  - Subscription {0}:" -f $SubGroup.Name) -ForegroundColor Yellow
-                foreach ($f in $SubGroup.Group)
-                {
-                    Write-Host ("      {0}: {1}" -f $f.Module, $f.Message) -ForegroundColor Yellow
-                }
-            }
-            Write-Host "  These resource types are missing (not empty) from the affected subscription's report." -ForegroundColor Yellow
-            Write-Host "  Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Yellow
-            Write-Host ""
-        }
-
-        if ($FailedSubscriptions.Count -gt 0)
-        {
-            Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
-            Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
-            Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
-            Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the failed subscriptions." -ForegroundColor Yellow
-            if ($DiagFile -and (Test-Path $DiagFile))
-            {
-                Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
-            }
-            if ($WrapperTranscriptStarted)
-            {
-                Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
-            }
-        }
-        elseif ($FailedAttempts.Count -gt 0)
-        {
-            # No new failures this run, but the resume-state file still has lingering
-            # FailedAttempts from a prior run that have not yet been retried. Surface
-            # them so the operator does not lose track of historical failures simply
-            # because the most recent run was clean.
-            Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
-            Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
-        }
-        Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
-        if ($OuterZipFile)
-        {
-            Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
-        }
+        Write-Host ""
+        Write-Host "Likely causes:" -ForegroundColor Yellow
+        Write-Host "  - Antivirus or DLP product quarantined the per-sub zip after the inner script wrote it." -ForegroundColor Yellow
+        Write-Host "  - Cloud Shell ephemeral storage was evicted between worker exit and wrapper consolidation." -ForegroundColor Yellow
+        Write-Host "  - A parallel worker crashed after the inner script logged completion but before flushing the zip to disk." -ForegroundColor Yellow
+        Write-Host "  - Out-of-disk-space write that the inner script swallowed silently." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
+        Write-Host "Recover by either:" -ForegroundColor Yellow
+        Write-Host "  - Locating the missing per-sub directory under the inventory root and inspecting why its zip is absent, OR" -ForegroundColor Yellow
+        Write-Host "  - Re-running with -Resume to re-collect any unprocessed/missing subscription." -ForegroundColor Yellow
         if ($WrapperTranscriptStarted)
         {
-            Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
+            Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
         }
-        Write-Host "=========================================" -ForegroundColor Green
+        Exit-Wrapper -Code 2
+    }
+    Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
+}
 
-        # --- Fold run-level extras into the consolidated bundle --------------
-        # Make the single AllSubscriptions zip the customer receives self-contained.
-        # It already holds the per-subscription inner zips (the ingestion payload,
-        # left untouched); here we ADD a run-level RunSummary.log (parameters + sub
-        # tally + health) and the unified MainSummary.html, plus a copy of each
-        # per-subscription HTML so the summary's drill-down links resolve straight
-        # out of the extracted zip. Only additive members are folded in and NO loose
-        # *.json is added, so the ingestion contract (inner-zip *.json members) is
-        # unchanged and nothing is double-ingested. Best-effort: any failure is a
-        # warning - the per-sub reports and the outer zip are already written.
-        if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+# Consolidate per-subscription ZIPs into a single outer ZIP
+$OuterZipFile = $null
+
+if (Test-Path -Path $InventoryRoot -PathType Container)
+{
+    # Filter ZIPs by current run timestamp only
+    $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    if ($SubZips.Count -gt 0)
+    {
+        $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+        $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
+        Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
+        Compress-Archive -Path $SubZips.FullName -DestinationPath $OuterZipFile -Force
+        Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
+    }
+    else
+    {
+        Write-Host ("No per-subscription zip files found under {0} to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
+    }
+}
+else
+{
+    Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
+}
+
+# Aggregate "main" HTML summary across all per-subscription reports from
+# THIS run. Built on EVERY run that produced a consolidated zip (it was
+# previously opt-in via -MainSummary; that switch is now implied and the
+# summary is always produced + folded into the bundle below). -Detailed
+# still adds the run-wide by-service charts. Built purely from the on-disk
+# per-sub artefacts (Inventory_*.json + sibling .html) scoped to
+# $RunStartTime - no Azure calls. A failure here must never fail the run:
+# the per-sub reports and the consolidated zip are already written, so any
+# error is downgraded to a warning and $MainSummaryFile is left $null.
+$MainSummaryFile = $null
+if ($null -ne $OuterZipFile)
+{
+    try
+    {
+        # The aggregate summary builder lives in a dot-sourced function
+        # library (Functions/AllSubHtmlSummary.Functions.ps1), which also
+        # holds the render helpers shared with Extension/Summary.ps1. A
+        # missing file throws into the surrounding catch and downgrades to
+        # a warning.
+        $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
+        if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
         {
-            try
-            {
-                $BundleStage = Join-Path $InventoryRoot ('.rda-bundle-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
-                New-Item -ItemType Directory -Path $BundleStage -Force | Out-Null
+            throw "Main summary functions not found at '$AllSubSummaryFunctions'."
+        }
+        . $AllSubSummaryFunctions
+        $MainSummaryFile = Join-Path $InventoryRoot ("MainSummary_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        # Source the version from Version.json rather than $Global:Version:
+        # in parallel mode the inner script runs in child processes, so the
+        # wrapper's $Global:Version is never set. Fall back to it (and then
+        # blank) if the file can't be read.
+        $MainVer = $Global:Version
+        try
+        {
+            $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+            $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
+        }
+        catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime `
+            -FailedSubscriptions $FailedSubscriptions `
+            -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+            -MetricsFailedSubs $Global:MetricsFailedSubs `
+            -CollectorFailures $Global:CollectorFailures `
+            -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
+            -Detailed:$Detailed -Obfuscated:$Obfuscate
+    }
+    catch
+    {
+        Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
 
-                # Version is display-only. Prefer Version.json (in parallel mode the
-                # wrapper's $Global:Version is never set - child processes set it),
-                # fall back to $Global:Version then blank.
-                $BundleVer = $Global:Version
-                try
-                {
-                    $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
-                    $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
-                }
-                catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
+# Clean up resume state on a fully successful run (all subs processed, no failures
+# this run AND no pending retries from a prior run). Otherwise leave it so a
+# future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+{
+    try
+    {
+        Remove-Item -Path $ResumeStateFile -Force
+        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+    }
+    catch
+    {
+        Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+    }
+}
 
-                # 1. RunSummary.log - run-level parameters + tally + health. Obfuscated
-                #    runs emit counts only (the wrapper holds no per-sub obfuscation
-                #    dictionary); default runs include per-sub detail.
-                $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
-                $RunSummaryLines = Get-RunSummaryLogContent `
-                    -InvocationParameters $PSBoundParameters `
-                    -Version $BundleVer `
-                    -StartTime $RunStartTime -EndTime (Get-Date) `
-                    -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
-                    -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
-                    -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
-                    -FailedSubscriptions $FailedSubscriptions `
-                    -CollectorFailures $Global:CollectorFailures `
-                    -MetricsFailedSubs $Global:MetricsFailedSubs `
-                    -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
-                    -ConsumptionRecordCount $ConsumptionRecordTotal `
-                    -Obfuscated:$Obfuscate
-                $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
+# Final summary
+$Elapsed = (Get-Date) - $RunStartTime
+Write-Host ""
+Write-Host "================ Summary ================" -ForegroundColor Green
+Write-Host ("Subscriptions Visible:   {0}" -f $AllSubscriptions.Count) -ForegroundColor Green
+if ($Excluded.Count -gt 0)
+{
+    Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $Excluded.Count) -ForegroundColor Green
+}
+Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundColor Green
+# In parallel mode, $SkippedCount is not populated by the foreach loop above
+# (each worker skips independently). Derive it from the difference between
+# the number of eligible subs and the number of subs that actually ran in
+# this invocation (the union of $SubResourceCounts entries plus failures).
+if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0)
+{
+    $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
+    $DerivedSkip = $Subscriptions.Count - $ActuallyProcessed
+    if ($DerivedSkip -gt 0) { $SkippedCount = $DerivedSkip }
+}
+if ($Resume)
+{
+    Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
+}
+Write-Host ("Subscriptions Processed: {0}" -f ($Subscriptions.Count - $SkippedCount)) -ForegroundColor Green
 
-                # 2. Unified MainSummary.html at the bundle root (renamed from the
-                #    timestamped file; its links are relative to sibling folders, so
-                #    renaming the summary itself does not break them). The drill-down
-                #    link folders are then renamed from ResourcesReport<stamp>/ to
-                #    HTML<stamp>/ (see step 3) - these bundle folders carry ONLY the
-                #    report HTML, so the HTML prefix distinguishes them at a glance
-                #    from the sibling ResourcesReport_<stamp>.zip data archives (which
-                #    hold the Inventory/Metrics/Consumption members). Rewrite the
-                #    summary's hrefs to match: only the leading folder token changes
-                #    (href="ResourcesReport... -> href="HTML...); the /<file>.html tail
-                #    is untouched because it is not preceded by href=".
-                $StagedMainSummary = Join-Path $BundleStage 'MainSummary.html'
-                if ($null -ne $MainSummaryFile -and (Test-Path -LiteralPath $MainSummaryFile))
-                {
-                    Copy-Item -LiteralPath $MainSummaryFile -Destination $StagedMainSummary -Force
-                    (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' |
-                        Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
+# Surface the per-subscription resource-count result so the user does not have
+# to scan individual transcripts to find subs that came back empty. Empty subs
+# are shown distinctly because they almost always indicate a permission gap;
+# treating them as "successful" in the summary is misleading.
+$EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
+$NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
+# Initialised here (not only inside the 0-resource branch below) so the
+# run-summary finalization can read them unconditionally even when there
+# were no empty subscriptions to classify.
+$NoAccessSubs = @()
+$GenuinelyEmptySubs = @()
+$UnknownSubs = @()
+if ($SubResourceCounts.Count -gt 0)
+{
+    $TotalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
+    Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $TotalRes, $NonEmptySubs.Count) -ForegroundColor Green
+}
+if ($EmptySubs.Count -gt 0)
+{
+    # A sub that returned 0 resources is either a permission gap (no role on the
+    # sub) or genuinely empty. Probe each one to label it precisely so the user
+    # knows whether to fix access or ignore it. The probe is one cheap ARM call
+    # per empty sub (only empties, so no cost on normal runs).
+    $NoAccessSubs = @()
+    $GenuinelyEmptySubs = @()
+    $UnknownSubs = @()
+    foreach ($e in $EmptySubs)
+    {
+        switch (Get-SubscriptionAccessState -SubscriptionId $e.Id)
+        {
+            'NoAccess' { $NoAccessSubs += $e }
+            'Empty' { $GenuinelyEmptySubs += $e }
+            default { $UnknownSubs += $e }
+        }
+    }
+
+    Write-Host ""
+    Write-Host ("Subscriptions with 0 resources: {0}" -f $EmptySubs.Count) -ForegroundColor Yellow
+
+    if ($NoAccessSubs.Count -gt 0)
+    {
+        Write-Host ("  NO ACCESS ({0}) - the signed-in identity has no role on these subscriptions:" -f $NoAccessSubs.Count) -ForegroundColor Red
+        foreach ($e in $NoAccessSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Red }
+        Write-Host "    Fix: grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
+    }
+    if ($GenuinelyEmptySubs.Count -gt 0)
+    {
+        Write-Host ("  GENUINELY EMPTY ({0}) - access confirmed, the subscription has no resources:" -f $GenuinelyEmptySubs.Count) -ForegroundColor Yellow
+        foreach ($e in $GenuinelyEmptySubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
+        Write-Host "    No action needed - these are expected to be empty in the report." -ForegroundColor DarkGray
+    }
+    if ($UnknownSubs.Count -gt 0)
+    {
+        Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $UnknownSubs.Count) -ForegroundColor Yellow
+        foreach ($e in $UnknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
+        Write-Host "    Verify manually: az group list --subscription <id>" -ForegroundColor Yellow
+    }
+
+    # Persist the per-subscription access verdict to the diagnostic log so it
+    # outlives the console/transcript and can be attached to a ticket or e-mail.
+    # This is the durable record behind the on-screen labels above: which
+    # 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume)
+    # vs genuinely empty (no action). Reuses the run's $DiagFile if one already
+    # exists (e.g. from a failure), otherwise creates one.
+    if ($null -eq $DiagFile)
+    {
+        $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_diagnostics_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
+    }
+    $EmptyDiag = @()
+    $EmptyDiag += "==== Subscriptions with 0 resources - access verdict ===="
+    $EmptyDiag += "Timestamp: $(Get-Date -Format 'o')"
+    foreach ($e in $NoAccessSubs)
+    {
+        $EmptyDiag += ("NO_ACCESS {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id)
+    }
+    foreach ($e in $GenuinelyEmptySubs)
+    {
+        $EmptyDiag += ("EMPTY {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id)
+    }
+    foreach ($e in $UnknownSubs)
+    {
+        $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id)
+    }
+    $EmptyDiag += ""
+    try
+    {
+        $EmptyDiag | Out-File -FilePath $DiagFile -Append -Encoding utf8
+        Write-Host ("  Access verdict written to diagnostic log: {0}" -f $DiagFile) -ForegroundColor DarkGray
+    }
+    catch
+    {
+        Write-Verbose ("Diagnostic log write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message)
+    }
+    Write-Host ""
+}
+
+# Surface consumption (billing) data health. The inner script's consumption
+# loop populates these globals; if every Get-UsageAggregates call failed
+# (typically because the Az PowerShell module is broken on disk and cannot
+# load its bundled MSAL/Azure.Core assemblies) the customer ends up with an
+# empty consumption sheet and no signal that anything went wrong. Make it
+# loud here so it's caught before the report is shared.
+$ConsumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$ConsumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
+if ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
+{
+    Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor Green
+}
+if ($ConsumptionFailures.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host ("Consumption Failures:    {0} subscription(s)" -f $ConsumptionFailures.Count) -ForegroundColor Yellow
+    # List the affected subscriptions by name so the operator knows exactly
+    # which subs are missing billing data (e.g. to go request Reader access
+    # on them). Mirrors the metrics-failure block below. Exclude the '(auth)'
+    # sentinel used for the whole-phase skip - it is not a specific sub.
+    foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object Name -Unique))
+    {
+        Write-Host ("  - {0} ({1})" -f $cf.Name, $cf.Id) -ForegroundColor Yellow
+    }
+    # The consumption failure message is repeated verbatim across every sub
+    # when the cause is a broken Az module - dedupe to avoid screen wall.
+    $UniqueMessages = @($ConsumptionFailures | Select-Object -ExpandProperty Message -Unique)
+    foreach ($m in $UniqueMessages)
+    {
+        Write-Host ("  - {0}" -f $m) -ForegroundColor Yellow
+    }
+    if ($UniqueMessages | Where-Object { $_ -match 'context has not been properly initialized|Could not load file or assembly|MSAL|Azure\.Core' })
+    {
+        Write-Host "  This message strongly suggests the Az PowerShell module is broken on disk." -ForegroundColor Yellow
+        Write-Host "  Reinstall with:" -ForegroundColor Yellow
+        Write-Host "    Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
+        Write-Host "    Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck" -ForegroundColor Yellow
+    }
+    Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Surface metrics-phase auth health. Mirrors the consumption block above:
+# metrics were requested (no -SkipMetrics) but skipped because no usable Azure
+# context/token could be established even after a reconnect attempt. Without
+# this the metrics sheet is silently empty and looks like "no metric-eligible
+# resources" rather than an auth failure. Listed per-subscription so the
+# operator knows exactly which subs are missing metrics.
+$MetricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+if ($MetricsFailures.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $MetricsFailures.Count) -ForegroundColor Yellow
+    foreach ($m in ($MetricsFailures | Sort-Object Name -Unique))
+    {
+        Write-Host ("  - {0} ({1})" -f $m.Name, $m.Id) -ForegroundColor Yellow
+    }
+    # The reason is the same across subs (auth), so show it once.
+    $FirstMsg = @($MetricsFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
+    if (-not [string]::IsNullOrEmpty($FirstMsg))
+    {
+        Write-Host ("  Reason: {0}" -f $FirstMsg) -ForegroundColor Yellow
+    }
+    Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
+    Write-Host "  Note: the metrics sheet in the output report will be empty for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Surface collector failures (#22). A Services/*/*.ps1 collector threw for a
+# specific subscription and was caught by ResourceInventory.ps1's circuit
+# breaker (CreateResourceJobs); that resource type is missing from the
+# affected subscription's report, not silently empty because none exist.
+# Grouped by subscription so the operator can see exactly which sub(s) and
+# which resource type(s) were affected without hunting through per-sub logs.
+$CollectorFailuresList = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+if ($CollectorFailuresList.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host ("Collector Failures:      {0} failure(s) across {1} subscription(s)" -f $CollectorFailuresList.Count, (@($CollectorFailuresList | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Yellow
+    foreach ($SubGroup in ($CollectorFailuresList | Group-Object -Property Id))
+    {
+        Write-Host ("  - Subscription {0}:" -f $SubGroup.Name) -ForegroundColor Yellow
+        foreach ($f in $SubGroup.Group)
+        {
+            Write-Host ("      {0}: {1}" -f $f.Module, $f.Message) -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  These resource types are missing (not empty) from the affected subscription's report." -ForegroundColor Yellow
+    Write-Host "  Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+if ($FailedSubscriptions.Count -gt 0)
+{
+    Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
+    Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
+    Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
+    Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the failed subscriptions." -ForegroundColor Yellow
+    if ($DiagFile -and (Test-Path $DiagFile))
+    {
+        Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
+    }
+    if ($WrapperTranscriptStarted)
+    {
+        Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
+    }
+}
+elseif ($FailedAttempts.Count -gt 0)
+{
+    # No new failures this run, but the resume-state file still has lingering
+    # FailedAttempts from a prior run that have not yet been retried. Surface
+    # them so the operator does not lose track of historical failures simply
+    # because the most recent run was clean.
+    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
+    Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
+}
+Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
+if ($OuterZipFile)
+{
+    Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
+}
+if ($WrapperTranscriptStarted)
+{
+    Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
+}
+Write-Host "=========================================" -ForegroundColor Green
+
+# --- Fold run-level extras into the consolidated bundle --------------
+# Make the single AllSubscriptions zip the customer receives self-contained.
+# It already holds the per-subscription inner zips (the ingestion payload,
+# left untouched); here we ADD a run-level RunSummary.log (parameters + sub
+# tally + health) and the unified MainSummary.html, plus a copy of each
+# per-subscription HTML so the summary's drill-down links resolve straight
+# out of the extracted zip. Only additive members are folded in and NO loose
+# *.json is added, so the ingestion contract (inner-zip *.json members) is
+# unchanged and nothing is double-ingested. Best-effort: any failure is a
+# warning - the per-sub reports and the outer zip are already written.
+if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+{
+    try
+    {
+        $BundleStage = Join-Path $InventoryRoot ('.rda-bundle-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+        New-Item -ItemType Directory -Path $BundleStage -Force | Out-Null
+
+        # Version is display-only. Prefer Version.json (in parallel mode the
+        # wrapper's $Global:Version is never set - child processes set it),
+        # fall back to $Global:Version then blank.
+        $BundleVer = $Global:Version
+        try
+        {
+            $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+            $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
+        }
+        catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
+
+        # 1. RunSummary.log - run-level parameters + tally + health. Obfuscated
+        #    runs emit counts only (the wrapper holds no per-sub obfuscation
+        #    dictionary); default runs include per-sub detail.
+        $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+        $RunSummaryLines = Get-RunSummaryLogContent `
+            -InvocationParameters $PSBoundParameters `
+            -Version $BundleVer `
+            -StartTime $RunStartTime -EndTime (Get-Date) `
+            -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
+            -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
+            -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
+            -FailedSubscriptions $FailedSubscriptions `
+            -CollectorFailures $Global:CollectorFailures `
+            -MetricsFailedSubs $Global:MetricsFailedSubs `
+            -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+            -ConsumptionRecordCount $ConsumptionRecordTotal `
+            -Obfuscated:$Obfuscate
+        $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
+
+        # 2. Unified MainSummary.html at the bundle root (renamed from the
+        #    timestamped file; its links are relative to sibling folders, so
+        #    renaming the summary itself does not break them). The drill-down
+        #    link folders are then renamed from ResourcesReport<stamp>/ to
+        #    HTML<stamp>/ (see step 3) - these bundle folders carry ONLY the
+        #    report HTML, so the HTML prefix distinguishes them at a glance
+        #    from the sibling ResourcesReport_<stamp>.zip data archives (which
+        #    hold the Inventory/Metrics/Consumption members). Rewrite the
+        #    summary's hrefs to match: only the leading folder token changes
+        #    (href="ResourcesReport... -> href="HTML...); the /<file>.html tail
+        #    is untouched because it is not preceded by href=".
+        $StagedMainSummary = Join-Path $BundleStage 'MainSummary.html'
+        if ($null -ne $MainSummaryFile -and (Test-Path -LiteralPath $MainSummaryFile))
+        {
+            Copy-Item -LiteralPath $MainSummaryFile -Destination $StagedMainSummary -Force
+            (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' | Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
         }
 
         # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder

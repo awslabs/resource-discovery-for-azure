@@ -299,6 +299,184 @@ Describe 'Merge-RecoveryData metrics handling' {
     }
 }
 
+Describe 'Merge-RecoveryData guards (advisory warnings)' {
+
+    It 'warns when the recovery dictionary shares no ResourceIdMap tokens with the gap (likely unseeded recovery)' {
+        $C = New-Case
+        $GapDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_gapTok' = '/id/gap' } }
+        $RecDict = [ordered]@{ GeneratedAt = '2026-01-02 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_recTok' = '/id/rec' } }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -Dictionary $GapDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) }) -Dictionary $RecDict
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'share NO ResourceIdMap tokens'
+    }
+
+    It 'does NOT warn about token overlap when the dictionaries share ResourceIdMap tokens (seeded recovery)' {
+        $C = New-Case
+        $GapDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_shared' = '/id/shared' } }
+        $RecDict = [ordered]@{ GeneratedAt = '2026-01-02 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_shared' = '/id/shared'; 'prod_recNew' = '/id/new' } }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -Dictionary $GapDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) }) -Dictionary $RecDict
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Not -Match 'share NO ResourceIdMap tokens'
+    }
+
+    It 'warns about mixed obfuscation state when only one bundle has a dictionary' {
+        $C = New-Case
+        $GapDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_gapTok' = '/id/gap' } }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -Dictionary $GapDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'only one of the gap/recovery bundles has an ObfuscationDictionary'
+    }
+
+    It 'warns when a replaced inventory key has fewer records than the gap held' {
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01'), (New-Record 'vm02')) })
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm-only-one')) })
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'REPLACED with FEWER records'
+    }
+
+    It 'warns when -RecoverConsumption replaces with fewer rows than the gap CSV' {
+        $C = New-Case
+        $GapCsv = "$script:CsvHeader`n{},Compute,m1,GAP1,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,`n{},Compute,m2,GAP2,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        $RecCsv = "$script:CsvHeader`n{},Compute,m1,REC1,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $GapCsv
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $RecCsv
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'FEWER rows than the gap CSV'
+    }
+
+    It 'warns when -RecoverConsumption billing window differs from the gap CSV' {
+        $C = New-Case
+        $GapCsv = "$script:CsvHeader`n{},Compute,m1,GAP1,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        $RecCsv = "$script:CsvHeader`n{},Compute,m1,REC1,eastus,vm,1,Hours,2026-02-01,2026-02-02,/id,eastus,,,"
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $GapCsv
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $RecCsv
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'billing window differs'
+    }
+
+    It 'emits the HTML-does-not-render-metrics advisory under -RecoverMetrics' {
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["rec-metric"]}' }
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverMetrics -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'does not render metrics'
+    }
+
+    It 'HARD FAILS when the gap dictionary does not match its inventory (wrong dictionary)' {
+        $C = New-Case
+        $GapInv = [ordered]@{
+            Version         = '3.2.3'
+            VirtualMachines = @(
+                [ordered]@{ Name = 'vm01'; ID = 'prod_11111111-1111-1111-1111-111111111111' },
+                [ordered]@{ Name = 'vm02'; ID = 'prod_22222222-2222-2222-2222-222222222222' },
+                [ordered]@{ Name = 'vm03'; ID = 'prod_33333333-3333-3333-3333-333333333333' }
+            )
+        }
+        # Dictionary from a DIFFERENT run: none of the gap inventory's tokens appear.
+        $WrongDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_99999999-9999-9999-9999-999999999999' = '/id/x' } }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory $GapInv -Dictionary $WrongDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        { Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue } |
+            Should -Throw -ExpectedMessage '*does NOT match its inventory*'
+    }
+
+    It 'HARD FAILS when the recovery dictionary does not match its inventory' {
+        $C = New-Case
+        $RecInv = [ordered]@{
+            Version         = '3.2.3'
+            VirtualMachines = @(
+                [ordered]@{ Name = 'vm01'; ID = 'prod_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' },
+                [ordered]@{ Name = 'vm02'; ID = 'prod_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' },
+                [ordered]@{ Name = 'vm03'; ID = 'prod_cccccccc-cccc-cccc-cccc-cccccccccccc' }
+            )
+        }
+        $WrongDict = [ordered]@{ GeneratedAt = '2026-01-02 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_dddddddd-dddd-dddd-dddd-dddddddddddd' = '/id/y' } }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory $RecInv -Dictionary $WrongDict
+
+        { Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue } |
+            Should -Throw -ExpectedMessage '*recovery bundle*does NOT match its inventory*'
+    }
+
+    It 'passes when the dictionary contains all of its inventory tokens (correct dictionary)' {
+        $C = New-Case
+        $GapInv = [ordered]@{
+            Version         = '3.2.3'
+            VirtualMachines = @(
+                [ordered]@{ Name = 'vm01'; ID = 'prod_11111111-1111-1111-1111-111111111111' },
+                [ordered]@{ Name = 'vm02'; ID = 'prod_22222222-2222-2222-2222-222222222222' },
+                [ordered]@{ Name = 'vm03'; ID = 'prod_33333333-3333-3333-3333-333333333333' }
+            )
+        }
+        $GoodDict = [ordered]@{
+            GeneratedAt   = '2026-01-01 00:00:00'
+            ResourceIdMap = [ordered]@{
+                'prod_11111111-1111-1111-1111-111111111111' = '/id/1'
+                'prod_22222222-2222-2222-2222-222222222222' = '/id/2'
+                'prod_33333333-3333-3333-3333-333333333333' = '/id/3'
+            }
+        }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory $GapInv -Dictionary $GoodDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) }) -Dictionary $GoodDict
+
+        { Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue } |
+            Should -Not -Throw
+    }
+
+    It 'warns (does not fail) on partial dictionary coverage below 50 percent' {
+        $C = New-Case
+        $GapInv = [ordered]@{
+            Version         = '3.2.3'
+            VirtualMachines = @(
+                [ordered]@{ Name = 'vm01'; ID = 'prod_11111111-1111-1111-1111-111111111111' },
+                [ordered]@{ Name = 'vm02'; ID = 'prod_22222222-2222-2222-2222-222222222222' },
+                [ordered]@{ Name = 'vm03'; ID = 'prod_33333333-3333-3333-3333-333333333333' },
+                [ordered]@{ Name = 'vm04'; ID = 'prod_44444444-4444-4444-4444-444444444444' }
+            )
+        }
+        # Only 1 of 4 tokens present -> 25% coverage -> warn, not throw.
+        $PartialDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_11111111-1111-1111-1111-111111111111' = '/id/1' } }
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory $GapInv -Dictionary $PartialDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) }) -Dictionary $PartialDict
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match 'covers only'
+    }
+
+    It 'reports no warnings for a clean, dictionary-compatible, same-window merge' {
+        $C = New-Case
+        $GapDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_shared' = '/id/shared' } }
+        $RecDict = [ordered]@{ GeneratedAt = '2026-01-02 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_shared' = '/id/shared' } }
+        $Csv = "$script:CsvHeader`n{},Compute,m1,MET,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $Csv -Dictionary $GapDict
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $Csv -Dictionary $RecDict
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue
+
+        @($Result.Warnings).Count | Should -Be 0
+    }
+}
+
 Describe 'Merge-RecoveryData dictionary merge and packaging' {
 
     It 'merges the obfuscation dictionaries as a union and returns its path' {

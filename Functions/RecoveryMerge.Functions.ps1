@@ -71,12 +71,97 @@ function Merge-RecoveryData
 
     $ErrorActionPreference = 'Stop'
 
+    # Non-fatal advisories. Each is emitted via Write-Warning for the operator AND
+    # collected here so it is returned in the result's .Warnings property (lets
+    # callers/tests assert them). These guards catch operator-discipline traps
+    # that would otherwise produce a bundle that LOOKS complete but is subtly
+    # wrong (mismatched obfuscation tokens, a shifted billing window, a silent
+    # record downgrade). They never block the merge - they surface the risk.
+    $MergeWarnings = [System.Collections.Generic.List[string]]::new()
+    function Add-MergeWarning([string]$Message)
+    {
+        Write-Warning ('Merge-RecoveryData: ' + $Message)
+        $MergeWarnings.Add($Message)
+    }
+
+    # -- Summarise a consumption CSV (row count + billing window endpoints) so
+    #    the -RecoverConsumption path can flag a shrunk row set or a shifted
+    #    billing period. Endpoints are compared as strings only (same tool, same
+    #    format on both sides), so equality/inequality is a reliable drift signal
+    #    without needing culture-aware date parsing. -----------------------------
+    function Get-ConsumptionCsvStats([string]$Path)
+    {
+        $Rows = @(Import-Csv -Path $Path -ErrorAction Stop)
+        $Starts = @($Rows | ForEach-Object { $_.UsageStartTime } | Where-Object { $_ } | Sort-Object -Unique)
+        $Ends = @($Rows | ForEach-Object { $_.UsageEndTime } | Where-Object { $_ } | Sort-Object -Unique)
+        [PSCustomObject]@{
+            RowCount = @($Rows).Count
+            MinStart = ($Starts | Select-Object -First 1)
+            MaxEnd   = ($Ends | Select-Object -Last 1)
+        }
+    }
+
+    # -- Verify an ObfuscationDictionary actually BELONGS to a given inventory.
+    #    An obfuscated inventory stores per-resource tokens (prod_/nonprod_<guid>)
+    #    in its ID/Name/cross-ref fields; those exact tokens are the KEYS of the
+    #    dictionary's maps (ResourceIdMap/ResourceNameMap/... are token -> real).
+    #    So the dictionary that goes with an inventory must contain (almost) all of
+    #    that inventory's tokens as keys. If someone points at the WRONG dictionary
+    #    (a different run/subscription), the inventory's tokens are absent and
+    #    coverage collapses to ~0. Returns matched/total counts plus a few sample
+    #    unmatched tokens. Tokens are already obfuscated, so they are safe to
+    #    surface in diagnostics; the dictionary VALUES (real IDs) are never touched.
+    function Test-DictionaryMatchesInventory
+    {
+        param([string]$DictionaryPath, [string]$InventoryPath)
+
+        $DictKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $Dict = Get-Content -Path $DictionaryPath -Raw | ConvertFrom-Json
+        foreach ($MapProp in $Dict.PSObject.Properties)
+        {
+            # Only object-valued properties are token maps; skip scalar metadata
+            # such as GeneratedAt.
+            if ($MapProp.Value -is [System.Management.Automation.PSCustomObject])
+            {
+                foreach ($TokenKey in $MapProp.Value.PSObject.Properties.Name) { [void]$DictKeys.Add($TokenKey) }
+            }
+        }
+
+        # Collect the DISTINCT obfuscation tokens present in the inventory text.
+        # The pattern matches only flat per-resource tokens (prod_/nonprod_<guid>),
+        # which are what the inventory ID/Name fields carry and what the dictionary
+        # maps key on. Consumption-style tokens (prod_sub_/prod_rg_...) live in the
+        # CSV, not the inventory JSON, so they never enter this scan.
+        $InventoryText = Get-Content -Path $InventoryPath -Raw
+        $InventoryTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))
+        {
+            [void]$InventoryTokens.Add($TokenMatch.Value)
+        }
+
+        $Unmatched = @($InventoryTokens | Where-Object { -not $DictKeys.Contains($_) })
+        [PSCustomObject]@{
+            TokenCount   = $InventoryTokens.Count
+            MatchedCount = ($InventoryTokens.Count - @($Unmatched).Count)
+            Unmatched    = $Unmatched
+        }
+    }
+
     # -- Locate the newest file matching a filter in a bundle folder ----------
     function Get-BundleFile
     {
         param([string]$Directory, [string]$Filter, [switch]$Optional)
-        $Found = Get-ChildItem -Path $Directory -Filter $Filter -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $MatchingFiles = @(Get-ChildItem -Path $Directory -Filter $Filter -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending)
+        if (@($MatchingFiles).Count -gt 1)
+        {
+            # More than one match means the folder is probably NOT a single
+            # per-subscription bundle (e.g. -GapBundlePath was pointed at the
+            # InventoryRoot that holds many sub folders/runs). Newest-wins is a
+            # silent guess, so make it loud.
+            Add-MergeWarning ("{0} files match '{1}' in '{2}'; using the newest ('{3}'). If this is not a single per-subscription bundle folder, point the path at one subscription's folder instead. Matches: [{4}]" -f @($MatchingFiles).Count, $Filter, $Directory, $MatchingFiles[0].Name, (($MatchingFiles | ForEach-Object { $_.Name }) -join ', '))
+        }
+        $Found = $MatchingFiles | Select-Object -First 1
         if (-not $Found -and -not $Optional)
         {
             throw ("Merge-RecoveryData: required file '{0}' not found in '{1}'." -f $Filter, $Directory)
@@ -92,6 +177,84 @@ function Merge-RecoveryData
     $GapConsumptionFile = Get-BundleFile -Directory $GapBundlePath      -Filter 'Consumption_*.csv'  -Optional
     $GapDictionaryFile = Get-BundleFile -Directory $GapBundlePath      -Filter 'ObfuscationDictionary_*.json' -Optional
     $RecoveryDictionaryFile = Get-BundleFile -Directory $RecoveryBundlePath -Filter 'ObfuscationDictionary_*.json' -Optional
+
+    # -- Guard: obfuscation-dictionary compatibility --------------------------
+    # The whole "recovered rows splice in cleanly" guarantee rests on the recovery
+    # run having been SEEDED with the gap bundle's dictionary
+    # (-ObfuscationDictionary <gap dict>), so identical real values map to identical
+    # tokens. If the operator forgets that seed, the recovery run mints fresh random
+    # tokens and the recovered service's cross-references to OTHER services'
+    # resources will not join - silent referential corruption in a bundle that
+    # otherwise looks complete. We cannot repair that here, but we CAN detect the
+    # tell-tale: a seeded recovery's ResourceIdMap shares (almost) all of the gap's
+    # tokens, whereas an unseeded one shares none. Warn loudly on zero overlap.
+    if ($GapDictionaryFile -and $RecoveryDictionaryFile)
+    {
+        try
+        {
+            $GapDictCheck = Get-Content -Path $GapDictionaryFile.FullName -Raw | ConvertFrom-Json
+            $RecoveryDictCheck = Get-Content -Path $RecoveryDictionaryFile.FullName -Raw | ConvertFrom-Json
+            $GapIdKeys = @($GapDictCheck.ResourceIdMap.PSObject.Properties.Name)
+            $RecoveryIdKeys = @($RecoveryDictCheck.ResourceIdMap.PSObject.Properties.Name)
+            if (@($GapIdKeys).Count -gt 0 -and @($RecoveryIdKeys).Count -gt 0)
+            {
+                $SharedIdKeys = @($RecoveryIdKeys | Where-Object { $_ -in $GapIdKeys })
+                if (@($SharedIdKeys).Count -eq 0)
+                {
+                    Add-MergeWarning ('the recovery and gap obfuscation dictionaries share NO ResourceIdMap tokens. This almost always means the recovery run was NOT seeded with the gap bundle''s dictionary (-ObfuscationDictionary <gap dict>). Cross-references in the recovered service(s) will carry mismatched tokens and will not join, so the merged bundle''s referential integrity is likely broken. Re-run the recovery seeded with the gap dictionary, or confirm the two bundles belong together.')
+                }
+            }
+        }
+        catch
+        {
+            Add-MergeWarning ('could not compare the gap/recovery obfuscation dictionaries for compatibility (seed check skipped): {0}' -f $_.Exception.Message)
+        }
+    }
+    elseif (($null -ne $GapDictionaryFile) -ne ($null -ne $RecoveryDictionaryFile))
+    {
+        Add-MergeWarning ('only one of the gap/recovery bundles has an ObfuscationDictionary. Mixed obfuscation state suggests the two bundles were produced with different -Obfuscate settings; confirm they belong together before shipping the merged bundle.')
+    }
+
+    # -- Guard: dictionary-belongs-to-its-inventory (HARD FAIL) ---------------
+    # Distinct from the seed-overlap check above. That one asks "was the recovery
+    # seeded from the gap?"; this one asks "does the dictionary sitting in each
+    # folder actually belong to THAT folder's inventory?". A wrong dictionary
+    # (operator pointed at a different run's / subscription's folder, or passed the
+    # wrong -ObfuscationDictionary) would be carried forward silently and make the
+    # merged bundle impossible to Reveal - the tokens in the report would map to
+    # nothing. We detect it by coverage: (almost) every obfuscated token in an
+    # inventory must exist as a key in the dictionary beside it. Zero coverage over
+    # a meaningful sample is unambiguous (right dict ~= 100%, wrong dict = 0%), so
+    # we HARD FAIL with a diagnostic naming the files, the counts, sample tokens,
+    # and the fix. Partial coverage is only suspicious, so it warns.
+    foreach ($DictPair in @(
+            @{ Label = 'gap'; Dict = $GapDictionaryFile; Inv = $GapInventoryFile; ParamName = '-GapBundlePath' },
+            @{ Label = 'recovery'; Dict = $RecoveryDictionaryFile; Inv = $RecoveryInventoryFile; ParamName = '-RecoveryBundlePath' }
+        ))
+    {
+        if (-not $DictPair.Dict) { continue }
+        try
+        {
+            $DictMatch = Test-DictionaryMatchesInventory -DictionaryPath $DictPair.Dict.FullName -InventoryPath $DictPair.Inv.FullName
+        }
+        catch
+        {
+            Add-MergeWarning ("could not verify the {0} bundle's dictionary matches its inventory (check skipped): {1}" -f $DictPair.Label, $_.Exception.Message)
+            continue
+        }
+        # No tokens = non-obfuscated inventory (or empty); nothing to verify.
+        if ($DictMatch.TokenCount -eq 0) { continue }
+
+        $SampleUnmatched = (@($DictMatch.Unmatched | Select-Object -First 3) -join ', ')
+        if ($DictMatch.TokenCount -ge 3 -and $DictMatch.MatchedCount -eq 0)
+        {
+            throw ("Merge-RecoveryData: the {0} bundle's ObfuscationDictionary does NOT match its inventory - 0 of {1} obfuscated token(s) in '{2}' were found as keys in '{3}'. That dictionary is almost certainly from a DIFFERENT run or subscription; carrying it forward would make the merged bundle impossible to reveal (its tokens would map to nothing). Point {4} at the folder whose ObfuscationDictionary matches its Inventory, or supply the correct dictionary. Example unmatched tokens: [{5}]." -f $DictPair.Label, $DictMatch.TokenCount, $DictPair.Inv.Name, $DictPair.Dict.Name, $DictPair.ParamName, $SampleUnmatched)
+        }
+        elseif ($DictMatch.MatchedCount -lt $DictMatch.TokenCount -and ($DictMatch.MatchedCount / $DictMatch.TokenCount) -lt 0.5)
+        {
+            Add-MergeWarning ("the {0} bundle's dictionary covers only {1} of {2} obfuscated inventory token(s). It may be a partial or slightly-mismatched dictionary; a later reveal will leave the uncovered tokens unresolved. Confirm the dictionary belongs to this inventory. Example unmatched tokens: [{3}]." -f $DictPair.Label, $DictMatch.MatchedCount, $DictMatch.TokenCount, $SampleUnmatched)
+        }
+    }
 
     # -- Load inventories -----------------------------------------------------
     $GapInventory = Get-Content -Path $GapInventoryFile.FullName -Raw | ConvertFrom-Json
@@ -137,6 +300,18 @@ function Merge-RecoveryData
     # replace if already present). -Force overwrites any existing property.
     foreach ($Key in $MergeKeys)
     {
+        # Guard: whole-key replace can silently DOWNGRADE. If the recovery run
+        # came back thinner than the gap bundle for this key (its own throttling,
+        # a partial collection), replacing wholesale drops the extra gap records
+        # with no trace. Compare counts and warn; do not block (the operator may
+        # know the gap key was itself corrupt and the smaller recovery set is the
+        # correct one).
+        $GapKeyCount = if ($GapInventory.PSObject.Properties.Name -contains $Key) { @($GapInventory.$Key).Count } else { 0 }
+        $RecoveryKeyCount = @($RecoveryInventory.$Key).Count
+        if ($GapKeyCount -gt 0 -and $RecoveryKeyCount -lt $GapKeyCount)
+        {
+            Add-MergeWarning ("service '{0}' is being REPLACED with FEWER records than the gap bundle held ({1} from recovery vs {2} in gap). Whole-key replace will drop the extra gap records. Confirm the recovery run for '{0}' completed fully (no throttling / partial collection) before shipping the merged bundle." -f $Key, $RecoveryKeyCount, $GapKeyCount)
+        }
         $GapInventory | Add-Member -NotePropertyName $Key -NotePropertyValue $RecoveryInventory.$Key -Force
     }
 
@@ -184,6 +359,33 @@ function Merge-RecoveryData
         }
         $ConsumptionSource = 'recovery'
         $ConsumptionSourceFile = $RecoveryConsumptionFile
+
+        # Guard: consumption row-shrink and billing-window drift. The recovery run
+        # pulls a NOW-relative billing window, so a recovery done later than the
+        # original run covers a DIFFERENT period; a whole-file replace then swaps
+        # in that different window silently. Also flag a smaller row set (a
+        # partial recovery pull). Both are warnings only - the replace is still
+        # the right call for a truncated gap CSV.
+        if ($GapConsumptionFile)
+        {
+            try
+            {
+                $GapConsumptionStats = Get-ConsumptionCsvStats -Path $GapConsumptionFile.FullName
+                $RecoveryConsumptionStats = Get-ConsumptionCsvStats -Path $RecoveryConsumptionFile.FullName
+                if ($GapConsumptionStats.RowCount -gt 0 -and $RecoveryConsumptionStats.RowCount -lt $GapConsumptionStats.RowCount)
+                {
+                    Add-MergeWarning ('the recovery consumption CSV has FEWER rows than the gap CSV ({0} vs {1}). -RecoverConsumption whole-file-replaces, so the extra gap rows will be dropped. Confirm the recovery consumption pull completed fully before shipping.' -f $RecoveryConsumptionStats.RowCount, $GapConsumptionStats.RowCount)
+                }
+                if ($GapConsumptionStats.RowCount -gt 0 -and $RecoveryConsumptionStats.RowCount -gt 0 -and ($GapConsumptionStats.MinStart -ne $RecoveryConsumptionStats.MinStart -or $GapConsumptionStats.MaxEnd -ne $RecoveryConsumptionStats.MaxEnd))
+                {
+                    Add-MergeWarning ('the recovery consumption billing window differs from the gap bundle''s (gap: {0}..{1}; recovery: {2}..{3}). The recovery run pulls a NOW-relative window, so the merged bundle''s consumption will reflect the recovery date, not the original run''s. Re-run recovery close to the original run date if the billing period must match.' -f $GapConsumptionStats.MinStart, $GapConsumptionStats.MaxEnd, $RecoveryConsumptionStats.MinStart, $RecoveryConsumptionStats.MaxEnd)
+                }
+            }
+            catch
+            {
+                Add-MergeWarning ('could not compare the gap/recovery consumption CSVs (row-count/window check skipped): {0}' -f $_.Exception.Message)
+            }
+        }
     }
     if ($ConsumptionSourceFile)
     {
@@ -219,6 +421,12 @@ function Merge-RecoveryData
             Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $RebasedName) -Force
         }
         $MetricsSource = 'recovery'
+        # Advisory: the regenerated HTML does not render metrics (Summary.ps1
+        # consumes inventory + consumption only), so recovering metrics updates
+        # the zipped Metrics_*.json but leaves the HTML visually unchanged. Set
+        # the operator's expectation so a "the report still looks the same"
+        # observation is not mistaken for the recovery having failed.
+        Add-MergeWarning ('recovered metrics were written to the bundle''s Metrics_*.json, but the regenerated HTML report does not render metrics (it uses inventory + consumption only). The zipped metrics JSON is updated; the HTML will look unchanged for metrics.')
     }
     else
     {
@@ -301,5 +509,6 @@ function Merge-RecoveryData
         OutputZip         = $OutZipFile
         OutputDictionary  = if ($DictionaryMerged) { $OutDictionaryFile } else { $null }
         BundleBase        = $BundleBase
+        Warnings          = @($MergeWarnings)
     }
 }

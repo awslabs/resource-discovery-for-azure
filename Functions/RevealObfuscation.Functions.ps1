@@ -58,6 +58,19 @@ function Get-JsonEscaped
 function Convert-RevealString
 {
     param([string]$Text, [string]$EscapeMode = 'None')
+    # Fast path: every obfuscation token starts with the literal 'prod_' or
+    # 'nonprod_' prefix (plain or type-hinted, e.g. prod_<guid> / prod_aks_<guid>),
+    # so text containing neither substring cannot contain a token - return it
+    # unchanged and skip the comparatively expensive regex scan. This is the hot
+    # path for the large Consumption CSV, whose cells are overwhelmingly dates,
+    # numbers and meter names with no token: it turns a per-cell regex sweep over
+    # 100k+ rows (minutes) into a substring test. Correctness is unchanged - the
+    # regex callback only ever substitutes tokens found in $Replacements, and any
+    # skipped text provably has no token to substitute.
+    if (-not ($Text.Contains('prod_') -or $Text.Contains('nonprod_')))
+    {
+        return $Text
+    }
     return [regex]::Replace($Text, $TokenPattern, {
             param($m)
             $Tok = $m.Value
@@ -270,15 +283,22 @@ function Invoke-RdaReveal
     try
     {
         # Phase progress (Expanding -> Scanning -> Compressing) so a single
-        # report's reveal is not a black box while the opaque Expand-Archive /
-        # Compress-Archive run. Uses the shared Write-RdaProgress when it is
+        # report's reveal is not a black box while the opaque extract / compress
+        # steps run. Uses the shared Write-RdaProgress when it is
         # loaded (single-report mode via Reveal.ps1, which dot-sources
         # Common.Functions); in the all-subscriptions child job the helper is
         # absent AND the job's output is suppressed, so guard on its presence and
         # no-op there (the wrapper shows a per-folder heartbeat instead).
         $EmitProgress = [bool](Get-Command -Name Write-RdaProgress -ErrorAction SilentlyContinue)
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Expanding archive' -Index 1 -Total 3 }
-        Expand-Archive -Path $InputZip -DestinationPath $TmpRoot -Force
+        # Use System.IO.Compression directly instead of Expand-Archive /
+        # Compress-Archive: the cmdlets are markedly slower (a multi-MB report can
+        # take minutes to re-zip), whereas ZipFile.ExtractToDirectory /
+        # CreateFromDirectory do the same work in a fraction of the time and
+        # produce the same flat archive layout. $TmpRoot was just created empty,
+        # so extraction has nothing to overwrite.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($InputZip, $TmpRoot)
 
         $TotalHits = 0
         $Files = Get-ChildItem -Path $TmpRoot -Recurse -File
@@ -341,19 +361,22 @@ function Invoke-RdaReveal
 
         # Atomic output: compress to a sibling *.partial.zip, then swap it into
         # place with File.Move(overwrite). A same-volume move is a rename, so a
-        # hard kill (SIGKILL / shell timeout) DURING Compress-Archive can never
-        # leave a truncated zip at $OutputZip. This matters for the
-        # all-subscriptions reveal (Reveal.ps1), whose -Resume trusts the presence
-        # of the output zip to mean "this folder is done" and whose consolidation
-        # sweeps every *.zip in staging: a partial file left at the FINAL name
-        # would be both skipped on resume AND folded into the outer zip. The
-        # .partial.zip name is excluded from that consolidation sweep, so only the
-        # completed archive ever appears at $OutputZip. (Compress-Archive appends
-        # .zip when the destination lacks it, so the temp deliberately ends .zip.)
+        # hard kill (SIGKILL / shell timeout) DURING compression can never leave a
+        # truncated zip at $OutputZip. This matters for the all-subscriptions
+        # reveal (Reveal.ps1), whose -Resume trusts the presence of the output zip
+        # to mean "this folder is done" and whose consolidation sweeps every *.zip
+        # in staging: a partial file left at the FINAL name would be both skipped
+        # on resume AND folded into the outer zip. The .partial.zip name is
+        # excluded from that consolidation sweep, so only the completed archive
+        # ever appears at $OutputZip. The Remove-Item below is required because
+        # ZipFile.CreateFromDirectory throws if the destination already exists.
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Compressing output' -Index 3 -Total 3 }
         $OutputZipPartial = ($OutputZip -replace '\.zip$', '') + '.partial.zip'
         if (Test-Path -Path $OutputZipPartial) { Remove-Item -Path $OutputZipPartial -Force }
-        Compress-Archive -Path (Join-Path $TmpRoot '*') -DestinationPath $OutputZipPartial -Force
+        # includeBaseDirectory = $false so the archive entries sit at the root
+        # (the members of $TmpRoot), matching the previous
+        # Compress-Archive -Path "$TmpRoot\*" layout the ingestion server expects.
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($TmpRoot, $OutputZipPartial, [System.IO.Compression.CompressionLevel]::Optimal, $false)
         [System.IO.File]::Move($OutputZipPartial, $OutputZip, $true)
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -Completed }
 

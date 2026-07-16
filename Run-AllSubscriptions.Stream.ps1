@@ -24,20 +24,20 @@
 # - the same file the parent loads - rather than inherited from the parent.
 
 param (
-    [Parameter(Mandatory=$true)] [string]   $TenantID,
-    [Parameter(Mandatory=$true)] [string]   $StreamId,
-    [Parameter(Mandatory=$true)] [string]   $InventoryRoot,
-    [Parameter(Mandatory=$true)] [string]   $ScriptRoot,
-    [Parameter(Mandatory=$true)] [string]   $AzContextPath,
-    [Parameter(Mandatory=$true)] [string]   $StreamSummaryPath,
-    [Parameter(Mandatory=$true)] [string]   $StreamFailuresPath,
+    [Parameter(Mandatory = $true)] [string]   $TenantID,
+    [Parameter(Mandatory = $true)] [string]   $StreamId,
+    [Parameter(Mandatory = $true)] [string]   $InventoryRoot,
+    [Parameter(Mandatory = $true)] [string]   $ScriptRoot,
+    [Parameter(Mandatory = $true)] [string]   $AzContextPath,
+    [Parameter(Mandatory = $true)] [string]   $StreamSummaryPath,
+    [Parameter(Mandatory = $true)] [string]   $StreamFailuresPath,
     # SubscriptionIds / SubscriptionNames are intentionally NOT Mandatory.
     # PowerShell rejects empty arrays passed to Mandatory [string[]] params,
     # which would hard-fail the worker before any logging runs. The parent
     # currently guarantees non-empty slices via [Math]::Min(StreamCount, subs)
     # but a future change to the slicing logic should not silently break the
     # worker's binding. Default to @() and guard the body explicitly.
-    [string[]] $SubscriptionIds   = @(),
+    [string[]] $SubscriptionIds = @(),
     [string[]] $SubscriptionNames = @(),
 
     [switch] $Resume,
@@ -75,7 +75,8 @@ $Tag = "[stream-$StreamId]"
 # Empty slice = nothing to do. Write a minimal "ok with zero subs" summary so
 # the parent's aggregation step (which expects a summary file from every
 # stream) does not flag this as a missing-summary failure, and exit cleanly.
-if ($SubscriptionIds.Count -eq 0) {
+if ($SubscriptionIds.Count -eq 0)
+{
     Write-Stream "no subscriptions in slice; exiting cleanly" 'Yellow'
     @{
         StreamId              = $StreamId
@@ -99,7 +100,8 @@ Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 # The parent wrapper called Save-AzContext on its already-authenticated session
 # and passed us the path. Importing it gives this child process a working Az
 # context without prompting for sign-in. Import-AzContext is idempotent.
-try {
+try
+{
     Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
     # Prevent the imported context from being persisted to the user's on-disk
     # AzureRmContext.json. Without this, every parallel worker writes its
@@ -110,7 +112,9 @@ try {
     catch { Write-Stream ("WARNING: could not disable AzContext autosave: {0}" -f $_.Exception.Message) 'Yellow' }
     Import-AzContext -Path $AzContextPath -ErrorAction Stop | Out-Null
     Write-Stream "Az context imported from shared snapshot" 'Green'
-} catch {
+}
+catch
+{
     Write-Stream ("FATAL: could not import Az context from {0}: {1}" -f $AzContextPath, $_.Exception.Message) 'Red'
     # Write a minimum stream summary so the parent doesn't think the stream
     # disappeared silently.
@@ -121,10 +125,10 @@ try {
         Reason        = $_.Exception.Message
         Completed     = @()
         Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
-            $name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
-            $id   = if ($_ -lt $SubscriptionIds.Count)   { $SubscriptionIds[$_] }   else { '<unknown>' }
-            [pscustomobject]@{ Id = $id; Name = $name; Reason = 'stream did not start: Az context import failed' }
-        })
+                $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
+                $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
+                [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
+            })
         ResourceCounts = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
     exit 1
@@ -139,25 +143,28 @@ $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json"
 
 
 
-$CompletedIds   = @()
+$CompletedIds = @()
 $FailedAttempts = @()
-if ($Resume -or $ResumeFailedOnly) {
-    $state          = Read-StreamState -Path $StreamStateFile
-    $CompletedIds   = $state.Completed
-    $FailedAttempts = $state.Failed
-    if ($CompletedIds.Count -gt 0) {
+if ($Resume -or $ResumeFailedOnly)
+{
+    $State = Read-StreamState -Path $StreamStateFile
+    $CompletedIds = $State.Completed
+    $FailedAttempts = $State.Failed
+    if ($CompletedIds.Count -gt 0)
+    {
         Write-Stream ("resume: skipping {0} previously-completed subs in this slice" -f $CompletedIds.Count) 'DarkGray'
     }
-    if ($ResumeFailedOnly -and $FailedAttempts.Count -gt 0) {
+    if ($ResumeFailedOnly -and $FailedAttempts.Count -gt 0)
+    {
         Write-Stream ("resume-failed-only: prior FailedAttempts list has {0} entry(ies) for this stream" -f $FailedAttempts.Count) 'DarkGray'
     }
 }
 
 # ---- Build the inner-script passthrough --------------------------------------
 $InventoryPassthrough = @{}
-if ($DeviceLogin)     { $InventoryPassthrough['DeviceLogin']     = $true }
-if ($Obfuscate)       { $InventoryPassthrough['Obfuscate']       = $true }
-if ($SkipMetrics)     { $InventoryPassthrough['SkipMetrics']     = $true }
+if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
+if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
+if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 
@@ -167,12 +174,12 @@ $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 # script via `&`, capture $Global:Resources / $Global:Consumption* afterward,
 # and record a per-sub status row for the wrapper to aggregate.
 
-$ResourceCounts        = @()
+$ResourceCounts = @()
 # Plain string array. We never call .Add() on this — only `+=`, which creates a
 # new array each time. Cheaper than fighting [List[T]]::new() constructor
 # overload resolution against an empty PowerShell array argument.
-$Completed             = @($CompletedIds)
-$FailedSubs            = @()
+$Completed = @($CompletedIds)
+$FailedSubs = @()
 
 # The inner script's $Global:ConsumptionRecordCount / $Global:ConsumptionFailedSubs
 # are *running totals*: ResourceInventory.ps1 only nil-initializes them once and
@@ -182,7 +189,7 @@ $FailedSubs            = @()
 # per-iteration snapshots (which would double-count: 100, 300, 600 for three
 # 100-record subs).
 $Global:ConsumptionRecordCount = 0
-$Global:ConsumptionFailedSubs  = @()
+$Global:ConsumptionFailedSubs = @()
 
 # Per-subscription metrics-phase auth health. ResourceInventory.ps1 appends to
 # $Global:MetricsFailedSubs (in this worker's scope, since it is invoked via `&`)
@@ -197,20 +204,23 @@ $Global:MetricsFailedSubs = @()
 # Same reset/aggregate/report lifecycle as $Global:MetricsFailedSubs above.
 $Global:CollectorFailures = @()
 
-$pairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
-for ($i = 0; $i -lt $pairCount; $i++) {
-    $subId   = $SubscriptionIds[$i]
-    $subName = $SubscriptionNames[$i]
+$PairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
+for ($i = 0; $i -lt $PairCount; $i++)
+{
+    $SubId = $SubscriptionIds[$i]
+    $SubName = $SubscriptionNames[$i]
 
-    if ($Resume -and ($Completed -contains $subId)) {
-        Write-Stream ("skipping (already completed): {0} ({1})" -f $subName, $subId) 'DarkGray'
+    if ($Resume -and ($Completed -contains $SubId))
+    {
+        Write-Stream ("skipping (already completed): {0} ({1})" -f $SubName, $SubId) 'DarkGray'
         continue
     }
 
-    Write-Stream ("processing: {0} ({1})" -f $subName, $subId) 'Cyan'
+    Write-Stream ("processing ({0} of {1}): {2} ({3})" -f ($i + 1), $PairCount, $SubName, $SubId) 'Cyan'
 
-    try {
-        & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $subId @InventoryPassthrough -RunAllSubs
+    try
+    {
+        & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
         # Only treat as failure if the inner script set a non-zero exit code.
         # Some completion paths in ResourceInventory.ps1 leave $LASTEXITCODE
         # unset ($null), and PowerShell's `-ne 0` returns $true against $null,
@@ -221,59 +231,68 @@ for ($i = 0; $i -lt $pairCount; $i++) {
         # ResourceInventory.ps1 is invoked via `&` so its $Global:Resources lives
         # in this stream worker's scope. The inner script resets $Global:Resources
         # to @() at the start of every invocation.
-        $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-        $ResourceCounts += [pscustomobject]@{ Name = $subName; Id = $subId; Count = $resCount }
+        $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount }
 
-        if ($resCount -eq 0) {
-            Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $subName) 'Yellow'
-        } else {
-            Write-Stream ("done: {0} - {1:N0} resources" -f $subName, $resCount) 'Green'
+        if ($ResCount -eq 0)
+        {
+            Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $SubName) 'Yellow'
+        }
+        else
+        {
+            Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
         }
 
-        if (-not ($Completed -contains $subId)) {
-            $Completed += $subId
+        if (-not ($Completed -contains $SubId))
+        {
+            $Completed += $SubId
             # If this is a retry that finally succeeded, drop the sub from
             # FailedAttempts so the unified resume-state file reflects truth.
-            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $subId
+            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
             Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
         }
-    } catch {
-        $errRecord = $_
-        Write-Stream ("ERROR processing {0}: {1}" -f $subName, $errRecord.Exception.Message) 'Red'
+    }
+    catch
+    {
+        $ErrRecord = $_
+        Write-Stream ("ERROR processing {0}: {1}" -f $SubName, $ErrRecord.Exception.Message) 'Red'
 
         # Build a structured failure record. Append to a per-stream failures log
         # so per-sub diagnostic detail survives even when many subs fail in one
         # stream. Mirrors the parent wrapper's diag-log shape.
-        $diagLines = @()
-        $diagLines += "==== Failure for subscription: $subName ($subId) [$Tag] ===="
-        $diagLines += "Timestamp: $(Get-Date -Format 'o')"
-        $diagLines += "Message:   $($errRecord.Exception.Message)"
-        $diagLines += "Type:      $($errRecord.Exception.GetType().FullName)"
-        $inner = $errRecord.Exception.InnerException
-        $depth = 0
-        while ($null -ne $inner -and $depth -lt 5) {
-            $diagLines += "Inner[$depth] Type:    $($inner.GetType().FullName)"
-            $diagLines += "Inner[$depth] Message: $($inner.Message)"
-            $inner = $inner.InnerException
-            $depth++
+        $DiagLines = @()
+        $DiagLines += "==== Failure for subscription: $SubName ($SubId) [$Tag] ===="
+        $DiagLines += "Timestamp: $(Get-Date -Format 'o')"
+        $DiagLines += "Message:   $($ErrRecord.Exception.Message)"
+        $DiagLines += "Type:      $($ErrRecord.Exception.GetType().FullName)"
+        $Inner = $ErrRecord.Exception.InnerException
+        $Depth = 0
+        while ($null -ne $Inner -and $Depth -lt 5)
+        {
+            $DiagLines += "Inner[$Depth] Type:    $($Inner.GetType().FullName)"
+            $DiagLines += "Inner[$Depth] Message: $($Inner.Message)"
+            $Inner = $Inner.InnerException
+            $Depth++
         }
-        if ($null -ne $errRecord.InvocationInfo) {
-            $diagLines += "ScriptName:    $($errRecord.InvocationInfo.ScriptName)"
-            $diagLines += "Line:          $($errRecord.InvocationInfo.ScriptLineNumber)"
-            $diagLines += "PositionMsg:   $($errRecord.InvocationInfo.PositionMessage)"
+        if ($null -ne $ErrRecord.InvocationInfo)
+        {
+            $DiagLines += "ScriptName:    $($ErrRecord.InvocationInfo.ScriptName)"
+            $DiagLines += "Line:          $($ErrRecord.InvocationInfo.ScriptLineNumber)"
+            $DiagLines += "PositionMsg:   $($ErrRecord.InvocationInfo.PositionMessage)"
         }
-        $diagLines += "StackTrace:"
-        $diagLines += $errRecord.ScriptStackTrace
-        if ($null -ne $errRecord.Exception.StackTrace) {
-            $diagLines += "ExceptionStackTrace:"
-            $diagLines += $errRecord.Exception.StackTrace
+        $DiagLines += "StackTrace:"
+        $DiagLines += $ErrRecord.ScriptStackTrace
+        if ($null -ne $ErrRecord.Exception.StackTrace)
+        {
+            $DiagLines += "ExceptionStackTrace:"
+            $DiagLines += $ErrRecord.Exception.StackTrace
         }
-        $diagLines += ""
+        $DiagLines += ""
 
-        try { $diagLines | Out-File -FilePath $StreamFailuresPath -Append -Encoding utf8 }
+        try { $DiagLines | Out-File -FilePath $StreamFailuresPath -Append -Encoding utf8 }
         catch { Write-Stream ("could not write to stream failures log {0}: {1}" -f $StreamFailuresPath, $_.Exception.Message) 'Yellow' }
 
-        $FailedSubs += [pscustomobject]@{ Id = $subId; Name = $subName; Reason = $errRecord.Exception.Message }
+        $FailedSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $ErrRecord.Exception.Message }
         # Persist the failure to the per-stream state file. The parent
         # wrapper will fold these entries into the unified FailedAttempts
         # list when it merges per-stream state at run end. Persisting on
@@ -281,7 +300,7 @@ for ($i = 0; $i -lt $pairCount; $i++) {
         # that is killed mid-slice still surfaces its partial failure
         # history to the next -ResumeFailedOnly invocation.
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
-            -Id $subId -Name $subName -Reason $errRecord.Exception.Message
+            -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
     }
 }
@@ -295,16 +314,16 @@ for ($i = 0; $i -lt $pairCount; $i++) {
 # across all subs in this worker's scope (see the reset at the top of the
 # loop), so a single read at the end gives the correct slice total without
 # the per-iteration double-counting trap.
-$ConsumptionTotal      = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
-$ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs)  { @($Global:ConsumptionFailedSubs) } else { @() }
-$MetricsFailedSubs     = if ($null -ne $Global:MetricsFailedSubs)      { @($Global:MetricsFailedSubs) } else { @() }
-$CollectorFailures     = if ($null -ne $Global:CollectorFailures)      { @($Global:CollectorFailures) } else { @() }
+$ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
+$MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+$CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
 
-$summary = [pscustomobject]@{
+$Summary = [pscustomobject]@{
     StreamId               = $StreamId
     Tenant                 = $TenantID
     Status                 = if ($FailedSubs.Count -eq 0) { 'ok' } else { 'partial-failure' }
-    SubsProcessed          = $pairCount
+    SubsProcessed          = $PairCount
     Completed              = @($Completed)
     Failed                 = $FailedSubs
     ResourceCounts         = $ResourceCounts
@@ -313,12 +332,15 @@ $summary = [pscustomobject]@{
     MetricsFailedSubs      = @($MetricsFailedSubs)
     CollectorFailures      = @($CollectorFailures)
 }
-try {
-    $summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8
-} catch {
+try
+{
+    $Summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+}
+catch
+{
     Write-Stream ("FATAL: could not write stream summary to {0}: {1}" -f $StreamSummaryPath, $_.Exception.Message) 'Red'
     exit 1
 }
 
-Write-Stream ("complete: {0}/{1} succeeded, {2} failed" -f $Completed.Count, $pairCount, $FailedSubs.Count) 'Green'
+Write-Stream ("complete: {0}/{1} succeeded, {2} failed" -f $Completed.Count, $PairCount, $FailedSubs.Count) 'Green'
 exit 0

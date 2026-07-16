@@ -2,51 +2,54 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AvSet = $Resources | Where-Object {$_.TYPE -eq 'microsoft.compute/availabilitysets'}
+    $AvSet = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/availabilitysets' }
 
-    if($AvSet)
+    if ($AvSet)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $AvSet) 
+        foreach ($1 in $AvSet)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            
-            if ($data.virtualMachines.id) {
-                foreach ($vmid in $data.virtualMachines.id) 
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+
+            if ($Data.virtualMachines.id)
+            {
+                foreach ($vmid in $Data.virtualMachines.id)
                 {
-                    $vmIds = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($vmid)) { $ResourceIdDictionary[$vmid] } else { 'obfuscated' } } else { $vmid.split('/')[8] }
-                    
-                    $obj = @{
+                    $VmIds = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($vmid)) { $ResourceIdDictionary[$vmid] } else { 'obfuscated' } } else { $vmid.split('/')[8] }
+
+                    $Obj = @{
                         'ID'               = $1.id;
-                        'Subscription'     = $sub1.Name;
+                        'Subscription'     = $Sub1.Name;
                         'ResourceGroup'    = $1.RESOURCEGROUP;
                         'Name'             = $1.NAME;
                         'Location'         = $1.LOCATION;
-                        'FaultDomains'     = [string]$data.platformFaultDomainCount;
-                        'UpdateDomains'    = [string]$data.platformUpdateDomainCount;
-                        'VirtualMachines'  = [string]$vmIds;
+                        'FaultDomains'     = [string]$Data.platformFaultDomainCount;
+                        'UpdateDomains'    = [string]$Data.platformUpdateDomainCount;
+                        'VirtualMachines'  = [string]$VmIds;
                     }
 
-                    $tmp += $obj                 
+                    $Tmp += $Obj
                 }
-            } else {
-                $obj = @{
+            }
+            else
+            {
+                $Obj = @{
                     'ID'               = $1.id;
-                    'Subscription'     = $sub1.Name;
+                    'Subscription'     = $Sub1.Name;
                     'ResourceGroup'    = $1.RESOURCEGROUP;
                     'Name'             = $1.NAME;
                     'Location'         = $1.LOCATION;
-                    'FaultDomains'     = [string]$data.platformFaultDomainCount;
-                    'UpdateDomains'    = [string]$data.platformUpdateDomainCount;
+                    'FaultDomains'     = [string]$Data.platformFaultDomainCount;
+                    'UpdateDomains'    = [string]$Data.platformUpdateDomainCount;
                     'VirtualMachines'  = '';
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
         }
 
-        $tmp
+        $Tmp
     }
 }

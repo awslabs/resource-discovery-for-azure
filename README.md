@@ -34,16 +34,12 @@ cd resource-discovery-for-azure
 
 This:
 - Inventories every enabled subscription in the tenant.
-- Obfuscates resource IDs, names, and other identifying details so the report is safe to share.
+- Produces a full-fidelity report with real resource names and IDs. If you need to share it externally (e.g. with the AWS team), add `-Obfuscate` to mask identifying details first — see [Obfuscation Mode](#obfuscation-mode).
 - Automatically tunes how many subscriptions run in parallel to the machine's CPU and memory: small boxes (e.g. 2 vCPU) run one subscription at a time, larger boxes scale up. Add `-ParallelStreams <N>` (and/or `-ConcurrencyLimit <N>`) only if you want to override the auto-detected values.
 
-The script tracks progress automatically as it goes. If anything interrupts the run (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added and it will skip the subscriptions that already finished and pick up the rest:
+The script tracks progress automatically as it goes. You don't need `-Resume` on the first run. Only if a run is interrupted (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added — it skips the subscriptions that already finished and picks up the rest. See [Resuming an interrupted run](#resuming-an-interrupted-run) for details.
 
-```powershell
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate -Resume
-```
-
-You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. Send that ZIP to the AWS team.
+You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details — see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
 
 For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) for sizing guidance. For all available options, see the [Run-AllSubscriptions Wrapper Parameters](#run-allsubscriptions-wrapper-parameters).
 
@@ -87,6 +83,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 - Sessions are ephemeral by default. Mount a storage account (Cloud Shell Settings > Reset User Settings > Mount storage account) if you need outputs to persist across sessions or want to use `-Resume` on a follow-up session.
 
 #### Option 2: Local Environment
+- **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
 - Azure CLI Resource-Graph Extension (auto-installed by script)
@@ -94,22 +91,20 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
-> .\Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate 
+> .\Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" 
 > ```
 
 ##### Installing the required PowerShell modules
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-The script only uses four Az submodules (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) — it does **not** need the full `Az` rollup. Install just those once before the first run from a **PowerShell 7** prompt (`pwsh`). Use `-Scope CurrentUser` so no administrator elevation is needed:
+**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the four Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those four submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the four it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
+
+**Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
 Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
-
-The slim set installs and imports much faster than the full `Az` module (the full rollup is ~80 submodules). If you already have the full `Az` installed, that works too — the script validates and loads only the four it needs. The report is generated as a self-contained HTML file and has no Excel/ImportExcel dependency, so there is nothing else to install.
-
-`Run-AllSubscriptions.ps1` will offer to install the `Az` module for you if it's missing (part of its pre-flight bootstrap, alongside the PowerShell 7 and Azure CLI checks). Crucially, it does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding. That avoids the old failure mode where an in-run install left a half-installed module that looked fine to `Get-Module` but failed much later with confusing errors like "no consumption records"; a broken/partial install is now caught up front with a clear repair message. Installing by hand with the command above still works and skips the prompt.
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
@@ -189,34 +184,37 @@ You might get more than one authentication request due to different collector pr
 
 ### Advanced Usage Examples
 
-**Scan specific subscription:**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012"
-```
+For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it inventories the whole tenant and forwards the common options (`-SkipConsumption`, `-SkipMetrics`, `-ConcurrencyLimit`, `-Obfuscate`, `-DeviceLogin`), so they behave exactly as they would on the inner script:
 
-**Scan specific resource group:**
+**Skip consumption (billing) data:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
-```
-
-**Adjust performance settings:**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ConcurrencyLimit 8
-```
-
-**Skip consumption:**
-```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SkipConsumption
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -SkipConsumption
 ```
 
 **Skip metrics:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -SkipMetrics
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -SkipMetrics
 ```
 
-**Generate obfuscated report (mask sensitive data before sharing):**
+**Tune the metrics throttle:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ConcurrencyLimit 8
+```
+
+To mask identifying details before sharing externally, add `-Obfuscate` — see [Obfuscation Mode](#obfuscation-mode).
+
+#### Targeting a single subscription or resource group
+
+The wrapper always covers the whole tenant. To scope a run to **one** subscription or a **single** resource group (producing one consolidated report), call `ResourceInventory.ps1` directly — the wrapper does not expose `-SubscriptionID` or `-ResourceGroup`. It accepts the same `-SkipConsumption`, `-SkipMetrics`, and `-Obfuscate` switches.
+
+**Scan a specific subscription:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012"
+```
+
+**Scan a specific resource group:**
+```powershell
+./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
 ```
 
 ### Running Across All Subscriptions
@@ -246,6 +244,26 @@ To include every subscription regardless of state, pass `-IncludeDisabled`:
 ```
 
 The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
+
+#### Subscription access check (up-front)
+
+Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
+
+The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+
+By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
+```
+
+If you *intentionally* have access to only a subset of the tenant, pass `-AllowPartialAccess` to skip the unreadable subscriptions and inventory the rest instead of stopping:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -AllowPartialAccess
+```
+
+On `-Resume`, only the subscriptions that still need processing are probed. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs.
 
 #### Resuming an interrupted run
 
@@ -332,7 +350,11 @@ Every time you run `Run-AllSubscriptions.ps1`, it writes a transcript of the who
 
 If a subscription fails, the wrapper also writes a structured failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`. This file captures the full exception type, the error message, up to five levels of inner exceptions, the script line number, the stack trace, and a snapshot of how much memory and free disk space the machine had when the failure happened. The final summary points at both files when failures occur.
 
-When reporting an issue, attach both files. They contain enough context to diagnose most failures without a follow-up round trip.
+Inside each subscription's report folder, the inner script also writes a consolidated **local debug log**, `DebugLog_<ReportName>_<timestamp>.log` — the per-collector heartbeat (each collector's start/finish/failure) plus the metrics-phase diagnostics that used to scroll past on the terminal. It stays **local** and is never added to the shared ZIP: it can contain real service/resource names and raw exception text, so keep it for your own troubleshooting.
+
+Obfuscated runs (`-Obfuscate`) additionally produce a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP. It is human-readable and scrubbed — subscriptions appear as their obfuscated tokens and other identifiers are masked — and it summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer). Because it is safe to share, it can go to the AWS team alongside the report to explain any gaps without exposing real names. It is a plain `.log` on purpose so the ingestion pipeline treats it as an attachment, not as report data.
+
+When reporting an issue, attach the wrapper transcript and the failure log (and, for obfuscated runs, the in-ZIP diagnostics log). The local `DebugLog_*.log` carries the most detail — share it too if you've confirmed it doesn't expose sensitive names. Together they contain enough context to diagnose most failures without a follow-up round trip.
 
 ## Output Files
 
@@ -347,6 +369,8 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
 | `Transcript_Log_<ReportName>_(date).txt` | Plaintext transcript of script activity (excluded from the zip when `-Obfuscate` is used) |
+| `DebugLog_<ReportName>_(date).log` | Consolidated **local** debug log — per-collector heartbeat + metrics diagnostics. Never added to the zip (may contain real names/exception text) |
+| `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on `-Obfuscate` runs only** |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery
@@ -356,6 +380,16 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 3. **Deliver to AWS team:** Send the renamed ZIP file for analysis
 
 ### Obfuscation Mode
+
+Obfuscation is **opt-in** (off by default). Add `-Obfuscate` to mask identifying details so the report can be shared externally — it works on both entry points:
+
+```powershell
+# Whole tenant (per-subscription reports):
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -Obfuscate
+
+# Single consolidated report:
+./ResourceInventory.ps1 -ReportName "CompanyName" -Obfuscate
+```
 
 When using `-Obfuscate`, the following data is masked in all output files:
 
@@ -374,7 +408,7 @@ Resources with names matching dev/test/qa patterns (including short prefixes lik
 
 **Deterministic mapping:** The same real subscription or resource group always maps to the same obfuscated value within a run. This means pivot tables, grouping, and cross-referencing all work correctly in the obfuscated output.
 
-**Reverse-lookup dictionary:** A local `ObfuscationDictionary_*.json` file maps every obfuscated value back to the real value. This file stays with the customer and is never included in the ZIP. Use `Reveal-Obfuscation.ps1` locally to produce a NEW ingestible ZIP (same structure as `-Obfuscate`) with only the dimensions you choose un-masked — `-Fields ResourceGroup,Subscription,Tag,ResourceName,ResourceId,FreeText` for a selective reveal, or `-All` for a full un-obfuscate. See [docs/obfuscation-and-unmask.md](docs/obfuscation-and-unmask.md) for details.
+**Reverse-lookup dictionary:** A local `ObfuscationDictionary_*.json` file maps every obfuscated value back to the real value. This file stays with the customer and is never included in the ZIP. Use `Reveal.ps1` locally to produce a NEW ingestible ZIP (same structure as `-Obfuscate`) with only the dimensions you choose un-masked — `-Fields ResourceGroup,Subscription,Tag,ResourceName,ResourceId,FreeText` for a selective reveal, or `-All` for a full un-obfuscate. See [docs/obfuscation-and-unmask.md](docs/obfuscation-and-unmask.md) for details.
 
 **What is preserved:** Location, SKU, VM size, OS type, disk type, metrics values, consumption quantities, and all technical configuration data needed for analysis.
 
@@ -470,6 +504,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
 | `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
+| `AllowPartialAccess` | Switch | Change the up-front access check from hard-stop to skip-and-continue. By default the wrapper verifies read access to every in-scope subscription before any work and **stops** if any is unreadable (see [Subscription access check](#subscription-access-check-up-front)). With this switch, unreadable subscriptions are skipped (and listed) and the run proceeds with the accessible ones. | False | `-AllowPartialAccess` |
 | `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |

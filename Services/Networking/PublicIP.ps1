@@ -1,61 +1,61 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $PublicIP = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/publicipaddresses' }
 
-    if($PublicIP)
+    if ($PublicIP)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $PublicIP) 
+        foreach ($1 in $PublicIP)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            if (!($data.ipConfiguration.id)) { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
-            if (!($data.natGateway.id) -and $Use -eq 'UnderUtilized') { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
-                      
-            if ($null -ne $data.ipConfiguration.id) 
+            if (!($Data.ipConfiguration.id)) { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
+            if (!($Data.natGateway.id) -and $Use -eq 'UnderUtilized') { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
+
+            if ($null -ne $Data.ipConfiguration.id)
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                       = $1.id;
-                    'Subscription'             = $sub1.Name;
+                    'Subscription'             = $Sub1.Name;
                     'ResourceGroup'            = $1.RESOURCEGROUP;
                     'Name'                     = $1.NAME;
                     'SKU'                      = $1.SKU.Name;
                     'Location'                 = $1.LOCATION;
-                    'AllocationType'           = $data.publicIPAllocationMethod;
-                    'Version'                  = $data.publicIPAddressVersion;
-                    'ProvisioningState'        = $data.provisioningState;
+                    'AllocationType'           = $Data.publicIPAllocationMethod;
+                    'Version'                  = $Data.publicIPAddressVersion;
+                    'ProvisioningState'        = $Data.provisioningState;
                     'Use'                      = $Use;
-                    'AssociatedResource'       = if ([string]::IsNullOrEmpty($data.ipConfiguration.id)) { $null } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($data.ipConfiguration.id)) { $ResourceIdDictionary[$data.ipConfiguration.id] } else { 'obfuscated' } } else { $data.ipConfiguration.id.split('/')[8] };
-                    'AssociatedResourceType'   = if ([string]::IsNullOrEmpty($data.ipConfiguration.id)) { $null } else { $data.ipConfiguration.id.split('/')[7] };
+                    'AssociatedResource'       = if ([string]::IsNullOrEmpty($Data.ipConfiguration.id)) { $null } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.ipConfiguration.id)) { $ResourceIdDictionary[$Data.ipConfiguration.id] } else { 'obfuscated' } } else { $Data.ipConfiguration.id.split('/')[8] };
+                    'AssociatedResourceType'   = if ([string]::IsNullOrEmpty($Data.ipConfiguration.id)) { $null } else { $Data.ipConfiguration.id.split('/')[7] };
                 }
 
-                $tmp += $obj
-            }               
-            else 
+                $Tmp += $Obj
+            }
+            else
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                       = $1.id;
-                    'Subscription'             = $sub1.name;
+                    'Subscription'             = $Sub1.name;
                     'ResourceGroup'            = $1.RESOURCEGROUP;
                     'Name'                     = $1.NAME;
                     'SKU'                      = $1.SKU.Name;
                     'Location'                 = $1.LOCATION;
-                    'AllocationType'           = $data.publicIPAllocationMethod;
-                    'Version'                  = $data.publicIPAddressVersion;
-                    'ProvisioningState'        = $data.provisioningState;
+                    'AllocationType'           = $Data.publicIPAllocationMethod;
+                    'Version'                  = $Data.publicIPAddressVersion;
+                    'ProvisioningState'        = $Data.provisioningState;
                     'Use'                      = $Use;
                     'AssociatedResource'       = 'None';
                     'AssociatedResourceType'   = 'None';
                 }
-                
-                $tmp += $obj           
-            }             
+
+                $Tmp += $Obj
+            }
         }
 
-        $tmp
+        $Tmp
     }
 }

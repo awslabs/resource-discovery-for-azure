@@ -2,33 +2,33 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $wrkspace = $Resources | Where-Object {$_.TYPE -eq 'microsoft.operationalinsights/workspaces'}
+    $Wrkspace = $Resources | Where-Object { $_.TYPE -eq 'microsoft.operationalinsights/workspaces' }
 
-    if($wrkspace)
+    if ($Wrkspace)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $wrkspace) 
+        foreach ($1 in $Wrkspace)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $timecreated = [datetime]($data.createdDate) | Get-Date -Format "yyyy-MM-dd HH:mm"
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Timecreated = [datetime]($Data.createdDate) | Get-Date -Format "yyyy-MM-dd HH:mm"
 
-            $obj = @{
+            $Obj = @{
                 'ID'                = $1.id;
-                'Subscription'      = $sub1.Name;
+                'Subscription'      = $Sub1.Name;
                 'ResourceGroup'     = $1.RESOURCEGROUP;
                 'Name'              = $1.NAME;
                 'Location'          = $1.LOCATION;
-                'SKU'               = $data.sku.name;
-                'RetentionDays'     = $data.retentionInDays;
-                'DailyQuotaGB'      = [decimal]$data.workspaceCapping.dailyQuotaGb;
-                'CreatedTime'       = $timecreated;
+                'SKU'               = $Data.sku.name;
+                'RetentionDays'     = $Data.retentionInDays;
+                'DailyQuotaGB'      = [decimal]$Data.workspaceCapping.dailyQuotaGb;
+                'CreatedTime'       = $Timecreated;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

@@ -1,30 +1,30 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $AzureFirewall = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/azurefirewalls' }
 
-    if($AzureFirewall)
+    if ($AzureFirewall)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $AzureFirewall) 
+        foreach ($1 in $AzureFirewall)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            
-            $obj = @{
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+
+            $Obj = @{
                 'ID'                                = $1.id;
-                'Subscription'                      = $sub1.Name;
+                'Subscription'                      = $Sub1.Name;
                 'ResourceGroup'                     = $1.RESOURCEGROUP;
                 'Name'                              = $1.NAME;
                 'Location'                          = $1.LOCATION;
-                'SKU'                               = $data.sku.tier;
+                'SKU'                               = $Data.sku.tier;
             }
 
-            $tmp += $obj            
+            $Tmp += $Obj
         }
-        
-        $tmp
+
+        $Tmp
     }
 }

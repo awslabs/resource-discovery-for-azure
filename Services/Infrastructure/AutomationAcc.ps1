@@ -2,58 +2,58 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $runbook = $Resources | Where-Object {$_.TYPE -eq 'microsoft.automation/automationaccounts/runbooks'}
-    $autacc = $Resources | Where-Object {$_.TYPE -eq 'microsoft.automation/automationaccounts'}
+    $Runbook = $Resources | Where-Object { $_.TYPE -eq 'microsoft.automation/automationaccounts/runbooks' }
+    $Autacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.automation/automationaccounts' }
 
-    if($autacc)
+    if ($Autacc)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($0 in $autacc) 
+        foreach ($0 in $Autacc)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $0.subscriptionId }
-            $rbs = $runbook | Where-Object { $_.id.split('/')[8] -eq $0.name }
-            
-            $data0 = $0.properties
-            $timecreated = $data0.creationTime
-            $timecreated = [datetime]$timecreated
-            $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $0.subscriptionId }
+            $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name }
 
-            if ($null -ne $rbs) 
+            $Data0 = $0.properties
+            $Timecreated = $Data0.creationTime
+            $Timecreated = [datetime]$Timecreated
+            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+
+            if ($null -ne $Rbs)
             {
-                foreach ($1 in $rbs) 
+                foreach ($1 in $Rbs)
                 {
-                    $data = $1.PROPERTIES
+                    $Data = $1.PROPERTIES
 
-                    $obj = @{
+                    $Obj = @{
                         'ID'                            = $1.id;
-                        'Subscription'                  = $sub1.Name;
+                        'Subscription'                  = $Sub1.Name;
                         'ResourceGroup'                 = $0.RESOURCEGROUP;
                         'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $0.NAME } else { $0.NAME };
                         'AutomationAccountState'        = $0.properties.State;
                         'AutomationAccountSKU'          = $0.properties.sku.name;
-                        'AutomationAccountCreatedTime'  = $timecreated;   
+                        'AutomationAccountCreatedTime'  = $Timecreated;
                         'Location'                      = $0.LOCATION;
                         'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
-                        'LastModifiedTime'              = ([datetime]$data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
-                        'RunbookState'                  = $data.state;
-                        'RunbookType'                   = $data.runbookType;
-                        'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $data.description } else { $data.description };
+                        'LastModifiedTime'              = ([datetime]$Data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
+                        'RunbookState'                  = $Data.state;
+                        'RunbookType'                   = $Data.runbookType;
+                        'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };
                     }
 
-                    $tmp += $obj
+                    $Tmp += $Obj
                 }
             }
-            else 
+            else
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                            = $0.id;
-                    'Subscription'                  = $sub1.name;
+                    'Subscription'                  = $Sub1.name;
                     'ResourceGroup'                 = $0.RESOURCEGROUP;
                     'AutomationAccountName'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $0.NAME } else { $0.NAME };
                     'AutomationAccountState'        = $0.properties.State;
                     'AutomationAccountSKU'          = $0.properties.sku.name;
-                    'AutomationAccountCreatedTime'  = $timecreated;   
+                    'AutomationAccountCreatedTime'  = $Timecreated;
                     'Location'                      = $0.LOCATION;
                     'RunbookName'                   = $null;
                     'LastModifiedTime'              = $null;
@@ -62,10 +62,10 @@ if ($Task -eq 'Processing')
                     'RunbookDescription'            = $null;
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
         }
 
-        $tmp
+        $Tmp
     }
 }

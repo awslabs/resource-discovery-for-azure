@@ -2,37 +2,37 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $svchub = $Resources | Where-Object {$_.TYPE -eq 'microsoft.servicebus/namespaces'}
+    $Svchub = $Resources | Where-Object { $_.TYPE -eq 'microsoft.servicebus/namespaces' }
 
-    if($svchub)
+    if ($Svchub)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $svchub) 
+        foreach ($1 in $Svchub)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $sku = $1.SKU
-            $timecreated = $data.createdAt
-            $timecreated = [datetime]$timecreated
-            $timecreated = $timecreated.ToString("yyyy-MM-dd HH:mm")
-            
-            $obj = @{
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Sku = $1.SKU
+            $Timecreated = $Data.createdAt
+            $Timecreated = [datetime]$Timecreated
+            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+
+            $Obj = @{
                 'ID'                    = $1.id;
-                'Subscription'          = $sub1.Name;
+                'Subscription'          = $Sub1.Name;
                 'ResourceGroup'         = $1.RESOURCEGROUP;
                 'Name'                  = $1.NAME;
                 'Location'              = $1.LOCATION;
-                'SKU'                   = $sku.name;
-                'Status'                = $data.status;
-                'GeoRep'                = $data.zoneRedundant;
+                'SKU'                   = $Sku.name;
+                'Status'                = $Data.status;
+                'GeoRep'                = $Data.zoneRedundant;
                 'ThroughputUnits'       = $1.sku.capacity;
-                'CreatedTime'           = $timecreated;      
+                'CreatedTime'           = $Timecreated;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

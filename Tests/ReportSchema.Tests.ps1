@@ -13,19 +13,21 @@
 
 Describe 'Report Schema Validation' {
     BeforeAll {
-        $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
+        $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+        {
             Get-ChildItem -Path $PSScriptRoot -Filter 'ResourcesReport_*.zip' |
                 Sort-Object LastWriteTime -Descending |
                 Select-Object -First 1 -ExpandProperty FullName
         }
 
-        if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath)) {
+        if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
+        {
             throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
         }
 
         $script:ExtractPath = Join-Path ([System.IO.Path]::GetTempPath()) "ReportSchemaTest_$([guid]::NewGuid().ToString().Substring(0,8))"
         New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-        Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+        Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
         $script:HtmlFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.html' | Select-Object -First 1
         $script:HtmlContent = if ($script:HtmlFile) { Get-Content $script:HtmlFile.FullName -Raw } else { '' }
@@ -35,25 +37,28 @@ Describe 'Report Schema Validation' {
         # populated service, where <slug> is the service/JSON key lowercased
         # with non-alphanumerics replaced by '-'.
         $script:SectionSlugs = @()
-        if ($script:HtmlContent) {
-            $svcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
-            $script:SectionSlugs = @($svcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
+        if ($script:HtmlContent)
+        {
+            $SvcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
+            $script:SectionSlugs = @($SvcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
         }
 
         # Helper mirroring Summary.ps1's slug rule so tests can map a service
         # name to its expected section id.
-        function script:Get-ServiceSlug([string]$Name) {
+        function script:Get-ServiceSlug([string]$Name)
+        {
             return ($Name -replace '[^a-zA-Z0-9]', '-').ToLower()
         }
 
-        $invFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
-        $script:InventoryJson = if ($invFile) { Get-Content $invFile.FullName -Raw | ConvertFrom-Json } else { $null }
+        $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $script:InventoryJson = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
 
         $script:ObfuscationSectionPattern = '^(prod|nonprod)-(databricks-|aks-|vmss-)?[0-9a-f]{8}-'
     }
 
     AfterAll {
-        if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) {
+        if ($script:ExtractPath -and (Test-Path $script:ExtractPath))
+        {
             Remove-Item -Path $script:ExtractPath -Recurse -Force
         }
     }
@@ -97,16 +102,17 @@ Describe 'HTML section invariants' {
     }
 
     It 'Every inventory resource type with data should have a corresponding HTML section' {
-        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) {
+        if (-not $script:FixtureReady -or $null -eq $script:InventoryJson)
+        {
             Set-ItResult -Skipped -Because 'no HTML or inventory JSON in fixture'
             return
         }
         $script:InventoryJson.PSObject.Properties |
             Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 } |
             ForEach-Object {
-                $expectedSlug = script:Get-ServiceSlug $_.Name
-                $script:SectionSlugs | Should -Contain $expectedSlug `
-                    -Because "inventory key '$($_.Name)' has resources but HTML section 'svc-$expectedSlug' is missing"
+                $ExpectedSlug = script:Get-ServiceSlug $_.Name
+                $script:SectionSlugs | Should -Contain $ExpectedSlug `
+                    -Because "inventory key '$($_.Name)' has resources but HTML section 'svc-$ExpectedSlug' is missing"
             }
     }
 
@@ -115,7 +121,8 @@ Describe 'HTML section invariants' {
         # A section slug is derived from the service key (e.g. "VirtualMachines"
         # -> "virtualmachines"), so it must never look like an obfuscated token.
         if (-not $script:FixtureReady) { Set-ItResult -Skipped -Because 'no fixture'; return }
-        foreach ($slug in $script:SectionSlugs) {
+        foreach ($slug in $script:SectionSlugs)
+        {
             $slug | Should -Not -Match $script:ObfuscationSectionPattern -Because "section slug '$slug' looks obfuscated; service names must remain literal"
         }
     }
@@ -124,9 +131,9 @@ Describe 'HTML section invariants' {
         # Fail (not skip) when an HTML fixture exists with a populated inventory
         # but rendered zero sections - that is the regression this guards.
         if (-not $script:FixtureReady -or $null -eq $script:InventoryJson) { Set-ItResult -Skipped -Because 'no fixture'; return }
-        $populatedCount = @($script:InventoryJson.PSObject.Properties |
-            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
-        if ($populatedCount -eq 0) { Set-ItResult -Skipped -Because 'inventory has no populated resource types'; return }
+        $PopulatedCount = @($script:InventoryJson.PSObject.Properties |
+                Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
+        if ($PopulatedCount -eq 0) { Set-ItResult -Skipped -Because 'inventory has no populated resource types'; return }
         $script:SectionSlugs.Count | Should -BeGreaterThan 0 -Because 'a populated inventory must render at least one service section'
     }
 }

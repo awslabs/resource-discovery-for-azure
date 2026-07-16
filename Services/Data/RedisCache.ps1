@@ -1,40 +1,40 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $RedisCache = @()
     $RedisCache += $Resources | Where-Object { $_.TYPE -eq 'microsoft.cache/redis' }
     $RedisCache += $Resources | Where-Object { $_.TYPE -eq 'microsoft.cache/redisenterprise' }
 
-    if($RedisCache)
+    if ($RedisCache)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($redisCacheInstance in $RedisCache) 
+        foreach ($redisCacheInstance in $RedisCache)
         {
-            $subscription = $Sub | Where-Object { $_.id -eq $redisCacheInstance.subscriptionId }
-            $data = $redisCacheInstance.Properties
-            
-            if($redisCacheInstance.Type -eq 'microsoft.cache/redis')
+            $Subscription = $Sub | Where-Object { $_.id -eq $redisCacheInstance.subscriptionId }
+            $Data = $redisCacheInstance.Properties
+
+            if ($redisCacheInstance.Type -eq 'microsoft.cache/redis')
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                    = $redisCacheInstance.id;
-                    'Subscription'          = $subscription.Name;
+                    'Subscription'          = $Subscription.Name;
                     'ResourceGroup'         = $redisCacheInstance.ResourceGroup;
                     'Name'                  = $redisCacheInstance.Name;
                     'Location'              = $redisCacheInstance.Location;
-                    'Sku'                   = $data.sku.name;
-                    'Capacity'              = $data.sku.capacity;
-                    'Family'                = $data.sku.family;
+                    'Sku'                   = $Data.sku.name;
+                    'Capacity'              = $Data.sku.capacity;
+                    'Family'                = $Data.sku.family;
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
             else
             {
-                $obj = @{
+                $Obj = @{
                     'ID'                    = $redisCacheInstance.id;
-                    'Subscription'          = $subscription.Name;
+                    'Subscription'          = $Subscription.Name;
                     'ResourceGroup'         = $redisCacheInstance.ResourceGroup;
                     'Name'                  = $redisCacheInstance.Name;
                     'Location'              = $redisCacheInstance.Location;
@@ -43,10 +43,10 @@ if ($Task -eq 'Processing')
                     'Family'                = 'enterprise';
                 }
 
-                $tmp += $obj
+                $Tmp += $Obj
             }
         }
 
-        $tmp
+        $Tmp
     }
 }

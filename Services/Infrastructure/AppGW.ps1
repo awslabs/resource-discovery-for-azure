@@ -1,41 +1,41 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $APPGTW = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/applicationgateways' }
 
-    if($APPGTW)
+    if ($APPGTW)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $APPGTW) 
+        foreach ($1 in $APPGTW)
         {
-            $sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            if([string]::IsNullOrEmpty($data.autoscaleConfiguration.maxCapacity)){$MaxCap = 'Autoscale Disabled'}else{$MaxCap = $data.autoscaleConfiguration.maxCapacity}
-            if([string]::IsNullOrEmpty($data.autoscaleConfiguration.minCapacity)){$MinCap = 'Autoscale Disabled'}else{$MinCap = $data.autoscaleConfiguration.minCapacity}
-            if([string]::IsNullOrEmpty($data.sslPolicy.minProtocolVersion)){$PROT = 'Default'}else{$PROT = $data.sslPolicy.minProtocolVersion}
-            if([string]::IsNullOrEmpty($data.webApplicationFirewallConfiguration.enabled)){$WAF = $false}else{$WAF = $data.webApplicationFirewallConfiguration.enabled}
-            
-            $obj = @{
+            if ([string]::IsNullOrEmpty($Data.autoscaleConfiguration.maxCapacity)) { $MaxCap = 'Autoscale Disabled' }else { $MaxCap = $Data.autoscaleConfiguration.maxCapacity }
+            if ([string]::IsNullOrEmpty($Data.autoscaleConfiguration.minCapacity)) { $MinCap = 'Autoscale Disabled' }else { $MinCap = $Data.autoscaleConfiguration.minCapacity }
+            if ([string]::IsNullOrEmpty($Data.sslPolicy.minProtocolVersion)) { $PROT = 'Default' }else { $PROT = $Data.sslPolicy.minProtocolVersion }
+            if ([string]::IsNullOrEmpty($Data.webApplicationFirewallConfiguration.enabled)) { $WAF = $false }else { $WAF = $Data.webApplicationFirewallConfiguration.enabled }
+
+            $Obj = @{
                 'ID'                    = $1.id;
-                'Subscription'          = $sub1.Name;
+                'Subscription'          = $Sub1.Name;
                 'ResourceGroup'         = $1.RESOURCEGROUP;
                 'Name'                  = $1.NAME;
                 'Location'              = $1.LOCATION;
-                'State'                 = $data.OperationalState;
+                'State'                 = $Data.OperationalState;
                 'WAFEnabled'            = $WAF;
                 'MinimumTLSVersion'     = "$($PROT -Replace '_', '.' -Replace 'v', ' ' -Replace 'tls', 'TLS')";
                 'AutoscaleMinCapacity'  = $MinCap;
                 'AutoscaleMaxCapacity'  = $MaxCap;
-                'SKUName'               = $data.sku.tier;
-                'CurrentInstances'      = $data.sku.capacity;
+                'SKUName'               = $Data.sku.tier;
+                'CurrentInstances'      = $Data.sku.capacity;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

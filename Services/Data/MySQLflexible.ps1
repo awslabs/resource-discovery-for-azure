@@ -1,45 +1,45 @@
 param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
-if ($Task -eq 'Processing') 
+if ($Task -eq 'Processing')
 {
     $MySQLFlexible = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.DBforMySQL/flexibleServers' }
 
-    if($MySQLFlexible)
+    if ($MySQLFlexible)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $MySQLFlexible) 
+        foreach ($1 in $MySQLFlexible)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            
-            $obj = @{
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+
+            $Obj = @{
                 'ID'                                = $1.id;
-                'Subscription'                      = $sub1.Name;
+                'Subscription'                      = $Sub1.Name;
                 'ResourceGroup'                     = $1.RESOURCEGROUP;
                 'Name'                              = $1.NAME;
                 'Location'                          = $1.LOCATION;
                 'SKU'                               = $1.sku.name;
                 'Tier'                              = $1.sku.tier;
-                'Version'                           = $data.version;
-                'State'                             = $data.state;
-                'Zone'                              = $data.availabilityZone;
-                'StorageSizeGB'                     = $data.storage.storageSizeGB;
-                'LimitIOPs'                         = $data.storage.iops;
-                'AutoGrow'                          = $data.storage.autoGrow;
-                'StorageSku'                        = $data.storage.storageSku;
-                'CustomMaintenanceWindow'           = $data.maintenanceWindow.customWindow;
-                'ReplicationRole'                   = $data.replicationRole;
-                'ReplicaCapacity'                   = $data.replicaCapacity;
-                'BackupRetentionDays'               = $data.backup.backupRetentionDays;
-                'GeoRedundantBackup'                = $data.backup.geoRedundantBackup;
-                'HighAvailability'                  = $data.highAvailability.mode;
-                'HighAvailabilityState'             = $data.highAvailability.state;                            
+                'Version'                           = $Data.version;
+                'State'                             = $Data.state;
+                'Zone'                              = $Data.availabilityZone;
+                'StorageSizeGB'                     = $Data.storage.storageSizeGB;
+                'LimitIOPs'                         = $Data.storage.iops;
+                'AutoGrow'                          = $Data.storage.autoGrow;
+                'StorageSku'                        = $Data.storage.storageSku;
+                'CustomMaintenanceWindow'           = $Data.maintenanceWindow.customWindow;
+                'ReplicationRole'                   = $Data.replicationRole;
+                'ReplicaCapacity'                   = $Data.replicaCapacity;
+                'BackupRetentionDays'               = $Data.backup.backupRetentionDays;
+                'GeoRedundantBackup'                = $Data.backup.geoRedundantBackup;
+                'HighAvailability'                  = $Data.highAvailability.mode;
+                'HighAvailabilityState'             = $Data.highAvailability.state;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

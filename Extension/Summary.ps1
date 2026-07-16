@@ -48,6 +48,12 @@ param(
     $ExtractionRunTime,
     $ReportingRunTime,
 
+    # Ordered hashtable of { phase label -> [TimeSpan] } giving a clear per-phase
+    # timing breakdown (metrics / collectors / consumption) for the header, so it
+    # is obvious which phase dominates a long run. Optional; when omitted only the
+    # coarse extraction/total timers are shown.
+    $PhaseTimings,
+
     # Environment label (e.g. 'Azure CloudShell', 'PowerShell Unix'). Display only.
     $PlatOS,
 
@@ -76,11 +82,32 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
     throw "Summary.ps1: -HtmlFile output path is required."
 }
 
+# Shared HTML-summary render helpers (ConvertTo-HtmlSafe / New-DonutChart /
+# New-BarChart) live in Functions/AllSubHtmlSummary.Functions.ps1 - the single
+# source of truth also used by the aggregate all-subscriptions summary. They are
+# NOT in Common.Functions.ps1 on purpose: only the HTML-rendering paths need
+# them, so they are dot-sourced only here (and by the wrapper's -MainSummary
+# branch) rather than loaded into every entry point. This script sits in
+# Extension/, so resolve the sibling Functions/ folder from the repo root.
+$RenderFunctionsFile = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
+if (-not (Test-Path -Path $RenderFunctionsFile -PathType Leaf))
+{
+    throw "Summary.ps1: shared render helpers not found at '$RenderFunctionsFile'."
+}
+. $RenderFunctionsFile
+
+# Self-measure the HTML render (JSON read + all fragment building). Summary CANNOT
+# measure the collection phases - they already ran and are passed in via
+# -PhaseTimings - but it CAN time its own render, so the report shows its own
+# generation cost too. Stopped just before the header is assembled; the final
+# here-string interpolation + file write after that is trivially fast.
+$RenderStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
 # Read input JSON. Top-level keys are service-type names; values are arrays of
 # resource records. No schema validation - a new field simply appears as a new
 # column in that service's table.
-$rawJson = Get-Content -Path $JsonFile -Raw -Encoding utf8
-$Inventory = $rawJson | ConvertFrom-Json
+$RawJson = Get-Content -Path $JsonFile -Raw -Encoding utf8
+$Inventory = $RawJson | ConvertFrom-Json
 
 # Compute summary stats. Every array-valued key becomes a (service, count)
 # pair. Empty services and the "Version" metadata key are filtered out.
@@ -88,13 +115,13 @@ $ServiceSummary = @()
 foreach ($prop in $Inventory.PSObject.Properties)
 {
     if ($prop.Name -eq 'Version') { continue }
-    $value = $prop.Value
-    if ($null -eq $value) { continue }
-    $count = @($value).Count
-    if ($count -le 0) { continue }
+    $Value = $prop.Value
+    if ($null -eq $Value) { continue }
+    $Count = @($Value).Count
+    if ($Count -le 0) { continue }
     $ServiceSummary += [pscustomobject]@{
         Service = $prop.Name
-        Count   = $count
+        Count   = $Count
     }
 }
 $ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
@@ -105,22 +132,22 @@ $TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
 # services; if most match the obfuscation signature treat the report as
 # obfuscated, else identifiable (the safe default for an unclear posture).
 $ObfuscationStatus = 'identifiable'
-$obfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-$samples = New-Object System.Collections.Generic.List[string]
+$ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+$Samples = New-Object System.Collections.Generic.List[string]
 foreach ($svc in $ServiceSummary | Select-Object -First 5)
 {
-    $records = $Inventory.($svc.Service)
-    foreach ($r in (@($records) | Select-Object -First 4))
+    $Records = $Inventory.($svc.Service)
+    foreach ($r in (@($Records) | Select-Object -First 4))
     {
         if ($null -eq $r) { continue }
-        if ($r.PSObject.Properties.Name -contains 'Name' -and -not [string]::IsNullOrWhiteSpace([string]$r.Name)) { $samples.Add([string]$r.Name) }
-        if ($r.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace([string]$r.Subscription)) { $samples.Add([string]$r.Subscription) }
+        if ($r.PSObject.Properties.Name -contains 'Name' -and -not [string]::IsNullOrWhiteSpace([string]$r.Name)) { $Samples.Add([string]$r.Name) }
+        if ($r.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace([string]$r.Subscription)) { $Samples.Add([string]$r.Subscription) }
     }
 }
-if ($samples.Count -gt 0)
+if ($Samples.Count -gt 0)
 {
-    $obfHits = ($samples | Where-Object { $_ -match $obfPattern }).Count
-    if ($obfHits -gt ($samples.Count * 0.7))
+    $ObfHits = ($Samples | Where-Object { $_ -match $ObfPattern }).Count
+    if ($ObfHits -gt ($Samples.Count * 0.7))
     {
         $ObfuscationStatus = 'obfuscated'
     }
@@ -137,11 +164,11 @@ if ($samples.Count -gt 0)
 $VmBilling = $null
 if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $ConsumptionFile -PathType Leaf))
 {
-    $runningVmCount = 0
-    $vmRecords = $Inventory.VirtualMachines
-    if ($vmRecords)
+    $RunningVmCount = 0
+    $VmRecords = $Inventory.VirtualMachines
+    if ($VmRecords)
     {
-        $runningVmCount = @($vmRecords | Where-Object { $_.PowerState -match 'running' }).Count
+        $RunningVmCount = @($VmRecords | Where-Object { $_.PowerState -match 'running' }).Count
     }
 
     # Count distinct VM-meter resources in the consumption CSV. A header-only or
@@ -150,31 +177,31 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $C
     # check is skipped rather than reporting a false 100% gap. A CSV that DOES
     # have rows but none in the 'Virtual Machines' meter is a legitimate zero -
     # the gap then reflects a real coverage shortfall.
-    $billedVmCount = 0
-    $hasConsumptionData = $false
+    $BilledVmCount = 0
+    $HasConsumptionData = $false
     try
     {
-        $consumption = @(Import-Csv -Path $ConsumptionFile -ErrorAction Stop)
-        $hasConsumptionData = ($consumption.Count -gt 0)
-        $billedVmCount = (@($consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
+        $Consumption = @(Import-Csv -Path $ConsumptionFile -ErrorAction Stop)
+        $HasConsumptionData = ($Consumption.Count -gt 0)
+        $BilledVmCount = (@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
     }
     catch
     {
         # Unreadable CSV: leave the check disabled so no banner is rendered.
-        $hasConsumptionData = $false
+        $HasConsumptionData = $false
     }
 
-    if ($hasConsumptionData -and $runningVmCount -gt 0)
+    if ($HasConsumptionData -and $RunningVmCount -gt 0)
     {
-        $gap = $runningVmCount - $billedVmCount
-        if ($gap -gt $VmBillingGapThreshold)
+        $Gap = $RunningVmCount - $BilledVmCount
+        if ($Gap -gt $VmBillingGapThreshold)
         {
-            $gapPct = [math]::Round((100.0 * $gap / $runningVmCount), 1)
+            $GapPct = [math]::Round((100.0 * $Gap / $RunningVmCount), 1)
             $VmBilling = [pscustomobject]@{
-                Running = $runningVmCount
-                Billed  = $billedVmCount
-                Gap     = $gap
-                GapPct  = $gapPct
+                Running = $RunningVmCount
+                Billed  = $BilledVmCount
+                Gap     = $Gap
+                GapPct  = $GapPct
             }
         }
     }
@@ -185,13 +212,13 @@ if ([string]::IsNullOrWhiteSpace($SubscriptionName))
 {
     foreach ($svc in $ServiceSummary)
     {
-        $records = $Inventory.($svc.Service)
-        if ($records -and @($records).Count -gt 0)
+        $Records = $Inventory.($svc.Service)
+        if ($Records -and @($Records).Count -gt 0)
         {
-            $first = @($records)[0]
-            if ($first.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace($first.Subscription))
+            $First = @($Records)[0]
+            if ($First.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace($First.Subscription))
             {
-                $SubscriptionName = [string]$first.Subscription
+                $SubscriptionName = [string]$First.Subscription
                 break
             }
         }
@@ -205,139 +232,13 @@ if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Ver
     $Version = [string]$Inventory.Version
 }
 
-# === HTML helpers =============================================================
+# === HTML + chart helpers ====================================================
 #
-# All output is HTML-escaped by default. The report embeds JSON-derived strings
-# from a downstream system (Azure Resource Graph) which could legitimately
-# contain HTML-significant characters in a name or tag. Escaping at the edge
-# is the only safe pattern; we never trust the input.
-function ConvertTo-HtmlSafe
-{
-    param([Parameter(ValueFromPipeline = $true)]$Value)
-    process
-    {
-        if ($null -eq $Value) { return '' }
-        $s = [string]$Value
-        $s = $s.Replace('&', '&amp;')
-        $s = $s.Replace('<', '&lt;')
-        $s = $s.Replace('>', '&gt;')
-        $s = $s.Replace('"', '&quot;')
-        $s = $s.Replace("'", '&#39;')
-        return $s
-    }
-}
-
-# === Chart helpers ============================================================
-#
-# Hand-rolled SVG. Two chart types: donut (proportions) and horizontal bar
-# (top-N counts). Both produce strings that drop straight into the HTML body.
-# No JS, no external library, ~5 KB combined.
-
-function New-DonutChart
-{
-    param(
-        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
-        [int]$Size = 240,
-        [int]$Thickness = 50
-    )
-
-    $total = ($Data | Measure-Object -Property Value -Sum).Sum
-    if ($total -le 0) { return '<div class="empty">No data</div>' }
-
-    $cx = $Size / 2
-    $cy = $Size / 2
-    $radius = ($Size / 2) - 10
-    $innerRadius = $radius - $Thickness
-
-    # Color palette - colorblind-friendly (Okabe-Ito + neutrals). Wraps if
-    # there are more services than colors, which is fine for visual purpose.
-    $palette = @(
-        '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9',
-        '#D55E00', '#F0E442', '#999999', '#332288', '#117733',
-        '#88CCEE', '#DDCC77', '#CC6677', '#AA4499', '#882255'
-    )
-
-    $svg = New-Object System.Text.StringBuilder
-    [void]$svg.Append("<svg viewBox='0 0 $Size $Size' class='chart-donut' role='img' aria-label='Resource count by service'>")
-
-    $angleStart = -90.0
-    $i = 0
-    foreach ($item in $Data)
-    {
-        $value = [double]$item.Value
-        if ($value -le 0) { $i++; continue }
-        $sweep = ($value / $total) * 360.0
-        $angleEnd = $angleStart + $sweep
-
-        $x1 = $cx + ($radius * [math]::Cos($angleStart * [math]::PI / 180.0))
-        $y1 = $cy + ($radius * [math]::Sin($angleStart * [math]::PI / 180.0))
-        $x2 = $cx + ($radius * [math]::Cos($angleEnd * [math]::PI / 180.0))
-        $y2 = $cy + ($radius * [math]::Sin($angleEnd * [math]::PI / 180.0))
-        $largeArc = if ($sweep -gt 180) { 1 } else { 0 }
-
-        $color = $palette[$i % $palette.Count]
-        $label = ConvertTo-HtmlSafe $item.Label
-        $pct = [math]::Round(($value / $total) * 100, 1)
-        $titleText = "$label`: $value ($pct%)"
-
-        $path = "M $cx $cy L $x1 $y1 A $radius $radius 0 $largeArc 1 $x2 $y2 Z"
-        [void]$svg.AppendFormat("<path d='{0}' fill='{1}'><title>{2}</title></path>", $path, $color, $titleText)
-
-        $angleStart = $angleEnd
-        $i++
-    }
-
-    # Inner cutout to make it a donut
-    [void]$svg.AppendFormat("<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $cx, $cy, $innerRadius)
-    [void]$svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $cx, ($cy - 6), $total)
-    [void]$svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $cx, ($cy + 14))
-
-    [void]$svg.Append('</svg>')
-    return $svg.ToString()
-}
-
-function New-BarChart
-{
-    param(
-        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
-        [int]$Width = 480,
-        [int]$RowHeight = 26,
-        [int]$LabelWidth = 160
-    )
-
-    if ($Data.Count -eq 0) { return '<div class="empty">No data</div>' }
-
-    $maxValue = ($Data | Measure-Object -Property Value -Maximum).Maximum
-    if ($maxValue -le 0) { return '<div class="empty">No data</div>' }
-
-    $height = $RowHeight * $Data.Count + 8
-    $barAreaWidth = $Width - $LabelWidth - 60
-
-    $svg = New-Object System.Text.StringBuilder
-    [void]$svg.Append("<svg viewBox='0 0 $Width $height' class='chart-bar' role='img' aria-label='Top services by count'>")
-
-    $i = 0
-    foreach ($item in $Data)
-    {
-        $y = ($i * $RowHeight) + 4
-        $label = ConvertTo-HtmlSafe $item.Label
-        $value = [int]$item.Value
-        $barWidth = [int](($value / $maxValue) * $barAreaWidth)
-        if ($barWidth -lt 1) { $barWidth = 1 }
-
-        # Label on the left
-        [void]$svg.AppendFormat("<text x='{0}' y='{1}' class='bar-label' text-anchor='end'>{2}</text>", ($LabelWidth - 8), ($y + 17), $label)
-        # Bar
-        [void]$svg.AppendFormat("<rect x='{0}' y='{1}' width='{2}' height='{3}' rx='3' class='bar-fill' />", $LabelWidth, $y, $barWidth, ($RowHeight - 8))
-        # Count to the right of the bar
-        [void]$svg.AppendFormat("<text x='{0}' y='{1}' class='bar-value'>{2}</text>", ($LabelWidth + $barWidth + 6), ($y + 17), $value)
-
-        $i++
-    }
-
-    [void]$svg.Append('</svg>')
-    return $svg.ToString()
-}
+# ConvertTo-HtmlSafe / New-DonutChart / New-BarChart now live in
+# Functions/AllSubHtmlSummary.Functions.ps1 (dot-sourced near the top of this
+# script) so the per-subscription report and the aggregate all-subscriptions
+# summary share ONE copy instead of duplicating them. Behaviour is unchanged;
+# see that file for the definitions.
 
 # === Per-service table builder ================================================
 #
@@ -359,17 +260,17 @@ function New-ServiceTable
         [string]$ObfuscationStatus = 'identifiable'
     )
 
-    $records = @($Records)
-    $count = $records.Count
-    if ($count -eq 0)
+    $Records = @($Records)
+    $Count = $Records.Count
+    if ($Count -eq 0)
     {
         return ''
     }
 
     # Discover columns from the records themselves. Frequency ordering puts
     # the most consistently-populated columns first.
-    $colCounts = @{}
-    foreach ($r in $records)
+    $ColCounts = @{}
+    foreach ($r in $Records)
     {
         if ($null -eq $r) { continue }
         if ($r -is [string] -or $r -is [int] -or $r -is [bool])
@@ -377,28 +278,28 @@ function New-ServiceTable
             # Defensive: collectors should emit objects, not scalars. If a
             # scalar slips in, surface it under a fixed column name so the
             # table still renders.
-            if (-not $colCounts.ContainsKey('Value')) { $colCounts['Value'] = 0 }
-            $colCounts['Value'] += 1
+            if (-not $ColCounts.ContainsKey('Value')) { $ColCounts['Value'] = 0 }
+            $ColCounts['Value'] += 1
             continue
         }
         foreach ($p in $r.PSObject.Properties)
         {
-            if (-not $colCounts.ContainsKey($p.Name)) { $colCounts[$p.Name] = 0 }
-            $colCounts[$p.Name] += 1
+            if (-not $ColCounts.ContainsKey($p.Name)) { $ColCounts[$p.Name] = 0 }
+            $ColCounts[$p.Name] += 1
         }
     }
 
     # Promote a stable preferred-column order for fields that almost every
     # service has, so the most useful columns lead. Anything not in this list
     # falls back to frequency order.
-    $preferredOrder = @('Name', 'Subscription', 'ResourceGroup', 'Location', 'SKU', 'Tier', 'State', 'Status', 'Kind', 'AppType', 'OSType', 'OS', 'OSName', 'OSVersion', 'Size')
-    $columns = @()
-    foreach ($p in $preferredOrder)
+    $PreferredOrder = @('Name', 'Subscription', 'ResourceGroup', 'Location', 'SKU', 'Tier', 'State', 'Status', 'Kind', 'AppType', 'OSType', 'OS', 'OSName', 'OSVersion', 'Size')
+    $Columns = @()
+    foreach ($p in $PreferredOrder)
     {
-        if ($colCounts.ContainsKey($p))
+        if ($ColCounts.ContainsKey($p))
         {
-            $columns += $p
-            $colCounts.Remove($p)
+            $Columns += $p
+            $ColCounts.Remove($p)
         }
     }
     # Append remaining columns ordered by descending frequency, but skip
@@ -407,31 +308,31 @@ function New-ServiceTable
     # deterministic: without a secondary key, equal-frequency columns fall back
     # to the enumeration order of an unordered hashtable, which varies run to
     # run and made columns (e.g. OSName) drift in and out of the 12-column cap.
-    $remaining = $colCounts.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Key'; Descending = $false } | ForEach-Object { $_.Key }
-    $columns += $remaining
+    $Remaining = $ColCounts.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Key'; Descending = $false } | ForEach-Object { $_.Key }
+    $Columns += $Remaining
 
     # Drop columns that always contain a complex object - they render as
     # "@{...}" which is noise. Detect by sampling the first non-null value.
-    $columnsClean = @()
-    foreach ($col in $columns)
+    $ColumnsClean = @()
+    foreach ($col in $Columns)
     {
-        $sample = $null
-        foreach ($r in $records)
+        $Sample = $null
+        foreach ($r in $Records)
         {
             if ($null -eq $r) { continue }
-            $v = $null
-            try { $v = $r.$col } catch { $v = $null }
-            if ($null -ne $v) { $sample = $v; break }
+            $V = $null
+            try { $V = $r.$col } catch { $V = $null }
+            if ($null -ne $V) { $Sample = $V; break }
         }
-        if ($null -eq $sample) { $columnsClean += $col; continue }
-        if ($sample -is [psobject] -and -not ($sample -is [string]) -and -not ($sample -is [int]) -and -not ($sample -is [bool]) -and -not ($sample -is [double]) -and -not ($sample -is [long]) -and -not ($sample -is [array]))
+        if ($null -eq $Sample) { $ColumnsClean += $col; continue }
+        if ($Sample -is [psobject] -and -not ($Sample -is [string]) -and -not ($Sample -is [int]) -and -not ($Sample -is [bool]) -and -not ($Sample -is [double]) -and -not ($Sample -is [long]) -and -not ($Sample -is [array]))
         {
             # Skip nested objects but keep arrays - we render arrays joined.
             continue
         }
-        $columnsClean += $col
+        $ColumnsClean += $col
     }
-    $columns = $columnsClean
+    $Columns = $ColumnsClean
 
     # When the report is obfuscated, drop columns that carry only opaque
     # pseudonym GUIDs and add no analytical value (the full resource ID and the
@@ -439,115 +340,130 @@ function New-ServiceTable
     # are kept because they still let rows be correlated.
     if ($ObfuscationStatus -eq 'obfuscated')
     {
-        $obfuscatedNoiseColumns = @('ID', 'Set')
-        $columns = $columns | Where-Object { $obfuscatedNoiseColumns -notcontains $_ }
+        $ObfuscatedNoiseColumns = @('ID', 'Set')
+        $Columns = $Columns | Where-Object { $ObfuscatedNoiseColumns -notcontains $_ }
     }
 
-    # Cap column count to keep the table readable. 12 is a soft limit that
-    # fits the most informative columns without horizontal scroll on most
-    # screens.
-    if ($columns.Count -gt 12) { $columns = $columns[0..11] }
+    # A 12-column cap used to be applied here to avoid horizontal scrolling on
+    # narrow screens, but it silently DROPPED genuinely useful collected columns
+    # (e.g. ImageSku = the OS image edition, OSType). Now that every table has a
+    # synced top+bottom horizontal scrollbar (see .table-scroll-top /
+    # setupTopScroll in the CSS/JS), the width is fully navigable, so ALL
+    # collected columns are shown rather than hidden behind a cap.
 
     # Render header
-    $sb = New-Object System.Text.StringBuilder
-    $safeServiceName = ConvertTo-HtmlSafe $ServiceName
-    $sectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLower()
-    [void]$sb.AppendFormat('<details class="service-section" id="svc-{0}">', $sectionId)
-    [void]$sb.AppendFormat('<summary><span class="svc-name">{0}</span><span class="svc-count">{1}</span></summary>', $safeServiceName, $count)
-    [void]$sb.Append('<div class="svc-body">')
-    [void]$sb.AppendFormat('<input type="search" class="svc-search" placeholder="Filter {0}..." aria-label="Filter {0}" />', $safeServiceName)
-    [void]$sb.Append('<div class="table-scroll"><table class="svc-table"><thead><tr>')
-    foreach ($col in $columns)
+    $Sb = New-Object System.Text.StringBuilder
+    $SafeServiceName = ConvertTo-HtmlSafe $ServiceName
+    $SectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLower()
+    [void]$Sb.AppendFormat('<details class="service-section" id="svc-{0}">', $SectionId)
+    [void]$Sb.AppendFormat('<summary><span class="svc-name">{0}</span><span class="svc-count">{1}</span></summary>', $SafeServiceName, $Count)
+    [void]$Sb.Append('<div class="svc-body">')
+    [void]$Sb.AppendFormat('<input type="search" class="svc-search" placeholder="Filter {0}..." aria-label="Filter {0}" />', $SafeServiceName)
+    [void]$Sb.Append('<div class="table-scroll"><table class="svc-table"><thead><tr>')
+    foreach ($col in $Columns)
     {
-        $colSafe = ConvertTo-HtmlSafe $col
-        [void]$sb.AppendFormat('<th data-col="{0}">{0}</th>', $colSafe)
+        $ColSafe = ConvertTo-HtmlSafe $col
+        [void]$Sb.AppendFormat('<th data-col="{0}">{0}</th>', $ColSafe)
     }
-    [void]$sb.Append('</tr></thead><tbody>')
+    [void]$Sb.Append('</tr></thead><tbody>')
 
-    foreach ($r in $records)
+    foreach ($r in $Records)
     {
-        [void]$sb.Append('<tr>')
-        foreach ($col in $columns)
+        [void]$Sb.Append('<tr>')
+        foreach ($col in $Columns)
         {
-            $val = $null
-            try { $val = $r.$col } catch { $val = $null }
+            $Val = $null
+            try { $Val = $r.$col } catch { $Val = $null }
 
-            if ($null -eq $val)
+            if ($null -eq $Val)
             {
-                [void]$sb.Append('<td class="empty">&mdash;</td>')
+                [void]$Sb.Append('<td class="empty">&mdash;</td>')
             }
-            elseif ($val -is [array])
+            elseif ($Val -is [array])
             {
                 # Render arrays joined. Truncate ID arrays for readability.
-                $joined = ($val | ForEach-Object {
-                    if ($null -eq $_) { return '' }
-                    if ($_ -is [psobject] -and -not ($_ -is [string])) { '(obj)' } else { [string]$_ }
-                }) -join ', '
-                if ($joined.Length -gt 200) { $joined = $joined.Substring(0, 200) + '...' }
-                [void]$sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $joined))
+                $Joined = ($Val | ForEach-Object {
+                        if ($null -eq $_) { return '' }
+                        if ($_ -is [string]) { return [string]$_ }
+                        # Tag-style objects ({ Name; Value }) - e.g. the Tags column -
+                        # render as key=value instead of an opaque placeholder. Any
+                        # other object falls back to its default string form (e.g.
+                        # "@{...}") rather than "(obj)".
+                        if ($_ -is [psobject])
+                        {
+                            $ElemProps = @($_.PSObject.Properties.Name)
+                            if (($ElemProps -contains 'Name') -and ($ElemProps -contains 'Value'))
+                            {
+                                return ('{0}={1}' -f $_.Name, $_.Value)
+                            }
+                        }
+                        [string]$_
+                    }) -join ', '
+                if ($Joined.Length -gt 200) { $Joined = $Joined.Substring(0, 200) + '...' }
+                [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $Joined))
             }
-            elseif ($val -is [bool])
+            elseif ($Val -is [bool])
             {
-                $cls = if ($val) { 'val-true' } else { 'val-false' }
-                [void]$sb.AppendFormat('<td class="{0}">{1}</td>', $cls, $val)
+                $Cls = if ($Val) { 'val-true' } else { 'val-false' }
+                [void]$Sb.AppendFormat('<td class="{0}">{1}</td>', $Cls, $Val)
             }
             else
             {
-                $s = [string]$val
-                if ($s.Length -gt 200) { $s = $s.Substring(0, 200) + '...' }
-                [void]$sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $s))
+                $S = [string]$Val
+                if ($S.Length -gt 200) { $S = $S.Substring(0, 200) + '...' }
+                [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $S))
             }
         }
-        [void]$sb.Append('</tr>')
+        [void]$Sb.Append('</tr>')
     }
 
-    [void]$sb.Append('</tbody></table></div></div></details>')
-    return $sb.ToString()
+    [void]$Sb.Append('</tbody></table></div></div></details>')
+    return $Sb.ToString()
 }
 
 # === Page assembly ============================================================
 
 # Build the chart row data. Top 10 services by count for the bar chart;
 # all services for the donut.
-$topN = $ServiceSummary | Select-Object -First 10
-$donutData = $ServiceSummary | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
-$barData   = $topN           | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
-$donutSvg  = if ($donutData) { New-DonutChart -Data $donutData } else { '<div class="empty">No data</div>' }
-$barSvg    = if ($barData)   { New-BarChart   -Data $barData }   else { '<div class="empty">No data</div>' }
+$TopN = $ServiceSummary | Select-Object -First 10
+$DonutData = $ServiceSummary | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
+$BarData = $TopN           | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
+$DonutSvg = if ($DonutData) { New-DonutChart -Data $DonutData } else { '<div class="empty">No data</div>' }
+$BarSvg = if ($BarData) { New-BarChart   -Data $BarData }   else { '<div class="empty">No data</div>' }
 
 # Build per-service tables in summary-order (highest count first) so the
 # scroll order matches the bar chart.
-$serviceSectionsHtml = New-Object System.Text.StringBuilder
+$ServiceSectionsHtml = New-Object System.Text.StringBuilder
 foreach ($svc in $ServiceSummary)
 {
-    $records = $Inventory.($svc.Service)
-    [void]$serviceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $records -ObfuscationStatus $ObfuscationStatus))
+    $Records = $Inventory.($svc.Service)
+    [void]$ServiceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $Records -ObfuscationStatus $ObfuscationStatus))
 }
 
-$generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
-$titleSafe = ConvertTo-HtmlSafe $Title
-$subSafe   = ConvertTo-HtmlSafe $SubscriptionName
-$tenantSafe = if ([string]::IsNullOrWhiteSpace($TenantId)) { '' } else { (ConvertTo-HtmlSafe $TenantId) }
-$versionSafe = if (-not [string]::IsNullOrWhiteSpace([string]$Version)) { ConvertTo-HtmlSafe ([string]$Version) } else { '' }
+$Generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
+$TitleSafe = ConvertTo-HtmlSafe $Title
+$SubSafe = ConvertTo-HtmlSafe $SubscriptionName
+$TenantSafe = if ([string]::IsNullOrWhiteSpace($TenantId)) { '' } else { (ConvertTo-HtmlSafe $TenantId) }
+$VersionSafe = if (-not [string]::IsNullOrWhiteSpace([string]$Version)) { ConvertTo-HtmlSafe ([string]$Version) } else { '' }
 
 # Optional run-stats carried over from the old Excel Overview sheet so no
 # information is lost in the HTML migration. Each is rendered only when
 # supplied by the caller.
-$extractTimeText = ''
+$ExtractTimeText = ''
 if ($ExtractionRunTime -is [TimeSpan])
 {
-    $extractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##')) }
+    $ExtractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##')) }
 }
-$reportTimeText = ''
+$ReportTimeText = ''
 if ($ReportingRunTime -is [TimeSpan])
 {
-    $reportTimeText = ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##'))
+    $ReportTimeText = if ($ReportingRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$ReportingRunTime.TotalSeconds) } else { ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##')) }
 }
-$platSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { (ConvertTo-HtmlSafe ([string]$PlatOS)) }
+$PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { (ConvertTo-HtmlSafe ([string]$PlatOS)) }
 
 # CSS - inlined. Print rules expand all <details> and strip non-essential
 # chrome so Cmd+P produces a clean PDF.
-$css = @'
+$Css = @'
 :root {
     --bg: #fafbfc;
     --panel: #ffffff;
@@ -658,6 +574,16 @@ header h1 { margin: 0 0 8px 0; font-size: 22px; }
 .table-scroll::-webkit-scrollbar-track { background: var(--row-alt); border-radius: 5px; }
 .table-scroll::-webkit-scrollbar-thumb { background: #b0b6bd; border-radius: 5px; }
 .table-scroll::-webkit-scrollbar-thumb:hover { background: #8a9099; }
+/* Synced TOP horizontal scrollbar for wide tables. The native scrollbar sits at
+   the BOTTOM of a tall table (hundreds of rows) and is unreachable without
+   scrolling the whole page down; this mirror sits ABOVE the table so far-right
+   columns can be reached immediately. The element is injected by JS. */
+.table-scroll-top { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #b0b6bd transparent; }
+.table-scroll-top::-webkit-scrollbar { height: 10px; }
+.table-scroll-top::-webkit-scrollbar-track { background: var(--row-alt); border-radius: 5px; }
+.table-scroll-top::-webkit-scrollbar-thumb { background: #b0b6bd; border-radius: 5px; }
+.table-scroll-top::-webkit-scrollbar-thumb:hover { background: #8a9099; }
+.table-scroll-top-inner { height: 1px; }
 .svc-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .svc-table th, .svc-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .svc-table th { background: var(--row-alt); font-weight: 600; cursor: pointer; user-select: none; }
@@ -728,7 +654,7 @@ footer {
 
 # JS - also inlined. Provides per-table search + click-to-sort. Vanilla,
 # no dependencies. Tables degrade to plain HTML if JS is disabled.
-$js = @'
+$Js = @'
 (function () {
     "use strict";
 
@@ -788,26 +714,76 @@ $js = @'
     if (btnCollapse) btnCollapse.addEventListener('click', function () {
         document.querySelectorAll('.service-section').forEach(function (d) { d.open = false; });
     });
+
+    // Synced TOP horizontal scrollbar for wide tables. The native scrollbar sits
+    // at the BOTTOM of a tall table (e.g. hundreds of VMs) and can't be reached
+    // without scrolling the whole page down; this mirror above the table scrolls
+    // the same content horizontally so far-right columns are reachable at once.
+    // Width is (re)computed when a section is expanded (a collapsed <details> has
+    // no dimensions) and on resize. If JS is off the table still scrolls natively.
+    function setupTopScroll(wrap) {
+        var top = document.createElement('div');
+        top.className = 'table-scroll-top';
+        var inner = document.createElement('div');
+        inner.className = 'table-scroll-top-inner';
+        top.appendChild(inner);
+        wrap.parentNode.insertBefore(top, wrap);
+        function sync() {
+            inner.style.width = wrap.scrollWidth + 'px';
+            top.style.display = (wrap.scrollWidth > wrap.clientWidth + 1) ? 'block' : 'none';
+        }
+        top.addEventListener('scroll', function () { wrap.scrollLeft = top.scrollLeft; });
+        wrap.addEventListener('scroll', function () { top.scrollLeft = wrap.scrollLeft; });
+        var det = wrap.closest('details');
+        if (det) det.addEventListener('toggle', function () { if (det.open) sync(); });
+        window.addEventListener('resize', sync);
+        sync();
+    }
+    document.querySelectorAll('.table-scroll').forEach(setupTopScroll);
 })();
 '@
 
 # Build the full document. Using a here-string so the layout reads top-down.
-$tenantBlock  = if ([string]::IsNullOrWhiteSpace($tenantSafe))  { '' } else { "<div><b>Tenant:</b> $tenantSafe</div>" }
-$versionBlock = if ([string]::IsNullOrWhiteSpace($versionSafe)) { '' } else { "<div><b>RDA version:</b> $versionSafe</div>" }
-$extractBlock = if ([string]::IsNullOrWhiteSpace($extractTimeText)) { '' } else { "<div><b>Extraction time:</b> $extractTimeText</div>" }
-$reportBlock  = if ([string]::IsNullOrWhiteSpace($reportTimeText))  { '' } else { "<div><b>Reporting time:</b> $reportTimeText</div>" }
-$platBlock    = if ([string]::IsNullOrWhiteSpace($platSafe))        { '' } else { "<div><b>Environment:</b> $platSafe</div>" }
+$TenantBlock = if ([string]::IsNullOrWhiteSpace($TenantSafe)) { '' } else { "<div><b>Tenant:</b> $TenantSafe</div>" }
+$VersionBlock = if ([string]::IsNullOrWhiteSpace($VersionSafe)) { '' } else { "<div><b>RDA version:</b> $VersionSafe</div>" }
+$ExtractBlock = if ([string]::IsNullOrWhiteSpace($ExtractTimeText)) { '' } else { "<div><b>Setup and resource discovery:</b> $ExtractTimeText</div>" }
+$ReportBlock = if ([string]::IsNullOrWhiteSpace($ReportTimeText)) { '' } else { "<div><b>Total collection (all phases):</b> $ReportTimeText</div>" }
+
+# Clear per-phase timing breakdown (metrics / collectors / consumption) from
+# -PhaseTimings, rendered as individual header lines so it is obvious which phase
+# dominates a long run. Labels are our own fixed text; HTML-escaped defensively.
+$PhaseBlocks = ''
+if ($PhaseTimings)
+{
+    foreach ($phaseName in $PhaseTimings.Keys)
+    {
+        $PhaseSpan = $PhaseTimings[$phaseName]
+        if ($PhaseSpan -is [TimeSpan])
+        {
+            $PhaseDurText = if ($PhaseSpan.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$PhaseSpan.TotalSeconds) } else { ('{0} Minutes' -f $PhaseSpan.TotalMinutes.ToString('#######.##')) }
+            $PhaseBlocks += ("<div><b>{0}:</b> {1}</div>" -f (ConvertTo-HtmlSafe ([string]$phaseName)), $PhaseDurText)
+        }
+    }
+}
+
+# Stop the render self-timer now: everything expensive (JSON read + all HTML
+# fragment building) is done; only the final here-string assembly + file write
+# remain, which are trivially fast.
+$RenderStopwatch.Stop()
+$RenderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##')) }
+$RenderBlock = "<div><b>Report generation (HTML):</b> $RenderTimeText</div>"
+$PlatBlock = if ([string]::IsNullOrWhiteSpace($PlatSafe)) { '' } else { "<div><b>Environment:</b> $PlatSafe</div>" }
 
 # Privacy banner. Obfuscated runs surface a green confirmation; identifiable
 # runs surface an amber warning so anyone opening the report is reminded the
 # content carries real subscription / resource names.
 if ($ObfuscationStatus -eq 'obfuscated')
 {
-    $privacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names have been replaced with deterministic pseudonyms (prod_/nonprod_ prefixes). Real identifiers are not present. Suitable for sharing.</div></div>'
+    $PrivacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names have been replaced with deterministic pseudonyms (prod_/nonprod_ prefixes). Real identifiers are not present. Suitable for sharing.</div></div>'
 }
 else
 {
-    $privacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
+    $PrivacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
 }
 
 # VM billing-coverage banner. Rendered only when the inventory shows materially
@@ -816,10 +792,10 @@ else
 # consumption-collection completeness, not at the report being inaccurate. In
 # an obfuscated report the per-VM identities cannot be joined (separate
 # dictionaries), so this is a count-level signal; the wording reflects that.
-$coverageBanner = ''
+$CoverageBanner = ''
 if ($null -ne $VmBilling)
 {
-    $idNote = if ($ObfuscationStatus -eq 'obfuscated')
+    $IdNote = if ($ObfuscationStatus -eq 'obfuscated')
     {
         ' Per-VM identification is unavailable in an obfuscated report; re-run without <code>-Obfuscate</code> (locally) to list the specific VMs.'
     }
@@ -827,56 +803,58 @@ if ($null -ne $VmBilling)
     {
         ''
     }
-    $coverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct, $idNote)
+    $CoverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct, $IdNote)
 }
 
-$html = @"
+$Html = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="Resource Discovery for Azure (Summary.ps1)">
-<title>$titleSafe - $subSafe</title>
+<title>$TitleSafe - $SubSafe</title>
 <style>
-$css
+$Css
 </style>
 </head>
 <body>
 <div class="container">
 <header>
-<h1>$titleSafe</h1>
+<h1>$TitleSafe</h1>
 <div class="meta">
-<div><b>Subscription:</b> $subSafe</div>
-$tenantBlock
-<div><b>Generated:</b> $generated</div>
-$versionBlock
-$extractBlock
-$reportBlock
-$platBlock
+<div><b>Subscription:</b> $SubSafe</div>
+$TenantBlock
+<div><b>Generated:</b> $Generated</div>
+$VersionBlock
+$ExtractBlock
+$PhaseBlocks
+$ReportBlock
+$RenderBlock
+$PlatBlock
 <div><b>Total Resources:</b> $TotalResources</div>
 <div><b>Service Types:</b> $($ServiceSummary.Count)</div>
 </div>
 </header>
 
-$privacyBanner
+$PrivacyBanner
 
-$coverageBanner
+$CoverageBanner
 
 <div class="charts">
 <section class="card">
 <h2>By Service</h2>
-$donutSvg
+$DonutSvg
 </section>
 <section class="card">
 <h2>Top Services by Count</h2>
-$barSvg
+$BarSvg
 </section>
 </div>
 
 <div class="card" style="margin-bottom: 20px;">
 <h2>Services <button id="expand-all" type="button" style="float:right; margin-left:8px;">Expand all</button><button id="collapse-all" type="button" style="float:right;">Collapse all</button></h2>
-$($serviceSectionsHtml.ToString())
+$($ServiceSectionsHtml.ToString())
 </div>
 
 <footer>
@@ -884,17 +862,17 @@ Generated by Resource Discovery for Azure (RDA) - Summary.ps1
 </footer>
 </div>
 <script>
-$js
+$Js
 </script>
 </body>
 </html>
 "@
 
-Set-Content -Path $HtmlFile -Value $html -Encoding utf8
+Set-Content -Path $HtmlFile -Value $Html -Encoding utf8
 Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
 Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
-$fileSize = (Get-Item $HtmlFile).Length
-Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $fileSize, ($fileSize / 1KB)) -ForegroundColor Green
+$FileSize = (Get-Item $HtmlFile).Length
+Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $FileSize, ($FileSize / 1KB)) -ForegroundColor Green
 if ($ObfuscationStatus -eq 'obfuscated')
 {
     Write-Host "  Privacy posture: obfuscated (safe to share)" -ForegroundColor Green

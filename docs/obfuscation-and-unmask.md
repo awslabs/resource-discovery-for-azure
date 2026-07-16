@@ -1,7 +1,7 @@
 # Obfuscation and Reveal
 
 How the `-Obfuscate` feature in `ResourceInventory.ps1` protects customer data,
-and how the local `Reveal-Obfuscation.ps1` helper turns an obfuscated report
+and how the local `Reveal.ps1` helper turns an obfuscated report
 back into an ingestible one with only the dimensions you choose un-masked.
 
 > **TL;DR**
@@ -11,7 +11,7 @@ back into an ingestible one with only the dimensions you choose un-masked.
 > - The run also writes a **local** `ObfuscationDictionary_*.json` that maps
 >   each token back to the real value. **The ZIP is safe to share; the
 >   dictionary and the transcript are not.**
-> - When you want analytics on real names, run `Reveal-Obfuscation.ps1`
+> - When you want analytics on real names, run `Reveal.ps1`
 >   **locally** to produce a new ingestible ZIP with only the dimensions you
 >   select (Resource Group + Subscription by default) un-masked.
 
@@ -58,7 +58,7 @@ previously dropped under obfuscation (set to `null` or the literal
 `obfuscated`), which made them unrecoverable. They are now tokenized
 deterministically into `$Global:FreeTextDictionary` (same real value → same
 `prod_`/`nonprod_` token within a run) and recorded in the dictionary's
-`FreeTextMap`, so `Reveal-Obfuscation.ps1` can restore them locally
+`FreeTextMap`, so `Reveal.ps1` can restore them locally
 (`-Fields FreeText` or `-All`). They remain masked in the shared report.
 
 ---
@@ -188,25 +188,33 @@ That is how the reveal step derives the friendly values:
 | The report **ZIP** (obfuscated) | ✅ Yes — safe to share with AWS / partners |
 | `ObfuscationDictionary_*.json` | ❌ **No — local only** |
 | The PowerShell **transcript** | ❌ **No — local only** (captures account UPN + tenant/sub IDs) |
-| A `Reveal-Obfuscation.ps1` output ZIP | ⚠️ Only with the party meant to ingest it — it contains the dimensions you chose to reveal |
+| A `Reveal.ps1` output ZIP | ⚠️ Only with the party meant to ingest it — it contains the dimensions you chose to reveal |
 
 Delete the dictionary and transcript when they are no longer needed.
 
 ---
 
-## 5. Partial reveal for server-side ingestion (`Reveal-Obfuscation.ps1`)
+## 5. Partial reveal for server-side ingestion (`Reveal.ps1`)
 
 The analytics pipeline is: **scan → obfuscated ZIP → reveal the dimensions you
-want → re-ingest into the server → graphs / reports / UI.** `Reveal-Obfuscation.ps1`
+want → re-ingest into the server → graphs / reports / UI.** `Reveal.ps1`
 is the step that turns a fully-masked ZIP into one your server can ingest with
 real names in it.
 
-It takes an obfuscated report ZIP + the matching dictionary and produces a NEW
-ZIP in which **only the dimensions you choose are un-obfuscated**, leaving
-everything else masked. The output keeps the **same filenames/structure** the
-`-Obfuscate` run produced, so it ingests exactly like an obfuscated ZIP — the
-server reads the same JSON members, just with (say) real resource group and
-subscription names.
+`Reveal.ps1` runs in one of two modes:
+
+- **Single-report mode** (`-InputZip`): reveal one obfuscated report ZIP against
+  its matching dictionary — described in this section.
+- **All-subscriptions mode** (`-InventoryRoot`, or no mode parameter): walk a
+  multi-subscription inventory tree, reveal every per-subscription report, and
+  consolidate the results into one outer ZIP — see §5.1.
+
+In single-report mode it takes an obfuscated report ZIP + the matching
+dictionary and produces a NEW ZIP in which **only the dimensions you choose are
+un-obfuscated**, leaving everything else masked. The output keeps the **same
+filenames/structure** the `-Obfuscate` run produced, so it ingests exactly like
+an obfuscated ZIP — the server reads the same JSON members, just with (say) real
+resource group and subscription names.
 
 It rewrites the selected dimensions' tokens across **every** text member of the
 ZIP (Inventory/Metrics JSON, Consumption CSV, the HTML report).
@@ -243,21 +251,22 @@ comma, or a free-text tag value) cannot corrupt the output:
 
 ```powershell
 # Default: reveal Resource Group + Subscription name, leave the rest masked
-./Reveal-Obfuscation.ps1 -InputZip ./ResourcesReport_2026....zip -DictionaryPath ./ObfuscationDictionary_2026....json
+./Reveal.ps1 -InputZip ./ResourcesReport_2026....zip -DictionaryPath ./ObfuscationDictionary_2026....json
 
 # Also reveal tag values
-./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -Fields ResourceGroup,Subscription,Tag
+./Reveal.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -Fields ResourceGroup,Subscription,Tag
 
 # Explicit output path
-./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -OutputZip ./report_for_ingest.zip
+./Reveal.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -OutputZip ./report_for_ingest.zip
 
 # Full reveal - un-obfuscate everything the dictionary can reverse (as if -Obfuscate had not been used)
-./Reveal-Obfuscation.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -All
+./Reveal.ps1 -InputZip ./report.zip -DictionaryPath ./dict.json -All
 ```
 
-### Parameters
+### Parameters (single-report mode)
 
-- `-InputZip` — an obfuscated report ZIP from `-Obfuscate` (required).
+- `-InputZip` — an obfuscated report ZIP from `-Obfuscate` (required; selects
+  single-report mode).
 - `-DictionaryPath` — the matching `ObfuscationDictionary_*.json`. If omitted,
   the newest match under `-SearchDirectory` is used.
 - `-SearchDirectory` — where to auto-discover the dictionary (default: current
@@ -277,6 +286,34 @@ comma, or a free-text tag value) cannot corrupt the output:
 > (with a warning); those that predate tag obfuscation have no `TagMap`, so
 > `-Fields Tag` is skipped with a warning.
 
+### 5.1 All-subscriptions mode (whole-tree reveal + consolidation)
+
+A multi-subscription run (`Run-AllSubscriptions.ps1 -Obfuscate`) leaves, under
+the inventory root, one folder per subscription — each holding an obfuscated
+report ZIP and its matching dictionary. Run `Reveal.ps1` with no mode parameter
+(or an explicit `-InventoryRoot`) to walk those folders, reveal each report
+against the dictionary sitting next to it, and consolidate the revealed
+per-subscription ZIPs into **one** outer ZIP shaped exactly like a normal
+multi-subscription run — so the ingestion server consumes it the same way, just
+with the chosen dimensions un-masked.
+
+```powershell
+# Reveal Subscription name + Resource Group across every sub into one outer zip
+./Reveal.ps1
+
+# Continue an interrupted large run (skips folders already revealed last time)
+./Reveal.ps1 -Resume
+
+# Custom root, full reveal, clean up the staging directory afterwards
+./Reveal.ps1 -InventoryRoot D:\Reports -All -RemoveStaging
+```
+
+All-subscriptions-mode parameters: `-InventoryRoot`, `-StagingDirectory`,
+`-RemoveStaging`, `-Resume` (plus the common `-Fields`, `-All`, `-OutputZip`).
+Each per-folder reveal runs in a time-bounded background job so one pathological
+report cannot stall the whole batch; failed/timed-out folders are reported and
+recoverable with `-Resume`.
+
 ---
 
 ## 6. Typical workflow
@@ -290,7 +327,7 @@ comma, or a free-text tag value) cannot corrupt the output:
 3. When you want analytics on real names, reveal the dimensions you need into a
    fresh ingestible ZIP — locally, against the matching dictionary:
    ```powershell
-   ./Reveal-Obfuscation.ps1 -InputZip ./ResourcesReport_2026....zip -DictionaryPath ./ObfuscationDictionary_2026....json
+   ./Reveal.ps1 -InputZip ./ResourcesReport_2026....zip -DictionaryPath ./ObfuscationDictionary_2026....json
    ```
    Upload that `_revealed.zip` to the ingestion server the same way you would an
    obfuscated ZIP.
@@ -308,7 +345,7 @@ comma, or a free-text tag value) cannot corrupt the output:
   if an attacker has a *different* run's dictionary.
 - Keep the dictionary out of any public surface (commits, PRs, tickets, email).
   It maps tokens straight back to real ARM resource IDs.
-- A `Reveal-Obfuscation.ps1` output ZIP is **partially de-obfuscated** by design
+- A `Reveal.ps1` output ZIP is **partially de-obfuscated** by design
   (it contains the dimensions you chose to reveal). Treat it like the dimensions
   it exposes — share it only with the intended ingestion party, never on a
   public surface.

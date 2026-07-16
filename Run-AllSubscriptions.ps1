@@ -1,5 +1,5 @@
 param (
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$TenantID,
     [switch]$DeviceLogin,
     [switch]$Obfuscate,
@@ -18,6 +18,30 @@ param (
     # subscriptions are split across streams.
     [switch]$ResumeFailedOnly,
     [switch]$IncludeDisabled,
+
+    # By DEFAULT the wrapper verifies control-plane read access to EVERY in-scope
+    # subscription up front (one cheap `az group list` per sub) and HARD-STOPS
+    # before doing any work if the signed-in identity cannot read one or more of
+    # them - so an auth/permission gap is surfaced and fixed up front instead of
+    # producing a report silently missing subscriptions (and risking the
+    # consumption cross-attribution class of bug). Pass -AllowPartialAccess to
+    # override that gate: the inaccessible subscriptions are SKIPPED (listed
+    # loudly in the summary) and the run proceeds with the accessible ones. Use
+    # this only when you intentionally have Reader on a subset of the tenant.
+    [switch]$AllowPartialAccess,
+
+    # DEPRECATED / no-op: the aggregate "main" HTML summary (run-wide totals, a
+    # per-subscription table with links to each per-sub report, and run-health
+    # banners) is now produced on EVERY run and folded into the consolidated
+    # AllSubscriptions zip as MainSummary.html, so the single bundle the customer
+    # receives is self-contained. This switch is retained only for backward
+    # compatibility with existing callers/scripts and has no effect.
+    [switch]$MainSummary,
+
+    # Also parse each per-subscription inventory to render a run-wide by-service
+    # breakdown (donut + top-services bar chart) in the MainSummary. Slightly
+    # slower on very large tenants (one JSON parse per subscription).
+    [switch]$Detailed,
 
     # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
     # the inner script's own default. The inner script uses this as the throttle
@@ -135,7 +159,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
         try
         {
             $InstallScript = Invoke-RestMethod -Uri 'https://aka.ms/install-powershell.ps1'
-            $InstallBlock  = [ScriptBlock]::Create($InstallScript)
+            $InstallBlock = [ScriptBlock]::Create($InstallScript)
             & $InstallBlock -UseMSI -Quiet
         }
         catch
@@ -234,8 +258,33 @@ function Resolve-AzCli
 $AzCliPath = Resolve-AzCli
 if (-not $AzCliPath)
 {
-    $AzManualHint  = '  https://aka.ms/installazurecliwindows'
+    # Install guidance is platform-specific. The automatic install below uses the
+    # official Windows MSI (msiexec), which only exists on Windows; on macOS/Linux
+    # there is no MSI to run, so point the operator at the correct install docs for
+    # their platform and let them install it, then re-run.
+    if ($IsMacOS)
+    {
+        $AzManualHint = '  macOS: brew install azure-cli   (docs: https://learn.microsoft.com/cli/azure/install-azure-cli-macos)'
+    }
+    elseif ($IsLinux)
+    {
+        $AzManualHint = '  Linux: https://learn.microsoft.com/cli/azure/install-azure-cli-linux'
+    }
+    else
+    {
+        $AzManualHint = '  https://aka.ms/installazurecliwindows'
+    }
     $AzInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+
+    # Automatic install is Windows-only. On macOS/Linux, show the correct link and
+    # exit instead of attempting a Windows MSI install that cannot succeed here.
+    if ($IsMacOS -or $IsLinux)
+    {
+        Write-Host "Azure CLI (az) is required but was not found." -ForegroundColor Red
+        Write-Host "Install the Azure CLI and re-run. See:" -ForegroundColor Yellow
+        Write-Host $AzManualHint -ForegroundColor Yellow
+        exit 1
+    }
 
     if (-not $AzInteractive)
     {
@@ -313,7 +362,7 @@ if (-not $AzCliPath)
 # Check per-submodule (a slim install has no `Az` meta-module, so the old
 # Get-Module -Name Az check would have false-negatived a perfectly good install).
 $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
-$MissingAzSubModules  = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
+$MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 if ($MissingAzSubModules.Count -gt 0)
 {
     $AzModuleManualHint = ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser' -f ($RequiredAzSubModules -join ','))
@@ -389,6 +438,16 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 }
 . $FunctionsFile
 
+# Shared cross-cutting helpers (Write-RdaProgress). Same dot-source pattern.
+$CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
+if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $CommonFunctionsFile
+
 # Turn off the Windows console QuickEdit mode as early as possible so a stray
 # click in the window cannot suspend the run mid-output (the "stuck until I
 # pressed Enter" freeze). No-ops on non-Windows / non-interactive / redirected
@@ -428,7 +487,8 @@ $Global:CollectorFailures = @()
 # transcript). Computed up front so the transcript can be started before
 # anything else writes to the host.
 $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {
+if (-not (Test-Path -Path $InventoryRoot -PathType Container))
+{
     try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
     catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
 }
@@ -453,11 +513,14 @@ if (-not (Test-Path -Path $InventoryRoot -PathType Container)) {
 # path via Exit-Wrapper.
 $WrapperTranscriptStarted = $false
 $WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
-try {
+try
+{
     Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
     $WrapperTranscriptStarted = $true
     Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
-} catch {
+}
+catch
+{
     # Non-fatal. If transcript fails to start (rare - usually permissions or
     # an already-running transcript on this host), the run continues without
     # one rather than aborting.
@@ -470,9 +533,12 @@ try {
 Invoke-PreFlightChecks -InventoryRoot $InventoryRoot
 
 
-try {
+try
+{
     $TenantID = Resolve-TenantId -Value $TenantID
-} catch {
+}
+catch
+{
     Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
     Exit-Wrapper -Code 1
 }
@@ -512,56 +578,80 @@ $ResumeStateFile = Join-Path $InventoryRoot (".resume-state-{0}.json" -f $Tenant
 
 
 
-try {
-    $cliTenant = Get-AzCliSignedInTenant
-    $psTenant  = Get-AzPsSignedInTenant
+try
+{
+    $CliTenant = Get-AzCliSignedInTenant
+    $PsTenant = Get-AzPsSignedInTenant
 
-    $cliTenantOk = ($cliTenant -eq $TenantID)
-    $psTenantOk  = ($psTenant  -eq $TenantID)
+    $CliTenantOk = ($CliTenant -eq $TenantID)
+    $PsTenantOk = ($PsTenant -eq $TenantID)
 
-    $cliTokenOk = $false
-    $psTokenOk  = $false
-    if ($cliTenantOk) { $cliTokenOk = Test-AzCliTokenSilent -Tenant $TenantID }
-    if ($psTenantOk)  { $psTokenOk  = Test-AzPsTokenSilent  -Tenant $TenantID }
+    $CliTokenOk = $false
+    $PsTokenOk = $false
+    if ($CliTenantOk) { $CliTokenOk = Test-AzCliTokenSilent -Tenant $TenantID }
+    if ($PsTenantOk) { $PsTokenOk = Test-AzPsTokenSilent  -Tenant $TenantID }
 
-    $cliOk = $cliTenantOk -and $cliTokenOk
-    $psOk  = $psTenantOk  -and $psTokenOk
+    $CliOk = $CliTenantOk -and $CliTokenOk
+    $PsOk = $PsTenantOk -and $PsTokenOk
 
-    if ($cliOk -and $psOk) {
+    if ($CliOk -and $PsOk)
+    {
         Write-Host ("Existing session detected for tenant {0} (token probe ok); skipping interactive login." -f $TenantID) -ForegroundColor Green
-    } else {
-        if (-not $cliOk) {
-            if ($null -eq $cliTenant) {
+    }
+    else
+    {
+        if (-not $CliOk)
+        {
+            if ($null -eq $CliTenant)
+            {
                 Write-Host "az CLI is not signed in; authenticating..." -ForegroundColor Cyan
-            } elseif (-not $cliTenantOk) {
-                Write-Host ("az CLI is signed in to tenant {0}; switching to {1}..." -f $cliTenant, $TenantID) -ForegroundColor Cyan
-            } else {
+            }
+            elseif (-not $CliTenantOk)
+            {
+                Write-Host ("az CLI is signed in to tenant {0}; switching to {1}..." -f $CliTenant, $TenantID) -ForegroundColor Cyan
+            }
+            else
+            {
                 Write-Host ("az CLI session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
             }
-            if ($DeviceLogin) {
+            if ($DeviceLogin)
+            {
                 az login -t $TenantID --use-device-code --only-show-errors | Out-Null
-            } else {
+            }
+            else
+            {
                 az login -t $TenantID --only-show-errors | Out-Null
             }
             if ($LASTEXITCODE -ne 0) { throw "az login failed with exit code $LASTEXITCODE" }
         }
 
-        if (-not $psOk) {
-            if ($null -eq $psTenant) {
+        if (-not $PsOk)
+        {
+            if ($null -eq $PsTenant)
+            {
                 Write-Host "Az PowerShell is not signed in; authenticating..." -ForegroundColor Cyan
-            } elseif (-not $psTenantOk) {
-                Write-Host ("Az PowerShell is signed in to tenant {0}; switching to {1}..." -f $psTenant, $TenantID) -ForegroundColor Cyan
-            } else {
+            }
+            elseif (-not $PsTenantOk)
+            {
+                Write-Host ("Az PowerShell is signed in to tenant {0}; switching to {1}..." -f $PsTenant, $TenantID) -ForegroundColor Cyan
+            }
+            else
+            {
                 Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
             }
-            if ($DeviceLogin) {
+            if ($DeviceLogin)
+            {
                 Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
-            } else {
+            }
+            else
+            {
                 Connect-AzAccount -Tenant $TenantID | Out-Null
             }
         }
     }
-} catch {
+}
+catch
+{
     Write-Host "ERROR: Authentication failed. $_" -ForegroundColor Red
     Exit-Wrapper -Code 1
 }
@@ -574,19 +664,23 @@ try {
 # this wrapper to report "All subscriptions processed!" with an empty
 # inventory. Capture warnings and treat zero-results-with-warnings as a
 # loud failure instead of a silent one.
-$subWarnings = @()
-$allSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable subWarnings -WarningAction SilentlyContinue
-if ($null -eq $allSubscriptions) { $allSubscriptions = @() }
-$allSubscriptions = @($allSubscriptions)
+$SubWarnings = @()
+$AllSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable subWarnings -WarningAction SilentlyContinue
+if ($null -eq $AllSubscriptions) { $AllSubscriptions = @() }
+$AllSubscriptions = @($AllSubscriptions)
 
-if ($allSubscriptions.Count -eq 0) {
+if ($AllSubscriptions.Count -eq 0)
+{
     Write-Host ("ERROR: Get-AzSubscription returned no subscriptions for tenant {0}." -f $TenantID) -ForegroundColor Red
-    if ($subWarnings.Count -gt 0) {
+    if ($SubWarnings.Count -gt 0)
+    {
         Write-Host "Underlying warnings:" -ForegroundColor Red
-        foreach ($w in $subWarnings) { Write-Host ("  - {0}" -f $w) -ForegroundColor Red }
+        foreach ($w in $SubWarnings) { Write-Host ("  - {0}" -f $w) -ForegroundColor Red }
         Write-Host "This typically indicates the cached session cannot acquire a token (Conditional Access / MFA), or the signed-in identity has no access to any subscription in this tenant." -ForegroundColor Yellow
         Write-Host "Try re-running with -DeviceLogin, or sign out and sign back in to the requested tenant." -ForegroundColor Yellow
-    } else {
+    }
+    else
+    {
         Write-Host "The signed-in identity may have no subscriptions in this tenant. Verify with 'Get-AzSubscription -TenantId <id>' interactively." -ForegroundColor Yellow
     }
     Exit-Wrapper -Code 1
@@ -598,52 +692,24 @@ if ($allSubscriptions.Count -eq 0) {
 # reports while still costing wall-clock time (which matters for environments
 # like Azure Cloud Shell where the session has a hard maximum lifetime).
 # Pass -IncludeDisabled to inventory every subscription regardless of state.
-if ($IncludeDisabled) {
-    $subscriptions = $allSubscriptions
-    $excluded = @()
-} else {
-    $subscriptions = @($allSubscriptions | Where-Object { $_.State -eq 'Enabled' })
-    $excluded     = @($allSubscriptions | Where-Object { $_.State -ne 'Enabled' })
+if ($IncludeDisabled)
+{
+    $Subscriptions = $AllSubscriptions
+    $Excluded = @()
+}
+else
+{
+    $Subscriptions = @($AllSubscriptions | Where-Object { $_.State -eq 'Enabled' })
+    $Excluded = @($AllSubscriptions | Where-Object { $_.State -ne 'Enabled' })
 }
 
-Write-Host ("Subscriptions visible: {0}" -f $allSubscriptions.Count) -ForegroundColor Cyan
-if ($excluded.Count -gt 0) {
-    $byState = $excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
-    Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $excluded.Count, ($byState -join ', ')) -ForegroundColor Yellow
+Write-Host ("Subscriptions visible: {0}" -f $AllSubscriptions.Count) -ForegroundColor Cyan
+if ($Excluded.Count -gt 0)
+{
+    $ByState = $Excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
+    Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $Excluded.Count, ($ByState -join ', ')) -ForegroundColor Yellow
 }
-Write-Host ("Subscriptions to process: {0}" -f $subscriptions.Count) -ForegroundColor Cyan
-
-# ---------------------------------------------------------------------------
-# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
-# -SkipConsumption was passed. If the signed-in identity is not authorized to
-# read consumption data, every subscription's consumption phase would fail and
-# the run would produce reports silently missing the billing data the operator
-# explicitly asked for. That is a HARD failure - fail fast, before spending
-# time on inventory and metrics, rather than hand back an incomplete report.
-#
-# Scope note: consumption/billing RBAC is usually uniform across a tenant, so we
-# probe the FIRST eligible subscription as the access signal. We hard-fail ONLY
-# on a clear authorization denial; a transient/token error (Conditional Access,
-# expired token, throttling) is NOT treated as a hard failure here - that is the
-# recoverable class the per-subscription consumption phase already handles and
-# reports. Operators who genuinely have mixed per-subscription billing access
-# can use -SkipConsumption.
-if (-not $SkipConsumption -and $subscriptions.Count -gt 0) {
-    $ConsumptionProbeSub = $subscriptions[0]
-    Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
-    $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
-    if ($ConsumptionAccess -eq 'Denied') {
-        Write-Host ""
-        Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
-        Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
-        Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
-        Exit-Wrapper -Code 1
-    } elseif ($ConsumptionAccess -eq 'Unavailable') {
-        Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
-    } else {
-        Write-Host "Consumption access confirmed." -ForegroundColor Green
-    }
-}
+Write-Host ("Subscriptions to process: {0}" -f $Subscriptions.Count) -ForegroundColor Cyan
 
 # Always seed $CompletedIds from the existing state file. -Resume only
 # controls whether we *use* that list to skip subscriptions; reading it
@@ -654,14 +720,72 @@ $CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $Ten
 # below preserve any existing failure history; -ResumeFailedOnly is what
 # uses it to filter the subscription list.
 $FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
-if ($Resume) {
-    if ($CompletedIds.Count -gt 0) {
+
+# Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
+# A parallel run persists each stream's Completed/FailedAttempts to its own
+# .resume-state-<tenant>-stream-<N>.json and only merges them into the unified
+# file at end-of-run. If that run was killed before the merge (Ctrl+C, SIGKILL,
+# Cloud Shell timeout), the failures live ONLY in the per-stream files while the
+# unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
+# sees no failures, and wrongly reports "Nothing to retry" - silently dropping
+# the retry set. Read (do NOT delete) the per-stream files here so BOTH -Resume
+# (skip-completed) and -ResumeFailedOnly (retry list) see the full picture; the
+# end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
+# cleanly-finished parallel run deletes its per-stream files, so this finds none.
+# Runs at startup before any stream is launched, so it cannot race live streams.
+if ($Resume -or $ResumeFailedOnly)
+{
+    $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
+    if ($StrandedStreamFiles.Count -gt 0)
+    {
+        $StrandedCompleted = @()
+        $StrandedFailed = @()
+        foreach ($StreamFile in $StrandedStreamFiles)
+        {
+            try
+            {
+                $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+                if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+                if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+            }
+            catch
+            {
+                Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
+            }
+        }
+        if ($StrandedCompleted.Count -gt 0)
+        {
+            $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)
+        }
+        # Same recency-wins / prune-on-completed reconciliation the end-of-run
+        # merge uses, so a sub that later succeeded in another stream is dropped.
+        $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
+        if ($StrandedCompleted.Count -gt 0 -or @($StrandedFailed).Count -gt 0)
+        {
+            Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
+            # Heal the unified file immediately so even a re-interrupted run keeps
+            # the recovered picture. Per-stream files are intentionally left for
+            # the end-of-run merge to reconcile and clean up.
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+        }
+    }
+}
+
+if ($Resume)
+{
+    if ($CompletedIds.Count -gt 0)
+    {
         Write-Host ("Resume mode: {0} previously completed subscription(s) will be skipped." -f $CompletedIds.Count) -ForegroundColor Cyan
-    } else {
+    }
+    else
+    {
         Write-Host "Resume mode: no previous state found; processing all subscriptions." -ForegroundColor Cyan
     }
-} else {
-    if ($CompletedIds.Count -gt 0) {
+}
+else
+{
+    if ($CompletedIds.Count -gt 0)
+    {
         Write-Host ("Note: resume state file exists at {0} ({1} previously completed). Pass -Resume to skip them." -f $ResumeStateFile, $CompletedIds.Count) -ForegroundColor Yellow
     }
 }
@@ -676,23 +800,121 @@ if ($Resume) {
 # completed list is only checked to defend against a sub that succeeded on a
 # previous retry but whose FailedAttempts entry was not yet pruned (shouldn't
 # happen if the catch/success paths are correct, but cheap to defend).
-if ($ResumeFailedOnly) {
-    if ($FailedAttempts.Count -eq 0) {
+if ($ResumeFailedOnly)
+{
+    if ($FailedAttempts.Count -eq 0)
+    {
         Write-Host "ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry." -ForegroundColor Green
         Write-Host ("If you expected failures here, verify {0} has a non-empty FailedAttempts array." -f $ResumeStateFile) -ForegroundColor DarkGray
         Exit-Wrapper -Code 0
     }
-    $failedIds = @($FailedAttempts | ForEach-Object { $_.Id })
-    $beforeCount = $subscriptions.Count
-    $subscriptions = @($subscriptions | Where-Object { $failedIds -contains $_.Id })
-    Write-Host ("ResumeFailedOnly: filtered to {0} previously-failed subscription(s) (was {1})." -f $subscriptions.Count, $beforeCount) -ForegroundColor Cyan
-    if ($subscriptions.Count -eq 0) {
+    $FailedIds = @($FailedAttempts | ForEach-Object { $_.Id })
+    $BeforeCount = $Subscriptions.Count
+    $Subscriptions = @($Subscriptions | Where-Object { $FailedIds -contains $_.Id })
+    Write-Host ("ResumeFailedOnly: filtered to {0} previously-failed subscription(s) (was {1})." -f $Subscriptions.Count, $BeforeCount) -ForegroundColor Cyan
+    if ($Subscriptions.Count -eq 0)
+    {
         # Could happen if the visible-subs list no longer contains the failed
         # IDs (sub was deleted, identity lost access, IncludeDisabled toggled
         # off relative to the prior run). Tell the user instead of silently
         # processing nothing.
         Write-Host "WARNING: FailedAttempts list contained IDs but none are visible in the current subscription set. Verify access and -IncludeDisabled flag matches the prior run." -ForegroundColor Yellow
         Exit-Wrapper -Code 0
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Up-front access gate. Before ANY per-subscription work, verify the signed-in
+# identity can actually read every in-scope subscription. Azure Resource Graph
+# returns 0 rows (not a 403) for a subscription the identity has no role on, so a
+# permission gap is otherwise invisible until the report comes back silently
+# missing subscriptions - and can feed the consumption cross-attribution class of
+# bug. Catch it here instead. By default any inaccessible subscription HARD-STOPS
+# the run so the operator fixes access first; -AllowPartialAccess overrides that
+# to skip the inaccessible ones and continue. On -Resume only the subscriptions
+# this run will actually process (not already-completed ones) are probed. Runs
+# once in the parent, before the sequential/parallel split, so it gates both.
+$ScopeForProbe = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
+if ($ScopeForProbe.Count -gt 0)
+{
+    Write-Host ("Verifying subscription access up front for {0} subscription(s)..." -f $ScopeForProbe.Count) -ForegroundColor Cyan
+    $AccessProbed = Test-SubscriptionAccessAll -Subscriptions $ScopeForProbe
+    $AccessDecision = Resolve-AccessPreflight -Probed $AccessProbed -AllowPartialAccess:$AllowPartialAccess
+    if ($AccessDecision.Inaccessible.Count -gt 0)
+    {
+        Write-Host ("  {0} subscription(s) are NOT readable by the signed-in identity:" -f $AccessDecision.Inaccessible.Count) -ForegroundColor Red
+        foreach ($NA in $AccessDecision.Inaccessible)
+        {
+            $Label = if ($NA.State -eq 'Unknown') { 'access probe inconclusive after retries' } else { 'no role on the subscription' }
+            Write-Host ("    - {0} ({1}) - {2}" -f $NA.Name, $NA.Id, $Label) -ForegroundColor Red
+        }
+        if ($AccessDecision.ShouldBlock)
+        {
+            Write-Host "  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
+            Write-Host "  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)" -ForegroundColor Red
+            Exit-Wrapper -Code 1
+        }
+        Write-Host "  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow
+        $Subscriptions = @($Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains $_.Id })
+        if ($Subscriptions.Count -eq 0)
+        {
+            Write-Host "No accessible subscriptions remain in scope; nothing to process." -ForegroundColor Yellow
+            Exit-Wrapper -Code 1
+        }
+    }
+    else
+    {
+        Write-Host ("  Access verified: all {0} in-scope subscription(s) are readable." -f $ScopeForProbe.Count) -ForegroundColor Green
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
+# -SkipConsumption was passed. If the signed-in identity is not authorized to
+# read consumption data, every subscription's consumption phase would fail and
+# the run would produce reports silently missing the billing data the operator
+# explicitly asked for. That is a HARD failure - fail fast, before spending
+# time on inventory and metrics, rather than hand back an incomplete report.
+#
+# Runs AFTER the access gate above, so $Subscriptions[0] is already known to be
+# control-plane-readable (inaccessible subs have either hard-stopped the run or,
+# under -AllowPartialAccess, been removed from $Subscriptions) - a 403 here is
+# therefore a genuine BILLING-RBAC denial, not just "no role on that sub".
+# consumption/billing RBAC is usually uniform across a tenant, so we probe the
+# FIRST subscription as the access signal. We hard-fail ONLY on a clear
+# authorization denial; a transient/token error (Conditional Access, expired
+# token, throttling) is NOT treated as a hard failure here - that is the
+# recoverable class the per-subscription consumption phase already handles and
+# reports. Operators who genuinely have mixed per-subscription billing access
+# can use -SkipConsumption.
+if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
+{
+    $ConsumptionProbeSub = $Subscriptions[0]
+    Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
+    $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
+    if ($ConsumptionAccess.Outcome -eq 'Denied')
+    {
+        Write-Host ""
+        Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
+        Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
+        if (-not [string]::IsNullOrWhiteSpace($ConsumptionAccess.Detail))
+        {
+            Write-Host ("Reason: {0}" -f $ConsumptionAccess.Detail) -ForegroundColor Red
+        }
+        Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
+        Exit-Wrapper -Code 1
+    }
+    elseif ($ConsumptionAccess.Outcome -eq 'Unavailable')
+    {
+        Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
+        if (-not [string]::IsNullOrWhiteSpace($ConsumptionAccess.Detail))
+        {
+            Write-Host ("  Probe error (why it could not be verified): {0}" -f $ConsumptionAccess.Detail) -ForegroundColor DarkYellow
+        }
+    }
+    else
+    {
+        Write-Host "Consumption access confirmed." -ForegroundColor Green
     }
 }
 
@@ -707,24 +929,24 @@ if ($ResumeFailedOnly) {
 # one is auto-filled. $PSBoundParameters is a reliable "did the operator set
 # this?" test here because the PS7 relaunch above forwards only bound params.
 # The existing clamp to the eligible subscription count still applies below.
-$autoTune        = Get-RecommendedParallelism
-$streamsAuto     = -not $PSBoundParameters.ContainsKey('ParallelStreams')
-$concurrencyAuto = -not $PSBoundParameters.ContainsKey('ConcurrencyLimit')
-if ($streamsAuto)     { $ParallelStreams  = $autoTune.Streams }
-if ($concurrencyAuto) { $ConcurrencyLimit = $autoTune.Concurrency }
+$AutoTune = Get-RecommendedParallelism
+$StreamsAuto = -not $PSBoundParameters.ContainsKey('ParallelStreams')
+$ConcurrencyAuto = -not $PSBoundParameters.ContainsKey('ConcurrencyLimit')
+if ($StreamsAuto) { $ParallelStreams = $AutoTune.Streams }
+if ($ConcurrencyAuto) { $ConcurrencyLimit = $AutoTune.Concurrency }
 
-$ramLabel       = if ($autoTune.RamGB -gt 0) { '{0} GB RAM' -f $autoTune.RamGB } else { 'RAM undetected' }
-$streamsSrc     = if ($streamsAuto)     { 'auto' } else { 'explicit' }
-$concurrencySrc = if ($concurrencyAuto) { 'auto' } else { 'explicit' }
-Write-Host ("Host: {0} vCPU / {1}." -f $autoTune.VCpu, $ramLabel) -ForegroundColor DarkGray
-Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $streamsSrc, $ConcurrencyLimit, $concurrencySrc) -ForegroundColor DarkGray
+$RamLabel = if ($AutoTune.RamGB -gt 0) { '{0} GB RAM' -f $AutoTune.RamGB } else { 'RAM undetected' }
+$StreamsSrc = if ($StreamsAuto) { 'auto' } else { 'explicit' }
+$ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
+Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
+Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
 # Build passthrough hashtable for optional switches
 $InventoryPassthrough = @{}
-if ($DeviceLogin)      { $InventoryPassthrough['DeviceLogin'] = $true }
-if ($Obfuscate)        { $InventoryPassthrough['Obfuscate'] = $true }
-if ($SkipMetrics)      { $InventoryPassthrough['SkipMetrics'] = $true }
-if ($SkipConsumption)  { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
+if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
+if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
+if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 # Always forward ConcurrencyLimit so the operator can tune metrics-phase
 # throttling end-to-end from a single param instead of editing the inner
 # script's default. Defaults to 6 (the inner script's existing default), so
@@ -741,148 +963,181 @@ $DiagFile = $null
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
 
-if ($ParallelStreams -le 1) {
+if ($ParallelStreams -le 1)
+{
     # === SEQUENTIAL PATH (default) ============================================
     # Original behavior, unchanged. Selected when -ParallelStreams 1 or unset.
-foreach ($sub in $subscriptions) {
-    if ($Resume -and ($CompletedIds -contains $sub.Id)) {
-        Write-Host ("Skipping (already completed): {0} ({1})" -f $sub.Name, $sub.Id) -ForegroundColor DarkGray
-        $SkippedCount++
-        continue
-    }
-
-    Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
-
-    try {
-        & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
-        # Only treat as failure if the inner script set a non-zero exit code.
-        # Some completion paths leave $LASTEXITCODE unset ($null), and
-        # PowerShell's `-ne 0` returns $true against $null - which would
-        # spuriously fail every successful sub.
-        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
-
-        # Capture the per-subscription resource count from the inner script.
-        # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
-        # lives in this wrapper's scope. The inner script resets that variable
-        # to @() at the start of every invocation, so the count after return
-        # accurately reflects the subscription that just finished.
-        $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-        $SubResourceCounts += [pscustomobject]@{
-            Name  = $sub.Name
-            Id    = $sub.Id
-            Count = $resCount
+    $SubTotal = @($Subscriptions).Count
+    $SubIndex = 0
+    foreach ($Sub in $Subscriptions)
+    {
+        $SubIndex++
+        # Unified progress reporter: interactive bar + non-interactive line. Counts
+        # every subscription (including resume-skipped ones) so the position in the
+        # list is accurate. See Write-RdaProgress in Functions/Common.Functions.ps1.
+        Write-RdaProgress -Activity 'Processing subscriptions' -CurrentItem $Sub.Name -Index $SubIndex -Total $SubTotal
+        if ($Resume -and ($CompletedIds -contains $Sub.Id))
+        {
+            Write-Host ("Skipping (already completed): {0} ({1})" -f $Sub.Name, $Sub.Id) -ForegroundColor DarkGray
+            $SkippedCount++
+            continue
         }
 
-        if ($resCount -eq 0) {
-            # Loud yellow signal so this stands out in the per-iteration narration
-            # and in the wrapper transcript. The most common cause is the signed-in
-            # identity not having Reader on the subscription; second is a sub that
-            # genuinely has no resources. Either way the user almost always wants
-            # to know immediately rather than discover it days later when the
-            # consolidated report turns out to be empty for some subs.
-            Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: az graph query -q ""resources | summarize count()"" --subscriptions {1}" -f $sub.Name, $sub.Id) -ForegroundColor Yellow
-        } else {
-            Write-Host ("Resources collected: {0:N0}" -f $resCount) -ForegroundColor DarkGreen
+        Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
+
+        try
+        {
+            & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
+            # Only treat as failure if the inner script set a non-zero exit code.
+            # Some completion paths leave $LASTEXITCODE unset ($null), and
+            # PowerShell's `-ne 0` returns $true against $null - which would
+            # spuriously fail every successful sub.
+            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+
+            # Capture the per-subscription resource count from the inner script.
+            # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
+            # lives in this wrapper's scope. The inner script resets that variable
+            # to @() at the start of every invocation, so the count after return
+            # accurately reflects the subscription that just finished.
+            $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+            $SubResourceCounts += [pscustomobject]@{
+                Name  = $Sub.Name
+                Id    = $Sub.Id
+                Count = $ResCount
+            }
+
+            if ($ResCount -eq 0)
+            {
+                # Loud yellow signal so this stands out in the per-iteration narration
+                # and in the wrapper transcript. The most common cause is the signed-in
+                # identity not having Reader on the subscription; second is a sub that
+                # genuinely has no resources. Either way the user almost always wants
+                # to know immediately rather than discover it days later when the
+                # consolidated report turns out to be empty for some subs.
+                Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: az graph query -q ""resources | summarize count()"" --subscriptions {1}" -f $Sub.Name, $Sub.Id) -ForegroundColor Yellow
+            }
+            else
+            {
+                Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
+            }
+
+            Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
+
+            # Mark complete and persist immediately so a mid-run sign-out is recoverable.
+            # If the sub was previously in FailedAttempts (i.e. this is a retry that
+            # finally succeeded), remove its entry so the resume-state file reflects
+            # current truth.
+            $StateChanged = $false
+            if (-not ($CompletedIds -contains $Sub.Id))
+            {
+                $CompletedIds += $Sub.Id
+                $StateChanged = $true
+            }
+            $BeforeFailedCount = @($FailedAttempts).Count
+            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+            if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
+            if ($StateChanged)
+            {
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+            }
         }
+        catch
+        {
+            # Surface the full exception chain so failures (e.g. report/JSON write
+            # errors, OOM in long CloudShell runs, file-handle leaks) are
+            # diagnosable instead of being summarised to a single line. See #16.
+            $ErrRecord = $_
+            Write-Host "ERROR processing subscription $($Sub.Name): $ErrRecord" -ForegroundColor Red
 
-        Write-Host "Completed subscription: $($sub.Name)" -ForegroundColor Green
+            $DiagLines = @()
+            $DiagLines += "==== Failure for subscription: $($Sub.Name) ($($Sub.Id)) ===="
+            $DiagLines += "Timestamp: $(Get-Date -Format 'o')"
+            $DiagLines += "Message:   $($ErrRecord.Exception.Message)"
+            $DiagLines += "Type:      $($ErrRecord.Exception.GetType().FullName)"
 
-        # Mark complete and persist immediately so a mid-run sign-out is recoverable.
-        # If the sub was previously in FailedAttempts (i.e. this is a retry that
-        # finally succeeded), remove its entry so the resume-state file reflects
-        # current truth.
-        $stateChanged = $false
-        if (-not ($CompletedIds -contains $sub.Id)) {
-            $CompletedIds += $sub.Id
-            $stateChanged = $true
-        }
-        $beforeFailedCount = @($FailedAttempts).Count
-        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $sub.Id
-        if (@($FailedAttempts).Count -ne $beforeFailedCount) { $stateChanged = $true }
-        if ($stateChanged) {
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
-        }
-    } catch {
-        # Surface the full exception chain so failures (e.g. report/JSON write
-        # errors, OOM in long CloudShell runs, file-handle leaks) are
-        # diagnosable instead of being summarised to a single line. See #16.
-        $errRecord = $_
-        Write-Host "ERROR processing subscription $($sub.Name): $errRecord" -ForegroundColor Red
+            $Inner = $ErrRecord.Exception.InnerException
+            $Depth = 0
+            while ($null -ne $Inner -and $Depth -lt 5)
+            {
+                $DiagLines += "Inner[$Depth] Type:    $($Inner.GetType().FullName)"
+                $DiagLines += "Inner[$Depth] Message: $($Inner.Message)"
+                $Inner = $Inner.InnerException
+                $Depth++
+            }
 
-        $diagLines = @()
-        $diagLines += "==== Failure for subscription: $($sub.Name) ($($sub.Id)) ===="
-        $diagLines += "Timestamp: $(Get-Date -Format 'o')"
-        $diagLines += "Message:   $($errRecord.Exception.Message)"
-        $diagLines += "Type:      $($errRecord.Exception.GetType().FullName)"
+            if ($null -ne $ErrRecord.InvocationInfo)
+            {
+                $DiagLines += "ScriptName:    $($ErrRecord.InvocationInfo.ScriptName)"
+                $DiagLines += "Line:          $($ErrRecord.InvocationInfo.ScriptLineNumber)"
+                $DiagLines += "PositionMsg:   $($ErrRecord.InvocationInfo.PositionMessage)"
+            }
 
-        $inner = $errRecord.Exception.InnerException
-        $depth = 0
-        while ($null -ne $inner -and $depth -lt 5) {
-            $diagLines += "Inner[$depth] Type:    $($inner.GetType().FullName)"
-            $diagLines += "Inner[$depth] Message: $($inner.Message)"
-            $inner = $inner.InnerException
-            $depth++
-        }
+            $DiagLines += "StackTrace:"
+            $DiagLines += $ErrRecord.ScriptStackTrace
+            if ($null -ne $ErrRecord.Exception.StackTrace)
+            {
+                $DiagLines += "ExceptionStackTrace:"
+                $DiagLines += $ErrRecord.Exception.StackTrace
+            }
 
-        if ($null -ne $errRecord.InvocationInfo) {
-            $diagLines += "ScriptName:    $($errRecord.InvocationInfo.ScriptName)"
-            $diagLines += "Line:          $($errRecord.InvocationInfo.ScriptLineNumber)"
-            $diagLines += "PositionMsg:   $($errRecord.InvocationInfo.PositionMessage)"
-        }
+            # Environment snapshot — useful when CloudShell runs out of memory or disk
+            try
+            {
+                $Proc = Get-Process -Id $PID
+                $DiagLines += "Process WorkingSet (MB):  $([math]::Round($Proc.WorkingSet64 / 1MB, 1))"
+                $DiagLines += "Process PrivateMemory (MB): $([math]::Round($Proc.PrivateMemorySize64 / 1MB, 1))"
+            }
+            catch { Write-Verbose ("Process snapshot failed: {0}" -f $_.Exception.Message) }
 
-        $diagLines += "StackTrace:"
-        $diagLines += $errRecord.ScriptStackTrace
-        if ($null -ne $errRecord.Exception.StackTrace) {
-            $diagLines += "ExceptionStackTrace:"
-            $diagLines += $errRecord.Exception.StackTrace
-        }
-
-        # Environment snapshot — useful when CloudShell runs out of memory or disk
-        try {
-            $proc = Get-Process -Id $PID
-            $diagLines += "Process WorkingSet (MB):  $([math]::Round($proc.WorkingSet64 / 1MB, 1))"
-            $diagLines += "Process PrivateMemory (MB): $([math]::Round($proc.PrivateMemorySize64 / 1MB, 1))"
-        } catch { Write-Verbose ("Process snapshot failed: {0}" -f $_.Exception.Message) }
-
-        try {
-            $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-            if (Test-Path $InventoryRoot) {
-                $rootDrive = (Get-Item $InventoryRoot).PSDrive
-                if ($rootDrive) {
-                    $diagLines += "Free disk on $($rootDrive.Name): (MB): $([math]::Round($rootDrive.Free / 1MB, 1))"
+            try
+            {
+                $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+                if (Test-Path $InventoryRoot)
+                {
+                    $RootDrive = (Get-Item $InventoryRoot).PSDrive
+                    if ($RootDrive)
+                    {
+                        $DiagLines += "Free disk on $($RootDrive.Name): (MB): $([math]::Round($RootDrive.Free / 1MB, 1))"
+                    }
                 }
             }
-        } catch { Write-Verbose ("Disk snapshot failed: {0}" -f $_.Exception.Message) }
+            catch { Write-Verbose ("Disk snapshot failed: {0}" -f $_.Exception.Message) }
 
-        $diagLines += ""
+            $DiagLines += ""
 
-        # Write to a per-run failures file so we don't lose the detail when many subs fail.
-        if ($null -eq $DiagFile) {
-            $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-            if (-not (Test-Path $InventoryRoot)) {
-                try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null }
-                catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
+            # Write to a per-run failures file so we don't lose the detail when many subs fail.
+            if ($null -eq $DiagFile)
+            {
+                $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+                if (-not (Test-Path $InventoryRoot))
+                {
+                    try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null }
+                    catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
+                }
+                $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
             }
-            $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0,4))
-        }
-        try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
-        catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
+            try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+            catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
-        $FailedSubscriptions += $sub.Name
-        # Persist the failure to the resume-state file so a future run with
-        # -ResumeFailedOnly can target it. Use the exception message as the
-        # Reason so the operator can see at a glance why each sub failed
-        # without opening the diag log.
-        $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
-            -Id $sub.Id -Name $sub.Name `
-            -Reason $errRecord.Exception.Message
-        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+            $FailedSubscriptions += $Sub.Name
+            # Persist the failure to the resume-state file so a future run with
+            # -ResumeFailedOnly can target it. Use the exception message as the
+            # Reason so the operator can see at a glance why each sub failed
+            # without opening the diag log.
+            $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
+                -Id $Sub.Id -Name $Sub.Name `
+                -Reason $ErrRecord.Exception.Message
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+        }
+
+        Write-Host "-----------------------------------" -ForegroundColor Gray
     }
 
-    Write-Host "-----------------------------------" -ForegroundColor Gray
-}
+    Write-RdaProgress -Activity 'Processing subscriptions' -Completed
 
-} else {
+}
+else
+{
     # === PARALLEL-STREAMS PATH ================================================
     #
     # Each "stream" is a separate `pwsh` background job (Start-Job runs the
@@ -912,65 +1167,76 @@ foreach ($sub in $subscriptions) {
     # `[stream-N]`). The final summary is consolidated from the per-stream
     # summary JSON files.
 
-    $StreamCount = [Math]::Min($ParallelStreams, $subscriptions.Count)
+    $StreamCount = [Math]::Min($ParallelStreams, $Subscriptions.Count)
     Write-Host ""
-    Write-Host ("Parallel-streams mode: {0} streams across {1} eligible subscription(s)" -f $StreamCount, $subscriptions.Count) -ForegroundColor Cyan
-    if ($ParallelStreams -gt $subscriptions.Count) {
+    Write-Host ("Parallel-streams mode: {0} streams across {1} eligible subscription(s)" -f $StreamCount, $Subscriptions.Count) -ForegroundColor Cyan
+    if ($ParallelStreams -gt $Subscriptions.Count)
+    {
         Write-Host ("Note: -ParallelStreams {0} clamped to {1} (one stream per subscription is the practical limit)." -f $ParallelStreams, $StreamCount) -ForegroundColor DarkGray
     }
     Write-Host "Each stream is a separate pwsh background job with its own Az context and resume-state file." -ForegroundColor DarkGray
     Write-Host ""
 
-    if ($StreamCount -le 1) {
+    if ($StreamCount -le 1)
+    {
         # User asked for parallel but only one (or zero) sub is eligible.
         # Process it inline using the same per-sub logic the sequential
         # branch uses, instead of bailing and asking the user to re-run.
         Write-Host "Only one eligible subscription; running sequentially." -ForegroundColor Yellow
-        if ($subscriptions.Count -gt 0) {
-            $sub = $subscriptions[0]
-            Write-Host "Processing subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
-            try {
-                & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $sub.Id @InventoryPassthrough -RunAllSubs
+        if ($Subscriptions.Count -gt 0)
+        {
+            $Sub = $Subscriptions[0]
+            Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
+            try
+            {
+                & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
                 # Same null-guard as the sequential branch above.
                 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
-                $resCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-                $SubResourceCounts += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Count = $resCount }
-                if ($resCount -eq 0) {
-                    Write-Host ("WARNING: '{0}' returned 0 resources." -f $sub.Name) -ForegroundColor Yellow
-                } else {
-                    Write-Host ("Resources collected: {0:N0}" -f $resCount) -ForegroundColor DarkGreen
+                $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+                $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount }
+                if ($ResCount -eq 0)
+                {
+                    Write-Host ("WARNING: '{0}' returned 0 resources." -f $Sub.Name) -ForegroundColor Yellow
                 }
-                if (-not ($CompletedIds -contains $sub.Id)) {
-                    $CompletedIds += $sub.Id
-                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $sub.Id
+                else
+                {
+                    Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
+                }
+                if (-not ($CompletedIds -contains $Sub.Id))
+                {
+                    $CompletedIds += $Sub.Id
+                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
                 }
-            } catch {
+            }
+            catch
+            {
                 # Match the sequential branch's diagnostic detail so users do not
                 # get a degraded error report when -ParallelStreams collapses to a
                 # single subscription. Mirrors the catch handler around line 615.
-                $errRecord = $_
-                Write-Host ("ERROR processing subscription {0}: {1}" -f $sub.Name, $errRecord) -ForegroundColor Red
-                $diagLines = @()
-                $diagLines += "==== Failure for subscription: $($sub.Name) ($($sub.Id)) ===="
-                $diagLines += "Timestamp: $(Get-Date -Format 'o')"
-                $diagLines += "Message:   $($errRecord.Exception.Message)"
-                $diagLines += "Type:      $($errRecord.Exception.GetType().FullName)"
-                $diagLines += "StackTrace:"
-                $diagLines += $errRecord.ScriptStackTrace
-                $diagLines += ""
-                if ($null -eq $DiagFile) {
-                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0,4))
+                $ErrRecord = $_
+                Write-Host ("ERROR processing subscription {0}: {1}" -f $Sub.Name, $ErrRecord) -ForegroundColor Red
+                $DiagLines = @()
+                $DiagLines += "==== Failure for subscription: $($Sub.Name) ($($Sub.Id)) ===="
+                $DiagLines += "Timestamp: $(Get-Date -Format 'o')"
+                $DiagLines += "Message:   $($ErrRecord.Exception.Message)"
+                $DiagLines += "Type:      $($ErrRecord.Exception.GetType().FullName)"
+                $DiagLines += "StackTrace:"
+                $DiagLines += $ErrRecord.ScriptStackTrace
+                $DiagLines += ""
+                if ($null -eq $DiagFile)
+                {
+                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
                 }
-                try { $diagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+                try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
                 catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
-                $FailedSubscriptions += $sub.Name
+                $FailedSubscriptions += $Sub.Name
                 # Mirror the sequential branch: persist failure to the
                 # resume-state file so -ResumeFailedOnly works even for the
                 # single-sub-collapses-to-inline corner case.
                 $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
-                    -Id $sub.Id -Name $sub.Name `
-                    -Reason $errRecord.Exception.Message
+                    -Id $Sub.Id -Name $Sub.Name `
+                    -Reason $ErrRecord.Exception.Message
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
             }
         }
@@ -978,321 +1244,374 @@ foreach ($sub in $subscriptions) {
         # post-processing (consolidation, summary) below.
         $StreamCount = 0
     }
-    if ($StreamCount -ge 2) {
+    if ($StreamCount -ge 2)
+    {
 
-    # Snapshot the parent's Az context to a shared file so each stream can
-    # Import-AzContext without prompting. Save-AzContext writes a JSON file
-    # containing a token cache, so it MUST NOT be left on disk after the
-    # run completes - that's the responsibility of the `finally` block
-    # below, which guarantees cleanup even on stream-launch crash, on
-    # Receive-Job failure, or on Ctrl+C.
-    $AzContextSnapshot = Join-Path $InventoryRoot (".rda-stream-azcontext-{0}.json" -f ([guid]::NewGuid().ToString()))
-    try {
-        Save-AzContext -Path $AzContextSnapshot -Force -ErrorAction Stop | Out-Null
-    } catch {
-        Write-Host ("ERROR: could not snapshot Az context for stream workers: {0}" -f $_.Exception.Message) -ForegroundColor Red
-        Write-Host "Re-run without -ParallelStreams to use the sequential code path." -ForegroundColor Yellow
-        # No snapshot was successfully written, so no security cleanup needed -
-        # but Save-AzContext can write a partial file before throwing on some
-        # error paths, so still try to remove it.
-        if (Test-Path -Path $AzContextSnapshot) {
-            try { Remove-Item -Path $AzContextSnapshot -Force }
-            catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
+        # Snapshot the parent's Az context to a shared file so each stream can
+        # Import-AzContext without prompting. Save-AzContext writes a JSON file
+        # containing a token cache, so it MUST NOT be left on disk after the
+        # run completes - that's the responsibility of the `finally` block
+        # below, which guarantees cleanup even on stream-launch crash, on
+        # Receive-Job failure, or on Ctrl+C.
+        $AzContextSnapshot = Join-Path $InventoryRoot (".rda-stream-azcontext-{0}.json" -f ([guid]::NewGuid().ToString()))
+        try
+        {
+            Save-AzContext -Path $AzContextSnapshot -Force -ErrorAction Stop | Out-Null
         }
-        Exit-Wrapper -Code 1
-    }
-
-    # Everything from here until the matching `finally` is the orchestration
-    # body. The `finally` guarantees the Az context snapshot is always wiped
-    # AND that any background jobs are cleaned up, which is the primary
-    # reason for this try/finally structure.
-    # Declared outside the try so the finally can always see them.
-    $jobs = @()
-    $StreamSummaries = @()
-    try {
-        $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
-        if (-not (Test-Path -Path $WorkerScript -PathType Leaf)) {
-            Write-Host ("ERROR: parallel worker script not found at {0}." -f $WorkerScript) -ForegroundColor Red
-            Write-Host "Make sure Run-AllSubscriptions.Stream.ps1 is present alongside Run-AllSubscriptions.ps1, or re-run without -ParallelStreams." -ForegroundColor Yellow
+        catch
+        {
+            Write-Host ("ERROR: could not snapshot Az context for stream workers: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            Write-Host "Re-run without -ParallelStreams to use the sequential code path." -ForegroundColor Yellow
+            # No snapshot was successfully written, so no security cleanup needed -
+            # but Save-AzContext can write a partial file before throwing on some
+            # error paths, so still try to remove it.
+            if (Test-Path -Path $AzContextSnapshot)
+            {
+                try { Remove-Item -Path $AzContextSnapshot -Force }
+                catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
+            }
             Exit-Wrapper -Code 1
         }
 
-        # Round-robin split: sub 0 -> stream 0, sub 1 -> stream 1, ..., sub N -> stream (N % StreamCount).
-        # This balances the slices regardless of how subscription sizes vary,
-        # and keeps slices roughly the same length even when the total
-        # subscription count is not evenly divisible by StreamCount.
-        $slices = @()
-        for ($i = 0; $i -lt $StreamCount; $i++) {
-            $slices += ,(New-Object 'System.Collections.Generic.List[object]')
-        }
-        for ($i = 0; $i -lt $subscriptions.Count; $i++) {
-            $slices[$i % $StreamCount].Add($subscriptions[$i])
-        }
-
-        # Build per-stream output paths up front so we know where to look later.
-        for ($s = 0; $s -lt $StreamCount; $s++) {
-            $sliceList     = $slices[$s]
-            $sliceIds      = @($sliceList | ForEach-Object { $_.Id })
-            $sliceNames    = @($sliceList | ForEach-Object { $_.Name })
-
-            $summaryPath   = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json"   -f $s)
-            $failuresPath  = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $s)
-
-            $StreamSummaries += [pscustomobject]@{
-                StreamId     = $s
-                SummaryPath  = $summaryPath
-                FailuresPath = $failuresPath
-                SubCount     = $sliceList.Count
+        # Everything from here until the matching `finally` is the orchestration
+        # body. The `finally` guarantees the Az context snapshot is always wiped
+        # AND that any background jobs are cleaned up, which is the primary
+        # reason for this try/finally structure.
+        # Declared outside the try so the finally can always see them.
+        $Jobs = @()
+        $StreamSummaries = @()
+        try
+        {
+            $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
+            if (-not (Test-Path -Path $WorkerScript -PathType Leaf))
+            {
+                Write-Host ("ERROR: parallel worker script not found at {0}." -f $WorkerScript) -ForegroundColor Red
+                Write-Host "Make sure Run-AllSubscriptions.Stream.ps1 is present alongside Run-AllSubscriptions.ps1, or re-run without -ParallelStreams." -ForegroundColor Yellow
+                Exit-Wrapper -Code 1
             }
 
-            Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $s, $sliceList.Count) -ForegroundColor DarkCyan
-
-            # Pass arguments to the worker via a single hashtable so the worker
-            # script's named parameters bind correctly. Start-Job's -FilePath
-            # mode passes ArgumentList positionally which collides with our
-            # named-parameter contract. Switches are only included when they
-            # are set, since switch parameters bind correctly from a splatted
-            # hashtable when present with value $true.
-            $workerArgs = @{
-                TenantID           = $TenantID
-                StreamId           = [string]$s
-                InventoryRoot      = $InventoryRoot
-                ScriptRoot         = $PSScriptRoot
-                AzContextPath      = $AzContextSnapshot
-                StreamSummaryPath  = $summaryPath
-                StreamFailuresPath = $failuresPath
-                SubscriptionIds    = $sliceIds
-                SubscriptionNames  = $sliceNames
-                ConcurrencyLimit   = $ConcurrencyLimit
+            # Round-robin split: sub 0 -> stream 0, sub 1 -> stream 1, ..., sub N -> stream (N % StreamCount).
+            # This balances the slices regardless of how subscription sizes vary,
+            # and keeps slices roughly the same length even when the total
+            # subscription count is not evenly divisible by StreamCount.
+            $Slices = @()
+            for ($i = 0; $i -lt $StreamCount; $i++)
+            {
+                $Slices += , (New-Object 'System.Collections.Generic.List[object]')
             }
-            if ($Resume)          { $workerArgs.Resume          = $true }
-            if ($ResumeFailedOnly) { $workerArgs.ResumeFailedOnly = $true }
-            if ($DeviceLogin)     { $workerArgs.DeviceLogin     = $true }
-            if ($Obfuscate)       { $workerArgs.Obfuscate       = $true }
-            if ($SkipMetrics)     { $workerArgs.SkipMetrics     = $true }
-            if ($SkipConsumption) { $workerArgs.SkipConsumption = $true }
-
-            $jobs += Start-Job -ScriptBlock {
-                param($WorkerScript, $WorkerArgs)
-                & $WorkerScript @WorkerArgs
-            } -ArgumentList @($WorkerScript, $workerArgs)
-        }
-
-        # Stream output back to the user as it arrives. Receive-Job is
-        # non-blocking when called against a still-running job; without this
-        # loop the wrapper would appear frozen until every stream completed.
-        Write-Host ""
-        Write-Host "All streams launched. Streaming output (lines prefixed [stream-N]):" -ForegroundColor Green
-        Write-Host ""
-        Write-Host ("Note: per-stream tags only prefix the wrapper's narration. The inner script's") -ForegroundColor DarkGray
-        Write-Host ("Write-Host/Write-Log output is unprefixed and will interleave across streams.") -ForegroundColor DarkGray
-        Write-Host ""
-        # Initial drain handles the case where every stream crashes immediately
-        # (jobs reach Completed state in <1500 ms, so the loop predicate would
-        # otherwise be false on first check and we'd skip output streaming).
-        # Drain output once before the polling loop, in case all streams
-        # finished synchronously between Start-Job and our first poll
-        # (jobs reach Completed state in <1500 ms, so the loop predicate would
-        # otherwise be false on first check and we'd skip output streaming).
-        $jobs | Receive-Job
-        # Explicit count check is safer than truthiness on the Where-Object
-        # result: when zero jobs match, Where-Object returns $null which is
-        # falsy, but when one matches it returns a single non-array object
-        # whose truthiness varies by PowerShell edition. @(...).Count is
-        # always an integer.
-        while (@($jobs | Where-Object { $_.State -eq 'Running' }).Count -gt 0) {
-            $jobs | Receive-Job
-            Start-Sleep -Milliseconds 1500
-        }
-        # Drain anything still buffered after all jobs reached terminal state.
-        $jobs | Receive-Job
-
-        # Capture exit codes and any errors from the jobs themselves before removing.
-        foreach ($j in $jobs) {
-            if ($j.State -ne 'Completed') {
-                Write-Host ("[stream-{0}] job ended in state {1}" -f $j.Id, $j.State) -ForegroundColor Yellow
-            }
-        }
-        # Job cleanup is in the `finally` block below so it runs even if any
-        # exception was raised during Receive-Job polling or aggregation.
-
-        # Aggregate per-stream summaries into the wrapper's existing
-        # accumulators so the consolidated summary at end-of-run looks the
-        # same shape as a sequential run.
-        foreach ($s in $StreamSummaries) {
-            if (-not (Test-Path -Path $s.SummaryPath -PathType Leaf)) {
-                Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $s.StreamId, $s.SummaryPath) -ForegroundColor Yellow
-                $FailedSubscriptions += ("stream-{0} (no summary)" -f $s.StreamId)
-                continue
-            }
-            try {
-                $streamSummary = Get-Content -Path $s.SummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            } catch {
-                Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $s.StreamId, $s.SummaryPath, $_.Exception.Message) -ForegroundColor Red
-                $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $s.StreamId)
-                continue
+            for ($i = 0; $i -lt $Subscriptions.Count; $i++)
+            {
+                $Slices[$i % $StreamCount].Add($Subscriptions[$i])
             }
 
-            # Surface stream-level failures (failed-to-start, etc.) so the
-            # wrapper transcript distinguishes "the whole stream broke" from
-            # "the stream ran fine but some subs in it failed". Per-sub
-            # failures are still folded into $FailedSubscriptions via the
-            # streamSummary.Failed enumeration below.
-            if ($streamSummary.Status -and $streamSummary.Status -ne 'ok' -and $streamSummary.Status -ne 'partial-failure') {
-                $reasonText = if ($streamSummary.Reason) { $streamSummary.Reason } else { '(no reason given)' }
-                Write-Host ("[stream-{0}] stream status: {1} - {2}" -f $s.StreamId, $streamSummary.Status, $reasonText) -ForegroundColor Red
+            # Build per-stream output paths up front so we know where to look later.
+            for ($S = 0; $S -lt $StreamCount; $S++)
+            {
+                $SliceList = $Slices[$S]
+                $SliceIds = @($SliceList | ForEach-Object { $_.Id })
+                $SliceNames = @($SliceList | ForEach-Object { $_.Name })
+
+                $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+                $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
+
+                $StreamSummaries += [pscustomobject]@{
+                    StreamId     = $S
+                    SummaryPath  = $SummaryPath
+                    FailuresPath = $FailuresPath
+                    SubCount     = $SliceList.Count
+                }
+
+                Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
+
+                # Pass arguments to the worker via a single hashtable so the worker
+                # script's named parameters bind correctly. Start-Job's -FilePath
+                # mode passes ArgumentList positionally which collides with our
+                # named-parameter contract. Switches are only included when they
+                # are set, since switch parameters bind correctly from a splatted
+                # hashtable when present with value $true.
+                $WorkerArgs = @{
+                    TenantID           = $TenantID
+                    StreamId           = [string]$S
+                    InventoryRoot      = $InventoryRoot
+                    ScriptRoot         = $PSScriptRoot
+                    AzContextPath      = $AzContextSnapshot
+                    StreamSummaryPath  = $SummaryPath
+                    StreamFailuresPath = $FailuresPath
+                    SubscriptionIds    = $SliceIds
+                    SubscriptionNames  = $SliceNames
+                    ConcurrencyLimit   = $ConcurrencyLimit
+                }
+                if ($Resume) { $WorkerArgs.Resume = $true }
+                if ($ResumeFailedOnly) { $WorkerArgs.ResumeFailedOnly = $true }
+                if ($DeviceLogin) { $WorkerArgs.DeviceLogin = $true }
+                if ($Obfuscate) { $WorkerArgs.Obfuscate = $true }
+                if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
+                if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
+
+                $Jobs += Start-Job -ScriptBlock {
+                    param($WorkerScript, $WorkerArgs)
+                    & $WorkerScript @WorkerArgs
+                } -ArgumentList @($WorkerScript, $WorkerArgs)
             }
 
-            if ($streamSummary.ResourceCounts) {
-                foreach ($rc in $streamSummary.ResourceCounts) {
-                    if ($null -eq $rc) { continue }
-                    $SubResourceCounts += [pscustomobject]@{
-                        Name  = $rc.Name
-                        Id    = $rc.Id
-                        Count = [int]$rc.Count
+            # Stream output back to the user as it arrives. Receive-Job is
+            # non-blocking when called against a still-running job; without this
+            # loop the wrapper would appear frozen until every stream completed.
+            Write-Host ""
+            Write-Host "All streams launched. Streaming output (lines prefixed [stream-N]):" -ForegroundColor Green
+            Write-Host ""
+            Write-Host ("Note: per-stream tags only prefix the wrapper's narration. The inner script's") -ForegroundColor DarkGray
+            Write-Host ("Write-Host/Write-Log output is unprefixed and will interleave across streams.") -ForegroundColor DarkGray
+            Write-Host ""
+            # Initial drain handles the case where every stream crashes immediately
+            # (jobs reach Completed state in <1500 ms, so the loop predicate would
+            # otherwise be false on first check and we'd skip output streaming).
+            # Drain output once before the polling loop, in case all streams
+            # finished synchronously between Start-Job and our first poll
+            # (jobs reach Completed state in <1500 ms, so the loop predicate would
+            # otherwise be false on first check and we'd skip output streaming).
+            $Jobs | Receive-Job
+            # Explicit count check is safer than truthiness on the Where-Object
+            # result: when zero jobs match, Where-Object returns $null which is
+            # falsy, but when one matches it returns a single non-array object
+            # whose truthiness varies by PowerShell edition. @(...).Count is
+            # always an integer.
+            while (@($Jobs | Where-Object { $_.State -eq 'Running' }).Count -gt 0)
+            {
+                $Jobs | Receive-Job
+                Start-Sleep -Milliseconds 1500
+            }
+            # Drain anything still buffered after all jobs reached terminal state.
+            $Jobs | Receive-Job
+
+            # Capture exit codes and any errors from the jobs themselves before removing.
+            foreach ($j in $Jobs)
+            {
+                if ($j.State -ne 'Completed')
+                {
+                    Write-Host ("[stream-{0}] job ended in state {1}" -f $j.Id, $j.State) -ForegroundColor Yellow
+                }
+            }
+            # Job cleanup is in the `finally` block below so it runs even if any
+            # exception was raised during Receive-Job polling or aggregation.
+
+            # Aggregate per-stream summaries into the wrapper's existing
+            # accumulators so the consolidated summary at end-of-run looks the
+            # same shape as a sequential run.
+            foreach ($S in $StreamSummaries)
+            {
+                if (-not (Test-Path -Path $S.SummaryPath -PathType Leaf))
+                {
+                    Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
+                    $FailedSubscriptions += ("stream-{0} (no summary)" -f $S.StreamId)
+                    continue
+                }
+                try
+                {
+                    $StreamSummary = Get-Content -Path $S.SummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                }
+                catch
+                {
+                    Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
+                    $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
+                    continue
+                }
+
+                # Surface stream-level failures (failed-to-start, etc.) so the
+                # wrapper transcript distinguishes "the whole stream broke" from
+                # "the stream ran fine but some subs in it failed". Per-sub
+                # failures are still folded into $FailedSubscriptions via the
+                # streamSummary.Failed enumeration below.
+                if ($StreamSummary.Status -and $StreamSummary.Status -ne 'ok' -and $StreamSummary.Status -ne 'partial-failure')
+                {
+                    $ReasonText = if ($StreamSummary.Reason) { $StreamSummary.Reason } else { '(no reason given)' }
+                    Write-Host ("[stream-{0}] stream status: {1} - {2}" -f $S.StreamId, $StreamSummary.Status, $ReasonText) -ForegroundColor Red
+                }
+
+                if ($StreamSummary.ResourceCounts)
+                {
+                    foreach ($rc in $StreamSummary.ResourceCounts)
+                    {
+                        if ($null -eq $rc) { continue }
+                        $SubResourceCounts += [pscustomobject]@{
+                            Name  = $rc.Name
+                            Id    = $rc.Id
+                            Count = [int]$rc.Count
+                        }
+                    }
+                }
+
+                if ($StreamSummary.Failed)
+                {
+                    foreach ($f in $StreamSummary.Failed)
+                    {
+                        $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $S.StreamId, $f.Reason)
+                    }
+                }
+
+                if ($null -ne $StreamSummary.ConsumptionRecords)
+                {
+                    if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+                    $Global:ConsumptionRecordCount = [int]$Global:ConsumptionRecordCount + [int]$StreamSummary.ConsumptionRecords
+                }
+                if ($StreamSummary.ConsumptionFailedSubs -and $StreamSummary.ConsumptionFailedSubs.Count -gt 0)
+                {
+                    if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+                    $Global:ConsumptionFailedSubs += @($StreamSummary.ConsumptionFailedSubs)
+                }
+
+                if ($StreamSummary.MetricsFailedSubs -and $StreamSummary.MetricsFailedSubs.Count -gt 0)
+                {
+                    if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+                    $Global:MetricsFailedSubs += @($StreamSummary.MetricsFailedSubs)
+                }
+
+                if ($StreamSummary.CollectorFailures -and $StreamSummary.CollectorFailures.Count -gt 0)
+                {
+                    if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
+                    $Global:CollectorFailures += @($StreamSummary.CollectorFailures)
+                }
+
+                # If a stream wrote a failures log, add it to the wrapper's diag-file
+                # accumulator so the final summary surfaces the path. The wrapper's
+                # existing $DiagFile was nullable; using a single concatenated log
+                # avoids breaking that contract.
+                if ((Test-Path -Path $S.FailuresPath -PathType Leaf) -and ((Get-Item $S.FailuresPath).Length -gt 0))
+                {
+                    if ($null -eq $DiagFile)
+                    {
+                        $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
+                    }
+                    try
+                    {
+                        Get-Content -Path $S.FailuresPath -Raw | Out-File -FilePath $DiagFile -Append -Encoding utf8
+                    }
+                    catch
+                    {
+                        Write-Verbose ("Failed to merge stream failures log {0}: {1}" -f $S.FailuresPath, $_.Exception.Message)
                     }
                 }
             }
 
-            if ($streamSummary.Failed) {
-                foreach ($f in $streamSummary.Failed) {
-                    $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $s.StreamId, $f.Reason)
+            # Clean up per-stream summary JSON files (the data is now folded into
+            # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
+            # they are referenced from the merged $DiagFile via Append above. The
+            # Az context snapshot cleanup lives in the `finally` block below so it
+            # runs even on failure paths.
+            foreach ($S in $StreamSummaries)
+            {
+                if (Test-Path -Path $S.SummaryPath)
+                {
+                    try { Remove-Item -Path $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
                 }
             }
 
-            if ($null -ne $streamSummary.ConsumptionRecords) {
-                if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
-                $Global:ConsumptionRecordCount = [int]$Global:ConsumptionRecordCount + [int]$streamSummary.ConsumptionRecords
-            }
-            if ($streamSummary.ConsumptionFailedSubs -and $streamSummary.ConsumptionFailedSubs.Count -gt 0) {
-                if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
-                $Global:ConsumptionFailedSubs += @($streamSummary.ConsumptionFailedSubs)
-            }
-
-            if ($streamSummary.MetricsFailedSubs -and $streamSummary.MetricsFailedSubs.Count -gt 0) {
-                if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
-                $Global:MetricsFailedSubs += @($streamSummary.MetricsFailedSubs)
-            }
-
-            if ($streamSummary.CollectorFailures -and $streamSummary.CollectorFailures.Count -gt 0) {
-                if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
-                $Global:CollectorFailures += @($streamSummary.CollectorFailures)
-            }
-
-            # If a stream wrote a failures log, add it to the wrapper's diag-file
-            # accumulator so the final summary surfaces the path. The wrapper's
-            # existing $DiagFile was nullable; using a single concatenated log
-            # avoids breaking that contract.
-            if ((Test-Path -Path $s.FailuresPath -PathType Leaf) -and ((Get-Item $s.FailuresPath).Length -gt 0)) {
-                if ($null -eq $DiagFile) {
-                    $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0,4))
+            # When parallel streams have completed (clean or otherwise), merge each
+            # stream's resume-state file into the unified resume-state file so a
+            # subsequent -Resume run picks up correctly. The unified file is also
+            # what the existing "clean run -> remove resume state" logic below
+            # will look at.
+            # Discover every per-stream resume file on disk for this tenant. See
+            # Get-StreamResumeStateFiles for why this is a full-disk scan rather
+            # than an iteration over 0..($StreamCount-1).
+            $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
+            $AllCompletedFromStreams = @()
+            $AllFailedFromStreams = @()
+            foreach ($StreamFile in $AllStreamFiles)
+            {
+                $PerStreamFile = $StreamFile.FullName
+                try
+                {
+                    $Obj = Get-Content -Path $PerStreamFile -Raw | ConvertFrom-Json
+                    if ($null -ne $Obj.Completed)
+                    {
+                        $AllCompletedFromStreams += @($Obj.Completed)
+                    }
+                    # Per-stream files written by workers also carry their
+                    # FailedAttempts entries. Merge by Id so the unified
+                    # state file reflects every stream's failures, with the
+                    # most-recent attempt's Reason/LastFailedAt winning when
+                    # the same sub appears in multiple streams (which would
+                    # only happen across re-runs with different slicing).
+                    if ($null -ne $Obj.FailedAttempts)
+                    {
+                        $AllFailedFromStreams += @($Obj.FailedAttempts)
+                    }
                 }
-                try {
-                    Get-Content -Path $s.FailuresPath -Raw | Out-File -FilePath $DiagFile -Append -Encoding utf8
-                } catch {
-                    Write-Verbose ("Failed to merge stream failures log {0}: {1}" -f $s.FailuresPath, $_.Exception.Message)
+                catch
+                {
+                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
+                }
+            }
+            if ($AllCompletedFromStreams.Count -gt 0)
+            {
+                $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
+            }
+            # Reconcile failed attempts from all streams against the unified list.
+            # See Merge-FailedAttempts for the recency/completion rules.
+            $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
+            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
+            {
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+            }
+            # Also delete per-stream resume files now that the unified file holds
+            # the truth - this prevents drift if a future run uses a different
+            # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
+            # as the merge loop above, so every file that was just merged is also
+            # the one that gets cleaned up here - regardless of this run's
+            # -ParallelStreams value.
+            foreach ($StreamFile in $AllStreamFiles)
+            {
+                $PerStreamFile = $StreamFile.FullName
+                try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+            }
+        }
+        finally
+        {
+            # Unconditional cleanup of background jobs and the Az context snapshot.
+            # Runs whether the orchestration succeeded, threw mid-aggregation, or
+            # was interrupted via Ctrl+C while a child stream was still running.
+
+            # 1. Background jobs. If we threw before $jobs was declared, the
+            # variable is null/empty and Remove-Job is a no-op. Each job is a
+            # separate `pwsh` process holding an Az context snapshot reference;
+            # leaving them running after the parent exits would leak both
+            # processes and authentication state.
+            if ($null -ne $Jobs -and @($Jobs).Count -gt 0)
+            {
+                try
+                {
+                    # Stop any still-running jobs first so Remove-Job doesn't
+                    # block waiting for them.
+                    @($Jobs | Where-Object { $_.State -eq 'Running' }) | ForEach-Object {
+                        try { Stop-Job -Job $_ -ErrorAction SilentlyContinue } catch {}
+                    }
+                    $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+                }
+                catch
+                {
+                    Write-Host ("WARNING: could not fully clean up background jobs: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                }
+            }
+
+            # 2. Az context snapshot. The snapshot file contains a token cache;
+            # leaving it on disk is a security exposure (bounded by the ~1h
+            # token lifetime, but real). Best-effort: log if the delete fails
+            # but do not propagate the error - that would mask the real exit
+            # reason.
+            if (Test-Path -Path $AzContextSnapshot)
+            {
+                try
+                {
+                    Remove-Item -Path $AzContextSnapshot -Force -ErrorAction Stop
+                }
+                catch
+                {
+                    Write-Host ("WARNING: could not remove Az context snapshot at {0}: {1}" -f $AzContextSnapshot, $_.Exception.Message) -ForegroundColor Yellow
+                    Write-Host "  This file contains an Azure token cache and should be deleted manually." -ForegroundColor Yellow
                 }
             }
         }
-
-        # Clean up per-stream summary JSON files (the data is now folded into
-        # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
-        # they are referenced from the merged $DiagFile via Append above. The
-        # Az context snapshot cleanup lives in the `finally` block below so it
-        # runs even on failure paths.
-        foreach ($s in $StreamSummaries) {
-            if (Test-Path -Path $s.SummaryPath) {
-                try { Remove-Item -Path $s.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $s.SummaryPath, $_.Exception.Message) }
-            }
-        }
-
-        # When parallel streams have completed (clean or otherwise), merge each
-        # stream's resume-state file into the unified resume-state file so a
-        # subsequent -Resume run picks up correctly. The unified file is also
-        # what the existing "clean run -> remove resume state" logic below
-        # will look at.
-        # Discover every per-stream resume file on disk for this tenant. See
-        # Get-StreamResumeStateFiles for why this is a full-disk scan rather
-        # than an iteration over 0..($StreamCount-1).
-        $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
-        $allCompletedFromStreams = @()
-        $allFailedFromStreams    = @()
-        foreach ($StreamFile in $AllStreamFiles) {
-            $perStreamFile = $StreamFile.FullName
-            try {
-                $obj = Get-Content -Path $perStreamFile -Raw | ConvertFrom-Json
-                if ($null -ne $obj.Completed) {
-                    $allCompletedFromStreams += @($obj.Completed)
-                }
-                # Per-stream files written by workers also carry their
-                # FailedAttempts entries. Merge by Id so the unified
-                # state file reflects every stream's failures, with the
-                # most-recent attempt's Reason/LastFailedAt winning when
-                # the same sub appears in multiple streams (which would
-                # only happen across re-runs with different slicing).
-                if ($null -ne $obj.FailedAttempts) {
-                    $allFailedFromStreams += @($obj.FailedAttempts)
-                }
-            } catch {
-                Write-Verbose ("Could not read stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message)
-            }
-        }
-        if ($allCompletedFromStreams.Count -gt 0) {
-            $CompletedIds = @($CompletedIds + $allCompletedFromStreams | Sort-Object -Unique)
-        }
-        # Reconcile failed attempts from all streams against the unified list.
-        # See Merge-FailedAttempts for the recency/completion rules.
-        $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $allFailedFromStreams -CompletedIds $CompletedIds
-        if ($allCompletedFromStreams.Count -gt 0 -or $allFailedFromStreams.Count -gt 0) {
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
-        }
-        # Also delete per-stream resume files now that the unified file holds
-        # the truth - this prevents drift if a future run uses a different
-        # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
-        # as the merge loop above, so every file that was just merged is also
-        # the one that gets cleaned up here - regardless of this run's
-        # -ParallelStreams value.
-        foreach ($StreamFile in $AllStreamFiles) {
-            $perStreamFile = $StreamFile.FullName
-            try { Remove-Item -Path $perStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $perStreamFile, $_.Exception.Message) }
-        }
-    } finally {
-        # Unconditional cleanup of background jobs and the Az context snapshot.
-        # Runs whether the orchestration succeeded, threw mid-aggregation, or
-        # was interrupted via Ctrl+C while a child stream was still running.
-
-        # 1. Background jobs. If we threw before $jobs was declared, the
-        # variable is null/empty and Remove-Job is a no-op. Each job is a
-        # separate `pwsh` process holding an Az context snapshot reference;
-        # leaving them running after the parent exits would leak both
-        # processes and authentication state.
-        if ($null -ne $jobs -and @($jobs).Count -gt 0) {
-            try {
-                # Stop any still-running jobs first so Remove-Job doesn't
-                # block waiting for them.
-                @($jobs | Where-Object { $_.State -eq 'Running' }) | ForEach-Object {
-                    try { Stop-Job -Job $_ -ErrorAction SilentlyContinue } catch {}
-                }
-                $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
-            } catch {
-                Write-Host ("WARNING: could not fully clean up background jobs: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-            }
-        }
-
-        # 2. Az context snapshot. The snapshot file contains a token cache;
-        # leaving it on disk is a security exposure (bounded by the ~1h
-        # token lifetime, but real). Best-effort: log if the delete fails
-        # but do not propagate the error - that would mask the real exit
-        # reason.
-        if (Test-Path -Path $AzContextSnapshot) {
-            try {
-                Remove-Item -Path $AzContextSnapshot -Force -ErrorAction Stop
-            } catch {
-                Write-Host ("WARNING: could not remove Az context snapshot at {0}: {1}" -f $AzContextSnapshot, $_.Exception.Message) -ForegroundColor Yellow
-                Write-Host "  This file contains an Azure token cache and should be deleted manually." -ForegroundColor Yellow
-            }
-        }
-    }
     }
 }
 
@@ -1322,24 +1641,24 @@ Write-Host "All subscriptions processed!" -ForegroundColor Green
 # Failed subs (in $FailedSubscriptions) are intentionally NOT counted -
 # their zip-or-no-zip state is unreliable and the wrapper already surfaces
 # them via the failure summary.
-$expectedZipCount = @($SubResourceCounts).Count
-if ($expectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container)) {
-    $actualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -ge $RunStartTime }
-    })
-    $actualZipCount = $actualSubZips.Count
-    if ($actualZipCount -lt $expectedZipCount) {
-        $missingCount = $expectedZipCount - $actualZipCount
+$ExpectedZipCount = @($SubResourceCounts).Count
+if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
+{
+    $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    $ActualZipCount = $ActualSubZips.Count
+    if ($ActualZipCount -lt $ExpectedZipCount)
+    {
+        $MissingCount = $ExpectedZipCount - $ActualZipCount
         Write-Host ""
         Write-Host "ERROR: Per-subscription output verification failed." -ForegroundColor Red
-        Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $expectedZipCount) -ForegroundColor Red
-        Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $actualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
-        Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $missingCount) -ForegroundColor Red
+        Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $ExpectedZipCount) -ForegroundColor Red
+        Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $ActualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
+        Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
         Write-Host ""
         Write-Host "Subscriptions whose inner script reported success this run:" -ForegroundColor Yellow
-        foreach ($s in $SubResourceCounts) {
-            Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $s.Name, $s.Id, $s.Count) -ForegroundColor Yellow
+        foreach ($S in $SubResourceCounts)
+        {
+            Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $S.Name, $S.Id, $S.Count) -ForegroundColor Yellow
         }
         Write-Host ""
         Write-Host "Likely causes:" -ForegroundColor Yellow
@@ -1352,47 +1671,103 @@ if ($expectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         Write-Host "Recover by either:" -ForegroundColor Yellow
         Write-Host "  - Locating the missing per-sub directory under the inventory root and inspecting why its zip is absent, OR" -ForegroundColor Yellow
         Write-Host "  - Re-running with -Resume to re-collect any unprocessed/missing subscription." -ForegroundColor Yellow
-        if ($WrapperTranscriptStarted) {
+        if ($WrapperTranscriptStarted)
+        {
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
         }
         Exit-Wrapper -Code 2
     }
-    Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $actualZipCount) -ForegroundColor Green
+    Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
 }
 
 # Consolidate per-subscription ZIPs into a single outer ZIP
 $OuterZipFile = $null
 
-if (Test-Path -Path $InventoryRoot -PathType Container) {
+if (Test-Path -Path $InventoryRoot -PathType Container)
+{
     # Filter ZIPs by current run timestamp only
-    $subZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object {
-        Get-ChildItem -Path $_.FullName -Filter "*.zip" -File |
-            Where-Object { $_.LastWriteTime -ge $RunStartTime }
-    })
-
-    if ($subZips.Count -gt 0) {
+    $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    if ($SubZips.Count -gt 0)
+    {
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
         $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
-
-        Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $subZips.Count, $OuterZipFile) -ForegroundColor Cyan
-        Compress-Archive -Path $subZips.FullName -DestinationPath $OuterZipFile -Force
-
+        Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
+        Compress-Archive -Path $SubZips.FullName -DestinationPath $OuterZipFile -Force
         Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
-    } else {
+    }
+    else
+    {
         Write-Host ("No per-subscription zip files found under {0} to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
     }
-} else {
+}
+else
+{
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
+}
+
+# Aggregate "main" HTML summary across all per-subscription reports from
+# THIS run. Built on EVERY run that produced a consolidated zip (it was
+# previously opt-in via -MainSummary; that switch is now implied and the
+# summary is always produced + folded into the bundle below). -Detailed
+# still adds the run-wide by-service charts. Built purely from the on-disk
+# per-sub artefacts (Inventory_*.json + sibling .html) scoped to
+# $RunStartTime - no Azure calls. A failure here must never fail the run:
+# the per-sub reports and the consolidated zip are already written, so any
+# error is downgraded to a warning and $MainSummaryFile is left $null.
+$MainSummaryFile = $null
+if ($null -ne $OuterZipFile)
+{
+    try
+    {
+        # The aggregate summary builder lives in a dot-sourced function
+        # library (Functions/AllSubHtmlSummary.Functions.ps1), which also
+        # holds the render helpers shared with Extension/Summary.ps1. A
+        # missing file throws into the surrounding catch and downgrades to
+        # a warning.
+        $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
+        if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
+        {
+            throw "Main summary functions not found at '$AllSubSummaryFunctions'."
+        }
+        . $AllSubSummaryFunctions
+        $MainSummaryFile = Join-Path $InventoryRoot ("MainSummary_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        # Source the version from Version.json rather than $Global:Version:
+        # in parallel mode the inner script runs in child processes, so the
+        # wrapper's $Global:Version is never set. Fall back to it (and then
+        # blank) if the file can't be read.
+        $MainVer = $Global:Version
+        try
+        {
+            $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+            $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
+        }
+        catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime `
+            -FailedSubscriptions $FailedSubscriptions `
+            -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+            -MetricsFailedSubs $Global:MetricsFailedSubs `
+            -CollectorFailures $Global:CollectorFailures `
+            -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
+            -Detailed:$Detailed -Obfuscated:$Obfuscate
+    }
+    catch
+    {
+        Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
 }
 
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf)) {
-    try {
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+{
+    try
+    {
         Remove-Item -Path $ResumeStateFile -Force
         Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
-    } catch {
+    }
+    catch
+    {
         Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
     }
 }
@@ -1401,24 +1776,27 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test
 $Elapsed = (Get-Date) - $RunStartTime
 Write-Host ""
 Write-Host "================ Summary ================" -ForegroundColor Green
-Write-Host ("Subscriptions Visible:   {0}" -f $allSubscriptions.Count) -ForegroundColor Green
-if ($excluded.Count -gt 0) {
-    Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $excluded.Count) -ForegroundColor Green
+Write-Host ("Subscriptions Visible:   {0}" -f $AllSubscriptions.Count) -ForegroundColor Green
+if ($Excluded.Count -gt 0)
+{
+    Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $Excluded.Count) -ForegroundColor Green
 }
-Write-Host ("Subscriptions Eligible:  {0}" -f $subscriptions.Count) -ForegroundColor Green
+Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundColor Green
 # In parallel mode, $SkippedCount is not populated by the foreach loop above
 # (each worker skips independently). Derive it from the difference between
 # the number of eligible subs and the number of subs that actually ran in
 # this invocation (the union of $SubResourceCounts entries plus failures).
-if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0) {
-    $actuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
-    $derivedSkip = $subscriptions.Count - $actuallyProcessed
-    if ($derivedSkip -gt 0) { $SkippedCount = $derivedSkip }
+if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0)
+{
+    $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
+    $DerivedSkip = $Subscriptions.Count - $ActuallyProcessed
+    if ($DerivedSkip -gt 0) { $SkippedCount = $DerivedSkip }
 }
-if ($Resume) {
+if ($Resume)
+{
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
 }
-Write-Host ("Subscriptions Processed: {0}" -f ($subscriptions.Count - $SkippedCount)) -ForegroundColor Green
+Write-Host ("Subscriptions Processed: {0}" -f ($Subscriptions.Count - $SkippedCount)) -ForegroundColor Green
 
 # Surface the per-subscription resource-count result so the user does not have
 # to scan individual transcripts to find subs that came back empty. Empty subs
@@ -1426,43 +1804,92 @@ Write-Host ("Subscriptions Processed: {0}" -f ($subscriptions.Count - $SkippedCo
 # treating them as "successful" in the summary is misleading.
 $EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
 $NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
-if ($SubResourceCounts.Count -gt 0) {
-    $totalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
-    Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $totalRes, $NonEmptySubs.Count) -ForegroundColor Green
+# Initialised here (not only inside the 0-resource branch below) so the
+# run-summary finalization can read them unconditionally even when there
+# were no empty subscriptions to classify.
+$NoAccessSubs = @()
+$GenuinelyEmptySubs = @()
+$UnknownSubs = @()
+if ($SubResourceCounts.Count -gt 0)
+{
+    $TotalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
+    Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $TotalRes, $NonEmptySubs.Count) -ForegroundColor Green
 }
-if ($EmptySubs.Count -gt 0) {
+if ($EmptySubs.Count -gt 0)
+{
     # A sub that returned 0 resources is either a permission gap (no role on the
     # sub) or genuinely empty. Probe each one to label it precisely so the user
     # knows whether to fix access or ignore it. The probe is one cheap ARM call
     # per empty sub (only empties, so no cost on normal runs).
-    $noAccessSubs = @()
-    $genuinelyEmptySubs = @()
-    $unknownSubs = @()
-    foreach ($e in $EmptySubs) {
-        switch (Get-SubscriptionAccessState -SubscriptionId $e.Id) {
-            'NoAccess' { $noAccessSubs += $e }
-            'Empty'    { $genuinelyEmptySubs += $e }
-            default    { $unknownSubs += $e }
+    $NoAccessSubs = @()
+    $GenuinelyEmptySubs = @()
+    $UnknownSubs = @()
+    foreach ($e in $EmptySubs)
+    {
+        switch (Get-SubscriptionAccessState -SubscriptionId $e.Id)
+        {
+            'NoAccess' { $NoAccessSubs += $e }
+            'Empty' { $GenuinelyEmptySubs += $e }
+            default { $UnknownSubs += $e }
         }
     }
 
     Write-Host ""
     Write-Host ("Subscriptions with 0 resources: {0}" -f $EmptySubs.Count) -ForegroundColor Yellow
 
-    if ($noAccessSubs.Count -gt 0) {
-        Write-Host ("  NO ACCESS ({0}) - the signed-in identity has no role on these subscriptions:" -f $noAccessSubs.Count) -ForegroundColor Red
-        foreach ($e in $noAccessSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Red }
+    if ($NoAccessSubs.Count -gt 0)
+    {
+        Write-Host ("  NO ACCESS ({0}) - the signed-in identity has no role on these subscriptions:" -f $NoAccessSubs.Count) -ForegroundColor Red
+        foreach ($e in $NoAccessSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Red }
         Write-Host "    Fix: grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
     }
-    if ($genuinelyEmptySubs.Count -gt 0) {
-        Write-Host ("  GENUINELY EMPTY ({0}) - access confirmed, the subscription has no resources:" -f $genuinelyEmptySubs.Count) -ForegroundColor Yellow
-        foreach ($e in $genuinelyEmptySubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
+    if ($GenuinelyEmptySubs.Count -gt 0)
+    {
+        Write-Host ("  GENUINELY EMPTY ({0}) - access confirmed, the subscription has no resources:" -f $GenuinelyEmptySubs.Count) -ForegroundColor Yellow
+        foreach ($e in $GenuinelyEmptySubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
         Write-Host "    No action needed - these are expected to be empty in the report." -ForegroundColor DarkGray
     }
-    if ($unknownSubs.Count -gt 0) {
-        Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $unknownSubs.Count) -ForegroundColor Yellow
-        foreach ($e in $unknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
+    if ($UnknownSubs.Count -gt 0)
+    {
+        Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $UnknownSubs.Count) -ForegroundColor Yellow
+        foreach ($e in $UnknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
         Write-Host "    Verify manually: az group list --subscription <id>" -ForegroundColor Yellow
+    }
+
+    # Persist the per-subscription access verdict to the diagnostic log so it
+    # outlives the console/transcript and can be attached to a ticket or e-mail.
+    # This is the durable record behind the on-screen labels above: which
+    # 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume)
+    # vs genuinely empty (no action). Reuses the run's $DiagFile if one already
+    # exists (e.g. from a failure), otherwise creates one.
+    if ($null -eq $DiagFile)
+    {
+        $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_diagnostics_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
+    }
+    $EmptyDiag = @()
+    $EmptyDiag += "==== Subscriptions with 0 resources - access verdict ===="
+    $EmptyDiag += "Timestamp: $(Get-Date -Format 'o')"
+    foreach ($e in $NoAccessSubs)
+    {
+        $EmptyDiag += ("NO_ACCESS {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id)
+    }
+    foreach ($e in $GenuinelyEmptySubs)
+    {
+        $EmptyDiag += ("EMPTY {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id)
+    }
+    foreach ($e in $UnknownSubs)
+    {
+        $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id)
+    }
+    $EmptyDiag += ""
+    try
+    {
+        $EmptyDiag | Out-File -FilePath $DiagFile -Append -Encoding utf8
+        Write-Host ("  Access verdict written to diagnostic log: {0}" -f $DiagFile) -ForegroundColor DarkGray
+    }
+    catch
+    {
+        Write-Verbose ("Diagnostic log write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message)
     }
     Write-Host ""
 }
@@ -1473,21 +1900,33 @@ if ($EmptySubs.Count -gt 0) {
 # load its bundled MSAL/Azure.Core assemblies) the customer ends up with an
 # empty consumption sheet and no signal that anything went wrong. Make it
 # loud here so it's caught before the report is shared.
-$consumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
-$consumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
-if ($consumptionRecords -gt 0 -or $consumptionFailures.Count -gt 0) {
-    Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $consumptionRecords) -ForegroundColor Green
+$ConsumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$ConsumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
+if ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
+{
+    Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor Green
 }
-if ($consumptionFailures.Count -gt 0) {
+if ($ConsumptionFailures.Count -gt 0)
+{
     Write-Host ""
-    Write-Host ("Consumption Failures:    {0} subscription(s)" -f $consumptionFailures.Count) -ForegroundColor Yellow
+    Write-Host ("Consumption Failures:    {0} subscription(s)" -f $ConsumptionFailures.Count) -ForegroundColor Yellow
+    # List the affected subscriptions by name so the operator knows exactly
+    # which subs are missing billing data (e.g. to go request Reader access
+    # on them). Mirrors the metrics-failure block below. Exclude the '(auth)'
+    # sentinel used for the whole-phase skip - it is not a specific sub.
+    foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object Name -Unique))
+    {
+        Write-Host ("  - {0} ({1})" -f $cf.Name, $cf.Id) -ForegroundColor Yellow
+    }
     # The consumption failure message is repeated verbatim across every sub
     # when the cause is a broken Az module - dedupe to avoid screen wall.
-    $uniqueMessages = @($consumptionFailures | Select-Object -ExpandProperty Message -Unique)
-    foreach ($m in $uniqueMessages) {
+    $UniqueMessages = @($ConsumptionFailures | Select-Object -ExpandProperty Message -Unique)
+    foreach ($m in $UniqueMessages)
+    {
         Write-Host ("  - {0}" -f $m) -ForegroundColor Yellow
     }
-    if ($uniqueMessages | Where-Object { $_ -match 'context has not been properly initialized|Could not load file or assembly|MSAL|Azure\.Core' }) {
+    if ($UniqueMessages | Where-Object { $_ -match 'context has not been properly initialized|Could not load file or assembly|MSAL|Azure\.Core' })
+    {
         Write-Host "  This message strongly suggests the Az PowerShell module is broken on disk." -ForegroundColor Yellow
         Write-Host "  Reinstall with:" -ForegroundColor Yellow
         Write-Host "    Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
@@ -1503,17 +1942,20 @@ if ($consumptionFailures.Count -gt 0) {
 # this the metrics sheet is silently empty and looks like "no metric-eligible
 # resources" rather than an auth failure. Listed per-subscription so the
 # operator knows exactly which subs are missing metrics.
-$metricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
-if ($metricsFailures.Count -gt 0) {
+$MetricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+if ($MetricsFailures.Count -gt 0)
+{
     Write-Host ""
-    Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $metricsFailures.Count) -ForegroundColor Yellow
-    foreach ($m in ($metricsFailures | Sort-Object Name -Unique)) {
+    Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $MetricsFailures.Count) -ForegroundColor Yellow
+    foreach ($m in ($MetricsFailures | Sort-Object Name -Unique))
+    {
         Write-Host ("  - {0} ({1})" -f $m.Name, $m.Id) -ForegroundColor Yellow
     }
     # The reason is the same across subs (auth), so show it once.
-    $firstMsg = @($metricsFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
-    if (-not [string]::IsNullOrEmpty($firstMsg)) {
-        Write-Host ("  Reason: {0}" -f $firstMsg) -ForegroundColor Yellow
+    $FirstMsg = @($MetricsFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
+    if (-not [string]::IsNullOrEmpty($FirstMsg))
+    {
+        Write-Host ("  Reason: {0}" -f $FirstMsg) -ForegroundColor Yellow
     }
     Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
     Write-Host "  Note: the metrics sheet in the output report will be empty for these subscriptions." -ForegroundColor Yellow
@@ -1527,12 +1969,15 @@ if ($metricsFailures.Count -gt 0) {
 # Grouped by subscription so the operator can see exactly which sub(s) and
 # which resource type(s) were affected without hunting through per-sub logs.
 $CollectorFailuresList = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
-if ($CollectorFailuresList.Count -gt 0) {
+if ($CollectorFailuresList.Count -gt 0)
+{
     Write-Host ""
     Write-Host ("Collector Failures:      {0} failure(s) across {1} subscription(s)" -f $CollectorFailuresList.Count, (@($CollectorFailuresList | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Yellow
-    foreach ($SubGroup in ($CollectorFailuresList | Group-Object -Property Id)) {
+    foreach ($SubGroup in ($CollectorFailuresList | Group-Object -Property Id))
+    {
         Write-Host ("  - Subscription {0}:" -f $SubGroup.Name) -ForegroundColor Yellow
-        foreach ($f in $SubGroup.Group) {
+        foreach ($f in $SubGroup.Group)
+        {
             Write-Host ("      {0}: {1}" -f $f.Module, $f.Message) -ForegroundColor Yellow
         }
     }
@@ -1541,18 +1986,23 @@ if ($CollectorFailuresList.Count -gt 0) {
     Write-Host ""
 }
 
-if ($FailedSubscriptions.Count -gt 0) {
+if ($FailedSubscriptions.Count -gt 0)
+{
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
     Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
     Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the failed subscriptions." -ForegroundColor Yellow
-    if ($DiagFile -and (Test-Path $DiagFile)) {
+    if ($DiagFile -and (Test-Path $DiagFile))
+    {
         Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
     }
-    if ($WrapperTranscriptStarted) {
+    if ($WrapperTranscriptStarted)
+    {
         Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
     }
-} elseif ($FailedAttempts.Count -gt 0) {
+}
+elseif ($FailedAttempts.Count -gt 0)
+{
     # No new failures this run, but the resume-state file still has lingering
     # FailedAttempts from a prior run that have not yet been retried. Surface
     # them so the operator does not lose track of historical failures simply
@@ -1561,13 +2011,113 @@ if ($FailedSubscriptions.Count -gt 0) {
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
-if ($OuterZipFile) {
+if ($OuterZipFile)
+{
     Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
 }
-if ($WrapperTranscriptStarted) {
+if ($WrapperTranscriptStarted)
+{
     Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
 }
 Write-Host "=========================================" -ForegroundColor Green
+
+# --- Fold run-level extras into the consolidated bundle --------------
+# Make the single AllSubscriptions zip the customer receives self-contained.
+# It already holds the per-subscription inner zips (the ingestion payload,
+# left untouched); here we ADD a run-level RunSummary.log (parameters + sub
+# tally + health) and the unified MainSummary.html, plus a copy of each
+# per-subscription HTML so the summary's drill-down links resolve straight
+# out of the extracted zip. Only additive members are folded in and NO loose
+# *.json is added, so the ingestion contract (inner-zip *.json members) is
+# unchanged and nothing is double-ingested. Best-effort: any failure is a
+# warning - the per-sub reports and the outer zip are already written.
+if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+{
+    try
+    {
+        $BundleStage = Join-Path $InventoryRoot ('.rda-bundle-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+        New-Item -ItemType Directory -Path $BundleStage -Force | Out-Null
+
+        # Version is display-only. Prefer Version.json (in parallel mode the
+        # wrapper's $Global:Version is never set - child processes set it),
+        # fall back to $Global:Version then blank.
+        $BundleVer = $Global:Version
+        try
+        {
+            $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+            $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
+        }
+        catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
+
+        # 1. RunSummary.log - run-level parameters + tally + health. Obfuscated
+        #    runs emit counts only (the wrapper holds no per-sub obfuscation
+        #    dictionary); default runs include per-sub detail.
+        $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+        $RunSummaryLines = Get-RunSummaryLogContent `
+            -InvocationParameters $PSBoundParameters `
+            -Version $BundleVer `
+            -StartTime $RunStartTime -EndTime (Get-Date) `
+            -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
+            -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
+            -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
+            -FailedSubscriptions $FailedSubscriptions `
+            -CollectorFailures $Global:CollectorFailures `
+            -MetricsFailedSubs $Global:MetricsFailedSubs `
+            -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+            -ConsumptionRecordCount $ConsumptionRecordTotal `
+            -Obfuscated:$Obfuscate
+        $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
+
+        # 2. Unified MainSummary.html at the bundle root (renamed from the
+        #    timestamped file; its links are relative to sibling folders, so
+        #    renaming the summary itself does not break them). The drill-down
+        #    link folders are then renamed from ResourcesReport<stamp>/ to
+        #    HTML<stamp>/ (see step 3) - these bundle folders carry ONLY the
+        #    report HTML, so the HTML prefix distinguishes them at a glance
+        #    from the sibling ResourcesReport_<stamp>.zip data archives (which
+        #    hold the Inventory/Metrics/Consumption members). Rewrite the
+        #    summary's hrefs to match: only the leading folder token changes
+        #    (href="ResourcesReport... -> href="HTML...); the /<file>.html tail
+        #    is untouched because it is not preceded by href=".
+        $StagedMainSummary = Join-Path $BundleStage 'MainSummary.html'
+        if ($null -ne $MainSummaryFile -and (Test-Path -LiteralPath $MainSummaryFile))
+        {
+            Copy-Item -LiteralPath $MainSummaryFile -Destination $StagedMainSummary -Force
+            (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' | Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
+        }
+
+        # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
+        #    name is the source ResourcesReport<stamp> with the leading
+        #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
+        #    summary links. HTML only - no *.json/csv - so nothing is
+        #    double-ingested and the folder name signals "report HTML, not
+        #    data". Scoped to THIS run by timestamp; a de-obfuscated
+        #    *_revealed* report is never copied across.
+        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
+        {
+            $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+            if ($null -eq $SubHtml) { continue }
+            $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
+            $DestDir = Join-Path $BundleStage $HtmlFolderName
+            New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+            Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
+        }
+
+        # Fold the staged extras into the existing outer zip (additive; the
+        # inner per-sub zips already inside it are preserved by -Update).
+        $StageItems = @(Get-ChildItem -Path $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        if ($StageItems.Count -gt 0)
+        {
+            Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
+            Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+        }
+        Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    catch
+    {
+        Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
 
 # Final, last-thing-the-user-sees banner when a requested data phase could not
 # be collected due to authentication. Printed AFTER the summary block so it is
@@ -1575,17 +2125,18 @@ Write-Host "=========================================" -ForegroundColor Green
 # (no -SkipConsumption) auth skips. The Excel sheets are intentionally NOT
 # annotated (server-side ingestion expects fixed columns); this banner is the
 # human-facing signal, and the non-zero exit below is the machine-facing one.
-$authSkippedPhases = @()
-if (@($Global:MetricsFailedSubs).Count -gt 0) { $authSkippedPhases += 'Metrics' }
-$consumptionAuthSkipped = @(
+$AuthSkippedPhases = @()
+if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
+$ConsumptionAuthSkipped = @(
     if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
 ) | Where-Object { $_.Id -eq '(auth)' }
-if ($consumptionAuthSkipped.Count -gt 0) { $authSkippedPhases += 'Consumption' }
+if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
 
-if ($authSkippedPhases.Count -gt 0) {
+if ($AuthSkippedPhases.Count -gt 0)
+{
     Write-Host ""
     Write-Host "===================== FAILED (auth) =====================" -ForegroundColor Red
-    Write-Host ("Could not collect: {0}" -f ($authSkippedPhases -join ' and ')) -ForegroundColor Red
+    Write-Host ("Could not collect: {0}" -f ($AuthSkippedPhases -join ' and ')) -ForegroundColor Red
     Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
     Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
     Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
@@ -1601,7 +2152,8 @@ if ($authSkippedPhases.Count -gt 0) {
 # per the same "do not sweep failures under the rug" requirement that drove
 # the circuit breaker itself - a human-only signal that scrolls past in a
 # large multi-subscription run is not good enough for CI/automation.
-if (@($Global:CollectorFailures).Count -gt 0) {
+if (@($Global:CollectorFailures).Count -gt 0)
+{
     Write-Host ""
     Write-Host "=================== FAILED (collectors) ===================" -ForegroundColor Red
     Write-Host ("{0} collector failure(s) across {1} subscription(s) - see 'Collector Failures' above for detail." -f @($Global:CollectorFailures).Count, (@($Global:CollectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Red
@@ -1613,16 +2165,18 @@ if (@($Global:CollectorFailures).Count -gt 0) {
 
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
-if ($WrapperTranscriptStarted) {
+if ($WrapperTranscriptStarted)
+{
     try { Stop-Transcript | Out-Null }
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
 
 
-$AuthSkipped      = $authSkippedPhases.Count -gt 0
+$AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode  = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
-if ($WrapperExitCode -ne 0) {
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+if ($WrapperExitCode -ne 0)
+{
     exit $WrapperExitCode
 }
 

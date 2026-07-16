@@ -89,6 +89,18 @@ function Measure-VariablePascalCase
 
         if ([string]::IsNullOrEmpty($Name)) { continue }
 
+        # Skip provider/drive-qualified variables (e.g. $env:PATH, $variable:x,
+        # $function:foo, $cert:y). These reference an external provider store,
+        # not a user-declared variable — their casing is provider-defined (and
+        # environment-variable names are case-sensitive on Linux), so the
+        # PascalCase convention does not apply and flagging them is a false
+        # positive. Real scope modifiers (global:/script:/etc.) are handled by
+        # the scope-prefix strip below, not here.
+        if ($Name -match '^(\w+):' -and $Matches[1].ToLower() -notin @('global', 'local', 'script', 'private', 'using', 'workflow'))
+        {
+            continue
+        }
+
         # VariablePath.UserPath includes the scope prefix (e.g. "script:Foo"
         # for $script:Foo) in lowercase. Left unstripped, that lowercase
         # prefix would always fail the uppercase-start check below regardless
@@ -114,6 +126,38 @@ function Measure-VariablePascalCase
         $SeverityType = [type]'Microsoft.Windows.PowerShell.ScriptAnalyzer.Generic.DiagnosticSeverity'
         $Warning      = [Enum]::Parse($SeverityType, 'Warning')
 
+        # Attach a SuggestedCorrection so `Invoke-ScriptAnalyzer -Fix` (and
+        # editor quick-fixes) can apply the PascalCase rename automatically.
+        # This is safe to auto-apply because PowerShell variable resolution is
+        # case-insensitive: re-casing ONLY the assignment-site token (e.g.
+        # `$foo` -> `$Foo`) does not change which variable is referenced, so
+        # lower-cased reads elsewhere in scope still resolve to the same
+        # variable. The correction rewrites only the variable token extent —
+        # $Left.Extent covers `$foo`, not any leading `[type]` cast — replacing
+        # it with the sigil plus the suggested (scope-prefixed) name.
+        # Resolved via [type]'...' at runtime for the same portability reason
+        # as the DiagnosticRecord type above.
+        #
+        # Only attach the auto-fix correction for the plain `$foo` token form.
+        # Brace-quoted names (e.g. `${foo bar}`) can't be reconstructed by
+        # prefixing a sigil to the name — that would drop the required braces
+        # and yield invalid syntax under `-Fix`. For that rare form we still
+        # emit the diagnostic (detection is unchanged) but attach no correction.
+        $Corrections = $null
+        if (-not $Left.Extent.Text.StartsWith('${'))
+        {
+            $CorrectionType = [type]'Microsoft.Windows.PowerShell.ScriptAnalyzer.Generic.CorrectionExtent'
+            $Correction     = $CorrectionType::new(
+                $Left.Extent,
+                ('$' + $Suggested),
+                $Left.Extent.File,
+                $Message
+            )
+            $CorrectionListType = [System.Collections.Generic.List`1].MakeGenericType($CorrectionType)
+            $Corrections        = $CorrectionListType::new()
+            $Corrections.Add($Correction)
+        }
+
         $Record = $DiagnosticType::new(
             $Message,
             $Left.Extent,
@@ -121,6 +165,10 @@ function Measure-VariablePascalCase
             $Warning,
             $null  # scriptName filled in by PSScriptAnalyzer
         )
+        if ($null -ne $Corrections)
+        {
+            $Record.SuggestedCorrections = $Corrections
+        }
         $Results += $Record
     }
 

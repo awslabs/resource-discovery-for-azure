@@ -20,7 +20,7 @@
 # per-VM join is impossible in an obfuscated report).
 
 BeforeAll {
-    $script:SummaryScript = Join-Path $PSScriptRoot '..' 'Extension' 'Summary.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
+    $script:SummaryScript = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Extension', 'Summary.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
     $script:WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("VmBillingGap_" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
 
@@ -31,10 +31,10 @@ BeforeAll {
     {
         param([int]$RunningVms, [int]$DeallocatedVms)
 
-        $vms = @()
+        $Vms = @()
         for ($i = 0; $i -lt $RunningVms; $i++)
         {
-            $vms += [pscustomobject]@{
+            $Vms += [pscustomobject]@{
                 Name         = ('prod_{0}' -f [guid]::NewGuid())
                 Subscription = ('prod_{0}' -f [guid]::NewGuid())
                 Location     = 'eastus'
@@ -44,7 +44,7 @@ BeforeAll {
         }
         for ($i = 0; $i -lt $DeallocatedVms; $i++)
         {
-            $vms += [pscustomobject]@{
+            $Vms += [pscustomobject]@{
                 Name         = ('prod_{0}' -f [guid]::NewGuid())
                 Subscription = ('prod_{0}' -f [guid]::NewGuid())
                 Location     = 'eastus'
@@ -52,7 +52,7 @@ BeforeAll {
                 PowerState   = 'vm deallocated'
             }
         }
-        return [pscustomobject]@{ VirtualMachines = $vms }
+        return [pscustomobject]@{ VirtualMachines = $Vms }
     }
 
     # Build a Consumption CSV with $BilledVms distinct 'Virtual Machines'-meter
@@ -61,35 +61,35 @@ BeforeAll {
     {
         param([string]$Path, [int]$BilledVms)
 
-        $rows = @()
+        $Rows = @()
         for ($i = 0; $i -lt $BilledVms; $i++)
         {
-            $rid = ('prod_{0}' -f [guid]::NewGuid())
+            $Rid = ('prod_{0}' -f [guid]::NewGuid())
             # two rows per resource to prove DISTINCT counting
-            $rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $rid }
-            $rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $rid }
+            $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $Rid }
+            $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $Rid }
         }
         # Non-VM noise rows that must not be counted.
-        $rows += [pscustomobject]@{ MeterCategory = 'Storage'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) }
-        $rows += [pscustomobject]@{ MeterCategory = 'Bandwidth'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Storage'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Bandwidth'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) }
 
-        $rows | Select-Object MeterCategory, ResourceId | Export-Csv -Path $Path -Encoding utf8 -NoTypeInformation
+        $Rows | Select-Object MeterCategory, ResourceId | Export-Csv -Path $Path -Encoding utf8 -NoTypeInformation
     }
 
     function Invoke-Summary
     {
         param($Inventory, [string]$ConsumptionFile, [int]$Threshold = 0)
 
-        $jsonPath = Join-Path $script:WorkDir ('inv_{0}.json' -f [guid]::NewGuid().ToString('N'))
-        $htmlPath = Join-Path $script:WorkDir ('rpt_{0}.html' -f [guid]::NewGuid().ToString('N'))
-        $Inventory | ConvertTo-Json -Depth 8 | Out-File -FilePath $jsonPath -Encoding utf8
+        $JsonPath = Join-Path $script:WorkDir ('inv_{0}.json' -f [guid]::NewGuid().ToString('N'))
+        $HtmlPath = Join-Path $script:WorkDir ('rpt_{0}.html' -f [guid]::NewGuid().ToString('N'))
+        $Inventory | ConvertTo-Json -Depth 8 | Out-File -FilePath $JsonPath -Encoding utf8
 
-        $params = @{ JsonFile = $jsonPath; HtmlFile = $htmlPath }
-        if ($PSBoundParameters.ContainsKey('ConsumptionFile')) { $params['ConsumptionFile'] = $ConsumptionFile }
-        if ($PSBoundParameters.ContainsKey('Threshold')) { $params['VmBillingGapThreshold'] = $Threshold }
+        $Params = @{ JsonFile = $JsonPath; HtmlFile = $HtmlPath }
+        if ($PSBoundParameters.ContainsKey('ConsumptionFile')) { $Params['ConsumptionFile'] = $ConsumptionFile }
+        if ($PSBoundParameters.ContainsKey('Threshold')) { $Params['VmBillingGapThreshold'] = $Threshold }
 
-        & $script:SummaryScript @params | Out-Null
-        return (Get-Content -Path $htmlPath -Raw)
+        & $script:SummaryScript @Params | Out-Null
+        return (Get-Content -Path $HtmlPath -Raw)
     }
 }
 
@@ -103,75 +103,75 @@ AfterAll {
 Describe 'VM billing-coverage banner' {
 
     It 'renders the banner when running VMs exceed billed VMs' {
-        $inv = New-TestInventory -RunningVms 10 -DeallocatedVms 2
-        $csv = Join-Path $script:WorkDir 'con_gap.csv'
-        New-TestConsumptionCsv -Path $csv -BilledVms 4
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 2
+        $Csv = Join-Path $script:WorkDir 'con_gap.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 4
 
-        $html = Invoke-Summary -Inventory $inv -ConsumptionFile $csv
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
 
         # Assert on the rendered banner DIV's text, not the CSS class name
         # ('.coverage-banner' is always present in the <style> block).
-        $html | Should -Match '<div class="coverage-banner">'
-        $html | Should -Match 'VM billing-coverage check'
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'VM billing-coverage check'
         # 10 running, 4 billed -> gap 6
-        $html | Should -Match '10 running VMs'
-        $html | Should -Match 'only 4 VMs'
-        $html | Should -Match '6 running VMs'
+        $Html | Should -Match '10 running VMs'
+        $Html | Should -Match 'only 4 VMs'
+        $Html | Should -Match '6 running VMs'
     }
 
     It 'reports the gap percentage' {
-        $inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
-        $csv = Join-Path $script:WorkDir 'con_pct.csv'
-        New-TestConsumptionCsv -Path $csv -BilledVms 4
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_pct.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 4
         # gap 6 of 10 running = 60%
-        $html = Invoke-Summary -Inventory $inv -ConsumptionFile $csv
-        $html | Should -Match '60%'
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '60%'
     }
 
     It 'does NOT render the banner when billed matches running' {
-        $inv = New-TestInventory -RunningVms 5 -DeallocatedVms 3
-        $csv = Join-Path $script:WorkDir 'con_match.csv'
-        New-TestConsumptionCsv -Path $csv -BilledVms 5
+        $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 3
+        $Csv = Join-Path $script:WorkDir 'con_match.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 5
 
-        $html = Invoke-Summary -Inventory $inv -ConsumptionFile $csv
-        $html | Should -Not -Match '<div class="coverage-banner">'
-        $html | Should -Not -Match 'VM billing-coverage check'
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Not -Match '<div class="coverage-banner">'
+        $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
     It 'does NOT render the banner when billed exceeds running (no negative gap)' {
-        $inv = New-TestInventory -RunningVms 3 -DeallocatedVms 0
-        $csv = Join-Path $script:WorkDir 'con_over.csv'
-        New-TestConsumptionCsv -Path $csv -BilledVms 7
+        $Inv = New-TestInventory -RunningVms 3 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_over.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 7
 
-        $html = Invoke-Summary -Inventory $inv -ConsumptionFile $csv
-        $html | Should -Not -Match '<div class="coverage-banner">'
-        $html | Should -Not -Match 'VM billing-coverage check'
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Not -Match '<div class="coverage-banner">'
+        $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
     It 'does NOT render the banner when no ConsumptionFile is supplied' {
-        $inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
-        $html = Invoke-Summary -Inventory $inv
-        $html | Should -Not -Match '<div class="coverage-banner">'
-        $html | Should -Not -Match 'VM billing-coverage check'
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
+        $Html = Invoke-Summary -Inventory $Inv
+        $Html | Should -Not -Match '<div class="coverage-banner">'
+        $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
     It 'does NOT render the banner for a header-only (empty) consumption CSV' {
-        $inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
-        $csv = Join-Path $script:WorkDir 'con_empty.csv'
-        'MeterCategory,ResourceId' | Out-File -FilePath $csv -Encoding utf8
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_empty.csv'
+        'MeterCategory,ResourceId' | Out-File -FilePath $Csv -Encoding utf8
 
-        $html = Invoke-Summary -Inventory $inv -ConsumptionFile $csv
-        $html | Should -Not -Match '<div class="coverage-banner">'
-        $html | Should -Not -Match 'VM billing-coverage check'
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Not -Match '<div class="coverage-banner">'
+        $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
     It 'respects the VmBillingGapThreshold (suppresses small gaps)' {
-        $inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
-        $csv = Join-Path $script:WorkDir 'con_thresh.csv'
-        New-TestConsumptionCsv -Path $csv -BilledVms 8   # gap = 2
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_thresh.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 8   # gap = 2
 
-        $html = Invoke-Summary -Inventory $inv -ConsumptionFile $csv -Threshold 5
-        $html | Should -Not -Match '<div class="coverage-banner">'
-        $html | Should -Not -Match 'VM billing-coverage check'
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv -Threshold 5
+        $Html | Should -Not -Match '<div class="coverage-banner">'
+        $Html | Should -Not -Match 'VM billing-coverage check'
     }
 }

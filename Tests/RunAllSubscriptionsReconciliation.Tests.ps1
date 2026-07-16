@@ -33,7 +33,8 @@
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'
-    if (-not (Test-Path $script:FunctionsPath)) {
+    if (-not (Test-Path $script:FunctionsPath))
+    {
         throw "Could not find shared functions file at $script:FunctionsPath"
     }
     . $script:FunctionsPath
@@ -41,9 +42,11 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome')
-    foreach ($Fn in $TargetFunctions) {
-        if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue)) {
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll')
+    foreach ($Fn in $TargetFunctions)
+    {
+        if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
+        {
             throw "Expected function '$Fn' to be defined by $script:FunctionsPath, but it was not. Has it been renamed or removed?"
         }
     }
@@ -54,7 +57,8 @@ BeforeAll {
 }
 
 AfterAll {
-    if ($script:TestRoot -and (Test-Path $script:TestRoot)) {
+    if ($script:TestRoot -and (Test-Path $script:TestRoot))
+    {
         Remove-Item -Path $script:TestRoot -Recurse -Force
     }
 }
@@ -194,7 +198,7 @@ Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
     }
 
     It 'Add-FailedAttempt increments Attempts when the same sub fails again (scalar input)' {
-        $First  = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first'
+        $First = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first'
         $Second = Add-FailedAttempt -Existing $First -Id 'sub-1' -Name 'Sub One' -Reason 'again'
         @($Second).Count | Should -Be 1 -Because 'the same sub Id must not be duplicated'
         @($Second)[0].Attempts | Should -Be 2
@@ -220,7 +224,7 @@ Describe 'Merge-FailedAttempts single-element handling' {
 
     It 'Accepts single (scalar) existing and stream failures without throwing' {
         $ExistingScalar = [pscustomobject]@{ Id = 'sub-1'; Name = 'Sub One'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'old'; Attempts = 1 }
-        $StreamScalar   = [pscustomobject]@{ Id = 'sub-2'; Name = 'Sub Two'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'new'; Attempts = 1 }
+        $StreamScalar = [pscustomobject]@{ Id = 'sub-2'; Name = 'Sub Two'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'new'; Attempts = 1 }
 
         { Merge-FailedAttempts -ExistingFailedAttempts $ExistingScalar -StreamFailedAttempts $StreamScalar -CompletedIds @() } | Should -Not -Throw
 
@@ -259,5 +263,213 @@ Describe 'Get-ConsumptionAccessOutcome classification' {
         Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 429 (TooManyRequests)' | Should -Be 'Unavailable'
         Get-ConsumptionAccessOutcome -ErrorMessage 'A task was canceled (timeout)' | Should -Be 'Unavailable'
         Get-ConsumptionAccessOutcome -ErrorMessage 'The remote name could not be resolved' | Should -Be 'Unavailable'
+    }
+}
+
+Describe 'Interrupted-parallel-run stream-state fold-in (F2)' {
+    # Reproduces the exact startup fold-in Run-AllSubscriptions.ps1 performs when
+    # -Resume/-ResumeFailedOnly runs after a PARALLEL run was killed before its
+    # end-of-run merge: discover per-stream files, read their Completed /
+    # FailedAttempts (the same keys Write-StreamState persists), union the
+    # completed ids, and reconcile failures via Merge-FailedAttempts. Guards the
+    # "-ResumeFailedOnly wrongly reports Nothing to retry" bug at the helper level
+    # (the wrapper body itself needs a live Azure session to run end to end).
+    BeforeEach {
+        $script:F2Dir = Join-Path $script:TestRoot ("f2_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:F2Dir -Force | Out-Null
+    }
+
+    AfterEach {
+        if (Test-Path $script:F2Dir) { Remove-Item -Path $script:F2Dir -Recurse -Force }
+    }
+
+    It 'recovers a failure that lives only in an unmerged per-stream file' {
+        $Tenant = 'tenant-f2a'
+        @{ Tenant = $Tenant; StreamId = 0; Completed = @('sub-ok'); FailedAttempts = @() } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-0.json")
+        @{ Tenant = $Tenant; StreamId = 1; Completed = @(); FailedAttempts = @(
+                [pscustomobject]@{ Id = 'sub-fail'; Name = 'Sub Fail'; LastFailedAt = '2026-06-01T00:00:00Z'; Reason = 'throttled'; Attempts = 1 }
+            )
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-1.json")
+
+        $StrandedCompleted = @()
+        $StrandedFailed = @()
+        foreach ($StreamFile in Get-StreamResumeStateFiles -InventoryRoot $script:F2Dir -Tenant $Tenant)
+        {
+            $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+            if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+        }
+        $CompletedIds = @($StrandedCompleted | Sort-Object -Unique)
+        $Failed = Merge-FailedAttempts -ExistingFailedAttempts @() -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
+
+        @($Failed).Count | Should -Be 1 -Because 'the failure stranded in the per-stream file must be recovered, not reported as Nothing to retry'
+        $Failed[0].Id | Should -Be 'sub-fail'
+        $CompletedIds | Should -Contain 'sub-ok' -Because 'completed ids from a per-stream file are folded in too'
+    }
+
+    It 'prunes a stranded failure when the same sub completed in another stream' {
+        $Tenant = 'tenant-f2b'
+        @{ Tenant = $Tenant; StreamId = 0; Completed = @('sub-x'); FailedAttempts = @() } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-0.json")
+        @{ Tenant = $Tenant; StreamId = 1; Completed = @(); FailedAttempts = @(
+                [pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-05-01T00:00:00Z'; Reason = 'transient'; Attempts = 1 }
+            )
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:F2Dir ".resume-state-$Tenant-stream-1.json")
+
+        $StrandedCompleted = @()
+        $StrandedFailed = @()
+        foreach ($StreamFile in Get-StreamResumeStateFiles -InventoryRoot $script:F2Dir -Tenant $Tenant)
+        {
+            $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+            if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+        }
+        $CompletedIds = @($StrandedCompleted | Sort-Object -Unique)
+        $Failed = Merge-FailedAttempts -ExistingFailedAttempts @() -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
+
+        @($Failed).Count | Should -Be 0 -Because 'a sub that completed in one stream must not be retried just because another stream logged an earlier failure'
+    }
+}
+
+Describe 'Resolve-AccessPreflight (up-front access gate decision)' {
+    # Pure decision function behind the wrapper's up-front access gate. Given the
+    # per-sub probe results (State in Empty/NoAccess/Unknown), it decides whether
+    # the run must STOP (default) or may proceed skipping the inaccessible subs
+    # (-AllowPartialAccess). 'Empty' means the identity CAN read the sub.
+    It 'does not block when every subscription is readable (all Empty)' {
+        $Probed = @(
+            [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+            [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'Empty' }
+        )
+        $D = Resolve-AccessPreflight -Probed $Probed
+        $D.ShouldBlock | Should -BeFalse
+        @($D.Inaccessible).Count | Should -Be 0
+    }
+
+    It 'blocks by default when any subscription is NoAccess' {
+        $Probed = @(
+            [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+            [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'NoAccess' }
+        )
+        $D = Resolve-AccessPreflight -Probed $Probed
+        $D.ShouldBlock | Should -BeTrue -Because 'the default gate must stop the run when the identity cannot read a sub'
+        @($D.Inaccessible).Count | Should -Be 1
+        $D.InaccessibleIds | Should -Contain 's2'
+    }
+
+    It 'treats a persistent Unknown as inaccessible (never silently skipped)' {
+        $Probed = @([pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Unknown' })
+        $D = Resolve-AccessPreflight -Probed $Probed
+        $D.ShouldBlock | Should -BeTrue
+        $D.InaccessibleIds | Should -Contain 's1'
+    }
+
+    It 'does NOT block when -AllowPartialAccess is set, but still reports the inaccessible subs to skip' {
+        $Probed = @(
+            [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+            [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'NoAccess' }
+            [pscustomobject]@{ Id = 's3'; Name = 'Three'; State = 'Unknown' }
+        )
+        $D = Resolve-AccessPreflight -Probed $Probed -AllowPartialAccess
+        $D.ShouldBlock | Should -BeFalse -Because '-AllowPartialAccess lets the run proceed with the accessible subs'
+        @($D.Inaccessible).Count | Should -Be 2
+        $D.InaccessibleIds | Should -Contain 's2'
+        $D.InaccessibleIds | Should -Contain 's3'
+    }
+
+    It 'returns a clean no-block result for an empty probe set' {
+        $D = Resolve-AccessPreflight -Probed @()
+        $D.ShouldBlock | Should -BeFalse
+        @($D.Inaccessible).Count | Should -Be 0
+        @($D.InaccessibleIds).Count | Should -Be 0
+    }
+}
+
+Describe 'Get-RunSummaryLogContent run-level shareable log' {
+
+    BeforeAll {
+        # Representative health collections carrying REAL-looking names/ids/messages,
+        # so the obfuscated-mode leak guard is exercised against concrete strings.
+        $script:Failed = @([pscustomobject]@{ Name = 'Contoso-Prod-Sub'; Id = '11111111-1111-1111-1111-111111111111' })
+        $script:NoAccess = @([pscustomobject]@{ Name = 'Fabrikam-Locked'; Id = '22222222-2222-2222-2222-222222222222' })
+        $script:CollectorFails = @([pscustomobject]@{ Id = '33333333-3333-3333-3333-333333333333'; Module = 'StreamAnalytics'; Message = 'threw on Contoso-Prod-Sub resource' })
+        $script:MetricsSkips = @([pscustomobject]@{ Name = 'Fabrikam-Locked'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'no usable token' })
+    }
+
+    It 'obfuscated run emits counts only - no names, ids, or raw messages' {
+        $Lines = Get-RunSummaryLogContent -Obfuscated `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions $script:Failed -EmptyNoAccess $script:NoAccess `
+            -CollectorFailures $script:CollectorFails -MetricsFailedSubs $script:MetricsSkips
+        $Text = ($Lines -join "`n")
+
+        # No identifiers of any kind leak into an obfuscated bundle.
+        $Text | Should -Not -Match 'Contoso'
+        $Text | Should -Not -Match 'Fabrikam'
+        $Text | Should -Not -Match 'StreamAnalytics'
+        $Text | Should -Not -Match '11111111-1111-1111-1111-111111111111'
+        $Text | Should -Not -Match '22222222-2222-2222-2222-222222222222'
+        $Text | Should -Not -Match '33333333-3333-3333-3333-333333333333'
+        $Text | Should -Not -Match 'no usable token'
+        # But the counts ARE present.
+        $Text | Should -Match 'Failed subscriptions\s+:\s+1'
+        $Text | Should -Match 'Collector failures\s+:\s+1'
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+1'
+    }
+
+    It 'non-obfuscated run includes per-subscription detail' {
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions $script:Failed -EmptyNoAccess $script:NoAccess `
+            -CollectorFailures $script:CollectorFails -MetricsFailedSubs $script:MetricsSkips
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Match 'Contoso-Prod-Sub'
+        $Text | Should -Match 'Fabrikam-Locked'
+        $Text | Should -Match 'StreamAnalytics'
+        $Text | Should -Match 'no usable token'
+    }
+
+    It 'drops TenantID / SubscriptionID / InventoryRoot from the parameter list' {
+        $Params = @{
+            TenantID        = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+            SubscriptionID  = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+            InventoryRoot   = '/home/someone/InventoryReports'
+            SkipConsumption = [switch]$true
+            ParallelStreams = 4
+        }
+        $Text = (Get-RunSummaryLogContent -InvocationParameters $Params -Obfuscated) -join "`n"
+
+        $Text | Should -Not -Match 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $Text | Should -Not -Match 'bbbbbbbb-bbbb'
+        $Text | Should -Not -Match '/home/someone'
+        $Text | Should -Match '-SkipConsumption'
+        # Allowlisted tuning knob keeps its value even under obfuscation.
+        $Text | Should -Match '-ParallelStreams 4'
+    }
+
+    It 'omits a non-allowlisted valued parameter value under obfuscation but keeps it otherwise' {
+        $Params = @{ SomeFutureValuedParam = 'secret-value-123' }
+
+        $Obf = (Get-RunSummaryLogContent -InvocationParameters $Params -Obfuscated) -join "`n"
+        $Obf | Should -Not -Match 'secret-value-123'
+        $Obf | Should -Match '-SomeFutureValuedParam <value omitted>'
+
+        $Clear = (Get-RunSummaryLogContent -InvocationParameters $Params) -join "`n"
+        $Clear | Should -Match '-SomeFutureValuedParam secret-value-123'
+    }
+
+    It 'renders a duration when start/end are supplied' {
+        $Start = [datetime]'2026-01-01T00:00:00'
+        $End = $Start.AddSeconds(125)
+        $Text = (Get-RunSummaryLogContent -StartTime $Start -EndTime $End) -join "`n"
+        $Text | Should -Match 'Total duration  : 2m 05s'
+    }
+
+    It 'handles null/empty health collections without throwing (standalone-run safety)' {
+        { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
+                -FailedSubscriptions $null -CollectorFailures $null `
+                -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
     }
 }

@@ -2,37 +2,37 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $expressroute = $Resources | Where-Object {$_.TYPE -eq 'microsoft.network/expressroutecircuits'}
+    $Expressroute = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/expressroutecircuits' }
 
-    if($expressroute)
+    if ($Expressroute)
     {
-        $tmp = @()
+        $Tmp = @()
 
-        foreach ($1 in $expressroute) 
+        foreach ($1 in $Expressroute)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
-            $sku = $1.SKU
-            
-            $obj = @{
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
+            $Sku = $1.SKU
+
+            $Obj = @{
                 'ID'                    = $1.id;
-                'Subscription'          = $sub1.name;
+                'Subscription'          = $Sub1.name;
                 'ResourceGroup'         = $1.RESOURCEGROUP;
                 'Name'                  = $1.NAME;
                 'Location'              = $1.LOCATION;
-                'Tier'                  = $sku.tier;
-                'BillingModel'          = $sku.family;
-                'CircuitStatus'         = $data.circuitProvisioningState;
-                'ProviderStatus'        = $data.serviceProviderProvisioningState;
-                'Provider'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.serviceProviderProperties.serviceProviderName };
-                'Bandwidth'             = $data.bandwidthInMbps;
-                'ERLocation'            = $data.peeringLocation;
-                'GlobalReachEnabled'    = $data.globalReachEnabled;
+                'Tier'                  = $Sku.tier;
+                'BillingModel'          = $Sku.family;
+                'CircuitStatus'         = $Data.circuitProvisioningState;
+                'ProviderStatus'        = $Data.serviceProviderProvisioningState;
+                'Provider'              = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.serviceProviderProperties.serviceProviderName };
+                'Bandwidth'             = $Data.bandwidthInMbps;
+                'ERLocation'            = $Data.peeringLocation;
+                'GlobalReachEnabled'    = $Data.globalReachEnabled;
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

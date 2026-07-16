@@ -15,34 +15,36 @@ BeforeAll {
             [Parameter(Mandatory)] [scriptblock] $RealValueSelector
         )
 
-        $pairs = foreach ($property in $Map.PSObject.Properties)
+        $Pairs = foreach ($property in $Map.PSObject.Properties)
         {
-            $real = & $RealValueSelector $property.Value
-            if (-not [string]::IsNullOrEmpty([string]$real))
+            $Real = & $RealValueSelector $property.Value
+            if (-not [string]::IsNullOrEmpty([string]$Real))
             {
-                [PSCustomObject]@{ Real = [string]$real; Token = $property.Name }
+                [PSCustomObject]@{ Real = [string]$Real; Token = $property.Name }
             }
         }
 
-        @($pairs | Group-Object Real | Where-Object { @($_.Group.Token | Sort-Object -Unique).Count -gt 1 })
+        @($Pairs | Group-Object Real | Where-Object { @($_.Group.Token | Sort-Object -Unique).Count -gt 1 })
     }
 
     # Find the zip
-    $zipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else {
-        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" | 
-            Sort-Object LastWriteTime -Descending | 
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    {
+        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
+            Sort-Object LastWriteTime -Descending |
             Select-Object -First 1 -ExpandProperty FullName
     }
 
-    if ([string]::IsNullOrEmpty($zipPath) -or -not (Test-Path $zipPath)) {
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
+    {
         throw "No test zip found. Copy a ResourcesReport_*.zip to the Tests/ folder or set `$env:TEST_ZIP_PATH"
     }
 
     # Extract to temp folder
-    $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
-    $script:ExtractPath = Join-Path $tmpBase ("ObfuscationTest_" + [guid]::NewGuid().ToString().Substring(0,8))
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+    $script:ExtractPath = Join-Path $TmpBase ("ObfuscationTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $script:ExtractPath -Force
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
     # Load files
     $script:InventoryFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
@@ -51,13 +53,15 @@ BeforeAll {
     $script:AllFiles = Get-ChildItem -Path $script:ExtractPath -File
 
     # Parse inventory JSON
-    if ($script:InventoryFile) {
+    if ($script:InventoryFile)
+    {
         $script:Inventory = Get-Content $script:InventoryFile.FullName -Raw | ConvertFrom-Json
     }
 
     # Read all file contents once for PII scanning
     $script:AllContent = @{}
-    foreach ($file in $script:AllFiles) {
+    foreach ($file in $script:AllFiles)
+    {
         $script:AllContent[$file.Name] = Get-Content $file.FullName -Raw
     }
 
@@ -71,9 +75,11 @@ BeforeAll {
 
     # Helper: get all resources from inventory as flat list
     $script:AllResources = @()
-    if ($script:Inventory) {
-        $props = $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' }
-        foreach ($prop in $props) {
+    if ($script:Inventory)
+    {
+        $Props = $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' }
+        foreach ($prop in $Props)
+        {
             $script:AllResources += @($prop.Value)
         }
     }
@@ -82,21 +88,25 @@ BeforeAll {
     # Same discovery convention as DictionaryValidation.Tests.ps1: prefer
     # $env:TEST_DICT_PATH, then the Tests/ folder, then next to the zip. The
     # dictionary is LOCAL-ONLY and is never inside the shared zip.
-    $dictPath = if ($env:TEST_DICT_PATH) { $env:TEST_DICT_PATH } else {
-        $found = Get-ChildItem -Path $PSScriptRoot -Filter "ObfuscationDictionary_*.json" -ErrorAction SilentlyContinue |
+    $DictPath = if ($env:TEST_DICT_PATH) { $env:TEST_DICT_PATH } else
+    {
+        $Found = Get-ChildItem -Path $PSScriptRoot -Filter "ObfuscationDictionary_*.json" -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-        if ([string]::IsNullOrEmpty($found)) {
-            $zipDir = if ($env:TEST_ZIP_PATH) { Split-Path $env:TEST_ZIP_PATH -Parent } else { $PSScriptRoot }
-            Get-ChildItem -Path $zipDir -Filter "ObfuscationDictionary_*.json" -ErrorAction SilentlyContinue |
+        if ([string]::IsNullOrEmpty($Found))
+        {
+            $ZipDir = if ($env:TEST_ZIP_PATH) { Split-Path $env:TEST_ZIP_PATH -Parent } else { $PSScriptRoot }
+            Get-ChildItem -Path $ZipDir -Filter "ObfuscationDictionary_*.json" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-        } else { $found }
+        }
+        else { $Found }
     }
-    $script:DictionaryAvailable = -not [string]::IsNullOrEmpty($dictPath) -and (Test-Path $dictPath)
-    $script:Dictionary = if ($script:DictionaryAvailable) { Get-Content $dictPath -Raw | ConvertFrom-Json } else { $null }
+    $script:DictionaryAvailable = -not [string]::IsNullOrEmpty($DictPath) -and (Test-Path $DictPath)
+    $script:Dictionary = if ($script:DictionaryAvailable) { Get-Content $DictPath -Raw | ConvertFrom-Json } else { $null }
 }
 
 AfterAll {
-    if (Test-Path $script:ExtractPath) {
+    if (Test-Path $script:ExtractPath)
+    {
         Remove-Item -Path $script:ExtractPath -Recurse -Force
     }
 }
@@ -106,8 +116,8 @@ AfterAll {
 # ============================================================
 Describe "Transcript Exclusion" {
     It "Should not contain any transcript log files in the zip" {
-        $transcriptFiles = $script:AllFiles | Where-Object { $_.Name -like "Transcript_*" }
-        $transcriptFiles | Should -BeNullOrEmpty
+        $TranscriptFiles = $script:AllFiles | Where-Object { $_.Name -like "Transcript_*" }
+        $TranscriptFiles | Should -BeNullOrEmpty
     }
 }
 
@@ -116,11 +126,12 @@ Describe "Transcript Exclusion" {
 # ============================================================
 Describe "Email Address Leak Check" {
     It "Should not contain any email addresses in any output file" {
-        $emailPattern = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-        foreach ($fileName in $script:AllContent.Keys) {
+        $EmailPattern = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
-            $matches = [regex]::Matches($script:AllContent[$fileName], $emailPattern)
-            $matches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses (found: $($matches.Value -join ', '))"
+            $EmailMatches = [regex]::Matches($script:AllContent[$fileName], $EmailPattern)
+            $EmailMatches.Count | Should -Be 0 -Because "File '$fileName' should not contain email addresses (found: $($EmailMatches.Value -join ', '))"
         }
     }
 }
@@ -130,13 +141,15 @@ Describe "Email Address Leak Check" {
 # ============================================================
 Describe "Home Directory Path Leak Check" {
     It "Should not contain Unix home directory paths" {
-        foreach ($fileName in $script:AllContent.Keys) {
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             $script:AllContent[$fileName] | Should -Not -Match '/home/[a-zA-Z]' -Because "File '$fileName' should not contain Unix home paths"
         }
     }
 
     It "Should not contain Windows user directory paths" {
-        foreach ($fileName in $script:AllContent.Keys) {
+        foreach ($fileName in $script:AllContent.Keys)
+        {
             $script:AllContent[$fileName] | Should -Not -Match 'C:\\Users\\[a-zA-Z]' -Because "File '$fileName' should not contain Windows user paths"
         }
     }
@@ -148,26 +161,29 @@ Describe "Home Directory Path Leak Check" {
 Describe "Subscription ID Leak Check" {
     It "Should not contain raw Azure subscription ID patterns in inventory JSON" {
         # Azure resource IDs follow: /subscriptions/<guid>/resourceGroups/...
-        $subIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        if ($script:InventoryFile) {
-            $content = $script:AllContent[$script:InventoryFile.Name]
-            $content | Should -Not -Match $subIdPattern -Because "Inventory JSON should not contain raw Azure resource ID paths"
+        $SubIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        if ($script:InventoryFile)
+        {
+            $Content = $script:AllContent[$script:InventoryFile.Name]
+            $Content | Should -Not -Match $SubIdPattern -Because "Inventory JSON should not contain raw Azure resource ID paths"
         }
     }
 
     It "Should not contain raw Azure subscription ID patterns in consumption CSV" {
-        $subIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        if ($script:ConsumptionFile) {
-            $content = $script:AllContent[$script:ConsumptionFile.Name]
-            $content | Should -Not -Match $subIdPattern -Because "Consumption CSV should not contain raw Azure resource ID paths"
+        $SubIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        if ($script:ConsumptionFile)
+        {
+            $Content = $script:AllContent[$script:ConsumptionFile.Name]
+            $Content | Should -Not -Match $SubIdPattern -Because "Consumption CSV should not contain raw Azure resource ID paths"
         }
     }
 
     It "Should not contain raw Azure subscription ID patterns in metrics JSON" {
-        $subIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        foreach ($metricsFile in $script:MetricsFiles) {
-            $content = $script:AllContent[$metricsFile.Name]
-            $content | Should -Not -Match $subIdPattern -Because "Metrics JSON should not contain raw Azure resource ID paths"
+        $SubIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        foreach ($metricsFile in $script:MetricsFiles)
+        {
+            $Content = $script:AllContent[$metricsFile.Name]
+            $Content | Should -Not -Match $SubIdPattern -Because "Metrics JSON should not contain raw Azure resource ID paths"
         }
     }
 }
@@ -178,8 +194,10 @@ Describe "Subscription ID Leak Check" {
 Describe "Inventory ID Obfuscation" {
     It "Should have all resource IDs matching the obfuscation pattern" {
         $script:AllResources.Count | Should -BeGreaterThan 0 -Because "There should be at least one resource in the inventory"
-        foreach ($resource in $script:AllResources) {
-            if ($null -ne $resource.ID) {
+        foreach ($resource in $script:AllResources)
+        {
+            if ($null -ne $resource.ID)
+            {
                 $resource.ID | Should -Match $script:ObfuscationPattern -Because "Resource ID '$($resource.ID)' should be obfuscated"
             }
         }
@@ -191,8 +209,10 @@ Describe "Inventory ID Obfuscation" {
 # ============================================================
 Describe "Inventory Name Obfuscation" {
     It "Should have all resource names matching the obfuscation pattern" {
-        foreach ($resource in $script:AllResources) {
-            if ($null -ne $resource.Name) {
+        foreach ($resource in $script:AllResources)
+        {
+            if ($null -ne $resource.Name)
+            {
                 $resource.Name | Should -Match $script:ObfuscationPattern -Because "Resource Name '$($resource.Name)' should be obfuscated"
             }
         }
@@ -204,8 +224,10 @@ Describe "Inventory Name Obfuscation" {
 # ============================================================
 Describe "Inventory Subscription Obfuscation" {
     It "Should have all subscription fields matching the obfuscation pattern" {
-        foreach ($resource in $script:AllResources) {
-            if ($null -ne $resource.Subscription) {
+        foreach ($resource in $script:AllResources)
+        {
+            if ($null -ne $resource.Subscription)
+            {
                 $resource.Subscription | Should -Match $script:ObfuscationPattern -Because "Subscription '$($resource.Subscription)' should be obfuscated"
             }
         }
@@ -217,8 +239,10 @@ Describe "Inventory Subscription Obfuscation" {
 # ============================================================
 Describe "Inventory ResourceGroup Obfuscation" {
     It "Should have all resource group fields matching the obfuscation pattern" {
-        foreach ($resource in $script:AllResources) {
-            if ($null -ne $resource.ResourceGroup) {
+        foreach ($resource in $script:AllResources)
+        {
+            if ($null -ne $resource.ResourceGroup)
+            {
                 $resource.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "ResourceGroup '$($resource.ResourceGroup)' should be obfuscated"
             }
         }
@@ -230,19 +254,25 @@ Describe "Inventory ResourceGroup Obfuscation" {
 # ============================================================
 Describe "Metrics Obfuscation" {
     It "Should have all metric IDs and names matching the obfuscation pattern" {
-        foreach ($metricsFile in $script:MetricsFiles) {
-            $metricsData = Get-Content $metricsFile.FullName -Raw | ConvertFrom-Json
-            foreach ($metric in @($metricsData.Metrics)) {
-                if ($null -ne $metric.ID) {
+        foreach ($metricsFile in $script:MetricsFiles)
+        {
+            $MetricsData = Get-Content $metricsFile.FullName -Raw | ConvertFrom-Json
+            foreach ($metric in @($MetricsData.Metrics))
+            {
+                if ($null -ne $metric.ID)
+                {
                     $metric.ID | Should -Match $script:ObfuscationPattern -Because "Metric ID should be obfuscated"
                 }
-                if ($null -ne $metric.Name) {
+                if ($null -ne $metric.Name)
+                {
                     $metric.Name | Should -Match $script:ObfuscationPattern -Because "Metric Name should be obfuscated"
                 }
-                if ($null -ne $metric.Subscription) {
+                if ($null -ne $metric.Subscription)
+                {
                     $metric.Subscription | Should -Match $script:ObfuscationPattern -Because "Metric Subscription should be obfuscated"
                 }
-                if ($null -ne $metric.ResourceGroup) {
+                if ($null -ne $metric.ResourceGroup)
+                {
                     $metric.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "Metric ResourceGroup should be obfuscated"
                 }
             }
@@ -275,11 +305,13 @@ Describe "Consumption Obfuscation" {
 
     It "Should have all consumption ResourceIds matching the obfuscation pattern" {
         if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }
-        $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
+        $Csv = Import-Csv $script:ConsumptionFile.FullName
+        if ($Csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
 
-        foreach ($row in $csv) {
-            if (![string]::IsNullOrEmpty($row.ResourceId)) {
+        foreach ($row in $Csv)
+        {
+            if (![string]::IsNullOrEmpty($row.ResourceId))
+            {
                 $row.ResourceId | Should -Match $script:ConsumptionSafePattern -Because "Consumption ResourceId should be obfuscated (flat token or structure-preserving ARM path)"
                 $row.ResourceId | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "Consumption ResourceId must not contain a real subscription GUID"
             }
@@ -288,16 +320,19 @@ Describe "Consumption Obfuscation" {
 
     It "Should have obfuscated ResourceUri inside InstanceData JSON" {
         if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }
-        $csv = Import-Csv $script:ConsumptionFile.FullName
-        if ($csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
+        $Csv = Import-Csv $script:ConsumptionFile.FullName
+        if ($Csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
 
-        foreach ($row in $csv) {
-            if (![string]::IsNullOrEmpty($row.InstanceData)) {
-                $instanceData = $row.InstanceData | ConvertFrom-Json
-                $uri = $instanceData.'Microsoft.Resources'.ResourceUri
-                if (![string]::IsNullOrEmpty($uri)) {
-                    $uri | Should -Match $script:ConsumptionSafePattern -Because "InstanceData ResourceUri should be obfuscated (flat token or structure-preserving ARM path)"
-                    $uri | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "InstanceData ResourceUri must not contain a real subscription GUID"
+        foreach ($row in $Csv)
+        {
+            if (![string]::IsNullOrEmpty($row.InstanceData))
+            {
+                $InstanceData = $row.InstanceData | ConvertFrom-Json
+                $Uri = $InstanceData.'Microsoft.Resources'.ResourceUri
+                if (![string]::IsNullOrEmpty($Uri))
+                {
+                    $Uri | Should -Match $script:ConsumptionSafePattern -Because "InstanceData ResourceUri should be obfuscated (flat token or structure-preserving ARM path)"
+                    $Uri | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "InstanceData ResourceUri must not contain a real subscription GUID"
                 }
             }
         }
@@ -309,10 +344,12 @@ Describe "Consumption Obfuscation" {
 # ============================================================
 Describe "Obfuscation Prefix Consistency" {
     It "Should use prod_ or nonprod_ prefix on all IDs (not plain GUIDs)" {
-        $plainGuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        foreach ($resource in $script:AllResources) {
-            if ($null -ne $resource.ID) {
-                $resource.ID | Should -Not -Match $plainGuidPattern -Because "ID should have prod_/nonprod_ prefix"
+        $PlainGuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        foreach ($resource in $script:AllResources)
+        {
+            if ($null -ne $resource.ID)
+            {
+                $resource.ID | Should -Not -Match $PlainGuidPattern -Because "ID should have prod_/nonprod_ prefix"
             }
         }
     }
@@ -323,11 +360,12 @@ Describe "Obfuscation Prefix Consistency" {
 # ============================================================
 Describe "Metrics JSON Structure" {
     It "Should have valid metrics JSON with a Metrics array property" {
-        foreach ($metricsFile in $script:MetricsFiles) {
-            $raw = Get-Content $metricsFile.FullName -Raw
-            $parsed = $raw | ConvertFrom-Json
-            $parsed | Should -Not -BeNullOrEmpty -Because "Metrics file should be valid JSON"
-            $parsed.PSObject.Properties.Name | Should -Contain 'Metrics' -Because "Metrics JSON should have a Metrics property"
+        foreach ($metricsFile in $script:MetricsFiles)
+        {
+            $Raw = Get-Content $metricsFile.FullName -Raw
+            $Parsed = $Raw | ConvertFrom-Json
+            $Parsed | Should -Not -BeNullOrEmpty -Because "Metrics file should be valid JSON"
+            $Parsed.PSObject.Properties.Name | Should -Contain 'Metrics' -Because "Metrics JSON should have a Metrics property"
         }
     }
 }
@@ -337,19 +375,22 @@ Describe "Metrics JSON Structure" {
 # ============================================================
 Describe "Consumption CSV Headers" {
     It "Should have a consumption CSV with the correct header columns" {
-        if ($null -eq $script:ConsumptionFile) {
+        if ($null -eq $script:ConsumptionFile)
+        {
             Set-ItResult -Skipped -Because "No consumption CSV in this report"
             return
         }
-        $firstLine = Get-Content $script:ConsumptionFile.FullName -TotalCount 1
-        if ([string]::IsNullOrEmpty($firstLine)) {
+        $FirstLine = Get-Content $script:ConsumptionFile.FullName -TotalCount 1
+        if ([string]::IsNullOrEmpty($FirstLine))
+        {
             Set-ItResult -Skipped -Because "Consumption CSV is empty (no usage data in this subscription)"
             return
         }
 
-        $expectedHeaders = @('InstanceData', 'MeterCategory', 'MeterId', 'MeterName', 'MeterRegion', 'MeterSubCategory', 'Quantity', 'Unit', 'UsageStartTime', 'UsageEndTime', 'ResourceId', 'ResourceLocation', 'ConsumptionMeter', 'ReservationId', 'ReservationOrderId')
-        foreach ($header in $expectedHeaders) {
-            $firstLine | Should -Match $header -Because "CSV should contain header '$header'"
+        $ExpectedHeaders = @('InstanceData', 'MeterCategory', 'MeterId', 'MeterName', 'MeterRegion', 'MeterSubCategory', 'Quantity', 'Unit', 'UsageStartTime', 'UsageEndTime', 'ResourceId', 'ResourceLocation', 'ConsumptionMeter', 'ReservationId', 'ReservationOrderId')
+        foreach ($header in $ExpectedHeaders)
+        {
+            $FirstLine | Should -Match $header -Because "CSV should contain header '$header'"
         }
     }
 }
@@ -360,9 +401,10 @@ Describe "Consumption CSV Headers" {
 Describe "Tenant ID Leak Check" {
     It "Should not contain Azure tenant ID patterns in output files" {
         # Tenant IDs appear as: "tenantId":"<guid>" or tenantID
-        $tenantPattern = '"tenant[Ii][Dd]"\s*:\s*"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"'
-        foreach ($fileName in $script:AllContent.Keys) {
-            $script:AllContent[$fileName] | Should -Not -Match $tenantPattern -Because "File '$fileName' should not contain tenant IDs"
+        $TenantPattern = '"tenant[Ii][Dd]"\s*:\s*"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"'
+        foreach ($fileName in $script:AllContent.Keys)
+        {
+            $script:AllContent[$fileName] | Should -Not -Match $TenantPattern -Because "File '$fileName' should not contain tenant IDs"
         }
     }
 }
@@ -375,7 +417,8 @@ Describe "Tenant ID Leak Check" {
 Describe "Non-Obfuscated Mode Safety" {
     BeforeAll {
         $script:NonObfZip = $env:TEST_NOOBF_ZIP_PATH
-        if ($script:NonObfZip -and (Test-Path $script:NonObfZip)) {
+        if ($script:NonObfZip -and (Test-Path $script:NonObfZip))
+        {
             $script:NoObfExtract = Join-Path ([System.IO.Path]::GetTempPath()) "NoObfTest_$([guid]::NewGuid().ToString().Substring(0,8))"
             New-Item -ItemType Directory -Path $script:NoObfExtract -Force | Out-Null
             Expand-Archive -Path $script:NonObfZip -DestinationPath $script:NoObfExtract -Force
@@ -387,30 +430,35 @@ Describe "Non-Obfuscated Mode Safety" {
     }
 
     AfterAll {
-        if ($script:NoObfExtract -and (Test-Path $script:NoObfExtract)) {
+        if ($script:NoObfExtract -and (Test-Path $script:NoObfExtract))
+        {
             Remove-Item -Path $script:NoObfExtract -Recurse -Force
         }
     }
 
     It "Should not contain 'obfuscated' in any output file when run without -Obfuscate" {
-        if (-not $script:NoObfContent) {
+        if (-not $script:NoObfContent)
+        {
             Set-ItResult -Skipped -Because "No non-obfuscated zip provided"
             return
         }
-        foreach ($file in $script:NoObfContent.Keys) {
+        foreach ($file in $script:NoObfContent.Keys)
+        {
             if ($file -like "Transcript_*") { continue }
             $script:NoObfContent[$file] | Should -Not -Match 'obfuscated' -Because "File '$file' should contain real data, not obfuscated placeholders"
         }
     }
 
     It "Should not contain obfuscation GUID patterns in non-obfuscated output" {
-        if (-not $script:NoObfContent) {
+        if (-not $script:NoObfContent)
+        {
             Set-ItResult -Skipped -Because "No non-obfuscated zip provided"
             return
         }
-        $guidPattern = '(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        foreach ($file in $script:NoObfContent.Keys) {
-            $script:NoObfContent[$file] | Should -Not -Match $guidPattern -Because "File '$file' should not contain obfuscation GUIDs"
+        $GuidPattern = '(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        foreach ($file in $script:NoObfContent.Keys)
+        {
+            $script:NoObfContent[$file] | Should -Not -Match $GuidPattern -Because "File '$file' should not contain obfuscation GUIDs"
         }
     }
 }
@@ -422,11 +470,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "AppServices: ServerFarmId should be obfuscated or null" {
-        $resources = @($script:Inventory.AppServices) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AppServices resources in this fixture"; return }
+        $Resources = @($script:Inventory.AppServices) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AppServices resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ServerFarmId)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ServerFarmId))
+            {
                 $r.ServerFarmId | Should -Not -Match $script:AzureIdPattern -Because "ServerFarmId should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -435,11 +485,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "VirtualMachines: Set (VMSS ID) should be obfuscated or null" {
-        $resources = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines resources in this fixture"; return }
+        $Resources = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Set)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Set))
+            {
                 $r.Set | Should -Match $script:ObfuscationPattern -Because "VMSS Set ID should be obfuscated"
                 $Checked++
             }
@@ -448,17 +500,21 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "VirtualMachines: Tags keys are preserved and values are obfuscated when obfuscated" {
-        $obfPattern = '^(prod|nonprod)_'
-        $resources = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines resources in this fixture"; return }
+        $ObfPattern = '^(prod|nonprod)_'
+        $Resources = @($script:Inventory.VirtualMachines) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VirtualMachines resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and $null -ne $r.Tags) {
-                foreach ($tag in @($r.Tags)) {
-                    if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and $null -ne $r.Tags)
+            {
+                foreach ($tag in @($r.Tags))
+                {
+                    if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
+                    {
                         # Key (Name) is kept verbatim; value must be a prod_/nonprod_ token.
                         $tag.Name  | Should -Not -BeNullOrEmpty -Because "tag keys are preserved for analytics"
-                        $tag.Value | Should -Match $obfPattern -Because "tag values must be obfuscated, not raw"
+                        $tag.Value | Should -Match $ObfPattern -Because "tag values must be obfuscated, not raw"
                         $Checked++
                     }
                 }
@@ -468,11 +524,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "Purview: CreatedBy is obfuscated (tokenized, never raw identity)" {
-        $resources = @($script:Inventory.Purview) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Purview resources in this fixture"; return }
+        $Resources = @($script:Inventory.Purview) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Purview resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.CreatedBy)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.CreatedBy))
+            {
                 $r.CreatedBy | Should -Match '^(prod|nonprod)_' -Because "CreatedBy contains user identity and must be obfuscated to a token, never raw"
                 $Checked++
             }
@@ -481,11 +539,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "SQLDB: DatabaseServer should not contain raw resource names" {
-        $resources = @($script:Inventory.SQLDB) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
+        $Resources = @($script:Inventory.SQLDB) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.DatabaseServer)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.DatabaseServer))
+            {
                 $r.DatabaseServer | Should -Not -Match $script:AzureIdPattern -Because "DatabaseServer should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -494,11 +554,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "SQLDB: ElasticPoolID should be obfuscated or 'None'" {
-        $resources = @($script:Inventory.SQLDB) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
+        $Resources = @($script:Inventory.SQLDB) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLDB resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ElasticPoolID)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ElasticPoolID))
+            {
                 $r.ElasticPoolID | Should -Not -Match $script:AzureIdPattern -Because "ElasticPoolID should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -507,11 +569,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "SQLMI: InstancePoolName should not contain raw resource IDs" {
-        $resources = @($script:Inventory.SQLMI) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMI resources in this fixture"; return }
+        $Resources = @($script:Inventory.SQLMI) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMI resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.InstancePoolName)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.InstancePoolName))
+            {
                 $r.InstancePoolName | Should -Not -Match $script:AzureIdPattern -Because "InstancePoolName should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -520,11 +584,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "SQLMIDB: ManagedInstance should be obfuscated or null" {
-        $resources = @($script:Inventory.SQLMIDB) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMIDB resources in this fixture"; return }
+        $Resources = @($script:Inventory.SQLMIDB) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no SQLMIDB resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedInstance)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedInstance))
+            {
                 $r.ManagedInstance | Should -Not -Match $script:AzureIdPattern -Because "ManagedInstance should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -533,11 +599,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "PublicIP: AssociatedResource should not contain raw resource names" {
-        $resources = @($script:Inventory.PublicIP) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no PublicIP resources in this fixture"; return }
+        $Resources = @($script:Inventory.PublicIP) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no PublicIP resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource) -and $r.AssociatedResource -ne 'None') {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource) -and $r.AssociatedResource -ne 'None')
+            {
                 $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "AssociatedResource should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -546,11 +614,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "VMDisk: AssociatedResource should be obfuscated or null" {
-        $resources = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
+        $Resources = @($script:Inventory.VMDisk) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no VMDisk resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource))
+            {
                 $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "Disk AssociatedResource should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -559,11 +629,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "ComputeSnapshots: SourceResourceId should be obfuscated or null" {
-        $resources = @($script:Inventory.ComputeSnapshots) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots resources in this fixture"; return }
+        $Resources = @($script:Inventory.ComputeSnapshots) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.SourceResourceId)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.SourceResourceId))
+            {
                 $r.SourceResourceId | Should -Not -Match $script:AzureIdPattern -Because "SourceResourceId should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -572,11 +644,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "AVD: HostId should be obfuscated or null" {
-        $resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.HostId)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.HostId))
+            {
                 $r.HostId | Should -Not -Match $script:AzureIdPattern -Because "AVD HostId should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -585,11 +659,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "AVD: Hostname should be obfuscated or null" {
-        $resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname))
+            {
                 $r.Hostname | Should -Not -Match $script:AzureIdPattern -Because "AVD Hostname should not contain raw Azure resource ID"
                 $r.Hostname | Should -Match $script:ObfuscationPattern -Because "AVD Hostname should be obfuscated"
                 $Checked++
@@ -599,11 +675,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "AVD: Hostname should differ from HostId" {
-        $resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
+        $Resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname) -and ![string]::IsNullOrEmpty($r.HostId)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.Hostname) -and ![string]::IsNullOrEmpty($r.HostId))
+            {
                 $r.Hostname | Should -Not -Be $r.HostId -Because "Hostname and HostId should be different obfuscated values"
                 $Checked++
             }
@@ -612,11 +690,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "MachineLearning: StorageAccount should be obfuscated or null" {
-        $resources = @($script:Inventory.MachineLearning) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning resources in this fixture"; return }
+        $Resources = @($script:Inventory.MachineLearning) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount))
+            {
                 $r.StorageAccount | Should -Not -Match $script:AzureIdPattern -Because "ML StorageAccount should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -625,11 +705,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "MachineLearning: KeyVault should be obfuscated or null" {
-        $resources = @($script:Inventory.MachineLearning) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning resources in this fixture"; return }
+        $Resources = @($script:Inventory.MachineLearning) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no MachineLearning resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.KeyVault)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.KeyVault))
+            {
                 $r.KeyVault | Should -Not -Match $script:AzureIdPattern -Because "ML KeyVault should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -638,11 +720,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "Databricks: ManagedResourceGroup should be obfuscated or null" {
-        $resources = @($script:Inventory.Databricks) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Databricks resources in this fixture"; return }
+        $Resources = @($script:Inventory.Databricks) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Databricks resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedResourceGroup)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.ManagedResourceGroup))
+            {
                 $r.ManagedResourceGroup | Should -BeIn @('obfuscated') -Because "Databricks ManagedResourceGroup should be obfuscated"
                 $Checked++
             }
@@ -651,11 +735,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "Databricks: StorageAccount should be obfuscated or null" {
-        $resources = @($script:Inventory.Databricks) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Databricks resources in this fixture"; return }
+        $Resources = @($script:Inventory.Databricks) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Databricks resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount))
+            {
                 $r.StorageAccount | Should -BeIn @('obfuscated') -Because "Databricks StorageAccount should be obfuscated"
                 $Checked++
             }
@@ -664,11 +750,13 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "Purview: FriendlyName is obfuscated (tokenized, never raw)" {
-        $resources = @($script:Inventory.Purview) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Purview resources in this fixture"; return }
+        $Resources = @($script:Inventory.Purview) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no Purview resources in this fixture"; return }
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.FriendlyName)) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.FriendlyName))
+            {
                 $r.FriendlyName | Should -Match '^(prod|nonprod)_' -Because "Purview FriendlyName must be obfuscated to a token, never raw"
                 $Checked++
             }
@@ -677,13 +765,15 @@ Describe "Cross-Reference Field Obfuscation" {
     }
 
     It "Frontdoor: WebApplicationFirewall should be obfuscated or a known marker" {
-        $resources = @($script:Inventory.FRONTDOOR) | Where-Object { $null -ne $_ }
-        if ($resources.Count -eq 0) { Set-ItResult -Skipped -Because "no FRONTDOOR resources in this fixture"; return }
+        $Resources = @($script:Inventory.FRONTDOOR) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no FRONTDOOR resources in this fixture"; return }
         # Skip known non-ID markers: 'False' (Classic, no WAF), 'Unknown' (Std/Premium,
         # not detectable from the profile). Any remaining value must not leak an Azure path.
         $Checked = 0
-        foreach ($r in $resources) {
-            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WebApplicationFirewall) -and $r.WebApplicationFirewall -notin @('False', 'Unknown')) {
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WebApplicationFirewall) -and $r.WebApplicationFirewall -notin @('False', 'Unknown'))
+            {
                 $r.WebApplicationFirewall | Should -Not -Match $script:AzureIdPattern -Because "Frontdoor WAF should not contain raw Azure resource ID"
                 $Checked++
             }
@@ -697,8 +787,8 @@ Describe "Cross-Reference Field Obfuscation" {
 # ============================================================
 Describe "Dictionary File Exclusion" {
     It "Should not contain the obfuscation dictionary in the zip" {
-        $dictFiles = $script:AllFiles | Where-Object { $_.Name -like "ObfuscationDictionary_*" }
-        $dictFiles | Should -BeNullOrEmpty -Because "Dictionary file should stay local, not in the zip"
+        $DictFiles = $script:AllFiles | Where-Object { $_.Name -like "ObfuscationDictionary_*" }
+        $DictFiles | Should -BeNullOrEmpty -Because "Dictionary file should stay local, not in the zip"
     }
 }
 
@@ -716,8 +806,8 @@ Describe "Dictionary File Exclusion" {
 # ============================================================
 Describe "Full Resource Dump Exclusion (P10)" {
     It "Should not contain the raw Full_* resource dump in the zip" {
-        $fullDumpFiles = $script:AllFiles | Where-Object { $_.Name -like "Full_*" }
-        $fullDumpFiles | Should -BeNullOrEmpty -Because "Full_* raw resource dump should stay local, not in the shared zip (P10)"
+        $FullDumpFiles = $script:AllFiles | Where-Object { $_.Name -like "Full_*" }
+        $FullDumpFiles | Should -BeNullOrEmpty -Because "Full_* raw resource dump should stay local, not in the shared zip (P10)"
     }
 }
 
@@ -737,53 +827,53 @@ Describe "Full Resource Dump Exclusion (P10)" {
 Describe "Obfuscation Determinism (P1)" {
     It "ResourceGroup: each real resource group maps to exactly one token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.ResourceGroupMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceGroupMap absent/empty in this dictionary"; return }
-        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/resourceGroups/([^/]+)') { $Matches[1] } }
-        $violations | Should -BeNullOrEmpty -Because "no real resource group may yield two different tokens within a run (P1)"
+        $Map = $script:Dictionary.ResourceGroupMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceGroupMap absent/empty in this dictionary"; return }
+        $Violations = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) if ($v -match '/resourceGroups/([^/]+)') { $Matches[1] } }
+        $Violations | Should -BeNullOrEmpty -Because "no real resource group may yield two different tokens within a run (P1)"
     }
 
     It "Subscription: each real subscription maps to exactly one token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.SubscriptionMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "SubscriptionMap absent/empty in this dictionary"; return }
-        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/subscriptions/([0-9a-fA-F-]+)') { $Matches[1] } }
-        $violations | Should -BeNullOrEmpty -Because "no real subscription may yield two different tokens within a run (P1)"
+        $Map = $script:Dictionary.SubscriptionMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "SubscriptionMap absent/empty in this dictionary"; return }
+        $Violations = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) if ($v -match '/subscriptions/([0-9a-fA-F-]+)') { $Matches[1] } }
+        $Violations | Should -BeNullOrEmpty -Because "no real subscription may yield two different tokens within a run (P1)"
     }
 
     It "ResourceId: each real resource id maps to exactly one token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.ResourceIdMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceIdMap absent/empty in this dictionary"; return }
-        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $violations | Should -BeNullOrEmpty -Because "no real resource id may yield two different tokens within a run (P1)"
+        $Map = $script:Dictionary.ResourceIdMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceIdMap absent/empty in this dictionary"; return }
+        $Violations = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Violations | Should -BeNullOrEmpty -Because "no real resource id may yield two different tokens within a run (P1)"
     }
 
     It "ResourceName: each real resource id maps to exactly one name token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.ResourceNameMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceNameMap absent/empty in this dictionary"; return }
+        $Map = $script:Dictionary.ResourceNameMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceNameMap absent/empty in this dictionary"; return }
         # Name tokens are keyed per real resource id (two resources sharing a
         # display name in different RGs legitimately get different name tokens),
         # so determinism is asserted against the real resource id, not the name.
-        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $violations | Should -BeNullOrEmpty -Because "no real resource id may yield two different name tokens within a run (P1)"
+        $Violations = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Violations | Should -BeNullOrEmpty -Because "no real resource id may yield two different name tokens within a run (P1)"
     }
 
     It "Tag: each real tag value maps to exactly one token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.TagMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "TagMap absent/empty in this dictionary"; return }
-        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $violations | Should -BeNullOrEmpty -Because "no real tag value may yield two different tokens within a run (P1)"
+        $Map = $script:Dictionary.TagMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "TagMap absent/empty in this dictionary"; return }
+        $Violations = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Violations | Should -BeNullOrEmpty -Because "no real tag value may yield two different tokens within a run (P1)"
     }
 
     It "FreeText: each real free-text value maps to exactly one token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.FreeTextMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "FreeTextMap absent/empty in this dictionary"; return }
-        $violations = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $violations | Should -BeNullOrEmpty -Because "no real free-text value may yield two different tokens within a run (P1)"
+        $Map = $script:Dictionary.FreeTextMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "FreeTextMap absent/empty in this dictionary"; return }
+        $Violations = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Violations | Should -BeNullOrEmpty -Because "no real free-text value may yield two different tokens within a run (P1)"
     }
 }
 
@@ -810,52 +900,52 @@ Describe "Obfuscation Determinism (P1)" {
 Describe "Obfuscation Injectivity (P2)" {
     It "ResourceGroup: no two tokens share the same real resource group" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.ResourceGroupMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceGroupMap absent/empty in this dictionary"; return }
-        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/resourceGroups/([^/]+)') { $Matches[1] } }
-        $collisions | Should -BeNullOrEmpty -Because "distinct real resource groups must map to distinct tokens; no token may cover two real values (P2)"
+        $Map = $script:Dictionary.ResourceGroupMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceGroupMap absent/empty in this dictionary"; return }
+        $Collisions = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) if ($v -match '/resourceGroups/([^/]+)') { $Matches[1] } }
+        $Collisions | Should -BeNullOrEmpty -Because "distinct real resource groups must map to distinct tokens; no token may cover two real values (P2)"
     }
 
     It "Subscription: no two tokens share the same real subscription" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.SubscriptionMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "SubscriptionMap absent/empty in this dictionary"; return }
-        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) if ($v -match '/subscriptions/([0-9a-fA-F-]+)') { $Matches[1] } }
-        $collisions | Should -BeNullOrEmpty -Because "distinct real subscriptions must map to distinct tokens; no token may cover two real values (P2)"
+        $Map = $script:Dictionary.SubscriptionMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "SubscriptionMap absent/empty in this dictionary"; return }
+        $Collisions = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) if ($v -match '/subscriptions/([0-9a-fA-F-]+)') { $Matches[1] } }
+        $Collisions | Should -BeNullOrEmpty -Because "distinct real subscriptions must map to distinct tokens; no token may cover two real values (P2)"
     }
 
     It "ResourceId: no two tokens share the same real resource id" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.ResourceIdMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceIdMap absent/empty in this dictionary"; return }
-        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $collisions | Should -BeNullOrEmpty -Because "distinct real resource ids must map to distinct tokens; no token may cover two real values (P2)"
+        $Map = $script:Dictionary.ResourceIdMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceIdMap absent/empty in this dictionary"; return }
+        $Collisions = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Collisions | Should -BeNullOrEmpty -Because "distinct real resource ids must map to distinct tokens; no token may cover two real values (P2)"
     }
 
     It "ResourceName: no two name tokens share the same real resource id" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.ResourceNameMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceNameMap absent/empty in this dictionary"; return }
+        $Map = $script:Dictionary.ResourceNameMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "ResourceNameMap absent/empty in this dictionary"; return }
         # Name tokens are keyed per real resource id (mirrors the P1 selector),
         # so injectivity is asserted against the real resource id, not the name.
-        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $collisions | Should -BeNullOrEmpty -Because "distinct real resource ids must map to distinct name tokens; no name token may cover two real values (P2)"
+        $Collisions = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Collisions | Should -BeNullOrEmpty -Because "distinct real resource ids must map to distinct name tokens; no name token may cover two real values (P2)"
     }
 
     It "Tag: no two tokens share the same real tag value" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.TagMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "TagMap absent/empty in this dictionary"; return }
-        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $collisions | Should -BeNullOrEmpty -Because "distinct real tag values must map to distinct tokens; no token may cover two real values (P2)"
+        $Map = $script:Dictionary.TagMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "TagMap absent/empty in this dictionary"; return }
+        $Collisions = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Collisions | Should -BeNullOrEmpty -Because "distinct real tag values must map to distinct tokens; no token may cover two real values (P2)"
     }
 
     It "FreeText: no two tokens share the same real free-text value" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
-        $map = $script:Dictionary.FreeTextMap
-        if ($null -eq $map -or @($map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "FreeTextMap absent/empty in this dictionary"; return }
-        $collisions = Get-DeterminismViolation -Map $map -RealValueSelector { param($v) $v }
-        $collisions | Should -BeNullOrEmpty -Because "distinct real free-text values must map to distinct tokens; no token may cover two real values (P2)"
+        $Map = $script:Dictionary.FreeTextMap
+        if ($null -eq $Map -or @($Map.PSObject.Properties).Count -eq 0) { Set-ItResult -Skipped -Because "FreeTextMap absent/empty in this dictionary"; return }
+        $Collisions = Get-DeterminismViolation -Map $Map -RealValueSelector { param($v) $v }
+        $Collisions | Should -BeNullOrEmpty -Because "distinct real free-text values must map to distinct tokens; no token may cover two real values (P2)"
     }
 }
 
@@ -910,74 +1000,74 @@ Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (
                 {
                     if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
                     {
-                        $realTagValue = [string]$tag.Value
-                        if (-not $TagValueDictionary.ContainsKey($realTagValue))
+                        $RealTagValue = [string]$tag.Value
+                        if (-not $TagValueDictionary.ContainsKey($RealTagValue))
                         {
-                            $tagPrefix = if ($realTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
-                            $TagValueDictionary[$realTagValue] = $tagPrefix + [guid]::NewGuid().ToString()
+                            $TagPrefix = if ($RealTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $RealTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                            $TagValueDictionary[$RealTagValue] = $TagPrefix + [guid]::NewGuid().ToString()
                         }
-                        $tag.Value = $TagValueDictionary[$realTagValue]
+                        $tag.Value = $TagValueDictionary[$RealTagValue]
                     }
                 }
             }
         }
 
         $script:TagTokenPattern = '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        $script:RiSourcePath = Join-Path $PSScriptRoot '..' 'ResourceInventory.ps1'
+        $script:RiSourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'ResourceInventory.ps1'
     }
 
     It "keeps mixed-case tag KEYS verbatim and masks VALUES to tokens (Req 4.1, 4.2, 4.5)" {
         # Mixed-case keys on purpose (Environment / CostCenter / Owner) to guard
         # the case-insensitive handling. Values are synthetic only (no real ids).
-        $resourceItem = @{
+        $ResourceItem = @{
             ID   = 'prod_' + [guid]::NewGuid().ToString()
             Tags = @(
                 [PSCustomObject]@{ Name = 'Environment'; Value = 'production' }
-                [PSCustomObject]@{ Name = 'CostCenter';  Value = 'finance-ops' }
-                [PSCustomObject]@{ Name = 'Owner';       Value = 'platform-team' }
+                [PSCustomObject]@{ Name = 'CostCenter'; Value = 'finance-ops' }
+                [PSCustomObject]@{ Name = 'Owner'; Value = 'platform-team' }
             )
         }
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
 
-        script:Invoke-TagObfuscation -ResourceItem $resourceItem -TagValueDictionary $dict
+        script:Invoke-TagObfuscation -ResourceItem $ResourceItem -TagValueDictionary $Dict
 
         # 4.5: structured Tags survives (not nulled / not dropped by a scrub)
-        $resourceItem.Tags | Should -Not -BeNullOrEmpty -Because "structured Tags must survive tokenization, not be nulled (Req 4.5)"
-        @($resourceItem.Tags).Count | Should -Be 3 -Because "no tag row may be dropped by a mixed-case scrub (Req 4.5)"
+        $ResourceItem.Tags | Should -Not -BeNullOrEmpty -Because "structured Tags must survive tokenization, not be nulled (Req 4.5)"
+        @($ResourceItem.Tags).Count | Should -Be 3 -Because "no tag row may be dropped by a mixed-case scrub (Req 4.5)"
 
-        $expectedKeys = @('Environment', 'CostCenter', 'Owner')
+        $ExpectedKeys = @('Environment', 'CostCenter', 'Owner')
         for ($i = 0; $i -lt 3; $i++)
         {
             # 4.1: key kept verbatim, including its original mixed casing
-            $resourceItem.Tags[$i].Name  | Should -BeExactly $expectedKeys[$i] -Because "tag KEY '$($expectedKeys[$i])' must be preserved verbatim, casing intact (Req 4.1)"
+            $ResourceItem.Tags[$i].Name  | Should -BeExactly $ExpectedKeys[$i] -Because "tag KEY '$($ExpectedKeys[$i])' must be preserved verbatim, casing intact (Req 4.1)"
             # 4.2: value replaced with a prod_/nonprod_ token
-            $resourceItem.Tags[$i].Value | Should -Match $script:TagTokenPattern -Because "tag VALUE must be a prod_/nonprod_ token, not raw (Req 4.2)"
+            $ResourceItem.Tags[$i].Value | Should -Match $script:TagTokenPattern -Because "tag VALUE must be a prod_/nonprod_ token, not raw (Req 4.2)"
         }
     }
 
     It "emits the SAME token for the same tag value across resources (Req 4.3 | P1)" {
-        $dict  = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $itemA = @{ ID = 'a'; Tags = @([PSCustomObject]@{ Name = 'Env';  Value = 'shared-value' }) }
-        $itemB = @{ ID = 'b'; Tags = @([PSCustomObject]@{ Name = 'Tier'; Value = 'shared-value' }) }
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $ItemA = @{ ID = 'a'; Tags = @([PSCustomObject]@{ Name = 'Env'; Value = 'shared-value' }) }
+        $ItemB = @{ ID = 'b'; Tags = @([PSCustomObject]@{ Name = 'Tier'; Value = 'shared-value' }) }
 
-        script:Invoke-TagObfuscation -ResourceItem $itemA -TagValueDictionary $dict
-        script:Invoke-TagObfuscation -ResourceItem $itemB -TagValueDictionary $dict
+        script:Invoke-TagObfuscation -ResourceItem $ItemA -TagValueDictionary $Dict
+        script:Invoke-TagObfuscation -ResourceItem $ItemB -TagValueDictionary $Dict
 
-        $itemA.Tags[0].Value | Should -Be $itemB.Tags[0].Value -Because "the same real tag value must map to one token within a run (Req 4.3 / P1)"
+        $ItemA.Tags[0].Value | Should -Be $ItemB.Tags[0].Value -Because "the same real tag value must map to one token within a run (Req 4.3 / P1)"
     }
 
     It "derives the prod/nonprod prefix from the tag VALUE (Req 4.2 environment signal)" {
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $item = @{
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Item = @{
             ID   = 'x'
             Tags = @(
                 [PSCustomObject]@{ Name = 'Stage'; Value = 'qa' }           # non-prod set member
                 [PSCustomObject]@{ Name = 'Stage'; Value = 'core-billing' } # neutral -> prod
             )
         }
-        script:Invoke-TagObfuscation -ResourceItem $item -TagValueDictionary $dict
-        $item.Tags[0].Value | Should -Match '^nonprod_' -Because "'qa' matches the non-prod set"
-        $item.Tags[1].Value | Should -Match '^prod_'    -Because "'core-billing' is neutral -> prod"
+        script:Invoke-TagObfuscation -ResourceItem $Item -TagValueDictionary $Dict
+        $Item.Tags[0].Value | Should -Match '^nonprod_' -Because "'qa' matches the non-prod set"
+        $Item.Tags[1].Value | Should -Match '^prod_'    -Because "'core-billing' is neutral -> prod"
     }
 
     It "records each token -> real tag value mapping so TagMap can be inverted (Req 4.4)" {
@@ -985,14 +1075,14 @@ Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (
         # (ResourceInventory.ps1 L1582-1586). Assert the dictionary this loop
         # populates carries the real value under the emitted token, which is
         # exactly what the inversion serializes into TagMap.
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $item = @{ ID = 'y'; Tags = @([PSCustomObject]@{ Name = 'Team'; Value = 'analytics-platform' }) }
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Item = @{ ID = 'y'; Tags = @([PSCustomObject]@{ Name = 'Team'; Value = 'analytics-platform' }) }
 
-        script:Invoke-TagObfuscation -ResourceItem $item -TagValueDictionary $dict
+        script:Invoke-TagObfuscation -ResourceItem $Item -TagValueDictionary $Dict
 
-        $token = $item.Tags[0].Value
-        $dict.ContainsKey('analytics-platform') | Should -BeTrue -Because "the real tag value must be keyed in the dictionary that TagMap inverts (Req 4.4)"
-        $dict['analytics-platform'] | Should -Be $token -Because "token <-> real value must round-trip through TagMap (Req 4.4)"
+        $Token = $Item.Tags[0].Value
+        $Dict.ContainsKey('analytics-platform') | Should -BeTrue -Because "the real tag value must be keyed in the dictionary that TagMap inverts (Req 4.4)"
+        $Dict['analytics-platform'] | Should -Be $Token -Because "token <-> real value must round-trip through TagMap (Req 4.4)"
     }
 
     # ---- Source-audit regression: the mixed-case / lowercase-scrub bug (Req 4.5) ----
@@ -1073,12 +1163,12 @@ Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
                 networkProfile    = [PSCustomObject]@{ loadBalancerSku = 'Standard' }
                 agentPoolProfiles = @(
                     [PSCustomObject]@{ name = 'nodepool1'; type = 'VirtualMachineScaleSets'; mode = 'System'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
-                    [PSCustomObject]@{ name = 'nodepool2'; type = 'VirtualMachineScaleSets'; mode = 'User';   osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
+                    [PSCustomObject]@{ name = 'nodepool2'; type = 'VirtualMachineScaleSets'; mode = 'User'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
                 )
             }
         }
         $script:AksSub = @([PSCustomObject]@{ id = 'sub-regress'; Name = 'sub-regress' })
-        $script:AksModule = Join-Path $PSScriptRoot '..' 'Services' 'Containers' 'AKS.ps1'
+        $script:AksModule = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Containers', 'AKS.ps1'
     }
 
     It "AKS.ps1 module file is present for direct invocation" {
@@ -1086,32 +1176,32 @@ Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
     }
 
     It "emits one row per node pool, each with its OWN Tags object instance (no aliasing)" {
-        $rows = & $script:AksModule -Sub $script:AksSub -Resources @($script:AksCluster) -Task 'Processing' -ResourceIdDictionary $null
-        @($rows).Count | Should -Be 2 -Because "one row per node pool"
-        [object]::ReferenceEquals($rows[0].Tags, $rows[1].Tags) | Should -BeFalse -Because "each node-pool row must get its own Tags object instance, not a shared reference"
+        $Rows = & $script:AksModule -Sub $script:AksSub -Resources @($script:AksCluster) -Task 'Processing' -ResourceIdDictionary $null
+        @($Rows).Count | Should -Be 2 -Because "one row per node pool"
+        [object]::ReferenceEquals($Rows[0].Tags, $Rows[1].Tags) | Should -BeFalse -Because "each node-pool row must get its own Tags object instance, not a shared reference"
     }
 
     It "the real tag-obfuscation loop yields exactly ONE dictionary entry and ONE shared token across both rows (P1, P2)" {
-        $rows = & $script:AksModule -Sub $script:AksSub -Resources @($script:AksCluster) -Task 'Processing' -ResourceIdDictionary $null
-        $dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Rows = & $script:AksModule -Sub $script:AksSub -Resources @($script:AksCluster) -Task 'Processing' -ResourceIdDictionary $null
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
 
         # Run the SAME tag-obfuscation loop ResourceInventory.ps1 runs per
         # resourceItem (L1002-1017), once per row, exactly as production does.
-        foreach ($resourceItem in $rows)
+        foreach ($ResourceItem in $Rows)
         {
-            if ($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
+            if ($ResourceItem.ContainsKey('Tags') -and $null -ne $ResourceItem.Tags)
             {
-                foreach ($tag in $resourceItem.Tags)
+                foreach ($tag in $ResourceItem.Tags)
                 {
                     if ($null -ne $tag -and -not [string]::IsNullOrEmpty([string]$tag.Value))
                     {
-                        $realTagValue = [string]$tag.Value
-                        if (-not $dict.ContainsKey($realTagValue))
+                        $RealTagValue = [string]$tag.Value
+                        if (-not $Dict.ContainsKey($RealTagValue))
                         {
-                            $tagPrefix = if ($realTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $realTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
-                            $dict[$realTagValue] = $tagPrefix + [guid]::NewGuid().ToString()
+                            $TagPrefix = if ($RealTagValue -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $RealTagValue -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                            $Dict[$RealTagValue] = $TagPrefix + [guid]::NewGuid().ToString()
                         }
-                        $tag.Value = $dict[$realTagValue]
+                        $tag.Value = $Dict[$RealTagValue]
                     }
                 }
             }
@@ -1120,11 +1210,11 @@ Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
         # P2 injectivity: exactly one real value went in, so exactly one entry
         # must come out. A count of 2 here is the aliasing bug's signature (the
         # already-tokenized value on row 2 gets misread as a second "real" value).
-        $dict.Count | Should -Be 1 -Because "one real tag value must yield exactly one dictionary entry, even across multiple node-pool rows for the same cluster (P2)"
+        $Dict.Count | Should -Be 1 -Because "one real tag value must yield exactly one dictionary entry, even across multiple node-pool rows for the same cluster (P2)"
 
         # P1 determinism across rows: both rows' tag must resolve to the SAME
         # token, and that token must actually be present as a dictionary value.
-        $rows[0].Tags[0].Value | Should -Be $rows[1].Tags[0].Value -Because "the same real tag value on two rows of the same cluster must yield the same token (P1)"
-        $dict.Values | Should -Contain $rows[0].Tags[0].Value -Because "the shared token must be the one real dictionary entry produced, not a spurious second entry"
+        $Rows[0].Tags[0].Value | Should -Be $Rows[1].Tags[0].Value -Because "the same real tag value on two rows of the same cluster must yield the same token (P1)"
+        $Dict.Values | Should -Contain $Rows[0].Tags[0].Value -Because "the shared token must be the one real dictionary entry produced, not a spurious second entry"
     }
 }

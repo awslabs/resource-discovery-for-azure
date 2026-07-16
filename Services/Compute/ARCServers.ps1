@@ -2,33 +2,33 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $arcservers = $Resources | Where-Object {$_.TYPE -eq 'microsoft.hybridcompute/machines'}
+    $Arcservers = $Resources | Where-Object { $_.TYPE -eq 'microsoft.hybridcompute/machines' }
 
-    if($arcservers)
+    if ($Arcservers)
     {
-        $tmp = @()
-        foreach ($1 in $arcservers) 
+        $Tmp = @()
+        foreach ($1 in $Arcservers)
         {
-            $sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
-            $data = $1.PROPERTIES
+            $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
+            $Data = $1.PROPERTIES
 
-            $obj = @{
+            $Obj = @{
                 'ID'                   = $1.id;
-                'Subscription'         = $sub1.name;
+                'Subscription'         = $Sub1.name;
                 'ResourceGroup'        = $1.RESOURCEGROUP;
                 'Name'                 = $1.NAME;
                 'Location'             = $1.LOCATION;
-                'Model'                = $data.detectedProperties.model;
-                'Status'               = $data.status;
-                'OsName'               = $data.osName;
-                'OsVersion'            = $data.osVersion;
-                'OsSku'                = $data.osSku;
-                'DomainName'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $data.domainName };
+                'Model'                = $Data.detectedProperties.model;
+                'Status'               = $Data.status;
+                'OsName'               = $Data.osName;
+                'OsVersion'            = $Data.osVersion;
+                'OsSku'                = $Data.osSku;
+                'DomainName'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.domainName };
             }
 
-            $tmp += $obj
+            $Tmp += $Obj
         }
 
-        $tmp
+        $Tmp
     }
 }

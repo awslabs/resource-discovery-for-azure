@@ -1878,17 +1878,28 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
             $EmptyDiag = @()
             $EmptyDiag += "==== Subscriptions with 0 resources - access verdict ===="
             $EmptyDiag += "Timestamp: $(Get-Date -Format 'o')"
-            foreach ($e in $NoAccessSubs)       { $EmptyDiag += ("NO_ACCESS      {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id) }
-            foreach ($e in $GenuinelyEmptySubs) { $EmptyDiag += ("EMPTY          {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id) }
-            foreach ($e in $UnknownSubs)        { $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id) }
+            foreach ($e in $NoAccessSubs)
+            {
+                $EmptyDiag += ("NO_ACCESS {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id)
+            }
+            foreach ($e in $GenuinelyEmptySubs)
+            {
+                $EmptyDiag += ("EMPTY {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id)
+            }
+            foreach ($e in $UnknownSubs)
+            {
+                $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id)
+            }
             $EmptyDiag += ""
             try
             {
                 $EmptyDiag | Out-File -FilePath $DiagFile -Append -Encoding utf8
                 Write-Host ("  Access verdict written to diagnostic log: {0}" -f $DiagFile) -ForegroundColor DarkGray
             }
-            catch { Write-Verbose ("Diagnostic log write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
-
+            catch
+            {
+                Write-Verbose ("Diagnostic log write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message)
+            }
             Write-Host ""
         }
 
@@ -2083,99 +2094,99 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                     Copy-Item -LiteralPath $MainSummaryFile -Destination $StagedMainSummary -Force
                     (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' |
                         Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
-                }
-
-                # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
-                #    name is the source ResourcesReport<stamp> with the leading
-                #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
-                #    summary links. HTML only - no *.json/csv - so nothing is
-                #    double-ingested and the folder name signals "report HTML, not
-                #    data". Scoped to THIS run by timestamp; a de-obfuscated
-                #    *_revealed* report is never copied across.
-                foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
-                {
-                    $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
-                    if ($null -eq $SubHtml) { continue }
-                    $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
-                    $DestDir = Join-Path $BundleStage $HtmlFolderName
-                    New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
-                    Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
-                }
-
-                # Fold the staged extras into the existing outer zip (additive; the
-                # inner per-sub zips already inside it are preserved by -Update).
-                $StageItems = @(Get-ChildItem -Path $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-                if ($StageItems.Count -gt 0)
-                {
-                    Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
-                    Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
-                }
-                Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            catch
-            {
-                Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-            }
         }
 
-        # Final, last-thing-the-user-sees banner when a requested data phase could not
-        # be collected due to authentication. Printed AFTER the summary block so it is
-        # the final output on screen. Covers metrics (no -SkipMetrics) and consumption
-        # (no -SkipConsumption) auth skips. The Excel sheets are intentionally NOT
-        # annotated (server-side ingestion expects fixed columns); this banner is the
-        # human-facing signal, and the non-zero exit below is the machine-facing one.
-        $AuthSkippedPhases = @()
-        if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
-        $ConsumptionAuthSkipped = @(
-            if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
-        ) | Where-Object { $_.Id -eq '(auth)' }
-        if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
-
-        if ($AuthSkippedPhases.Count -gt 0)
+        # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
+        #    name is the source ResourcesReport<stamp> with the leading
+        #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
+        #    summary links. HTML only - no *.json/csv - so nothing is
+        #    double-ingested and the folder name signals "report HTML, not
+        #    data". Scoped to THIS run by timestamp; a de-obfuscated
+        #    *_revealed* report is never copied across.
+        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
         {
-            Write-Host ""
-            Write-Host "===================== FAILED (auth) =====================" -ForegroundColor Red
-            Write-Host ("Could not collect: {0}" -f ($AuthSkippedPhases -join ' and ')) -ForegroundColor Red
-            Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
-            Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
-            Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
-            Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
-            Write-Host "=========================================================" -ForegroundColor Red
+            $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+            if ($null -eq $SubHtml) { continue }
+            $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
+            $DestDir = Join-Path $BundleStage $HtmlFolderName
+            New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+            Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
         }
 
-        # Machine-facing signal for collector failures (#22), distinct from the auth
-        # banner above. A collector failure is not an auth problem - it means one or
-        # more resource types are silently MISSING from one or more subscriptions'
-        # reports because a Services/*/*.ps1 collector threw. This must be
-        # machine-detectable (not just console-visible in the summary block above),
-        # per the same "do not sweep failures under the rug" requirement that drove
-        # the circuit breaker itself - a human-only signal that scrolls past in a
-        # large multi-subscription run is not good enough for CI/automation.
-        if (@($Global:CollectorFailures).Count -gt 0)
+        # Fold the staged extras into the existing outer zip (additive; the
+        # inner per-sub zips already inside it are preserved by -Update).
+        $StageItems = @(Get-ChildItem -Path $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        if ($StageItems.Count -gt 0)
         {
-            Write-Host ""
-            Write-Host "=================== FAILED (collectors) ===================" -ForegroundColor Red
-            Write-Host ("{0} collector failure(s) across {1} subscription(s) - see 'Collector Failures' above for detail." -f @($Global:CollectorFailures).Count, (@($Global:CollectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Red
-            Write-Host "One or more resource types are MISSING (not empty) from the affected subscription(s)' reports." -ForegroundColor Red
-            Write-Host "Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Red
-            Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
-            Write-Host "=========================================================" -ForegroundColor Red
+            Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
+            Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
         }
+        Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    catch
+    {
+        Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
 
-        # Stop the wrapper transcript on the normal-completion path. Error paths take
-        # Exit-Wrapper which does the same.
-        if ($WrapperTranscriptStarted)
-        {
-            try { Stop-Transcript | Out-Null }
-            catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
-        }
+# Final, last-thing-the-user-sees banner when a requested data phase could not
+# be collected due to authentication. Printed AFTER the summary block so it is
+# the final output on screen. Covers metrics (no -SkipMetrics) and consumption
+# (no -SkipConsumption) auth skips. The Excel sheets are intentionally NOT
+# annotated (server-side ingestion expects fixed columns); this banner is the
+# human-facing signal, and the non-zero exit below is the machine-facing one.
+$AuthSkippedPhases = @()
+if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
+$ConsumptionAuthSkipped = @(
+    if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
+) | Where-Object { $_.Id -eq '(auth)' }
+if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
+
+if ($AuthSkippedPhases.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host "===================== FAILED (auth) =====================" -ForegroundColor Red
+    Write-Host ("Could not collect: {0}" -f ($AuthSkippedPhases -join ' and ')) -ForegroundColor Red
+    Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
+    Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
+    Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
+    Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    Write-Host "=========================================================" -ForegroundColor Red
+}
+
+# Machine-facing signal for collector failures (#22), distinct from the auth
+# banner above. A collector failure is not an auth problem - it means one or
+# more resource types are silently MISSING from one or more subscriptions'
+# reports because a Services/*/*.ps1 collector threw. This must be
+# machine-detectable (not just console-visible in the summary block above),
+# per the same "do not sweep failures under the rug" requirement that drove
+# the circuit breaker itself - a human-only signal that scrolls past in a
+# large multi-subscription run is not good enough for CI/automation.
+if (@($Global:CollectorFailures).Count -gt 0)
+{
+    Write-Host ""
+    Write-Host "=================== FAILED (collectors) ===================" -ForegroundColor Red
+    Write-Host ("{0} collector failure(s) across {1} subscription(s) - see 'Collector Failures' above for detail." -f @($Global:CollectorFailures).Count, (@($Global:CollectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Red
+    Write-Host "One or more resource types are MISSING (not empty) from the affected subscription(s)' reports." -ForegroundColor Red
+    Write-Host "Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Red
+    Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    Write-Host "=========================================================" -ForegroundColor Red
+}
+
+# Stop the wrapper transcript on the normal-completion path. Error paths take
+# Exit-Wrapper which does the same.
+if ($WrapperTranscriptStarted)
+{
+    try { Stop-Transcript | Out-Null }
+    catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
+}
 
 
-        $AuthSkipped = $AuthSkippedPhases.Count -gt 0
-        $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-        $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
-        if ($WrapperExitCode -ne 0)
-        {
-            exit $WrapperExitCode
-        }
+$AuthSkipped = $AuthSkippedPhases.Count -gt 0
+$CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+if ($WrapperExitCode -ne 0)
+{
+    exit $WrapperExitCode
+}
 

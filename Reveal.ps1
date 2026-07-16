@@ -70,6 +70,14 @@
     explicit -StagingDirectory, the most recent RevealedStaging_* under the
     inventory root is auto-detected.
 
+.PARAMETER FolderTimeoutMinutes
+    ALL-SUBSCRIPTIONS MODE. Hard cap, in minutes, on how long a single folder's
+    reveal may run before it is abandoned (recorded as a timeout failure) so the
+    batch can move on to the next folder. Defaults to 20. Lower it (e.g. 1) to
+    blast quickly past folders that stall - combine with -Resume so already
+    revealed folders are skipped and only the previously stuck ones are retried
+    under the shorter cap. Accepts fractional minutes (e.g. 0.5).
+
 .PARAMETER Fields
     BOTH MODES. Which dimensions to reveal. Valid: ResourceGroup, Subscription,
     Tag, ResourceName, ResourceId, FreeText. Defaults to
@@ -130,6 +138,10 @@ param(
 
     [Parameter(ParameterSetName = 'All')]
     [switch]   $Resume,
+
+    [Parameter(ParameterSetName = 'All')]
+    [ValidateRange(0.1, 10080)]
+    [double]   $FolderTimeoutMinutes = 20,
 
     # ---- Common to both modes ----
     [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')]
@@ -271,8 +283,10 @@ $FolderTotal = $Folders.Count
 # (e.g. an unusually large or malformed zip) can make Expand-Archive /
 # Compress-Archive run effectively forever; without a cap one bad folder stalls
 # the entire batch. When a folder exceeds this it is abandoned, recorded as a
-# timeout failure, and the run continues with the next folder.
-$RevealTimeoutSeconds = 20 * 60
+# timeout failure, and the run continues with the next folder. Configurable via
+# -FolderTimeoutMinutes (default 20); Ceiling keeps a fractional-minute value
+# (e.g. 0.5) at a whole >=1s Wait-Job timeout.
+$RevealTimeoutSeconds = [int][math]::Ceiling($FolderTimeoutMinutes * 60)
 
 foreach ($Folder in $Folders)
 {
@@ -357,7 +371,7 @@ foreach ($Folder in $Folders)
             # consolidated outer zip nor mistaken for completed work by -Resume.
             Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (($OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
-            $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = ("timed out after {0} minutes" -f ($RevealTimeoutSeconds / 60)) }
+            $FailedItems += [pscustomobject]@{ Folder = $Folder.Name; Reason = ("timed out after {0:0.##} minutes" -f ($RevealTimeoutSeconds / 60)) }
             continue
         }
 

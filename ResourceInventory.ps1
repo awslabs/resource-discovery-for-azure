@@ -500,7 +500,7 @@ Function RunInventorySetup()
 
             $DebugPreference = "Continue"
 
-            $Tenants = az account list --query [].homeTenantId -o tsv --only-show-errors | Sort-Object -Unique
+            $Tenants = (Get-AzSubscription -WarningAction SilentlyContinue).HomeTenantId | Sort-Object -Unique
 
             Write-Log -Message ('Checking number of Tenants') -Severity 'Info'
 

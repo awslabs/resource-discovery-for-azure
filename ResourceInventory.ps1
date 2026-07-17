@@ -166,12 +166,11 @@ Function RunInventorySetup()
     function CheckCliRequirements()
     {
         # Idempotent per PowerShell session. Under -RunAllSubs the wrapper invokes
-        # this script via & once per subscription in the SAME process, so the CLI
-        # probe, Resource-Graph extension check, and Az module import only need to
-        # run once: the verified CLI and imported modules persist process-wide.
-        # $Global:AzPowerShellLoaded is set $true at the end of a successful load
-        # (below); when it is already set we skip the whole re-check, which removes
-        # the repeated "Verifying Azure CLI... / Loading Az.* ..." output on every
+        # this script via & once per subscription in the SAME process, so the Az
+        # module check and import only need to run once: the imported modules
+        # persist process-wide. $Global:AzPowerShellLoaded is set $true at the end
+        # of a successful load (below); when it is already set we skip the whole
+        # re-check, which removes the repeated "Loading Az.* ..." output on every
         # subscription. Parallel streams run in separate processes, so each stream
         # still loads once. On a failed load the flag stays $false, so the next
         # subscription retries the full check.
@@ -180,42 +179,17 @@ Function RunInventorySetup()
             return
         }
 
-        Write-Log -Message ('Verifying Azure CLI is installed...') -Severity 'Info'
-
-        $AzCliVersion = az --version
-
-        if ($null -eq $AzCliVersion)
-        {
-            Write-Log -Message ("Azure CLI Not Found. Please install and run the script again.") -Severity 'Error'
-            Read-Host "Press <Enter> to exit"
-            Exit
-        }
-
-        Write-Log -Message ('CLI Version: {0}' -f $AzCliVersion[0]) -Severity 'Success'
-
-        Write-Log -Message ('Verifying Azure CLI Extension...') -Severity 'Info'
-
-        $AzCliExtension = az extension list --output json | ConvertFrom-Json
-        $AzCliExtension = $AzCliExtension | Where-Object { $_.name -eq 'resource-graph' }
-
-        Write-Log -Message ('Current Resource-Graph Extension Version: {0}' -f $AzCliExtension.Version) -Severity 'Success'
-
-        $AzCliExtensionVersion = $AzCliExtension | Where-Object { $_.name -eq 'resource-graph' }
-
-        if (!$AzCliExtensionVersion)
-        {
-            Write-Log -Message ('Azure CLI Extension not found') -Severity 'Warning'
-            Write-Log -Message ('Installing Azure CLI Extension...') -Severity 'Info'
-            az extension add --name resource-graph
-        }
-
+        # Resource discovery uses the native Az.ResourceGraph cmdlet
+        # (Search-AzGraph), so the Azure CLI and its resource-graph extension are
+        # no longer prerequisites - only the Az PowerShell modules below are
+        # checked/loaded. See .kiro/steering/cross-platform-powershell.md.
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        # This tool only calls cmdlets from four Az submodules (see the import
+        # This tool only calls cmdlets from five Az submodules (see the import
         # loop below), so it validates and loads exactly those - it does NOT
         # require the full ~80-submodule `Az` rollup to be installed. A slim
         # install is sufficient:
-        #   Install-Module Az.Accounts, Az.Compute, Az.Monitor, Az.Billing
+        #   Install-Module Az.Accounts, Az.Compute, Az.Monitor, Az.Billing, Az.ResourceGraph
         # The full `Az` rollup also satisfies this check because installing `Az`
         # lays down each Az.* submodule as its own discoverable module on disk,
         # so Get-Module -Name Az.Accounts (etc.) finds them either way. Checking
@@ -394,7 +368,7 @@ Function RunInventorySetup()
 
         if ($platformOS -eq 'Azure CloudShell')
         {
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+            $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
         }
         elseif ($platformOS -eq 'PowerShell Unix' -or $platformOS -eq 'PowerShell Desktop')
         {
@@ -404,67 +378,48 @@ Function RunInventorySetup()
 
     function LoginSession()
     {
+        # Resolve the current Az PowerShell context once and reuse it for both the
+        # display banner and the already-authenticated check. Using the native Az
+        # context (not `az account show`) means there is a single source of truth
+        # for auth state - the tool no longer has to reconcile a separate az CLI
+        # login with the Az PS context. See .kiro/steering/cross-platform-powershell.md.
+        $ExistingContext = Get-AzContext -ErrorAction SilentlyContinue
+
         # Display-only banner: the active Azure cloud environment does not change
         # between subscriptions in a session, so print it once. This also skips a
-        # redundant `az cloud list` per subscription under -RunAllSubs. The auth
-        # logic below (az account show, the Az context check, Connect-AzAccount)
-        # is OUTSIDE this guard and still runs on every invocation, unchanged.
+        # redundant lookup per subscription under -RunAllSubs. The auth logic below
+        # (the context check and Connect-AzAccount) is OUTSIDE this guard and still
+        # runs on every invocation, unchanged.
         if (-not $Global:RdaSessionInitialized)
         {
-            $CloudEnv = az cloud list | ConvertFrom-Json
+            $CurrentCloudEnvName = if ($ExistingContext) { $ExistingContext.Environment.Name } else { 'AzureCloud' }
             Write-Host "Azure Cloud Environment: " -NoNewline
-
-            $CurrentCloudEnvName = $CloudEnv | Where-Object { $_.isActive -eq 'True' }
-            Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+            Write-Host $CurrentCloudEnvName -ForegroundColor Green
         }
 
-        # Check if already authenticated
-        $ExistingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
-        if ($null -ne $ExistingAccount)
+        # Check if already authenticated (a non-null Az context means we are)
+        if ($null -ne $ExistingContext)
         {
             # Display-only: report the authenticated identity once per session. The
-            # tenant-context comparison and any reconnect below still run every sub.
+            # tenant comparison below still runs every sub.
             if (-not $Global:RdaSessionInitialized)
             {
-                Write-Log -Message ("Already authenticated as: {0}" -f $ExistingAccount.user.name) -Severity 'Success'
+                Write-Log -Message ("Already authenticated as: {0}" -f $ExistingContext.Account.Id) -Severity 'Success'
             }
 
-            if (!$TenantID -or $ExistingAccount.tenantId -eq $TenantID)
+            if (!$TenantID -or $ExistingContext.Tenant.Id -eq $TenantID)
             {
-                # Ensure PowerShell Az context is set for the requested tenant.
-                # We compare the Az PS context's tenant — not its current subscription
-                # — against $existingAccount because the Az PS and az CLI contexts can
-                # have different default subscriptions even when authenticated against
-                # the same tenant. Comparing subscriptions caused a re-Connect-AzAccount
-                # on every iteration of Run-AllSubscriptions.ps1 on PowerShell Desktop,
-                # which prompted the user to log in again for each subscription. Per-
-                # subscription scoping happens later via Set-AzContext / --subscriptions /
-                # resource-id parameters on Get-AzMetric, so the context only needs to
-                # match the tenant.
-                $AzContext = Get-AzContext -ErrorAction SilentlyContinue
-                $NeedsConnect = $null -eq $AzContext -or
-                [string]::IsNullOrEmpty($AzContext.Tenant.Id) -or
-                $AzContext.Tenant.Id -ne $ExistingAccount.tenantId
-                if ($NeedsConnect)
-                {
-                    Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
-                    if ($DeviceLogin.IsPresent)
-                    {
-                        Connect-AzAccount -UseDeviceAuthentication -Tenant $ExistingAccount.tenantId | Out-Null
-                    }
-                    else
-                    {
-                        Connect-AzAccount -Tenant $ExistingAccount.tenantId | Out-Null
-                    }
-                }
-
-                $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
+                # The existing context already matches the requested tenant (or no
+                # tenant was requested), so no reconnect is needed. Per-subscription
+                # scoping happens later via Set-AzContext / resource-id parameters on
+                # Get-AzMetric, so the context only needs to match the tenant.
+                $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
+                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID }) }
                 return
             }
             else
             {
-                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $ExistingAccount.tenantId, $TenantID) -Severity 'Warning'
+                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $ExistingContext.Tenant.Id, $TenantID) -Severity 'Warning'
             }
         }
 
@@ -477,7 +432,7 @@ Function RunInventorySetup()
 
             if (!$RunAllSubs.IsPresent)
             {
-                az account clear | Out-Null
+                Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
             }
 
             $DebugPreference = "SilentlyContinue"
@@ -488,13 +443,11 @@ Function RunInventorySetup()
                 if ($DeviceLogin.IsPresent)
                 {
                     Write-Log -Message ('Using device login') -Severity 'Info'
-                    az login --use-device-code
                     Connect-AzAccount -UseDeviceAuthentication | Out-Null
                 }
                 else
                 {
                     Write-Log -Message ('Using browser login') -Severity 'Info'
-                    az login --only-show-errors | Out-Null
                     Connect-AzAccount | Out-Null
                 }
             }
@@ -546,12 +499,10 @@ Function RunInventorySetup()
                 {
                     if ($DeviceLogin.IsPresent)
                     {
-                        az login --use-device-code -t $TenantID
                         Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
                     }
                     else
                     {
-                        az login -t $TenantID --only-show-errors | Out-Null
                         Connect-AzAccount -Tenant $TenantID | Out-Null
                     }
                 }
@@ -560,39 +511,33 @@ Function RunInventorySetup()
             Write-Log -Message ("Extracting from Tenant $TenantID") -Severity 'Info'
             Write-Log -Message ("Extracting Subscriptions") -Severity 'Info'
 
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID })
+            $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
+            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID })
         }
         else
         {
 
             if (!$RunAllSubs.IsPresent)
             {
-                az account clear | Out-Null
+                Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
 
                 if (!$Appid)
                 {
                     if ($DeviceLogin.IsPresent)
                     {
-                        az login --use-device-code -t $TenantID
                         Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
                     }
                     else
                     {
-                        az login -t $TenantID --only-show-errors | Out-Null
                         Connect-AzAccount -Tenant $TenantID | Out-Null
                     }
                 }
                 elseif ($Appid -and $Secret -and $tenantid)
                 {
                     Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
-                    # Authenticate the az CLI without putting the secret on the command
-                    # line (it would otherwise appear in the process list and transcript).
-                    # Pipe the plaintext to --password-stdin; the plaintext lives only in
-                    # this local variable for the duration of the call.
-                    $UnsecuredSecret = [System.Net.NetworkCredential]::new('', $Secret).Password
-                    $UnsecuredSecret | az login --service-principal -u $appid --tenant $TenantID --password-stdin --only-show-errors | Out-Null
-                    Remove-Variable -Name unsecuredSecret -ErrorAction SilentlyContinue
+                    # Az PowerShell accepts the SecureString secret directly via a
+                    # PSCredential, so the secret never has to be converted to plaintext
+                    # (unlike the old az CLI --password-stdin path this replaced).
                     $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
                     Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
                 }
@@ -605,8 +550,8 @@ Function RunInventorySetup()
                 }
             }
 
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID })
+            $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
+            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID })
         }
     }
 

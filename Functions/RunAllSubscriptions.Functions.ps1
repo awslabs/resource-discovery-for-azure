@@ -428,7 +428,7 @@ function Invoke-PreFlightChecks
 #
 # That endpoint is anonymous (no sign-in required) and returns a JSON document
 # whose "issuer" field embeds the tenant GUID. Resolving up front means every
-# downstream call (az login, Get-AzSubscription, the resume state filename, the
+# downstream call (Get-AzSubscription, the resume state filename, the
 # auth gate) operates on a stable identifier even if Azure later renames the
 # domain.
 function Resolve-TenantId
@@ -662,13 +662,6 @@ function Merge-FailedAttempts
     return $Reconciled
 }
 
-function Get-AzCliSignedInTenant
-{
-    $Raw = az account show --output json 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $Raw) { return $null }
-    try { return ($Raw | ConvertFrom-Json).tenantId } catch { return $null }
-}
-
 function Get-AzPsSignedInTenant
 {
     try
@@ -681,15 +674,6 @@ function Get-AzPsSignedInTenant
     {
         return $null
     }
-}
-
-# Probe whether az CLI can silently acquire a token for $TenantID.
-# Returns $true on success, $false on any failure.
-function Test-AzCliTokenSilent
-{
-    param([Parameter(Mandatory = $true)][string]$Tenant)
-    az account get-access-token --tenant $Tenant --output none 2>$null
-    return ($LASTEXITCODE -eq 0)
 }
 
 # Probe whether Az PowerShell can silently acquire a token for $TenantID.

@@ -222,7 +222,7 @@ Function RunInventorySetup()
         # the submodules (not the `Az` umbrella) is what lets the slim install
         # pass - a slim install has no `Az` meta-module, so the old
         # Get-Module -Name Az check would have thrown a false "not found".
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
@@ -257,13 +257,14 @@ Function RunInventorySetup()
         # submodules (hundreds of DLLs plus their format/type data) and stalls for
         # 20-40s on a fresh box with no output - which looks like a hang right
         # after "Checking Azure PowerShell Module...". The tool only calls cmdlets
-        # from these four:
-        #   Az.Accounts - Connect/Get/Set-AzContext, Get-AzSubscription,
-        #                 Get-AzAccessToken, Save-/Import-AzContext
-        #   Az.Compute  - Get-AzComputeResourceSku
-        #   Az.Monitor  - Get-AzMetric
-        #   Az.Billing  - Get-UsageAggregates
-        # Because these four are the entire Az cmdlet surface, a slim install of
+        # from these five:
+        #   Az.Accounts      - Connect/Get/Set-AzContext, Get-AzSubscription,
+        #                      Get-AzAccessToken, Save-/Import-AzContext
+        #   Az.Compute       - Get-AzComputeResourceSku
+        #   Az.Monitor       - Get-AzMetric
+        #   Az.Billing       - Get-UsageAggregates
+        #   Az.ResourceGraph - Search-AzGraph (resource discovery)
+        # Because these five are the entire Az cmdlet surface, a slim install of
         # just them is enough and cannot cause "command not found". If the full
         # `Az` rollup happens to be installed instead, any other submodule still
         # auto-loads on first use - but nothing outside these four is ever called.
@@ -660,7 +661,7 @@ Function RunInventorySetup()
             $Subscri = $SubscriptionID
 
             $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $Subscri
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1)
@@ -673,7 +674,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $Subscri -Skip $Limit -First 1000 -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -687,7 +688,7 @@ Function RunInventorySetup()
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $SubscriptionID
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1)
@@ -700,7 +701,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $SubscriptionID -Skip $Limit -First 1000 -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -727,7 +728,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -Skip $Limit -First 1000 -Lowercase
 
                     $Global:Resources += $Resource.Data
                     Start-Sleep 2
@@ -755,7 +756,7 @@ Function RunInventorySetup()
             while ($Looper -lt $Loop)
             {
                 $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
+                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -Skip $Limit -First 1000 -Lowercase
 
                 $Global:Resources += $AVD.data
                 Start-Sleep 2

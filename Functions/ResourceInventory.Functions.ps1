@@ -117,26 +117,40 @@ Function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
     return $Result
 }
 
-# Runs `az graph query` and returns the parsed JSON result. Azure CLI
-# failures (expired auth, throttling, a malformed KQL string, a transient
-# ARM error) print to stderr and exit non-zero, but the previous call sites
-# piped stdout straight into ConvertFrom-Json and read a count field off
-# whatever came out - a failed call and a genuinely empty subscription both
-# produced $null/0 with zero indication anything went wrong (see #22). This
-# wrapper checks the actual exit code and throws with the real Azure CLI
-# error text, so a Resource Graph failure surfaces as a loud, actionable
-# subscription failure instead of a silent "0 resources found". -Lowercase
-# preserves the exact `.tolower()` behavior the original data-fetching call
-# sites relied on (collectors compare against lowercase type strings).
+# Runs an Azure Resource Graph query via the native Az.ResourceGraph cmdlet
+# (Search-AzGraph) and returns an object exposing a .data member, mirroring the
+# shape the call sites already consume. A failed query (expired auth, throttling,
+# a malformed KQL string, a transient ARM error) throws with the real error text,
+# so a Resource Graph failure surfaces as a loud, actionable subscription failure
+# instead of a silent "0 resources found" (see #22) - transient failures are
+# retried with backoff first. -Lowercase preserves the exact whole-payload
+# `.tolower()` behavior the original data-fetching call sites relied on
+# (collectors compare against lowercase type strings and self-join on lowercased
+# ids). Native cmdlet = portable across Windows/Linux/macOS with no az.cmd shell
+# boundary; see .kiro/steering/cross-platform-powershell.md.
 function Invoke-AzGraphQuerySafe
 {
     param(
         [Parameter(Mandatory = $true)][string]$Query,
-        [object[]]$ExtraArgs = @(),
+        [string[]]$Subscription,
+        [int]$First = 1000,
+        [int]$Skip = 0,
         [switch]$Lowercase
     )
 
-    $AzArgs = @('graph', 'query', '-q', $Query, '--output', 'json', '--only-show-errors') + $ExtraArgs
+    # Native Az.ResourceGraph query. Replaces the former 'az graph query' CLI
+    # shell-out so the data path is portable by construction across
+    # Windows/Linux/macOS with no az.cmd/cmd.exe argument-quoting boundary.
+    #
+    # Contract preserved for the callers (unchanged): returns an object exposing
+    # a .data member - the row array for a fetch, or the single row for a
+    # 'summarize count()' probe (so $x.data.'count_' keeps working). Paging is
+    # caller-driven via -First (max 1000) / -Skip offset, mirroring the previous
+    # --first/--skip. -Subscription scopes the query (mirrors --subscriptions);
+    # omitting it queries the whole accessible tenant, as before.
+    $GraphParams = @{ Query = $Query; First = $First; ErrorAction = 'Stop' }
+    if ($Subscription) { $GraphParams['Subscription'] = $Subscription }
+    if ($Skip -gt 0) { $GraphParams['Skip'] = $Skip }
 
     # Bounded retry for TRANSIENT Resource Graph failures (dropped/changed
     # network mid-run, VPN switch, ARM throttling, 5xx). Without this a single
@@ -152,63 +166,50 @@ function Invoke-AzGraphQuerySafe
     # throw is identical to the pre-retry behavior, so the per-subscription
     # catch -> FailedAttempts -> -Resume path is unchanged (see #22).
     $GraphMaxRetries = 3
-    $StdOut = $null
-    $ExitCode = 0
-    $StdErr = $null
+    $Rows = $null
 
     for ($Attempt = 0; ; $Attempt++)
     {
-        # Capture stdout and stderr separately rather than merging with 2>&1.
-        # Some az CLI versions emit non-suppressible diagnostic text on stderr
-        # (extension auto-install notices, deprecation warnings) even on a
-        # successful (exit 0) call. Merging streams would splice that text into
-        # the JSON payload and cause ConvertFrom-Json to throw a parse error on
-        # a call that actually succeeded - a false failure this must not
-        # introduce. Stdout is only ever used for the JSON payload; stderr is
-        # only used in the error message when the exit code is actually non-zero.
-        $StdErrFile = [System.IO.Path]::GetTempFileName()
         try
         {
-            $StdOut = & az @AzArgs 2>$StdErrFile
-            $ExitCode = $LASTEXITCODE
-            $StdErr = Get-Content -Path $StdErrFile -Raw -ErrorAction SilentlyContinue
+            $Rows = @(Search-AzGraph @GraphParams)
+            break
         }
-        finally
+        catch
         {
-            Remove-Item -Path $StdErrFile -Force -ErrorAction SilentlyContinue
+            $Message = $_.Exception.Message
+
+            # Clearly-permanent failures: a retry cannot help, so surface immediately.
+            $Permanent = $Message -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid'
+
+            if ($Permanent -or $Attempt -ge $GraphMaxRetries)
+            {
+                throw ("Resource Graph query failed after {0} attempt(s): {1}`nQuery: {2}" -f ($Attempt + 1), $Message, $Query)
+            }
+
+            # Transient: exponential backoff (2^attempt, capped) plus jitter so a
+            # wave of throttled calls does not retry in lockstep. Throttled calls
+            # wait a bit longer.
+            $Throttled = $Message -match 'TooManyRequests|\b429\b|throttl'
+            $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
+            if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
+            $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
+            Start-Sleep -Seconds ([math]::Round($Backoff + $Jitter, 2))
         }
-
-        if ($ExitCode -eq 0) { break }
-
-        # Clearly-permanent failures: a retry cannot help, so surface immediately.
-        $Permanent = $StdErr -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid'
-
-        if ($Permanent -or $Attempt -ge $GraphMaxRetries)
-        {
-            throw ("az graph query failed (exit code {0}) after {1} attempt(s): {2}`nQuery: {3}" -f $ExitCode, ($Attempt + 1), $StdErr, $Query)
-        }
-
-        # Transient: exponential backoff (2^attempt, capped) plus jitter so a
-        # wave of throttled calls does not retry in lockstep. Throttled calls
-        # wait a bit longer.
-        $Throttled = $StdErr -match 'TooManyRequests|\b429\b|throttl'
-        $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
-        if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
-        $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
-        Start-Sleep -Seconds ([math]::Round($Backoff + $Jitter, 2))
     }
 
-    $Text = $StdOut -join "`n"
-    if ($Lowercase) { $Text = $Text.ToLower() }
-
-    try
+    # Reproduce the former whole-payload .ToLower() (keys AND values) when asked.
+    # Search-AzGraph returns typed objects with ORIGINAL casing; every data-fetch
+    # call site passes -Lowercase and downstream collectors/report tests depend on
+    # lowercased type/location/value strings (and on both sides of intra-collector
+    # self-joins being lowercased), so round-trip through JSON to lowercase both.
+    if ($Lowercase -and $Rows.Count -gt 0)
     {
-        return ($Text | ConvertFrom-Json -ErrorAction Stop)
+        $Rows = @(($Rows | ConvertTo-Json -Depth 100).ToLower() | ConvertFrom-Json)
     }
-    catch
-    {
-        throw ("az graph query returned output that could not be parsed as JSON: {0}`nRaw output: {1}" -f $_.Exception.Message, $Text)
-    }
+
+    # Preserve the historical .data accessor the call sites read.
+    return [pscustomobject]@{ data = $Rows }
 }
 
 

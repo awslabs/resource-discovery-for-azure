@@ -167,11 +167,14 @@ public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 # level and returns reduced/empty results rather than a 403 when the identity
 # lacks a role, so "no access" and "empty" look identical there.
 #
-# To tell them apart we make ONE cheap, access-scoped control-plane call:
-# `az group list` on the subscription. Listing resource groups requires a role
-# on the subscription (Reader is enough). If the identity has none, ARM returns
-# AuthorizationFailed (403), which we detect. If it succeeds (even with zero
-# RGs) the identity DOES have access, so the subscription is genuinely empty.
+# To tell them apart we make ONE cheap, access-scoped control-plane call via the
+# native Az module (Invoke-AzRestMethod) - an authenticated ARM GET of the
+# subscription's resource groups. Listing resource groups requires a role on the
+# subscription (Reader is enough): HTTP 200 means the identity DOES have access
+# (so 0 resources == genuinely empty), 403/401 means no role, and 404 means ARM
+# is hiding a subscription the identity cannot see. Using the module cmdlet (not
+# the `az` CLI) keeps this portable across Windows/Linux/macOS with no per-OS
+# shell quoting - see .kiro/steering/cross-platform-powershell.md.
 #
 # Returns one of: 'NoAccess', 'Empty', 'Unknown'. Only called for subs that
 # returned 0 resources, so it adds no cost to the normal (non-empty) path.
@@ -179,46 +182,63 @@ function Get-SubscriptionAccessState
 {
     param([Parameter(Mandatory = $true)][string]$SubscriptionId)
 
-    # One cheap, access-scoped control-plane call. Capture stdout+stderr
-    # together and the exit code. Listing resource groups requires a role on
-    # the subscription, so a no-access identity gets AuthorizationFailed.
-    $Output = (az group list --subscription $SubscriptionId --query "length(@)" -o tsv 2>&1) -join ' '
-    $Exit = $LASTEXITCODE
-
-    if ($Exit -eq 0)
+    # One cheap, access-scoped control-plane read via the native Az module - an
+    # authenticated ARM GET of the subscription's resource groups. Portable by
+    # construction (no `az` CLI, no per-OS shell quoting). Invoke-AzRestMethod
+    # returns a PSHttpResponse with an integer .StatusCode for HTTP responses
+    # (including 4xx) and only throws for CLIENT-side failures (no usable
+    # context/token, network/DNS) - verified against a live session: 200 for an
+    # accessible subscription, 404 for an unknown one, neither thrown.
+    try
     {
-        # Call succeeded: identity can read the subscription, so 0 resources
-        # means it is genuinely empty.
+        $Response = Invoke-AzRestMethod -Method GET `
+            -Path ('/subscriptions/{0}/resourcegroups?api-version=2021-04-01' -f $SubscriptionId) `
+            -ErrorAction Stop
+    }
+    catch
+    {
+        # Client-side failure (no usable Azure context/token, network/DNS). This
+        # is not a permission verdict - hedge as Unknown so the caller retries.
+        return 'Unknown'
+    }
+
+    $Status = [int]$Response.StatusCode
+    if ($Status -ge 200 -and $Status -lt 300)
+    {
+        # Identity can read the subscription, so 0 resources means it is
+        # genuinely empty.
         return 'Empty'
     }
-    if ($Output -match 'AuthorizationFailed|does not have authorization|not authorized|Forbidden|403')
+    if ($Status -eq 403 -or $Status -eq 401)
     {
         return 'NoAccess'
     }
-    # An identity that can ENUMERATE a subscription (it came from
-    # Get-AzSubscription) but gets "not found / not recognized" on a
-    # control-plane read into it has no usable role there - ARM hides the
-    # subscription rather than returning a 403. Treat that as NoAccess too,
-    # since the sub IDs we probe are always real and tenant-visible.
-    if ($Output -match "not found|not recognized|could not be found|was not found")
+    if ($Status -eq 404)
     {
+        # An identity that can ENUMERATE a subscription (it came from
+        # Get-AzSubscription) but gets 404 on a control-plane read into it has
+        # no usable role there - ARM hides the subscription rather than
+        # returning a 403. Treat that as NoAccess too, since the sub IDs we
+        # probe are always real and tenant-visible.
         return 'NoAccess'
     }
-    # Some other failure (transient ARM error, throttling, network). Don't
-    # mislabel it - report Unknown so the summary can hedge.
+    # Any other status (429 throttling, 5xx, gateway) is transient/inconclusive.
+    # Don't mislabel it - report Unknown so the caller can retry and the summary
+    # can hedge.
     return 'Unknown'
 }
 
 # Probe control-plane READ access for a set of subscriptions up front, before any
 # per-subscription work. Reuses Get-SubscriptionAccessState (one cheap
-# `az group list` per sub): 'Empty' == the identity CAN read the subscription
+# native ARM GET per sub): 'Empty' == the identity CAN read the subscription
 # (accessible, whether or not it has resources), 'NoAccess' == no role on it,
 # 'Unknown' == an inconclusive/transient failure. A transient 'Unknown' is retried
 # a few times with a short backoff before it is accepted, so a throttle/network
 # blip is not mistaken for a permission gap. Returns one record per sub -
 # { Id, Name, State } with State in Empty/NoAccess/Unknown. This is side-effecting
-# (makes az calls); the proceed/skip DECISION is factored into the pure
-# Resolve-AccessPreflight below so it can be unit-tested without a live session.
+# (makes Azure control-plane calls); the proceed/skip DECISION is factored into
+# the pure Resolve-AccessPreflight below so it can be unit-tested without a live
+# session.
 function Test-SubscriptionAccessAll
 {
     param(

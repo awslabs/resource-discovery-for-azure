@@ -20,7 +20,8 @@ param (
     [switch]$IncludeDisabled,
 
     # By DEFAULT the wrapper verifies control-plane read access to EVERY in-scope
-    # subscription up front (one cheap `az group list` per sub) and HARD-STOPS
+    # subscription up front (one cheap native ARM resource-group read per sub)
+    # and HARD-STOPS
     # before doing any work if the signed-in identity cannot read one or more of
     # them - so an auth/permission gap is surfaced and fixed up front instead of
     # producing a report silently missing subscriptions (and risking the
@@ -1853,7 +1854,7 @@ if ($EmptySubs.Count -gt 0)
     {
         Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $UnknownSubs.Count) -ForegroundColor Yellow
         foreach ($e in $UnknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
-        Write-Host "    Verify manually: az group list --subscription <id>" -ForegroundColor Yellow
+        Write-Host "    Verify manually (PowerShell): (Invoke-AzRestMethod -Method GET -Path '/subscriptions/<id>/resourcegroups?api-version=2021-04-01').StatusCode" -ForegroundColor Yellow
     }
 
     # Persist the per-subscription access verdict to the diagnostic log so it
@@ -1879,7 +1880,7 @@ if ($EmptySubs.Count -gt 0)
     }
     foreach ($e in $UnknownSubs)
     {
-        $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify: az group list --subscription {1}" -f $e.Name, $e.Id)
+        $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify (PowerShell): (Invoke-AzRestMethod -Method GET -Path '/subscriptions/{1}/resourcegroups?api-version=2021-04-01').StatusCode" -f $e.Name, $e.Id)
     }
     $EmptyDiag += ""
     try

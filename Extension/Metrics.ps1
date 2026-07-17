@@ -439,8 +439,6 @@ if ($Task -eq 'Processing')
                 # spam is removed. Warnings (retry) and errors (giving up) below
                 # are intentionally kept on the console.
 
-                #$metricQuery = (az monitor metrics list --resource $_.Id --metric $_.MetricName --start-time $_.StartTime  --end-time $_.EndTime --interval $_.Interval --aggregation $_.Aggregation | ConvertFrom-Json)
-
                 $MetricError = $false
                 $MetricName = $_.MetricName
                 $MetricService = $_.Service

@@ -42,7 +42,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -492,5 +492,45 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
                 -FailedSubscriptions $null -CollectorFailures $null `
                 -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
+    }
+}
+
+Describe 'Expand-ServiceFilter' {
+    It 'returns an empty array for $null / no input' {
+        @(Expand-ServiceFilter -Service $null).Count | Should -Be 0
+        @(Expand-ServiceFilter).Count | Should -Be 0
+    }
+
+    It 'passes a clean single-element array through unchanged' {
+        $Result = @(Expand-ServiceFilter -Service @('VirtualMachines'))
+        $Result.Count | Should -Be 1
+        $Result[0] | Should -Be 'VirtualMachines'
+    }
+
+    It 'passes a clean multi-element array through unchanged' {
+        $Result = @(Expand-ServiceFilter -Service @('VirtualMachines', 'Streamanalytics'))
+        $Result | Should -Be @('VirtualMachines', 'Streamanalytics')
+    }
+
+    It 'splits a single comma-joined token (the pwsh -File binding case) into elements' {
+        # `pwsh -File wrapper.ps1 -Service a,b` binds @('VirtualMachines,Streamanalytics')
+        # as ONE element; the helper must split it so both invocation forms match.
+        $Result = @(Expand-ServiceFilter -Service @('VirtualMachines,Streamanalytics'))
+        $Result | Should -Be @('VirtualMachines', 'Streamanalytics')
+    }
+
+    It 'trims surrounding whitespace around comma-separated names' {
+        $Result = @(Expand-ServiceFilter -Service @('VirtualMachines, Streamanalytics , AKS'))
+        $Result | Should -Be @('VirtualMachines', 'Streamanalytics', 'AKS')
+    }
+
+    It 'drops empty tokens produced by stray/trailing commas' {
+        $Result = @(Expand-ServiceFilter -Service @('VirtualMachines,,', '', 'AKS'))
+        $Result | Should -Be @('VirtualMachines', 'AKS')
+    }
+
+    It 'de-duplicates repeated names' {
+        $Result = @(Expand-ServiceFilter -Service @('VirtualMachines', 'VirtualMachines,AKS'))
+        $Result | Should -Be @('VirtualMachines', 'AKS')
     }
 }

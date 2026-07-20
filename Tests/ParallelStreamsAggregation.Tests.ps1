@@ -15,11 +15,12 @@
 #   $env:TEST_SEQUENTIAL_BUNDLE  - path to AllSubscriptions_*.zip from a -ParallelStreams 1 run
 #   $env:TEST_PARALLEL_BUNDLE    - path to AllSubscriptions_*.zip from a -ParallelStreams N (N>=2) run
 #
-# If both env vars are unset, the test auto-discovers the two most recent
-# AllSubscriptions_*.zip files under $env:HOME/InventoryReports (or
-# $env:USERPROFILE\InventoryReports on Windows) and assumes the older one is
-# sequential and the newer one is parallel. For repeatability, set both env
-# vars explicitly.
+# Both env vars are REQUIRED. Auto-discovery of the two newest
+# AllSubscriptions_*.zip files was deliberately removed: two arbitrary bundles
+# in the default InventoryReports directory could come from runs with different
+# flag combinations (e.g. one -SkipMetrics, one not), producing false-positive
+# failures here. If either env var is unset, every test in this file is marked
+# Skipped (mirroring how Obfuscation.Tests.ps1 handles "no fixture provided").
 
 BeforeAll {
     # Resolve the sequential/parallel bundle pair *only* from explicit env vars.

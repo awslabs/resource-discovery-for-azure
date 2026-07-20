@@ -50,6 +50,11 @@ param (
     [switch] $Obfuscate,
     [switch] $SkipMetrics,
     [switch] $SkipConsumption,
+    # Collector scope forwarded to ResourceInventory.ps1's -Service filter. The
+    # parent (Run-AllSubscriptions.ps1) already normalized + validated it and
+    # passes a clean array via the Start-Job argument hashtable, so the worker
+    # forwards it as-is.
+    [string[]] $Service = @(),
     [int]    $ConcurrencyLimit = 6
 )
 
@@ -166,6 +171,7 @@ if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($Service -and $Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 
 # ---- Per-sub iteration -------------------------------------------------------

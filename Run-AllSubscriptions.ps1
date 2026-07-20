@@ -5,6 +5,17 @@ param (
     [switch]$Obfuscate,
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
+
+    # Scope collection to ONLY these service collectors (by their Services/*.ps1
+    # BaseName, e.g. VirtualMachines, Streamanalytics), across every in-scope
+    # subscription. Forwarded to ResourceInventory.ps1's own -Service filter.
+    # Useful for a migration that only cares about certain workloads (e.g. VMs +
+    # Stream Analytics) and does not want the rest even collected. Omit to collect
+    # all services (default). Accepts a comma list as one token
+    # (-Service VirtualMachines,Streamanalytics) or a PowerShell array; unknown
+    # names fail fast up front with the valid list.
+    [string[]]$Service,
+
     [switch]$Resume,
     # Retry only the subscriptions that failed on a previous run: the script
     # processes exactly the failures recorded in the resume-state file and
@@ -205,7 +216,18 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
         else
         {
             $ForwardArgs += ('-' + $BoundParam.Key)
-            $ForwardArgs += [string]$BoundValue
+            # Array-valued params (e.g. -Service) must survive the `pwsh -File`
+            # round-trip. `-File` does NOT split a space- or comma-separated token
+            # back into array elements, so join with commas into ONE token; the
+            # relaunched instance normalizes it via Expand-ServiceFilter.
+            if ($BoundValue -is [System.Array])
+            {
+                $ForwardArgs += (($BoundValue | ForEach-Object { [string]$_ }) -join ',')
+            }
+            else
+            {
+                $ForwardArgs += [string]$BoundValue
+            }
         }
     }
 
@@ -786,12 +808,31 @@ $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
+# Normalize the -Service filter (comma token / array, trim, de-dupe) then
+# fail FAST if any requested collector name is unknown - otherwise every
+# subscription's inner run would throw the same "matched no collectors" error.
+# Mirrors ResourceInventory.ps1's own -Service validation, but up front and once.
+$Service = Expand-ServiceFilter -Service $Service
+if ($Service.Count -gt 0)
+{
+    $AvailableServices = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object -Unique)
+    $UnknownServices = @($Service | Where-Object { $_ -notin $AvailableServices })
+    if ($UnknownServices.Count -gt 0)
+    {
+        Write-Host ("ERROR: -Service contains unknown collector name(s): [{0}]." -f ($UnknownServices -join ', ')) -ForegroundColor Red
+        Write-Host ("Valid collector names: [{0}]" -f ($AvailableServices -join ', ')) -ForegroundColor Yellow
+        Exit-Wrapper -Code 1
+    }
+    Write-Host ("Service filter active: collecting ONLY [{0}] across all in-scope subscriptions." -f ($Service -join ', ')) -ForegroundColor Cyan
+}
+
 # Build passthrough hashtable for optional switches
 $InventoryPassthrough = @{}
 if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 # Always forward ConcurrencyLimit so the operator can tune metrics-phase
 # throttling end-to-end from a single param instead of editing the inner
 # script's default. Defaults to 6 (the inner script's existing default), so
@@ -1192,6 +1233,7 @@ else
                 if ($Obfuscate) { $WorkerArgs.Obfuscate = $true }
                 if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
+                if ($Service.Count -gt 0) { $WorkerArgs.Service = $Service }
 
                 $Jobs += Start-Job -ScriptBlock {
                     param($WorkerScript, $WorkerArgs)

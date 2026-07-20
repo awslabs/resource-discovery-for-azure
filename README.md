@@ -496,7 +496,7 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 ### Run-AllSubscriptions Wrapper Parameters
 
 These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`, 
-`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-Service`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
 
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|---------|
@@ -510,6 +510,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
 | `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `Service` | String[] | Forwarded. Scope collection to ONLY these service collectors (by their `Services/*.ps1` base name, e.g. `VirtualMachines`, `Streamanalytics`), across every in-scope subscription — the rest are not collected. Useful for a migration that only cares about certain workloads. Accepts a comma list as one token or a PowerShell array; unknown names fail fast up front with the valid list. Omit to collect all services. | *(all)* | `-Service VirtualMachines,Streamanalytics` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting

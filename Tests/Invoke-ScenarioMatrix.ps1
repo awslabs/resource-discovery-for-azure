@@ -12,6 +12,8 @@
 #   3. skipboth         - -SkipMetrics -SkipConsumption
 #   4. skipmetrics      - -SkipMetrics only
 #   5. skipconsumption  - -SkipConsumption only
+#   6. service          - -Service VirtualMachines (collector scoping): asserts the
+#                         inventory contains ONLY the requested service(s)
 #
 # IMPORTANT - obfuscation vs PII tests:
 #   The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
@@ -35,7 +37,7 @@
 param(
     [string]   $SubscriptionID,
     [string]   $TenantID,
-    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption'),
+    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service'),
     [int]      $MetricsLookbackDays = 2,
     [int]      $ConcurrencyLimit = 6,
     [switch]   $KeepOutput
@@ -128,6 +130,11 @@ $Catalog = @{
     'skipboth'        = @{ Args = @{ SkipMetrics = $true; SkipConsumption = $true }; Tests = $StructuralTests }
     'skipmetrics'     = @{ Args = @{ SkipMetrics = $true }; Tests = $StructuralTests }
     'skipconsumption' = @{ Args = @{ SkipConsumption = $true }; Tests = $StructuralTests }
+    # Collector scoping. -SkipMetrics/-SkipConsumption keep it fast (the assertion
+    # is purely about WHICH resource types appear, not metrics/consumption). The
+    # ServiceScope suite reads $env:TEST_EXPECTED_SERVICES (set below) and asserts
+    # the inventory contains ONLY the requested collector(s) + metadata.
+    'service'         = @{ Args = @{ Service = @('VirtualMachines'); SkipMetrics = $true; SkipConsumption = $true }; Tests = @('ServiceScope.Tests.ps1') }
 }
 
 New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
@@ -185,6 +192,17 @@ try
             Remove-Item Env:TEST_SUBSCRIPTION_ID -ErrorAction SilentlyContinue
             Remove-Item Env:TEST_USER_EMAIL      -ErrorAction SilentlyContinue
             Remove-Item Env:TEST_DICT_PATH       -ErrorAction SilentlyContinue
+        }
+
+        # The service scenario drives ServiceScope.Tests.ps1 with the exact
+        # collector(s) it requested; clear it otherwise so the suite stays inert.
+        if ($name -eq 'service')
+        {
+            $env:TEST_EXPECTED_SERVICES = ($Scenario.Args.Service -join ',')
+        }
+        else
+        {
+            Remove-Item Env:TEST_EXPECTED_SERVICES -ErrorAction SilentlyContinue
         }
 
         $TestPaths = $Scenario.Tests | ForEach-Object { Join-Path $PSScriptRoot $_ }
@@ -258,10 +276,11 @@ try
 }
 finally
 {
-    Remove-Item Env:TEST_ZIP_PATH        -ErrorAction SilentlyContinue
-    Remove-Item Env:TEST_SUBSCRIPTION_ID -ErrorAction SilentlyContinue
-    Remove-Item Env:TEST_USER_EMAIL      -ErrorAction SilentlyContinue
-    Remove-Item Env:TEST_DICT_PATH       -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_ZIP_PATH            -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_SUBSCRIPTION_ID     -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_USER_EMAIL          -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_DICT_PATH           -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_EXPECTED_SERVICES   -ErrorAction SilentlyContinue
 
     if (-not $KeepOutput)
     {

@@ -775,19 +775,48 @@ function Read-StreamState
 function Write-StreamState
 {
     param([string]$Path, [string[]]$Completed, $FailedAttempts = @())
+    $Tmp = "$Path.tmp"
     try
     {
-        @{
+        $Json = @{
             Tenant         = $TenantID
             StreamId       = $StreamId
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+        } | ConvertTo-Json -Depth 4
+        # Atomic write: serialise to a sibling temp file, then replace the target
+        # in a single filesystem operation. A crash mid-write can only ever
+        # damage the temp file, so a -Resume never reads a half-written (and thus
+        # truncated / progress-losing) state file. [IO.File]::Move overwrite is
+        # cross-platform (PowerShell 7 / .NET) and atomic on the same volume.
+        Set-Content -LiteralPath $Tmp -Value $Json -Encoding utf8 -ErrorAction Stop
+        [System.IO.File]::Move($Tmp, $Path, $true)
     }
     catch
     {
+        Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
     }
+}
+
+# Normalize the -Service collector filter so it behaves identically however it
+# was supplied. In-shell PowerShell splits `-Service a,b` into @('a','b'), but
+# `pwsh -File Run-AllSubscriptions.ps1 -Service a,b` (how the PS 5.1 -> 7 relaunch
+# and some callers invoke it) binds the whole thing as the single element 'a,b'
+# - verified empirically. Splitting on comma here makes both forms yield the same
+# list; also trims whitespace, drops empties, and de-duplicates. Returns @() for
+# no input. Pure (no Azure/state), so it is unit-testable offline.
+function Expand-ServiceFilter
+{
+    param([string[]]$Service)
+    if (-not $Service) { return @() }
+    return @(
+        $Service |
+            ForEach-Object { $_ -split ',' } |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ } |
+            Select-Object -Unique
+    )
 }
 
 

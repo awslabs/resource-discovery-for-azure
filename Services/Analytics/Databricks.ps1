@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
-                'PricingTier'               = $Sku.name;
+                'Sku'               = $Sku.name;
                 # ManagedResourceGroupId is theoretically always set on a workspace, but
                 # split('/')[4] still fails if the property is missing or malformed.
                 # Guard cheaply rather than crash the whole subscription.

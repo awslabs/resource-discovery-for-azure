@@ -10,7 +10,15 @@ param(
     [Alias('ResourceSubscriptionDictionary')]$ResourceSubDictionary, # Map dictionary to obfuscate subscription names
     [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, # Map dictionary to obfuscate resource group names
     $Obfuscate, # Boolean flag toggle indicating whether sensitive infrastructure details should be masked
-    $MetricsLookbackDays = 31 # Default tracking duration window determining how far back to ask Azure for data
+    $MetricsLookbackDays = 31, # Default tracking duration window determining how far back to ask Azure for data
+    # EXPERIMENTAL (default OFF): fetch VM CPU/memory metrics through the Azure
+    # Monitor data-plane metrics:getBatch API (one REST call per <=50 resources,
+    # all aggregations in one request) instead of one Get-AzMetric per
+    # (resource, metric). Falls back to the per-call path on ANY batch failure
+    # (e.g. Microsoft.Insights RP not registered, narrow RBAC, regional issue),
+    # so metrics are never lost. When omitted, behaviour is byte-identical to the
+    # established per-call path.
+    [switch]$UseMetricsBatch
 )
 
 # Shared cross-cutting helpers (Write-RdaProgress). This extension is invoked via
@@ -49,6 +57,193 @@ if ($Task -eq 'Processing')
     {
         Write-Log -Message ('[Metrics] ' + $Line) -NoConsole -ToDebugLog
     }
+
+    # -----------------------------------------------------------------------
+    # Obfuscation of metric records (shared by the per-call and batch paths).
+    # Mutates each metric hashtable in place, mapping the real resource ID to
+    # its deterministic obfuscated value via the shared dictionaries (with the
+    # same prod_/nonprod_ fallback the per-call path has always used). Extracted
+    # to a single implementation so the per-call and batch fast-path produce
+    # IDENTICAL obfuscation - divergent copies could break determinism.
+    # -----------------------------------------------------------------------
+    function Protect-RdaMetrics
+    {
+        param($Metrics, $ResourceIdDictionary, $ResourceNameDictionary, $ResourceSubDictionary, $ResourceGroupDictionary)
+
+        foreach ($metric in $Metrics)
+        {
+            $OriginalId = $metric.ID
+            if (![string]::IsNullOrEmpty($OriginalId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($OriginalId))
+            {
+                $metric.ID = $ResourceIdDictionary[$OriginalId]
+                $metric.Name = $ResourceNameDictionary[$OriginalId]
+                $metric.Subscription = $ResourceSubDictionary[$OriginalId]
+                $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
+            }
+            else
+            {
+                # Fallback: resource not in main dictionary (e.g., deleted/transient resource)
+                # Cache the obfuscated value so same resource correlates across metrics
+                if (![string]::IsNullOrEmpty($OriginalId))
+                {
+                    $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
+                    $ResourceIdDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
+                    $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
+                    $ResourceSubDictionary[$OriginalId] = $FbPrefix + 'sub_' + [guid]::NewGuid().ToString()
+                    $ResourceGroupDictionary[$OriginalId] = $FbPrefix + 'rg_' + [guid]::NewGuid().ToString()
+                    $metric.ID = $ResourceIdDictionary[$OriginalId]
+                    $metric.Name = $ResourceNameDictionary[$OriginalId]
+                    $metric.Subscription = $ResourceSubDictionary[$OriginalId]
+                    $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
+                }
+            }
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # Build ONE metric record (the 16-field hashtable) from a single getBatch
+    # per-metric result, using the SAME downstream math as the per-call path:
+    # pick the aggregation column named by the def, keep null intervals, then
+    # 95th-percentile + Measure collapse. Kept identical to the inline per-call
+    # computation so batch output matches the frozen Metrics_*.json schema.
+    # -----------------------------------------------------------------------
+    function New-RdaMetricObject
+    {
+        param($Def, $MetricResult)
+
+        $MetricError = $false
+        $DataPoints = @()
+        if ($null -ne $MetricResult -and $MetricResult.timeseries)
+        {
+            $DataPoints = @($MetricResult.timeseries[0].data)
+        }
+        $MetricTotalCount = $DataPoints.Count
+
+        $Agg = ([string]$Def.Aggregation).ToLower()
+        $MetricQueryResults = @($DataPoints | ForEach-Object { $_.$Agg })
+        $MetricQueryResultsCount = ($MetricQueryResults.Where({ $null -ne $_ }).Count)
+        $MetricPercentile = 0
+        $MetricTimeSeries = 0
+
+        if ($MetricQueryResultsCount -eq 0)
+        {
+            $MetricQueryResults = 0
+            $MetricQueryResultsCount = 0
+            $MetricPercentile = 0
+        }
+        else
+        {
+            $MetricQueryResultsSorted = $MetricQueryResults | Sort-Object
+            $MetricPercentileIndex = [math]::Ceiling(0.95 * $MetricQueryResultsSorted.Count) - 1
+            $MetricPercentile = $MetricQueryResultsSorted[$MetricPercentileIndex]
+
+            if ($Def.Series -eq 'true')
+            {
+                $MetricTimeSeries = $MetricQueryResults.Where({ $null -ne $_ })
+            }
+
+            switch ($Def.Measure)
+            {
+                'Average' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Average).Average }
+                'Maximum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Maximum).Maximum }
+                'Sum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Sum).Sum }
+                'Minimum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Minimum).Minimum }
+                'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
+            }
+        }
+
+        return @{
+            'ID'               = $Def.Id;
+            'Subscription'     = $Def.SubName;
+            'ResourceGroup'    = $Def.ResourceGroup;
+            'Name'             = $Def.Name;
+            'Location'         = $Def.Location;
+            'Service'          = $Def.Service;
+            'Metric'           = $Def.MetricName;
+            'MetricAggregate'  = $Def.Aggregation;
+            'MetricTimeGrain'  = $Def.Interval;
+            'MetricMeasure'    = $Def.Measure;
+            'MetricPercentile' = $MetricPercentile;
+            'MetricValue'      = $MetricQueryResults;
+            'MetricCount'      = $MetricQueryResultsCount;
+            'MetricTotalCount' = $MetricTotalCount;
+            'MetricSeries'     = $MetricTimeSeries;
+            'MetricError'      = $MetricError;
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # Fetch metrics for a set of same-namespace metric defs via the Azure
+    # Monitor data-plane metrics:getBatch API. Groups by subscription + region
+    # (the endpoint is regional, one subscription per call), chunks resource ids
+    # to the 50-per-call limit, and requests all needed metric names + all
+    # aggregations in a single call. Returns an array of metric hashtables in the
+    # per-call shape. THROWS on any HTTP/parse failure so the caller can fall back.
+    # The Get-AzMetricsBatch cmdlet is deliberately NOT used - it ignores the Az
+    # context; we mint the data-plane token and call REST for portability.
+    # -----------------------------------------------------------------------
+    function Invoke-RdaMetricsBatch
+    {
+        param($Defs, $MetricNamespace)
+
+        $Results = [System.Collections.Generic.List[object]]::new()
+        if (-not $Defs -or @($Defs).Count -eq 0) { return $Results.ToArray() }
+
+        # subscription id + region derive from each resource's ARM id / Location.
+        # Group by subscription + region + timing so every def in a group shares
+        # the StartTime/EndTime/Interval we read from $First (correct for the
+        # uniform VM fast-path today, and safe if reused for mixed-interval defs).
+        $Groups = $Defs | Group-Object -Property { (([string]$_.Id) -split '/')[2] + '|' + $_.Location + '|' + $_.Interval + '|' + $_.StartTime + '|' + $_.EndTime }
+        foreach ($Group in $Groups)
+        {
+            $First = $Group.Group[0]
+            $SubscriptionId = (([string]$First.Id) -split '/')[2]
+            $Region = $First.Location
+            if ([string]::IsNullOrEmpty($SubscriptionId) -or [string]::IsNullOrEmpty($Region))
+            {
+                throw ("Metrics batch: cannot derive subscription/region from id '{0}'." -f $First.Id)
+            }
+
+            $Endpoint = "https://$Region.metrics.monitor.azure.com"
+            $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
+            $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLower() })
+            $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
+
+            $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
+            $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
+
+            $NamesParam = (($MetricNames | ForEach-Object { [uri]::EscapeDataString($_) }) -join ',')
+            $NsParam = [uri]::EscapeDataString($MetricNamespace)
+            $AggParam = ($Aggregations -join ',')
+
+            $ResourceIds = @($Group.Group | Select-Object -ExpandProperty Id -Unique)
+            for ($Offset = 0; $Offset -lt $ResourceIds.Count; $Offset += 50)
+            {
+                $Chunk = @($ResourceIds[$Offset..([math]::Min($Offset + 49, $ResourceIds.Count - 1))])
+                $Uri = "{0}/subscriptions/{1}/metrics:getBatch?api-version=2023-10-01&metricnamespace={2}&metricnames={3}&aggregation={4}&interval={5}&starttime={6}&endtime={7}" -f `
+                    $Endpoint, $SubscriptionId, $NsParam, $NamesParam, $AggParam, $IntervalIso, $StartIso, $EndIso
+                $BodyJson = @{ resourceids = $Chunk } | ConvertTo-Json
+
+                $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -ErrorAction Stop
+
+                foreach ($ResourceResult in @($Response.values))
+                {
+                    $ResId = [string]$ResourceResult.resourceid
+                    $ResourceDefs = @($Group.Group | Where-Object { ([string]$_.Id) -ieq $ResId })
+                    foreach ($Def in $ResourceDefs)
+                    {
+                        $MetricResult = @($ResourceResult.value | Where-Object { ([string]$_.name.value) -ieq ([string]$Def.MetricName) })[0]
+                        $Results.Add((New-RdaMetricObject -Def $Def -MetricResult $MetricResult))
+                    }
+                }
+            }
+        }
+
+        return $Results.ToArray()
+    }
+
     # Instantiate a clean, empty generic PowerShell Custom Object container
     $Tmp = New-Object PSObject
 
@@ -359,6 +554,85 @@ if ($Task -eq 'Processing')
 
 
     $MetricCount = $MetricDefs.Count
+
+    # ---------------------------------------------------------------------
+    # OPTIONAL data-plane batch fast-path for VM metrics (default OFF).
+    # ---------------------------------------------------------------------
+    # When -UseMetricsBatch is set, fetch the VM CPU/memory metrics through the
+    # Azure Monitor metrics:getBatch API (one REST call per <=50 VMs, all
+    # aggregations in one request) instead of one Get-AzMetric per (VM, metric).
+    # The produced records are obfuscated + written as the "_0" chunk, then
+    # removed from $MetricDefs so the per-call loop below handles only the rest.
+    # On ANY batch failure (Microsoft.Insights RP not registered, narrow RBAC,
+    # regional issue) we log and leave ALL defs on the per-call path - metrics
+    # are never lost (fail-safe, not fail-silent).
+    if ($UseMetricsBatch)
+    {
+        $VmBatchDefs = [System.Collections.Generic.List[object]]::new()
+        $RemainingDefs = [System.Collections.Generic.List[object]]::new()
+        foreach ($Def in $MetricDefs)
+        {
+            if ($Def.Service -eq 'Virtual Machines') { $VmBatchDefs.Add($Def) } else { $RemainingDefs.Add($Def) }
+        }
+
+        if ($VmBatchDefs.Count -gt 0)
+        {
+            try
+            {
+                $BatchObjects = Invoke-RdaMetricsBatch -Defs $VmBatchDefs -MetricNamespace 'microsoft.compute/virtualMachines'
+                # A 200 with zero records (empty values / no id match) must NOT be
+                # treated as success - that would drop the VM metrics silently. Throw
+                # so the catch below keeps ALL defs on the per-call path (fail-safe).
+                if (@($BatchObjects).Count -eq 0)
+                {
+                    throw ("getBatch returned no metric records for {0} VM metric def(s)." -f $VmBatchDefs.Count)
+                }
+
+                # Guard against a PARTIAL 200 (a resource omitted from values): any
+                # VM def not satisfied by a returned record is re-queued onto the
+                # per-call path so its metric is never lost. Computed on the REAL id
+                # (before the obfuscation pass below rewrites $BatchObj.ID).
+                $SatisfiedKeys = @{}
+                foreach ($BatchObj in $BatchObjects)
+                {
+                    $SatisfiedKeys[('{0}|{1}' -f ([string]$BatchObj.ID).ToLower(), $BatchObj.Metric)] = $true
+                }
+                $ReQueued = 0
+                foreach ($Def in $VmBatchDefs)
+                {
+                    if (-not $SatisfiedKeys.ContainsKey(('{0}|{1}' -f ([string]$Def.Id).ToLower(), $Def.MetricName)))
+                    {
+                        $RemainingDefs.Add($Def)
+                        $ReQueued++
+                    }
+                }
+
+                foreach ($BatchObj in $BatchObjects) { $Tmp.Metrics.Add($BatchObj) }
+
+                if ($Obfuscate)
+                {
+                    Protect-RdaMetrics -Metrics $Tmp.Metrics -ResourceIdDictionary $ResourceIdDictionary -ResourceNameDictionary $ResourceNameDictionary -ResourceSubDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary
+                }
+
+                # "_0" chunk matches the Metrics_<name>_<stamp>__<idx>.json naming
+                # the per-call loop uses (which starts at 1), so downstream globbing
+                # (Metrics_..._*.json) picks it up with no collision.
+                $BatchOutputPath = $FilePath + "_0.json"
+                $Tmp | ConvertTo-Json -depth 5 -compress | Out-File $BatchOutputPath -Encoding utf8
+                $Tmp.Metrics.Clear()
+
+                $MetricDefs = $RemainingDefs
+                $MetricCount = $MetricDefs.Count
+                Write-MetricsDiag ("Metrics batch fast-path: fetched {0} VM metric record(s) via getBatch; {1} metric def(s) remain on the per-call path." -f $BatchObjects.Count, $MetricCount)
+            }
+            catch
+            {
+                # Fallback: keep ALL defs (including VM defs) on the per-call path.
+                $Tmp.Metrics.Clear()
+                Write-MetricsDiag ("WARNING: metrics batch fast-path failed ({0}); falling back to per-call Get-AzMetric for all metrics." -f $_.Exception.Message)
+            }
+        }
+    }
 
     $WarningPreference = "SilentlyContinue"
 
@@ -704,34 +978,7 @@ if ($Task -eq 'Processing')
 
             if ($Obfuscate)
             {
-                foreach ($metric in $Tmp.Metrics)
-                {
-                    $OriginalId = $metric.ID
-                    if (![string]::IsNullOrEmpty($OriginalId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($OriginalId))
-                    {
-                        $metric.ID = $ResourceIdDictionary[$OriginalId]
-                        $metric.Name = $ResourceNameDictionary[$OriginalId]
-                        $metric.Subscription = $ResourceSubDictionary[$OriginalId]
-                        $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
-                    }
-                    else
-                    {
-                        # Fallback: resource not in main dictionary (e.g., deleted/transient resource)
-                        # Cache the obfuscated value so same resource correlates across metrics
-                        if (![string]::IsNullOrEmpty($OriginalId))
-                        {
-                            $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
-                            $ResourceIdDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
-                            $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
-                            $ResourceSubDictionary[$OriginalId] = $FbPrefix + 'sub_' + [guid]::NewGuid().ToString()
-                            $ResourceGroupDictionary[$OriginalId] = $FbPrefix + 'rg_' + [guid]::NewGuid().ToString()
-                            $metric.ID = $ResourceIdDictionary[$OriginalId]
-                            $metric.Name = $ResourceNameDictionary[$OriginalId]
-                            $metric.Subscription = $ResourceSubDictionary[$OriginalId]
-                            $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
-                        }
-                    }
-                }
+                Protect-RdaMetrics -Metrics $Tmp.Metrics -ResourceIdDictionary $ResourceIdDictionary -ResourceNameDictionary $ResourceNameDictionary -ResourceSubDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary
             }
 
             $OutputPath = $FilePath + "_" + $RangeIdx + ".json"

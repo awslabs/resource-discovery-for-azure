@@ -13,6 +13,13 @@ param ($TenantID,
     [switch]$DeviceLogin,
     [switch]$Obfuscate,
     [switch]$RunAllSubs,
+    # EXPERIMENTAL (default OFF). Forwarded to Extension/Metrics.ps1. When set,
+    # VM CPU/memory metrics are collected via the Azure Monitor metrics:getBatch
+    # data-plane API instead of one Get-AzMetric per (resource, metric), and the
+    # tool will attempt to register the Microsoft.Insights provider if needed.
+    # Falls back to the per-call path on any batch failure (no data lost). See
+    # the -UseMetricsBatch notes in Extension/Metrics.ps1.
+    [switch]$UseMetricsBatch,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
@@ -1075,7 +1082,7 @@ function ExecuteInventoryProcessing()
 
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch
         }
     }
 

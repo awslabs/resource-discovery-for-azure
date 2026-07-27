@@ -2148,6 +2148,21 @@ if ($WrapperTranscriptStarted)
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
 
+# Even on a run that completed and produced a report, collect the local support
+# logs when ANY per-phase failure occurred (failed subscriptions, collector
+# failures, or metrics/consumption auth-skips). The consolidated report already
+# carries RunSummary.log (failure counts) + the per-sub scrubbed diagnostics;
+# this additionally bundles the LOCAL detail logs (wrapper transcript + per-sub
+# DebugLog / ErrorLog) that are never in the shared report zip, so the operator
+# has one ready-to-send artefact if support needs the detail. Collected AFTER
+# Stop-Transcript so the finalized transcript is captured, and scoped to this
+# run via $RunStartTime. Failure exits are handled separately by Exit-Wrapper.
+$RunHadFailures = ($FailedSubscriptions.Count -gt 0) -or (@($Global:CollectorFailures).Count -gt 0) -or (@($Global:MetricsFailedSubs).Count -gt 0) -or (@($Global:ConsumptionFailedSubs).Count -gt 0)
+if ($RunHadFailures)
+{
+    Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime
+}
+
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0

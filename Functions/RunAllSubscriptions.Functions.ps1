@@ -19,6 +19,37 @@
 # =============================================================================
 
 # ---- Wrapper / shared -------------------------------------------------------
+# Best-effort collection of this run's LOCAL support/diagnostic logs into a
+# single zip (see New-RdaSupportLogBundle), with the operator-facing "here is
+# what to send" message. Fully ISOLATED: a collection failure is swallowed to a
+# verbose line so it can never disrupt the caller (an exit path, or the normal
+# end-of-run). Shared by BOTH Exit-Wrapper (any failure exit, where no report
+# bundle may have been produced) and the normal-completion path (a run that DID
+# produce a report but had per-phase failures). The caller passes $InventoryRoot
+# and the run start time (scopes collection to THIS run); a Get-Command guard
+# avoids a hard dependency if the collector is somehow absent.
+function Invoke-RdaSupportLogCollection
+{
+    param(
+        [string]$InventoryRoot,
+        [datetime]$SinceTime
+    )
+    if (-not (Get-Command New-RdaSupportLogBundle -ErrorAction SilentlyContinue)) { return }
+    try
+    {
+        $CollectParams = @{}
+        if (-not [string]::IsNullOrWhiteSpace($InventoryRoot)) { $CollectParams['InventoryRoot'] = $InventoryRoot }
+        if ($SinceTime -ne [datetime]::MinValue) { $CollectParams['SinceTime'] = $SinceTime }
+        $SupportBundle = New-RdaSupportLogBundle @CollectParams
+        if ($SupportBundle)
+        {
+            Write-Host ("Support logs collected: {0}" -f $SupportBundle) -ForegroundColor Cyan
+            Write-Host "  Send this file to support over a secure/private channel (it contains real identifiers)." -ForegroundColor Cyan
+        }
+    }
+    catch { Write-Verbose ("Support-log collection failed: {0}" -f $_.Exception.Message) }
+}
+
 # Single exit path that ensures the wrapper transcript is stopped before
 # returning to the host. Used by every error path that previously called
 # `exit <code>` directly.
@@ -35,25 +66,12 @@ function Exit-Wrapper
     # zip so an operator whose run hard-stopped BEFORE producing a report bundle
     # (auth / access-gate / consumption denial / output-verification) still has a
     # single artefact to send to support. The transcript is finalized just above,
-    # so it is captured. Scoped to $RunStartTime so only THIS run's files are
-    # gathered; $InventoryRoot / $RunStartTime are read from the caller (parent-
-    # wrapper) scope, the same way $WrapperTranscriptStarted is above. Fully
-    # isolated best-effort: a collection failure must NEVER change the exit code.
-    if ($Code -ne 0 -and (Get-Command New-RdaSupportLogBundle -ErrorAction SilentlyContinue))
+    # so it is captured. $InventoryRoot / $RunStartTime are read from the caller
+    # (parent-wrapper) scope, the same way $WrapperTranscriptStarted is above; the
+    # collection is isolated in the helper so it can NEVER change the exit code.
+    if ($Code -ne 0)
     {
-        try
-        {
-            $CollectParams = @{}
-            if (-not [string]::IsNullOrWhiteSpace($InventoryRoot)) { $CollectParams['InventoryRoot'] = $InventoryRoot }
-            if ($RunStartTime -is [datetime]) { $CollectParams['SinceTime'] = $RunStartTime }
-            $SupportBundle = New-RdaSupportLogBundle @CollectParams
-            if ($SupportBundle)
-            {
-                Write-Host ("Support logs collected: {0}" -f $SupportBundle) -ForegroundColor Cyan
-                Write-Host "  Send this file to support over a secure/private channel (it contains real identifiers)." -ForegroundColor Cyan
-            }
-        }
-        catch { Write-Verbose ("Support-log collection on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
+        Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime
     }
 
     exit $Code

@@ -89,6 +89,7 @@ If ($Task -eq 'Processing')
                 'ImageSku'                      = $Data.storageProfile.imageReference.sku;
                 'ImageOffer'                    = $Data.storageProfile.imageReference.offer;
                 'HybridBenefit'                 = $Lic;
+                'OSName'                        = $Data.extended.instanceView.osname;
                 'OSType'                        = $Data.storageProfile.osDisk.osType;
                 'OSVersion'                     = $Data.extended.instanceView.osversion;
                 'OSDisk'                        = $OSDisk;

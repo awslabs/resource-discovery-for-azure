@@ -23,10 +23,9 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'             = $1.RESOURCEGROUP;
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
-                'PricingTier'               = $Sku.name;
-                # ManagedResourceGroupId is theoretically always set on a workspace, but
-                # split('/')[4] still fails if the property is missing or malformed.
-                # Guard cheaply rather than crash the whole subscription.
+                'Sku'                       = $Sku.name;
+                # ManagedResourceGroupId is usually set, but below we make sure it's there before we
+                # split it, otherwise a missing or malformed value crashes the subscription.
                 'ManagedResourceGroup'      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } elseif ([string]::IsNullOrEmpty($Data.managedResourceGroupId)) { $null } else { $Data.managedResourceGroupId.split('/')[4] };
                 'StorageAccount'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.parameters.storageAccountName.value };
                 'StorageAccountSKU'         = $Data.parameters.storageAccountSkuName.value;

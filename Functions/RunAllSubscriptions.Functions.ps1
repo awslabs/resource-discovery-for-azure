@@ -30,6 +30,32 @@ function Exit-Wrapper
         try { Stop-Transcript | Out-Null }
         catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
     }
+
+    # On a FAILURE exit, collect this run's LOCAL support/diagnostic logs into one
+    # zip so an operator whose run hard-stopped BEFORE producing a report bundle
+    # (auth / access-gate / consumption denial / output-verification) still has a
+    # single artefact to send to support. The transcript is finalized just above,
+    # so it is captured. Scoped to $RunStartTime so only THIS run's files are
+    # gathered; $InventoryRoot / $RunStartTime are read from the caller (parent-
+    # wrapper) scope, the same way $WrapperTranscriptStarted is above. Fully
+    # isolated best-effort: a collection failure must NEVER change the exit code.
+    if ($Code -ne 0 -and (Get-Command New-RdaSupportLogBundle -ErrorAction SilentlyContinue))
+    {
+        try
+        {
+            $CollectParams = @{}
+            if (-not [string]::IsNullOrWhiteSpace($InventoryRoot)) { $CollectParams['InventoryRoot'] = $InventoryRoot }
+            if ($RunStartTime -is [datetime]) { $CollectParams['SinceTime'] = $RunStartTime }
+            $SupportBundle = New-RdaSupportLogBundle @CollectParams
+            if ($SupportBundle)
+            {
+                Write-Host ("Support logs collected: {0}" -f $SupportBundle) -ForegroundColor Cyan
+                Write-Host "  Send this file to support over a secure/private channel (it contains real identifiers)." -ForegroundColor Cyan
+            }
+        }
+        catch { Write-Verbose ("Support-log collection on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
+    }
+
     exit $Code
 }
 
@@ -103,6 +129,51 @@ function Get-RecommendedParallelism
         RamGB       = $RamGB
         Streams     = [int]$Streams
         Concurrency = [int]$Concurrency
+    }
+}
+
+# Probe whether PowerShell background jobs (Start-Job) can actually be launched
+# in this session. Returns $true when jobs are usable, $false otherwise.
+#
+# WHY: the parallel-streams path launches each stream with Start-Job (a child
+# pwsh process). On a Windows host under a system-wide application-control
+# policy (WDAC / AppLocker / __PSLockdownPolicy) the interactive session can be
+# FullLanguage while the machine enforces ConstrainedLanguage system-wide;
+# Start-Job then throws synchronously ("Cannot start job. The language mode for
+# this session is incompatible with the system-wide language mode.") and NO job
+# process is ever created. Left unguarded, the whole parallel run produces an
+# empty report ("No per-subscription zip files found ... to consolidate").
+#
+# Rather than replicate PowerShell's internal language-mode comparison (brittle,
+# and the trigger set can shift between releases), this probes the exact
+# capability the caller needs: it launches a trivial job and confirms it starts.
+# Any failure to START the job is treated as "not supported" so the caller can
+# fall back to the sequential path (which never calls Start-Job). The probe job
+# is always removed. On Linux/macOS and unrestricted Windows this simply returns
+# $true.
+function Test-BackgroundJobSupport
+{
+    # The language-mode lockdown this guards against is Windows-only, so on
+    # Linux/macOS skip the probe entirely rather than spawn a needless child
+    # pwsh (mirrors Disable-ConsoleQuickEdit's early return in this file).
+    if (-not $IsWindows) { return $true }
+
+    $Probe = $null
+    try
+    {
+        $Probe = Start-Job -ScriptBlock { $true } -ErrorAction Stop
+        return $true
+    }
+    catch
+    {
+        return $false
+    }
+    finally
+    {
+        if ($Probe)
+        {
+            try { Remove-Job -Job $Probe -Force -ErrorAction SilentlyContinue } catch { Write-Verbose ("Probe job cleanup failed: {0}" -f $_.Exception.Message) }
+        }
     }
 }
 
@@ -1125,4 +1196,225 @@ function Get-RunSummaryLogContent
     }
 
     return $Lines.ToArray()
+}
+
+# Return $true if the consolidated zip contains an entry with the given name
+# (matched case-insensitively against both the entry's root-level name and its
+# full path). Used to VERIFY that the run summary actually persisted into the
+# shared bundle after a Compress-Archive -Update fold, so a silent fold failure
+# can be surfaced instead of shipping a bundle with no run summary.
+#
+# Uses the cross-platform .NET System.IO.Compression API rather than shelling
+# out to any archive tool, so it behaves identically on Windows, Linux and
+# macOS (see the cross-platform-powershell steering rule). Any error (archive
+# locked, unreadable, missing) returns $false - the caller treats $false as
+# "could not confirm the entry is present" and keeps the on-disk fallback copy.
+function Test-ZipArchiveEntry
+{
+    param(
+        [Parameter(Mandatory)][string]$ZipPath,
+        [Parameter(Mandatory)][string]$EntryName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ZipPath) -or -not (Test-Path -LiteralPath $ZipPath))
+    {
+        return $false
+    }
+
+    $Archive = $null
+    try
+    {
+        # System.IO.Compression.FileSystem carries ZipFile::OpenRead. It is loaded
+        # by default under PowerShell 7 but Add-Type is a cheap no-op guard for
+        # any host where it is not, and never throws when already present.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        foreach ($Entry in $Archive.Entries)
+        {
+            if ($Entry.Name -ieq $EntryName -or $Entry.FullName -ieq $EntryName)
+            {
+                return $true
+            }
+        }
+        return $false
+    }
+    catch
+    {
+        return $false
+    }
+    finally
+    {
+        if ($null -ne $Archive) { $Archive.Dispose() }
+    }
+}
+
+# Collect the LOCAL support/diagnostic logs a run leaves behind into a single
+# zip the operator can hand to support - especially for a FAILED run that never
+# produced a consolidated report bundle (auth / access-gate / consumption hard-
+# fail), where the only evidence lives in loose, timestamped files scattered
+# under $InventoryRoot. Gathers the wrapper transcript + failure / access-verdict
+# diagnostics logs and every per-subscription log (the scrubbed Diagnostics_*
+# plus the LOCAL DebugLog_* / ErrorLog_* / Transcript_Log_*), preserves each
+# per-subscription folder so the grouping is obvious, and writes a MANIFEST.txt
+# describing each file.
+#
+# IMPORTANT - this bundle is NOT safe for a public surface. The wrapper
+# transcript and the per-sub DebugLog / ErrorLog / Transcript carry real
+# identifiers (signed-in UPN, tenant / subscription IDs, resource names) and raw
+# exception text. It is a PRIVATE support artefact to send over a secure channel,
+# never posted publicly. The obfuscation dictionary (ObfuscationDictionary_* /
+# Full_*) - the de-obfuscation reveal key - is EXPLICITLY excluded so collecting
+# logs can never leak the mapping.
+#
+# Cross-platform by construction (Get-ChildItem / Copy-Item / Compress-Archive +
+# .NET path APIs; no external CLI). Best-effort: an unreadable individual file is
+# skipped rather than aborting the whole collection. Returns the destination zip
+# path, or $null when nothing matched (with a warning) so the caller can tell the
+# operator there was nothing to collect.
+function New-RdaSupportLogBundle
+{
+    param(
+        # Root the run wrote to. Defaults to the same platform path the wrapper
+        # uses so a bare New-RdaSupportLogBundle "just works" after a run.
+        [string]$InventoryRoot,
+        # Where to write the bundle. Defaults to a timestamped zip in InventoryRoot.
+        [string]$DestinationPath,
+        # When supplied, include only files last written at/after this time (scope
+        # to a single run). Omit to collect everything currently present.
+        [datetime]$SinceTime,
+        # Also include the aggregate MainSummary_*.html for context.
+        [switch]$IncludeMainSummary
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InventoryRoot))
+    {
+        $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+    }
+    if (-not (Test-Path -LiteralPath $InventoryRoot -PathType Container))
+    {
+        Write-Warning ("Support-log collection: inventory root not found at '{0}'; nothing to collect." -f $InventoryRoot)
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($DestinationPath))
+    {
+        $DestinationPath = Join-Path $InventoryRoot ('RdaSupportLogs_{0}.zip' -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+    }
+
+    # Names that must NEVER be collected: the reveal dictionary would expose the
+    # de-obfuscation mapping. Matched case-insensitively against the file name.
+    $ExcludedNamePatterns = @('ObfuscationDictionary_*', 'Full_*')
+    $IsExcluded = {
+        param($Name)
+        foreach ($Pat in $ExcludedNamePatterns) { if ($Name -like $Pat) { return $true } }
+        return $false
+    }
+    # $SinceTime is a value-type param: when the caller omits it, it defaults to
+    # [datetime]::MinValue, so that sentinel (closed over from the function scope)
+    # is the reliable "was it supplied?" test inside this scriptblock.
+    $PassesSince = {
+        param($File)
+        if ($SinceTime -ne [datetime]::MinValue)
+        {
+            return ($File.LastWriteTime -ge $SinceTime)
+        }
+        return $true
+    }
+
+    # Wrapper-level logs live directly in InventoryRoot (non-recursive).
+    $WrapperPatterns = @(
+        'RunAllSubscriptions_transcript_*.txt',
+        'RunAllSubscriptions_failures_*.log',
+        'RunAllSubscriptions_diagnostics_*.log',
+        'RunSummary_*.log'
+    )
+    if ($IncludeMainSummary) { $WrapperPatterns += 'MainSummary_*.html' }
+
+    # Per-subscription logs live in ResourcesReport<stamp>/ subfolders.
+    $PerSubPatterns = @(
+        'Diagnostics_*.log',
+        'DebugLog_*.log',
+        'ErrorLog_*.log',
+        'Transcript_Log_*.txt'
+    )
+
+    # Build a staging tree: wrapper logs at the root, per-sub logs grouped under
+    # their originating ResourcesReport<stamp>/ folder name.
+    $Stage = Join-Path $InventoryRoot ('.rda-supportlogs-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+    $Collected = 0
+    try
+    {
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+
+        foreach ($Pattern in $WrapperPatterns)
+        {
+            foreach ($File in @(Get-ChildItem -Path $InventoryRoot -File -Filter $Pattern -ErrorAction SilentlyContinue))
+            {
+                if ((& $IsExcluded $File.Name) -or -not (& $PassesSince $File)) { continue }
+                try { Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $Stage $File.Name) -Force; $Collected++ }
+                catch { Write-Verbose ("Support-log collection: skipped '{0}': {1}" -f $File.FullName, $_.Exception.Message) }
+            }
+        }
+
+        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue))
+        {
+            $DestSubDir = Join-Path $Stage $SubDir.Name
+            foreach ($Pattern in $PerSubPatterns)
+            {
+                foreach ($File in @(Get-ChildItem -Path $SubDir.FullName -File -Filter $Pattern -ErrorAction SilentlyContinue))
+                {
+                    if ((& $IsExcluded $File.Name) -or -not (& $PassesSince $File)) { continue }
+                    if (-not (Test-Path -LiteralPath $DestSubDir -PathType Container)) { New-Item -ItemType Directory -Path $DestSubDir -Force | Out-Null }
+                    try { Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $DestSubDir $File.Name) -Force; $Collected++ }
+                    catch { Write-Verbose ("Support-log collection: skipped '{0}': {1}" -f $File.FullName, $_.Exception.Message) }
+                }
+            }
+        }
+
+        if ($Collected -eq 0)
+        {
+            Write-Warning ("Support-log collection: no matching log files found under '{0}'{1}." -f $InventoryRoot, $(if ($PSBoundParameters.ContainsKey('SinceTime')) { ' for the requested time window' } else { '' }))
+            return $null
+        }
+
+        # Manifest: what each file is + the mandatory do-not-post-publicly warning.
+        $Manifest = [System.Collections.Generic.List[string]]::new()
+        $Manifest.Add('Resource Discovery for Azure - support log bundle')
+        $Manifest.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+        $Manifest.Add(('Inventory root  : {0}' -f $InventoryRoot))
+        if ($PSBoundParameters.ContainsKey('SinceTime')) { $Manifest.Add(('Scoped to files at/after : {0}' -f $SinceTime.ToString('yyyy-MM-dd HH:mm:ss'))) }
+        $Manifest.Add(('Files collected : {0}' -f $Collected))
+        $Manifest.Add('')
+        $Manifest.Add('*** PRIVATE - contains real identifiers ***')
+        $Manifest.Add('This bundle includes the wrapper transcript and per-subscription debug/error')
+        $Manifest.Add('logs, which carry the signed-in account (UPN), tenant/subscription IDs,')
+        $Manifest.Add('resource names, and raw error text. Send it to support over a SECURE/PRIVATE')
+        $Manifest.Add('channel only. Do NOT attach it to a public issue, PR, or forum post.')
+        $Manifest.Add('The obfuscation dictionary (the de-obfuscation reveal key) is deliberately')
+        $Manifest.Add('NOT included in this bundle.')
+        $Manifest.Add('')
+        $Manifest.Add('Contents:')
+        $Manifest.Add('  RunAllSubscriptions_transcript_*.txt  - full wrapper console transcript (start-to-exit; present even when the run hard-failed before producing a report).')
+        $Manifest.Add('  RunAllSubscriptions_failures_*.log    - wrapper failure diagnostics (per subscription / per stream).')
+        $Manifest.Add('  RunAllSubscriptions_diagnostics_*.log - 0-resource access verdict (no-access / empty / undetermined).')
+        $Manifest.Add('  RunSummary_*.log                      - run parameters, subscription tally, per-phase failure counts (per-sub detail only for non-obfuscated runs).')
+        if ($IncludeMainSummary) { $Manifest.Add('  MainSummary_*.html                    - aggregate run summary (context).') }
+        $Manifest.Add('  <ResourcesReport*>/Diagnostics_*.log  - per-subscription SHAREABLE (identifier-scrubbed) phase/health diagnostics.')
+        $Manifest.Add('  <ResourcesReport*>/DebugLog_*.log     - per-subscription collector heartbeat (START/DONE/FAIL) + metrics diagnostics (LOCAL; real names).')
+        $Manifest.Add('  <ResourcesReport*>/ErrorLog_*.log     - per-subscription error log (LOCAL; real names).')
+        $Manifest.Add('  <ResourcesReport*>/Transcript_Log_*.txt - per-subscription PowerShell transcript (LOCAL; real names).')
+        $Manifest.ToArray() | Out-File -FilePath (Join-Path $Stage 'MANIFEST.txt') -Encoding utf8
+
+        $StageItems = @(Get-ChildItem -Path $Stage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        Compress-Archive -Path $StageItems -DestinationPath $DestinationPath -Force
+        return $DestinationPath
+    }
+    catch
+    {
+        Write-Warning ("Support-log collection failed: {0}" -f $_.Exception.Message)
+        return $null
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }

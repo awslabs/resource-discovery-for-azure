@@ -808,6 +808,31 @@ $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
+# Background-job capability guard. The parallel-streams path below launches each
+# stream with Start-Job (a child pwsh process). On a Windows host under a
+# system-wide application-control policy (WDAC / AppLocker / __PSLockdownPolicy)
+# the interactive session can be FullLanguage while the machine enforces
+# ConstrainedLanguage system-wide; Start-Job then throws synchronously ("Cannot
+# start job. The language mode for this session is incompatible with the
+# system-wide language mode.") and NO stream process is ever created - the run
+# ends having produced nothing to consolidate. Detect that up front and fall
+# back to the sequential path (which never calls Start-Job) so a locked-down
+# host still gets a full report, just single-threaded. Only probe when we would
+# actually use parallelism (the auto-tuner can select >1 without the operator
+# asking, so this also covers the out-of-the-box case).
+if ($ParallelStreams -gt 1 -and -not (Test-BackgroundJobSupport))
+{
+    Write-Host ""
+    Write-Host "WARNING: PowerShell background jobs (Start-Job) are unavailable in this session." -ForegroundColor Yellow
+    Write-Host "         This host enforces a system-wide language-mode / application-control policy" -ForegroundColor Yellow
+    Write-Host "         (WDAC / AppLocker) that is incompatible with Start-Job, so parallel streams" -ForegroundColor Yellow
+    Write-Host "         cannot launch here. Falling back to the SEQUENTIAL path (one subscription at a" -ForegroundColor Yellow
+    Write-Host "         time). The report content is identical - only slower. Pass -ParallelStreams 1" -ForegroundColor Yellow
+    Write-Host "         explicitly to select the sequential path up front and silence this notice." -ForegroundColor Yellow
+    Write-Host ""
+    $ParallelStreams = 1
+}
+
 # Normalize the -Service filter (comma token / array, trim, de-dupe) then
 # fail FAST if any requested collector name is unknown - otherwise every
 # subscription's inner run would throw the same "matched no collectors" error.
@@ -1908,61 +1933,120 @@ if ($WrapperTranscriptStarted)
 }
 Write-Host "=========================================" -ForegroundColor Green
 
-# --- Fold run-level extras into the consolidated bundle --------------
-# Make the single AllSubscriptions zip the customer receives self-contained.
-# It already holds the per-subscription inner zips (the ingestion payload,
-# left untouched); here we ADD a run-level RunSummary.log (parameters + sub
-# tally + health) and the unified MainSummary.html, plus a copy of each
-# per-subscription HTML so the summary's drill-down links resolve straight
-# out of the extracted zip. Only additive members are folded in and NO loose
-# *.json is added, so the ingestion contract (inner-zip *.json members) is
-# unchanged and nothing is double-ingested. Best-effort: any failure is a
-# warning - the per-sub reports and the outer zip are already written.
+# --- Run summary (ALWAYS produced) + fold run-level extras into the bundle ---
+# The run summary (parameters + sub tally + health) is the ONE artefact we must
+# never lose: it is how a shared bundle is triaged, and a customer has already
+# received a zip that was missing it. So its generation and on-disk write are
+# UNCONDITIONAL and decoupled from both the outer zip and the best-effort
+# MainSummary/HTML bundling below - a failure in any later step can no longer
+# suppress it. Three independent stages, each in its own try/catch:
+#   1. Generate RunSummary content and write it to disk (always).
+#   2. Fold RunSummary.log into the consolidated zip as its OWN operation, then
+#      verify it actually persisted (a silent Compress-Archive -Update failure
+#      previously dropped it); the on-disk copy from stage 1 is the fallback.
+#   3. Fold the unified MainSummary.html + a copy of each per-subscription HTML
+#      (drill-down targets) into the zip. Only additive members and NO loose
+#      *.json, so the ingestion contract (inner-zip *.json members) is unchanged
+#      and nothing is double-ingested.
+
+# Version is display-only. Prefer Version.json (in parallel mode the wrapper's
+# $Global:Version is never set - child processes set it), fall back to
+# $Global:Version then blank. Resolved once and shared by the stages below.
+$BundleVer = $Global:Version
+try
+{
+    $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+    $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
+}
+catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
+
+# --- Stage 1: generate RunSummary + durable on-disk copy (unconditional) -----
+# Obfuscated runs emit counts only (the wrapper holds no per-sub obfuscation
+# dictionary); default runs include per-sub detail. The on-disk copy lives next
+# to the report(s) in $InventoryRoot so the operator always has it even when no
+# consolidated zip was produced (e.g. a resume run that regenerated nothing) or
+# when the zip fold in stage 2 fails.
+$RunSummaryLocalFile = $null
+try
+{
+    $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+    $RunSummaryLines = Get-RunSummaryLogContent `
+        -InvocationParameters $PSBoundParameters `
+        -Version $BundleVer `
+        -StartTime $RunStartTime -EndTime (Get-Date) `
+        -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
+        -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
+        -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
+        -FailedSubscriptions $FailedSubscriptions `
+        -CollectorFailures $Global:CollectorFailures `
+        -MetricsFailedSubs $Global:MetricsFailedSubs `
+        -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+        -ConsumptionRecordCount $ConsumptionRecordTotal `
+        -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
+        -Streams $ParallelStreams -StreamsSource $StreamsSrc `
+        -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `
+        -Obfuscated:$Obfuscate
+    $RunSummaryLocalFile = Join-Path $InventoryRoot ('RunSummary_{0}.log' -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+    $RunSummaryLines | Out-File -FilePath $RunSummaryLocalFile -Encoding utf8
+    Write-Host ("Run summary written: {0}" -f $RunSummaryLocalFile) -ForegroundColor Green
+}
+catch
+{
+    $RunSummaryLocalFile = $null
+    Write-Host ("WARNING: Could not generate the run summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# --- Stage 2: fold RunSummary.log into the zip (isolated + verified) ---------
+# Its OWN operation so a MainSummary/HTML failure in stage 3 cannot prevent the
+# run summary landing in the shared bundle. Verified afterwards via the
+# cross-platform .NET zip reader; if it did not persist we say so loudly and
+# point at the on-disk copy from stage 1.
+if ($null -ne $RunSummaryLocalFile -and (Test-Path -LiteralPath $RunSummaryLocalFile) -and `
+        $null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+{
+    $RunSummaryStage = $null
+    try
+    {
+        $RunSummaryStage = Join-Path $InventoryRoot ('.rda-runsummary-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+        New-Item -ItemType Directory -Path $RunSummaryStage -Force | Out-Null
+        Copy-Item -LiteralPath $RunSummaryLocalFile -Destination (Join-Path $RunSummaryStage 'RunSummary.log') -Force
+        Compress-Archive -Path (Join-Path $RunSummaryStage 'RunSummary.log') -DestinationPath $OuterZipFile -Update
+
+        if (Test-ZipArchiveEntry -ZipPath $OuterZipFile -EntryName 'RunSummary.log')
+        {
+            Write-Host ("Run summary folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+        }
+        else
+        {
+            Write-Host ("WARNING: RunSummary.log did not persist into {0}; the on-disk copy remains at {1}" -f (Split-Path -Path $OuterZipFile -Leaf), $RunSummaryLocalFile) -ForegroundColor Yellow
+        }
+    }
+    catch
+    {
+        Write-Host ("WARNING: Could not fold RunSummary.log into the consolidated zip (on-disk copy at {0}): {1}" -f $RunSummaryLocalFile, $_.Exception.Message) -ForegroundColor Yellow
+    }
+    finally
+    {
+        if ($null -ne $RunSummaryStage) { Remove-Item -LiteralPath $RunSummaryStage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# --- Stage 3: fold MainSummary.html + per-sub HTML into the bundle -----------
+# Best-effort: any failure here is a warning and can no longer take the run
+# summary (already folded in stage 2) down with it.
 if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 {
+    $BundleStage = $null
     try
     {
         $BundleStage = Join-Path $InventoryRoot ('.rda-bundle-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
         New-Item -ItemType Directory -Path $BundleStage -Force | Out-Null
 
-        # Version is display-only. Prefer Version.json (in parallel mode the
-        # wrapper's $Global:Version is never set - child processes set it),
-        # fall back to $Global:Version then blank.
-        $BundleVer = $Global:Version
-        try
-        {
-            $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
-            $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
-        }
-        catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
-
-        # 1. RunSummary.log - run-level parameters + tally + health. Obfuscated
-        #    runs emit counts only (the wrapper holds no per-sub obfuscation
-        #    dictionary); default runs include per-sub detail.
-        $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
-        $RunSummaryLines = Get-RunSummaryLogContent `
-            -InvocationParameters $PSBoundParameters `
-            -Version $BundleVer `
-            -StartTime $RunStartTime -EndTime (Get-Date) `
-            -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
-            -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
-            -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
-            -FailedSubscriptions $FailedSubscriptions `
-            -CollectorFailures $Global:CollectorFailures `
-            -MetricsFailedSubs $Global:MetricsFailedSubs `
-            -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
-            -ConsumptionRecordCount $ConsumptionRecordTotal `
-            -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
-            -Streams $ParallelStreams -StreamsSource $StreamsSrc `
-            -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `
-            -Obfuscated:$Obfuscate
-        $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
-
-        # 2. Unified MainSummary.html at the bundle root (renamed from the
+        # 1. Unified MainSummary.html at the bundle root (renamed from the
         #    timestamped file; its links are relative to sibling folders, so
         #    renaming the summary itself does not break them). The drill-down
         #    link folders are then renamed from ResourcesReport<stamp>/ to
-        #    HTML<stamp>/ (see step 3) - these bundle folders carry ONLY the
+        #    HTML<stamp>/ (see step 2) - these bundle folders carry ONLY the
         #    report HTML, so the HTML prefix distinguishes them at a glance
         #    from the sibling ResourcesReport_<stamp>.zip data archives (which
         #    hold the Inventory/Metrics/Consumption members). Rewrite the
@@ -1976,7 +2060,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' | Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
         }
 
-        # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
+        # 2. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
         #    name is the source ResourcesReport<stamp> with the leading
         #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
         #    summary links. HTML only - no *.json/csv - so nothing is
@@ -1999,13 +2083,16 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         if ($StageItems.Count -gt 0)
         {
             Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
-            Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+            Write-Host ("Bundle finalized: MainSummary.html + per-subscription HTML folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
         }
-        Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
     }
     catch
     {
-        Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Write-Host ("WARNING: Could not fold main-summary / per-subscription HTML into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+    finally
+    {
+        if ($null -ne $BundleStage) { Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 

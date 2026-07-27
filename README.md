@@ -85,8 +85,6 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
-- Azure CLI Resource-Graph Extension (auto-installed by script)
 - **Az PowerShell module** — only four submodules are needed (install before running — see below)
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
@@ -127,8 +125,8 @@ Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PS
 ![CloudShell](./docs/cloudshell.png)
 
 **For Local Environment:**
-1. Open PowerShell 7 as Administrator
-2. Ensure Azure CLI is installed and configured
+1. Open PowerShell 7
+2. Sign in with `Connect-AzAccount` (the tool also prompts you to authenticate on first run). The required Az PowerShell modules are checked — and offered for install on interactive runs — automatically; see [Installing the required PowerShell modules](#installing-the-required-powershell-modules) above.
 
 ### Step 2: Get the Script
 
@@ -354,7 +352,17 @@ Inside each subscription's report folder, the inner script also writes a consoli
 
 Obfuscated runs (`-Obfuscate`) additionally produce a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP. It is human-readable and scrubbed — subscriptions appear as their obfuscated tokens and other identifiers are masked — and it summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer). Because it is safe to share, it can go to the AWS team alongside the report to explain any gaps without exposing real names. It is a plain `.log` on purpose so the ingestion pipeline treats it as an attachment, not as report data.
 
-When reporting an issue, attach the wrapper transcript and the failure log (and, for obfuscated runs, the in-ZIP diagnostics log). The local `DebugLog_*.log` carries the most detail — share it too if you've confirmed it doesn't expose sensitive names. Together they contain enough context to diagnose most failures without a follow-up round trip.
+**Collecting everything in one step.** Rather than hunting these files down individually, run the log collector to gather them into a single zip you can hand to support:
+
+```
+pwsh ./Functions/Collect-SupportLogs.ps1
+```
+
+It bundles the wrapper transcript, the failure / access-verdict logs, the run summary, and every per-subscription log (`Diagnostics_*`, `DebugLog_*`, `ErrorLog_*`, `Transcript_Log_*`) into `InventoryReports/RdaSupportLogs_<timestamp>.zip`, with a `MANIFEST.txt` explaining each file. The obfuscation dictionary (the de-obfuscation reveal key) is deliberately **excluded**. Because the bundle contains real identifiers (the signed-in account, tenant/subscription IDs, resource names) it is a **private** artefact — send it over a secure channel, never post it publicly. Add `-IncludeMainSummary` to also fold in the aggregate summary, or `-InventoryRoot <path>` if your reports are not in the default location.
+
+**A failed run collects this for you automatically.** If `Run-AllSubscriptions.ps1` hard-stops *before* producing a report bundle — for example an authentication failure, the up-front subscription-access gate, or a consumption-access denial — it writes `InventoryReports/RdaSupportLogs_<timestamp>.zip` on its way out and prints the path. So even a run that "never worked" and produced no report still leaves exactly one file to send; you don't need to know which logs to gather.
+
+When reporting an issue, send the `RdaSupportLogs_*.zip`. (If you'd rather attach files individually: the wrapper transcript and the failure log, plus — for obfuscated runs — the in-ZIP diagnostics log. The local `DebugLog_*.log` carries the most detail; share it too if you've confirmed it doesn't expose sensitive names.) Together these contain enough context to diagnose most failures without a follow-up round trip.
 
 ## Output Files
 
@@ -590,7 +598,7 @@ Codes `3`–`5` still mean the report was produced — they flag that it is **in
 ### Important Notes
 
 - The script does not upgrade existing PowerShell modules
-- Resource-Graph extension installs automatically if missing
+- Resource discovery uses the native `Az.ResourceGraph` module (no Azure CLI or CLI resource-graph extension required)
 - All operations are read-only and safe to execute
 - Historical data covers the previous 31 days
 

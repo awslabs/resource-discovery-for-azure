@@ -18,6 +18,14 @@ param(
     # (e.g. Microsoft.Insights RP not registered, narrow RBAC, regional issue),
     # so metrics are never lost. When omitted, behaviour is byte-identical to the
     # established per-call path.
+    #
+    # SIDE-EFFECT (opt-in only): because getBatch REQUIRES the Microsoft.Insights
+    # resource provider, passing this switch makes the tool ATTEMPT to register
+    # that provider on the subscription if it is not already registered (a
+    # control-plane write). This is intentional - opting in is the operator's
+    # consent to "help enable" the data plane. It is best-effort and idempotent:
+    # if the identity/org policy disallows the registration it is logged and the
+    # run falls back to the per-call path (no failure, no data loss).
     [switch]$UseMetricsBatch
 )
 
@@ -235,13 +243,77 @@ if ($Task -eq 'Processing')
                     foreach ($Def in $ResourceDefs)
                     {
                         $MetricResult = @($ResourceResult.value | Where-Object { ([string]$_.name.value) -ieq ([string]$Def.MetricName) })[0]
-                        $Results.Add((New-RdaMetricObject -Def $Def -MetricResult $MetricResult))
+                        # Only emit a record when the metric was actually RETURNED for
+                        # this resource. A def whose metric is ABSENT from the response
+                        # is left unsatisfied so the caller re-queues it to the per-call
+                        # path (rather than emitting a silent zero). A metric that IS
+                        # present but has an empty window still yields a legitimate
+                        # zeroed record via New-RdaMetricObject.
+                        if ($null -ne $MetricResult)
+                        {
+                            $Results.Add((New-RdaMetricObject -Def $Def -MetricResult $MetricResult))
+                        }
                     }
                 }
             }
         }
 
         return $Results.ToArray()
+    }
+
+    # -----------------------------------------------------------------------
+    # Opt-in prerequisite helper: runs ONLY when -UseMetricsBatch is set, to
+    # "help enable" the data-plane path the operator asked for. Best-effort:
+    #   - Ensures the Microsoft.Insights resource provider is Registered on the
+    #     current-context subscription (a HARD prerequisite for metrics:getBatch;
+    #     an unregistered RP is what makes getBatch 403 even for an Owner).
+    # SCOPE: acts on the CURRENT Az-context subscription. This extension is
+    # invoked once per subscription by ResourceInventory.ps1 (the collector/
+    # extension contract), with the context already set to that subscription and
+    # $Resources scoped to it, so current-context registration is the correct
+    # subscription. (If this ever runs for defs spanning multiple subscriptions,
+    # registration would need to iterate them.)
+    # Permission is deliberately NOT pre-checked with ARM checkAccess: that API
+    # was observed to return false negatives for a valid Owner, so a pre-check
+    # would wrongly disable batch. The batch attempt itself is the reliable
+    # permission check; the caller classifies a 403 in its fallback path.
+    # Never throws - on any problem it logs and lets the batch attempt proceed
+    # (which falls back to per-call if the data plane is still unavailable).
+    function Initialize-RdaMetricsBatchPrereq
+    {
+        try
+        {
+            $Rp = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $Rp -and $Rp.RegistrationState -eq 'Registered')
+            {
+                Write-MetricsDiag '[batch] Microsoft.Insights resource provider already registered.'
+                return
+            }
+
+            Write-MetricsDiag ("[batch] Microsoft.Insights RP is '{0}'; registering (required for metrics:getBatch)..." -f $(if ($Rp) { $Rp.RegistrationState } else { 'unknown' }))
+            Register-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -ErrorAction Stop | Out-Null
+
+            # Registration is asynchronous; poll briefly (bounded). This cost is
+            # ONE-TIME per subscription - once Registered it persists, so future
+            # runs hit the fast 'already registered' path above and never wait.
+            # Not reaching Registered here is NON-fatal - the batch attempt falls
+            # back to per-call.
+            $Deadline = (Get-Date).AddSeconds(60)
+            $State = ''
+            do
+            {
+                Start-Sleep -Seconds 10
+                $State = (Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -ErrorAction SilentlyContinue | Select-Object -First 1).RegistrationState
+            } while ($State -ne 'Registered' -and (Get-Date) -lt $Deadline)
+            Write-MetricsDiag ("[batch] Microsoft.Insights registration state after wait: {0}" -f $State)
+        }
+        catch
+        {
+            # Most likely the identity lacks Microsoft.Insights/register/action
+            # (Reader can't register providers). Surface it, then let the batch
+            # attempt proceed and fall back if the data plane is unavailable.
+            Write-MetricsDiag ("[batch] could not ensure Microsoft.Insights registration ({0}). If batch fails, an admin must register the provider: Register-AzResourceProvider -ProviderNamespace Microsoft.Insights" -f $_.Exception.Message)
+        }
     }
 
     # Instantiate a clean, empty generic PowerShell Custom Object container
@@ -556,81 +628,126 @@ if ($Task -eq 'Processing')
     $MetricCount = $MetricDefs.Count
 
     # ---------------------------------------------------------------------
-    # OPTIONAL data-plane batch fast-path for VM metrics (default OFF).
+    # OPTIONAL data-plane batch fast-path for VM / disk / storage metrics (default OFF).
     # ---------------------------------------------------------------------
-    # When -UseMetricsBatch is set, fetch the VM CPU/memory metrics through the
-    # Azure Monitor metrics:getBatch API (one REST call per <=50 VMs, all
-    # aggregations in one request) instead of one Get-AzMetric per (VM, metric).
-    # The produced records are obfuscated + written as the "_0" chunk, then
-    # removed from $MetricDefs so the per-call loop below handles only the rest.
-    # On ANY batch failure (Microsoft.Insights RP not registered, narrow RBAC,
-    # regional issue) we log and leave ALL defs on the per-call path - metrics
+    # When -UseMetricsBatch is set, fetch these services' metrics through the
+    # Azure Monitor metrics:getBatch API (one REST call per <=50 resources, all
+    # aggregations in one request) instead of one Get-AzMetric per
+    # (resource, metric). Each batchable service is fetched with its OWN metric
+    # namespace; the produced records accumulate into the "_0" chunk. Every def
+    # NOT satisfied by batch (a per-service failure, an empty/partial response,
+    # or a non-batchable service) is left on the per-call loop below - metrics
     # are never lost (fail-safe, not fail-silent).
     if ($UseMetricsBatch)
     {
-        $VmBatchDefs = [System.Collections.Generic.List[object]]::new()
-        $RemainingDefs = [System.Collections.Generic.List[object]]::new()
-        foreach ($Def in $MetricDefs)
-        {
-            if ($Def.Service -eq 'Virtual Machines') { $VmBatchDefs.Add($Def) } else { $RemainingDefs.Add($Def) }
+        # Batchable service -> its Azure Monitor metric namespace. Ordered so the
+        # "_0" chunk is deterministic. Add a service here to batch it (its metric
+        # defs must be attached to a resource whose ARM id yields the namespace).
+        $BatchNamespaceMap = [ordered]@{
+            'Virtual Machines' = 'microsoft.compute/virtualMachines'
+            'Managed Disk'     = 'microsoft.compute/disks'
+            'Storage Account'  = 'microsoft.storage/storageAccounts'
         }
 
-        if ($VmBatchDefs.Count -gt 0)
+        $RemainingDefs = [System.Collections.Generic.List[object]]::new()
+        $BatchGroups = [ordered]@{}
+        foreach ($Def in $MetricDefs)
         {
-            try
+            if ($BatchNamespaceMap.Contains($Def.Service))
             {
-                $BatchObjects = Invoke-RdaMetricsBatch -Defs $VmBatchDefs -MetricNamespace 'microsoft.compute/virtualMachines'
-                # A 200 with zero records (empty values / no id match) must NOT be
-                # treated as success - that would drop the VM metrics silently. Throw
-                # so the catch below keeps ALL defs on the per-call path (fail-safe).
-                if (@($BatchObjects).Count -eq 0)
-                {
-                    throw ("getBatch returned no metric records for {0} VM metric def(s)." -f $VmBatchDefs.Count)
-                }
+                if (-not $BatchGroups.Contains($Def.Service)) { $BatchGroups[$Def.Service] = [System.Collections.Generic.List[object]]::new() }
+                $BatchGroups[$Def.Service].Add($Def)
+            }
+            else
+            {
+                $RemainingDefs.Add($Def)
+            }
+        }
 
-                # Guard against a PARTIAL 200 (a resource omitted from values): any
-                # VM def not satisfied by a returned record is re-queued onto the
-                # per-call path so its metric is never lost. Computed on the REAL id
-                # (before the obfuscation pass below rewrites $BatchObj.ID).
-                $SatisfiedKeys = @{}
-                foreach ($BatchObj in $BatchObjects)
+        if ($BatchGroups.Count -gt 0)
+        {
+            # Operator opted into batch: help enable it by ensuring the
+            # Microsoft.Insights RP is registered (best-effort, non-fatal).
+            Initialize-RdaMetricsBatchPrereq
+
+            # Fetch each batchable service independently: a failure for one service
+            # re-queues ONLY that service's defs to the per-call path, leaving the
+            # others batched (per-service fail-safe).
+            foreach ($Service in $BatchGroups.Keys)
+            {
+                $ServiceDefs = $BatchGroups[$Service]
+                $Namespace = $BatchNamespaceMap[$Service]
+                try
                 {
-                    $SatisfiedKeys[('{0}|{1}' -f ([string]$BatchObj.ID).ToLower(), $BatchObj.Metric)] = $true
-                }
-                $ReQueued = 0
-                foreach ($Def in $VmBatchDefs)
-                {
-                    if (-not $SatisfiedKeys.ContainsKey(('{0}|{1}' -f ([string]$Def.Id).ToLower(), $Def.MetricName)))
+                    $BatchObjects = Invoke-RdaMetricsBatch -Defs $ServiceDefs -MetricNamespace $Namespace
+                    # A 200 with zero records must NOT be treated as success - that
+                    # would drop this service's metrics silently. Throw so the catch
+                    # keeps this service's defs on the per-call path (fail-safe).
+                    if (@($BatchObjects).Count -eq 0)
                     {
-                        $RemainingDefs.Add($Def)
-                        $ReQueued++
+                        throw ("getBatch returned no metric records for {0} {1} metric def(s)." -f $ServiceDefs.Count, $Service)
                     }
+
+                    # Re-queue any def NOT satisfied by a returned record (partial
+                    # 200 / omitted resource / unmatched metric name). Keyed on the
+                    # REAL id, before the obfuscation pass below rewrites $BatchObj.ID.
+                    $SatisfiedKeys = @{}
+                    foreach ($BatchObj in $BatchObjects)
+                    {
+                        $SatisfiedKeys[('{0}|{1}' -f ([string]$BatchObj.ID).ToLower(), $BatchObj.Metric)] = $true
+                    }
+                    foreach ($Def in $ServiceDefs)
+                    {
+                        if (-not $SatisfiedKeys.ContainsKey(('{0}|{1}' -f ([string]$Def.Id).ToLower(), $Def.MetricName)))
+                        {
+                            $RemainingDefs.Add($Def)
+                        }
+                    }
+
+                    foreach ($BatchObj in $BatchObjects) { $Tmp.Metrics.Add($BatchObj) }
+                    Write-MetricsDiag ("Metrics batch fast-path: fetched {0} {1} metric record(s) via getBatch." -f $BatchObjects.Count, $Service)
                 }
+                catch
+                {
+                    # This service falls back to per-call; OTHER services unaffected.
+                    foreach ($Def in $ServiceDefs) { $RemainingDefs.Add($Def) }
+                    $BatchErr = $_.Exception.Message
+                    # Classify the failure so the operator who opted into batch gets
+                    # an ACTIONABLE reason (this is the reliable permission check -
+                    # the ARM checkAccess API gives false negatives, so we read it
+                    # off the real attempt). An auth/403 => subscription-level read
+                    # is missing.
+                    $Hint = if ($BatchErr -match '(?i)403|AuthorizationFailed|does not have access|does not have authorization')
+                    {
+                        'the signed-in identity lacks subscription-level read for the metrics data plane - assign Reader or Monitoring Reader at the subscription scope, and ensure Microsoft.Insights is registered'
+                    }
+                    else
+                    {
+                        'ensure Microsoft.Insights is registered and the region/resources are reachable'
+                    }
+                    Write-MetricsDiag ("WARNING: metrics batch fast-path failed for {0} ({1}). {2}. Those metrics fall back to per-call (no data lost)." -f $Service, $BatchErr, $Hint)
+                }
+            }
 
-                foreach ($BatchObj in $BatchObjects) { $Tmp.Metrics.Add($BatchObj) }
-
+            # Obfuscate + write the accumulated batch records ONCE as the "_0" chunk
+            # (matches the Metrics_<name>_<stamp>__<idx>.json naming; the per-call
+            # loop starts at 1, so downstream globbing picks up both with no clash).
+            if ($Tmp.Metrics.Count -gt 0)
+            {
                 if ($Obfuscate)
                 {
                     Protect-RdaMetrics -Metrics $Tmp.Metrics -ResourceIdDictionary $ResourceIdDictionary -ResourceNameDictionary $ResourceNameDictionary -ResourceSubDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary
                 }
-
-                # "_0" chunk matches the Metrics_<name>_<stamp>__<idx>.json naming
-                # the per-call loop uses (which starts at 1), so downstream globbing
-                # (Metrics_..._*.json) picks it up with no collision.
                 $BatchOutputPath = $FilePath + "_0.json"
                 $Tmp | ConvertTo-Json -depth 5 -compress | Out-File $BatchOutputPath -Encoding utf8
                 $Tmp.Metrics.Clear()
+            }
 
-                $MetricDefs = $RemainingDefs
-                $MetricCount = $MetricDefs.Count
-                Write-MetricsDiag ("Metrics batch fast-path: fetched {0} VM metric record(s) via getBatch; {1} metric def(s) remain on the per-call path." -f $BatchObjects.Count, $MetricCount)
-            }
-            catch
-            {
-                # Fallback: keep ALL defs (including VM defs) on the per-call path.
-                $Tmp.Metrics.Clear()
-                Write-MetricsDiag ("WARNING: metrics batch fast-path failed ({0}); falling back to per-call Get-AzMetric for all metrics." -f $_.Exception.Message)
-            }
+            # Everything not batched (per-service fallbacks + non-batchable
+            # services) is processed by the per-call loop below.
+            $MetricDefs = $RemainingDefs
+            $MetricCount = $MetricDefs.Count
+            Write-MetricsDiag ("Metrics batch fast-path: {0} metric def(s) remain on the per-call path." -f $MetricCount)
         }
     }
 

@@ -1026,6 +1026,7 @@ function Get-RunSummaryLogContent
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
         [int]$ConsumptionRecordCount = 0,
+        [int]$MetricsApiCallCount = 0,
         # Host size and resolved parallelism (run-environment metadata, not
         # identifiers). Emitted in both modes. Defaults mean "not supplied" and
         # the whole section is omitted (keeps standalone/offline callers clean).
@@ -1171,6 +1172,7 @@ function Get-RunSummaryLogContent
     $Lines.Add('')
     $Lines.Add('Health:')
     $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount))
+    $Lines.Add(('  Metric-query API calls issued : {0:N0}' -f $MetricsApiCallCount))
     $Lines.Add(('  Failed subscriptions          : {0}' -f $Failed.Count))
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))

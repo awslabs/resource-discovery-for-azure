@@ -235,6 +235,12 @@ if ($Task -eq 'Processing')
                 $BodyJson = @{ resourceids = $Chunk } | ConvertTo-Json
 
                 $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -ErrorAction Stop
+                # One metrics:getBatch REST call was issued. Count it (script scope so
+                # the end-of-phase summary can report this run's metric-query API-call
+                # impact). Placed AFTER the POST so only round-trips that reached Azure
+                # are counted; a POST that throws is a fallback, tallied on the per-call
+                # path instead.
+                $script:MetricsBatchHttpCalls++
 
                 foreach ($ResourceResult in @($Response.values))
                 {
@@ -626,6 +632,13 @@ if ($Task -eq 'Processing')
 
 
     $MetricCount = $MetricDefs.Count
+
+    # Running count of Azure Monitor metrics:getBatch HTTP calls issued this run
+    # (stays 0 unless -UseMetricsBatch is set and a batchable service is present).
+    # Combined with the per-call Get-AzMetric attempts in the end-of-phase summary
+    # so each subscription's run self-reports its metric-query API-call impact
+    # against the Azure Monitor "metric queries" billing meter.
+    $script:MetricsBatchHttpCalls = 0
 
     # ---------------------------------------------------------------------
     # OPTIONAL data-plane batch fast-path for VM / disk / storage metrics (default OFF).
@@ -1124,6 +1137,25 @@ if ($Task -eq 'Processing')
 
     Write-MetricsDiag ("===== Metrics phase summary =====")
     Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | Elapsed: {5}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
+
+    # Self-reported metric-query API-call impact for THIS subscription. The per-call
+    # path issues one Get-AzMetric HTTP call per attempt (retries included), so sum
+    # the recorded Attempts; the batch path issues one metrics:getBatch POST per
+    # <=50-resource chunk ($script:MetricsBatchHttpCalls). Both count toward the
+    # Azure Monitor "metric queries" meter (10,000,000 calls free per billing account
+    # per month, then charged per Azure Monitor pricing). Use -SkipMetrics to issue
+    # zero; -UseMetricsBatch lowers the count vs the per-call path.
+    $PerCallHttpCalls = if ($DiagRecords.Count -gt 0) { [int]($DiagRecords | Measure-Object -Property Attempts -Sum).Sum } else { 0 }
+    $BatchHttpCalls = [int]$script:MetricsBatchHttpCalls
+    Write-MetricsDiag ("Metric-query API calls issued (this subscription): {0} total | per-call Get-AzMetric incl. retries: {1} | getBatch POSTs: {2}. Counts toward the Azure Monitor 'metric queries' meter (10,000,000 free/account/month)." -f ($PerCallHttpCalls + $BatchHttpCalls), $PerCallHttpCalls, $BatchHttpCalls)
+
+    # Roll this subscription's total into the run-wide running total surfaced in
+    # the wrapper RunSummary. Mirrors the $Global:ConsumptionRecordCount pattern:
+    # nil-init once, then accumulate with += across every subscription processed
+    # in this scope (the sequential wrapper's scope, or a parallel stream worker's
+    # scope which reports the slice total in its per-stream summary JSON).
+    if ($null -eq $Global:MetricsApiCallCount) { $Global:MetricsApiCallCount = 0 }
+    $Global:MetricsApiCallCount = [int]$Global:MetricsApiCallCount + $PerCallHttpCalls + $BatchHttpCalls
 
     if (($TimeoutCount + $ThrottledCount + $ErrorCount) -gt 0)
     {

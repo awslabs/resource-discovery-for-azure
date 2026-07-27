@@ -197,6 +197,13 @@ $FailedSubs = @()
 $Global:ConsumptionRecordCount = 0
 $Global:ConsumptionFailedSubs = @()
 
+# Metric-query API-call running total. Same running-total semantics as
+# $Global:ConsumptionRecordCount above: Extension/Metrics.ps1 nil-inits it once
+# then accumulates with += across every sub in this worker's scope. Reset to
+# known-zero up-front so the worker reads the whole-slice total once after the
+# loop instead of a stale/per-iteration value.
+$Global:MetricsApiCallCount = 0
+
 # Per-subscription metrics-phase auth health. ResourceInventory.ps1 appends to
 # $Global:MetricsFailedSubs (in this worker's scope, since it is invoked via `&`)
 # for each sub whose metrics phase was skipped because no usable Azure
@@ -321,6 +328,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
 # loop), so a single read at the end gives the correct slice total without
 # the per-iteration double-counting trap.
 $ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
 $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
@@ -334,6 +342,7 @@ $Summary = [pscustomobject]@{
     Failed                 = $FailedSubs
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
+    MetricsApiCalls        = $MetricsApiCallTotal
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     CollectorFailures      = @($CollectorFailures)

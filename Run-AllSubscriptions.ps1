@@ -1366,6 +1366,12 @@ else
                     if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
                     $Global:ConsumptionRecordCount = [int]$Global:ConsumptionRecordCount + [int]$StreamSummary.ConsumptionRecords
                 }
+
+                if ($null -ne $StreamSummary.MetricsApiCalls)
+                {
+                    if ($null -eq $Global:MetricsApiCallCount) { $Global:MetricsApiCallCount = 0 }
+                    $Global:MetricsApiCallCount = [int]$Global:MetricsApiCallCount + [int]$StreamSummary.MetricsApiCalls
+                }
                 if ($StreamSummary.ConsumptionFailedSubs -and $StreamSummary.ConsumptionFailedSubs.Count -gt 0)
                 {
                     if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
@@ -1970,6 +1976,7 @@ $RunSummaryLocalFile = $null
 try
 {
     $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+    $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
     $RunSummaryLines = Get-RunSummaryLogContent `
         -InvocationParameters $PSBoundParameters `
         -Version $BundleVer `
@@ -1982,6 +1989,7 @@ try
         -MetricsFailedSubs $Global:MetricsFailedSubs `
         -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
         -ConsumptionRecordCount $ConsumptionRecordTotal `
+        -MetricsApiCallCount $MetricsApiCallTotal `
         -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
         -Streams $ParallelStreams -StreamsSource $StreamsSrc `
         -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `

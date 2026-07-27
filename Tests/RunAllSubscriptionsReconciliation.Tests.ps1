@@ -42,7 +42,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -532,5 +532,37 @@ Describe 'Expand-ServiceFilter' {
     It 'de-duplicates repeated names' {
         $Result = @(Expand-ServiceFilter -Service @('VirtualMachines', 'VirtualMachines,AKS'))
         $Result | Should -Be @('VirtualMachines', 'AKS')
+    }
+}
+
+Describe 'Test-BackgroundJobSupport' {
+    # Backs the wrapper's "fall back to sequential when Start-Job is unavailable"
+    # guard. The real trigger it defends against - Start-Job throwing
+    # synchronously on a Windows host under a WDAC/AppLocker system-wide
+    # ConstrainedLanguage policy - is Windows-only and cannot be reproduced on
+    # the Linux/macOS runner (which takes the early -not $IsWindows return). So
+    # these tests cover the platform-agnostic contract only: it returns a real
+    # boolean, reports $true when jobs ARE usable in the current session, and
+    # never leaks its probe job. The Windows failure path is exercised
+    # out-of-band per windows-cross-os-testing.md.
+    It 'returns a boolean' {
+        Test-BackgroundJobSupport | Should -BeOfType [bool]
+    }
+
+    It 'reports $true in a session where jobs are usable (early-return path on non-Windows)' {
+        # On the non-Windows CI runner this exercises the early -not $IsWindows
+        # return; on unrestricted Windows it exercises a successful probe. Either
+        # way the helper must not report a false negative. The Windows LOCKED-DOWN
+        # ($false) path is covered out-of-band per windows-cross-os-testing.md.
+        Test-BackgroundJobSupport | Should -BeTrue
+    }
+
+    It 'leaves no probe job behind in the caller''s job table' {
+        # Invariant on both platforms: non-Windows never creates a probe job
+        # (early return, delta 0); Windows creates one and removes it in the
+        # finally block (delta 0). Either way the caller's job table is untouched.
+        $Before = @(Get-Job).Count
+        $null = Test-BackgroundJobSupport
+        @(Get-Job).Count | Should -Be $Before -Because 'the probe job must never pollute the caller''s job table'
     }
 }

@@ -76,6 +76,69 @@ Health:
 Per-subscription detail (a per-call vs getBatch breakdown) is written to each
 subscription's local `DebugLog_*.log`.
 
+## Trimming metric volume at very large scale
+
+On a very large tenant (thousands of subscriptions) three additional opt-in
+switches let you cut the metric footprint further. All three are **OFF by
+default** and default to each metric's native cadence, so a run that omits them
+behaves exactly as before.
+
+- `-SkipStorageMetrics` skips the Storage Account `UsedCapacity` metric
+  (one metric-query call per storage account).
+- `-SkipDiskMetrics` skips the four Managed Disk composite I/O metrics
+  (four calls per attached disk, usually the single largest metric source).
+- `-MetricsIntervalMinutes <0|5|15|30|60>` overrides the sampling grain of the
+  high-frequency VM / Azure SQL DB / OSS-DB (MariaDB, MySQL, PostgreSQL and
+  their Flexible variants) utilization series. `0` keeps each family's native
+  cadence (15 min VM, 30 min SQL, 60 min OSS-DB); `60` gives one data point per
+  hour.
+
+Two different levers, two different effects:
+
+- **API-call count** (what the Azure Monitor "metric queries" meter counts, and
+  what the per-subscription read ceiling limits) is reduced by `-UseMetricsBatch`
+  and by the two `-Skip*` switches. This is the lever that matters most for the
+  read ceiling.
+- **Data-point volume** (report memory, JSON size, post-processing time) is
+  reduced by `-MetricsIntervalMinutes`. It does **not** change the number of API
+  calls, only how many samples each call returns. Because the aggregation stays
+  `Maximum`, a coarser grain still captures each bucket's peak (for example
+  `60` = the hourly peak), just at lower time resolution.
+
+### Best-case footprint for a very large tenant (without obfuscation)
+
+This combines every volume lever: batched reads, no storage or disk metrics,
+and hourly VM/SQL/OSS-DB utilization.
+
+```powershell
+pwsh ./Run-AllSubscriptions.ps1 -TenantID <your-tenant-id> `
+  -UseMetricsBatch `
+  -SkipStorageMetrics `
+  -SkipDiskMetrics `
+  -MetricsIntervalMinutes 60
+```
+
+> Without `-Obfuscate` the output contains **real** subscription, resource, and
+> resource-group identifiers. Keep the resulting zip on a private/secure channel
+> and do not send it anywhere that expects obfuscated input. Add `-Obfuscate` if
+> the output will be shared for analysis.
+
+Tune throughput for the host by adding `-ParallelStreams <n>` (each stream is a
+separate process handling a slice of subscriptions); omit it to let the tool
+auto-size to the machine.
+
+Single subscription instead of the whole tenant:
+
+```powershell
+pwsh ./ResourceInventory.ps1 -SubscriptionID <your-subscription-id> `
+  -UseMetricsBatch -SkipStorageMetrics -SkipDiskMetrics -MetricsIntervalMinutes 60
+```
+
+Each subscription also writes a `[Memory] Post-metrics GC:` line (managed heap
+and process working set) to its local `DebugLog_*.log`, so you can watch the
+per-subscription footprint across a long run. That log stays local and is never
+included in the output zip.
+
 ## Cost note
 
 Collecting standard platform metrics is free to ingest; **reading** them via the
@@ -88,5 +151,9 @@ Levers:
 
 - `-UseMetricsBatch` lowers the number of metric-query calls versus the default
   per-call path.
+- `-SkipStorageMetrics` / `-SkipDiskMetrics` drop those services' metrics, each
+  removing their calls from the total (see "Trimming metric volume" above).
+- `-MetricsIntervalMinutes` reduces data-point volume per call (memory / JSON),
+  not the call count.
 - `-SkipMetrics` skips the metrics phase entirely and issues zero metric-query
   calls.

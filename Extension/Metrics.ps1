@@ -32,15 +32,14 @@ param(
     # peak busy-ness, or the low-water available-memory point - e.g. 60 = the
     # hourly extreme, just at lower temporal resolution. The daily SQL
     # limit/capacity reads and the disk/storage metrics
-    # are intentionally NOT affected. The purpose is volume REDUCTION, so the
-    # intended values are equal-to or coarser-than each family's native cadence
-    # (60 is the safe, universally-supported choice); picking a grain FINER than a
-    # family's native (e.g. 5 for a VM whose native is 15) is allowed but INCREASES
-    # that family's data-point volume. ValidateSet only constrains the VALUE to the
-    # standard sub-hourly grains - it does NOT guarantee every metric supports the
-    # chosen grain; an unsupported (metric, grain) is handled by the existing
-    # per-call error path (zeroed record, logged to the local debug log), same as
-    # any other metric read failure.
+    # are intentionally NOT affected. 0 = keep each family's native default (VM 15 /
+    # SQL 30 / OSS-DB 60 min; byte-identical to a run without the knob). A set value
+    # (5/15/30/60) is applied UNIFORMLY to all three families as the operator's
+    # explicit choice - honoured as-is, not clamped. Coarser than a family's default
+    # reduces that family's data-point volume; finer increases it (the operator's
+    # call - e.g. 30 for finer OSS-DB fidelity than its 60-min default). All four
+    # values are supported: every controlled metric is stored at Azure's PT1M base
+    # grain (validated against the Microsoft Learn supported-metrics reference).
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     # EXPERIMENTAL (default OFF): fetch VM CPU/memory metrics through the Azure
     # Monitor data-plane metrics:getBatch API (one REST call per <=50 resources,
@@ -376,24 +375,33 @@ if ($Task -eq 'Processing')
     # Establish an offset timestamp rolled back exactly 24 hours ago
     $MetricTimeOneDay = (Get-Date).AddDays(-1)
 
-    # High-frequency utilization-series grain. When -MetricsIntervalMinutes is 0
-    # (default) each series keeps its native literal cadence (VM 15 min, SQL
-    # 30 min) so output is byte-identical to prior runs. When set (5/15/30/60) the
-    # VM and SQL sampled series below use this grain instead. FromMinutes(n).ToString()
-    # yields the same 'hh:mm:ss' string the defs have always carried (60 ->
-    # '01:00:00', 30 -> '00:30:00', 15 -> '00:15:00', 5 -> '00:05:00'), which both
-    # the per-call (Get-AzMetric -TimeGrain) and batch ([TimeSpan] cast) paths already
-    # consume unchanged. These cover EVERY high-frequency sampled utilization
-    # series: VM CPU/memory ($VmMetricInterval, native 15 min), Azure SQL DB
-    # cpu_used/dtu_used/cpu_percent ($SqlMetricInterval, native 30 min), and the
-    # OSS-DB (MariaDB / MySQL / PostgreSQL + Flexible) cpu_percent/memory_percent
-    # ($DbMetricInterval, native 60 min). Each default equals that family's native
-    # cadence so a run with the knob OFF (0) is byte-identical. The daily SQL
-    # limit/capacity reads, the *_percent storage/read/write capacity reads
-    # (Series='false'), and the disk/storage metrics keep their own literals.
+    # High-frequency utilization-series grain (operator-selectable). Each family has
+    # a native default cadence the tool ships with - VM 15 min, Azure SQL DB 30 min,
+    # OSS-DB (MariaDB / MySQL / PostgreSQL + Flexible) 60 min. When
+    # -MetricsIntervalMinutes is 0 (default) each family keeps its native default, so
+    # output is byte-identical to a run without the knob. When set (5/15/30/60) the
+    # operator's chosen grain is applied UNIFORMLY to all three families and honoured
+    # AS-IS (not clamped): the operator may deliberately pick a grain finer than a
+    # family's default - e.g. 30 on OSS-DB whose default is 60 - to better
+    # characterise bursty load, keep every utilisation series at one cadence for
+    # downstream analysis, or match an external 30-min window. That trade is theirs:
+    # a grain finer than a family's default increases that family's data-point volume,
+    # a coarser one reduces it.
+    #
+    # Support: validated against Microsoft Learn (supported-metrics reference) -
+    # EVERY metric the knob controls (VM Percentage CPU / Available Memory Bytes, SQL
+    # cpu_used/dtu_used/cpu_percent, OSS-DB cpu_percent/memory_percent) is stored at
+    # Azure's PT1M base grain, so all of 5/15/30/60 are individually supported for
+    # them. FromMinutes(n).ToString() yields the same 'hh:mm:ss' string the defs have
+    # always carried (60 -> '01:00:00', 30 -> '00:30:00', 15 -> '00:15:00', 5 ->
+    # '00:05:00'), consumed unchanged by both the per-call (Get-AzMetric -TimeGrain)
+    # and batch ([TimeSpan] cast) paths. The daily SQL limit/capacity reads, the
+    # *_percent storage capacity reads (Series='false'), VMSS/CosmosDB, and the
+    # disk/storage metrics keep their own literals and are unaffected.
     $VmMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '00:15:00' }
     $SqlMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '00:30:00' }
     $DbMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '01:00:00' }
+    Write-MetricsDiag ("Metric grain (requested {0} min): VM={1} SQL={2} OSS-DB={3} (0 = each family's native default; a set value is applied uniformly, honoured as-is)." -f $MetricsIntervalMinutes, $VmMetricInterval, $SqlMetricInterval, $DbMetricInterval)
 
     # Build a fast id -> subscription lookup once. The per-resource loops below
     # previously scanned the entire $Subscriptions list with Where-Object for

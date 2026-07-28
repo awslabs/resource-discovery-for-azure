@@ -452,7 +452,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
 | `SkipStorageMetrics` | Switch | Skip only the Storage Account `UsedCapacity` metric (one metric-query call per storage account). Other metrics still collected. | False | `-SkipStorageMetrics` |
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
-| `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = each family's native cadence (15 min VM, 30 min SQL, 60 min OSS-DB). Coarser values (e.g. `60`) cut data-point volume/memory; they do **not** reduce the API-call count. Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
+| `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = each family's native cadence (15 min VM, 30 min SQL, 60 min OSS-DB). A set value (5/15/30/60) is applied **uniformly** to all three families and honored as-is. Coarser than a family's native cadence cuts that family's data-point volume/memory; finer increases it (your choice — e.g. `30` for finer OSS-DB fidelity than its 60-min default). Does **not** change the API-call count. All values are supported (these series have a 1-minute base grain). Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
 | `UseMetricsBatch` | Switch | Collect VM/disk/storage metrics via the Azure Monitor `metrics:getBatch` data-plane API (one request per ≤50 resources), which lowers the metric-query API-call count. Falls back to the per-call path on any failure. See `docs/metrics-batch-trial.md`. | False | `-UseMetricsBatch` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
@@ -490,8 +490,12 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 > Memory Bytes`), Azure SQL DB (`cpu_used`, `dtu_used`, `cpu_percent`) and OSS-DB
 > (`cpu_percent`, `memory_percent`) sampled series to a coarser grain — e.g. `60`
 > gives one hourly (peak) point instead of the 15/30-min default — to cut
-> data-point volume on very large tenants. It does not change VMSS, the daily
-> reads, or the capacity/point-in-time metrics.
+> data-point volume on very large tenants. A set value is applied **uniformly** to
+> all three families (VM, SQL, OSS-DB) and honored as-is: coarser than a family's
+> native cadence reduces its data-point volume, finer increases it — the operator's
+> choice (e.g. `30` for finer OSS-DB fidelity than its 60-min default). These series
+> are stored at Azure's 1-minute base grain, so every allowed value is supported. It
+> does not change VMSS, the daily reads, or the capacity/point-in-time metrics.
 
 ### Privacy & Obfuscation Parameters
 

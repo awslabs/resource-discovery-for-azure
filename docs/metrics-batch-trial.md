@@ -91,7 +91,11 @@ behaves exactly as before.
   high-frequency VM / Azure SQL DB / OSS-DB (MariaDB, MySQL, PostgreSQL and
   their Flexible variants) utilization series. `0` keeps each family's native
   cadence (15 min VM, 30 min SQL, 60 min OSS-DB); `60` gives one data point per
-  hour.
+  hour. A set value is applied **uniformly** to all three families and honored
+  as-is: coarser than a family's native cadence reduces that family's data-point
+  volume, finer increases it (the operator's choice — e.g. `30` gives finer OSS-DB
+  fidelity than its 60-min default). These series are stored at Azure's 1-minute
+  base grain, so every allowed value (5/15/30/60) is individually supported.
 
 Two different levers, two different effects:
 

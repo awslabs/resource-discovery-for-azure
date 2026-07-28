@@ -99,15 +99,18 @@ Describe 'Metrics Volume Controls' {
         $Disk.Count | Should -Be 0 -Because '-SkipDiskMetrics must drop the four composite disk-I/O defs entirely'
     }
 
-    It 'applies the requested grain to the VM/SQL sampled series when -MetricsIntervalMinutes was set' {
+    It 'applies the requested grain uniformly to the VM/SQL/OSS-DB sampled series when -MetricsIntervalMinutes was set' {
         if ([string]::IsNullOrEmpty($env:TEST_EXPECT_METRIC_GRAIN_MINUTES)) { Set-ItResult -Skipped -Because 'TEST_EXPECT_METRIC_GRAIN_MINUTES not set'; return }
         if (-not $script:Active) { Set-ItResult -Skipped -Because 'TEST_ZIP_PATH not set / missing'; return }
 
+        # -MetricsIntervalMinutes applies the operator's chosen grain UNIFORMLY to
+        # every knob-controlled sampled series (VM / SQL / OSS-DB) and honours it
+        # as-is (not clamped), so all of them must carry exactly the requested grain.
         $ExpectedGrain = ([TimeSpan]::FromMinutes([int]$env:TEST_EXPECT_METRIC_GRAIN_MINUTES)).ToString()
         $Sampled = @($script:Metrics | Where-Object { $_.Service -in $script:GrainTargetServices -and $_.Metric -in $script:GrainTargetMetrics })
-        if ($Sampled.Count -eq 0) { Set-ItResult -Skipped -Because 'this subscription produced no VM/SQL sampled-series metrics to inspect'; return }
+        if ($Sampled.Count -eq 0) { Set-ItResult -Skipped -Because 'this subscription produced no VM/SQL/OSS-DB sampled-series metrics to inspect'; return }
 
         $Wrong = @($Sampled | Where-Object { $_.MetricTimeGrain -ne $ExpectedGrain })
-        $Wrong.Count | Should -Be 0 -Because ("every VM/SQL sampled series should carry grain {0}; found {1} record(s) with a different grain (e.g. '{2}')" -f $ExpectedGrain, $Wrong.Count, ($Wrong | Select-Object -First 1 -ExpandProperty MetricTimeGrain))
+        $Wrong.Count | Should -Be 0 -Because ("every VM/SQL/OSS-DB sampled series should carry the requested grain {0}; found {1} record(s) with a different grain (e.g. Service '{2}' grain '{3}')" -f $ExpectedGrain, $Wrong.Count, ($Wrong | Select-Object -First 1 -ExpandProperty Service), ($Wrong | Select-Object -First 1 -ExpandProperty MetricTimeGrain))
     }
 }

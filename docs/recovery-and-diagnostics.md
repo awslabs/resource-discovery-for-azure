@@ -1,202 +1,297 @@
-# Recovery & diagnostics features
+# Recovery and diagnostics
 
-This document covers the targeted-collection, recovery, and diagnostics features
-that are **not** described in the main README. They exist so that when a large
-multi-subscription run has a partial failure (one collector errors, or a
-subscription's consumption/metrics pull is interrupted), you can repair just the
-missing piece instead of re-running the whole tenant.
+This guide covers the targeted-collection, recovery, and diagnostics features
+that are not in the main README. They exist for one job: when a long
+multi-subscription run partly fails (one collector errors, or a subscription's
+metrics or consumption pull is interrupted), you can repair just the missing
+piece instead of re-running the whole tenant.
 
-Applies to build **3.2.2** and later.
+Applies to build 3.2.2 and later.
 
-Contents:
-- [The problem these solve](#the-problem-these-solve)
-- [`-Service` — targeted collector selection](#-service--targeted-collector-selection)
-- [`-ObfuscationDictionary` — seed tokens from a prior run](#-obfuscationdictionary--seed-tokens-from-a-prior-run)
-- [`Merge-RecoveryData` — splice a recovery run back in](#merge-recoverydata--splice-a-recovery-run-back-in)
-- [Recovery recipes](#recovery-recipes)
+## Contents
+- [When you need this](#when-you-need-this)
+- [How a run is built (three phases)](#how-a-run-is-built-three-phases)
+- [-Service, re-run specific collectors](#-service-re-run-specific-collectors)
+- [What -Service can and cannot scope](#what--service-can-and-cannot-scope)
+- [-ObfuscationDictionary, reuse tokens from a prior run](#-obfuscationdictionary-reuse-tokens-from-a-prior-run)
+- [Merge-RecoveryData, splice a repair run back in](#merge-recoverydata-splice-a-repair-run-back-in)
+- [Worked recovery examples](#worked-recovery-examples)
 - [Diagnostics logs](#diagnostics-logs)
-- [Reveal.ps1 — resilient un-masking](#revealps1--resilient-un-masking)
+- [Reveal.ps1, turn masked reports back into real values](#revealps1-turn-masked-reports-back-into-real-values)
 
-## The problem these solve
+## When you need this
 
-A full run can be long. When one part fails partway — a single collector throws
-on a bad record, or a subscription's consumption/metrics pull hits a transient —
-the report is produced but is **missing** that slice. Re-running the entire
-tenant to recover one service or one subscription's billing is wasteful. These
-features let you re-collect only the missing slice and splice it back into the
-original bundle so the result looks like a clean first run.
+A full tenant run can take a while. If something fails partway, the run still
+finishes and still produces a report, but that report is quietly missing a
+slice: maybe one service came back empty, or a subscription's billing sheet is
+cut short. Re-running the entire tenant to recover one service, or one
+subscription's billing, wastes time. The features below let you re-collect only
+the missing slice and merge it back into the original bundle, so the final
+result looks like a clean first run.
 
-## `-Service` — targeted collector selection
+## How a run is built (three phases)
 
-`ResourceInventory.ps1 -Service <name[,name...]>` runs **only** the named
-service collectors instead of all of them. Names are the collector file base
-names (e.g. `VirtualMachines`, `Streamanalytics`, `AKS`, `StorageAcc`); matching
-is case-insensitive.
+Every subscription goes through three independent phases. Knowing which phase
+failed tells you how to repair it.
 
-- Multiple names are accepted: `-Service Streamanalytics,AKS`.
-- **Fail-loud:** if any explicitly named `-Service` value is not a real
-  collector (a typo, or absent from a recovery inventory), the run stops with a
-  clear error listing the unmatched name(s) and the valid ones — rather than
-  silently collecting a subset.
-- `-Service` scopes **inventory collection only**. The metrics and consumption
-  phases are independent and still run for the whole subscription (governed by
-  `-SkipMetrics` / `-SkipConsumption`).
+1. Inventory. One collector per resource type (the files under `Services/`).
+   This produces the resource list in the report.
+2. Metrics. Azure Monitor metrics such as CPU, memory, and disk, for a fixed set
+   of resource types. Controlled by `-SkipMetrics`.
+3. Consumption. Subscription billing from `Get-UsageAggregates`. Controlled by
+   `-SkipConsumption`.
 
-This is the mechanism used to re-collect a single failed collector for recovery.
+The three phases fail and recover separately, so the rest of this guide is
+organised around them.
 
-### What is and isn't sliceable by `-Service`
+## -Service, re-run specific collectors
 
-Only **inventory** is decomposable per service. The three phases scope differently:
+`ResourceInventory.ps1 -Service <name>` runs only the collectors you name,
+instead of all of them. Names are the collector file base names, for example
+`VirtualMachines`, `StorageAcc`, `AKS`, `Streamanalytics`. Matching is
+case-insensitive, and you can pass several, separated by commas.
 
-| Phase | Sliceable by `-Service`? | Why |
-|-------|--------------------------|-----|
-| Inventory | **Yes — per collector.** `-Service VirtualMachines` re-runs just that one collector. | Each `Services/*/*.ps1` collector is selected by name. |
-| Metrics | **No.** Metrics still cover the whole subscription, by resource type. | `Extension/Metrics.ps1` takes the whole raw Resource Graph result and filters it itself per type (e.g. `$Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }`), independent of the `-Service` collector selection. |
-| Consumption | **No — not decomposable at all.** | Consumption is subscription-wide billing via `Get-UsageAggregates`; there is no per-service dimension to slice. |
+```powershell
+# Re-run just the Virtual Machines collector for one subscription
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Service VirtualMachines
 
-Practical consequence for recovery: you can re-collect a single failed
-**inventory** collector with `-Service`, but to repair **metrics** or
-**consumption** you re-run the whole subscription's metrics/consumption phase
-(drop `-SkipMetrics` / `-SkipConsumption`) and splice the result back with
-`Merge-RecoveryData -RecoverMetrics` / `-RecoverConsumption`.
+# Re-run two collectors
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Service Streamanalytics,AKS
+```
 
-## `-ObfuscationDictionary` — seed tokens from a prior run
+If you name a collector that does not exist (a typo, or a service that is not in
+the recovery inventory), the run stops right away with an error that lists the
+bad name and the valid ones. It does not silently collect a smaller set.
 
-`ResourceInventory.ps1 -Obfuscate -ObfuscationDictionary <path>` preloads the
-obfuscation maps from a previous run's `ObfuscationDictionary_*.json` so that
-identical real values yield the **same** `prod_`/`nonprod_` tokens as that
-earlier run.
+This is the main tool for recovering a single failed collector.
 
-This is what makes a scoped recovery run's output splice cleanly into the
-earlier bundle: without it, each run mints fresh random tokens and the recovered
-rows would not line up. New real values not present in the seed still get fresh
-tokens, so determinism is *extended*, never broken.
+## What -Service can and cannot scope
 
-The obfuscation pass runs over the **full** Resource Graph result set up front,
-so a resource's token is present in the dictionary even if the collector that
-would have processed it failed. That is why seeding a recovery run reproduces the
-original tokens for the failed service's resources.
+`-Service` only scopes the inventory phase. It does not change metrics or
+consumption. Here is the full picture:
 
-> The dictionary is **local-only** and never included in the shared ZIP. The
-> recovery flow needs the copy from the original run's output folder on your
-> machine.
+| Phase | Can -Service scope it? | Why |
+|-------|------------------------|-----|
+| Inventory | Yes, per collector. `-Service VirtualMachines` re-runs only that collector. | Each collector under `Services/` is picked by name. |
+| Metrics | No. Metrics still cover the whole subscription, grouped by resource type. | `Extension/Metrics.ps1` takes the full resource list and filters it by type on its own (for example, `$Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }`), so the collector selection never reaches it. |
+| Consumption | No, and it cannot be split by service at all. | Consumption is whole-subscription billing from `Get-UsageAggregates`. There is no per-service breakdown to select. |
 
-## `Merge-RecoveryData` — splice a recovery run back in
+So you can re-collect one failed inventory collector with `-Service`, but to
+repair metrics or consumption you re-run that subscription's metrics or
+consumption phase (drop `-SkipMetrics` or `-SkipConsumption`) and merge the
+result back with `Merge-RecoveryData -RecoverMetrics` or `-RecoverConsumption`.
 
-Defined in `Functions/RecoveryMerge.Functions.ps1`. Dot-source the file, then
-call the function. It takes an incomplete ("gap") bundle and a scoped recovery
-run's bundle and produces one clean rebuilt bundle (inventory JSON, consumption
-CSV, metrics JSON, regenerated HTML, fresh ZIP).
+`-RecoverMetrics` and `-RecoverConsumption` are switches on `Merge-RecoveryData`
+that tell it to take the metrics or consumption files from the repair run
+instead of keeping the original (empty or partial) ones. They are covered in
+detail in the [Merge-RecoveryData](#merge-recoverydata-splice-a-repair-run-back-in)
+section below.
+
+### Targeted collection (not recovery): use -ResourceGroup
+
+`-Service` is a recovery tool, not a general workload filter. If your goal is to
+collect only part of a subscription up front (for example, only the VMs in a
+tenant with poor resource-group hygiene), scope by resource group instead:
+
+```powershell
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -ResourceGroup <rg-name>
+```
+
+Unlike `-Service`, `-ResourceGroup` narrows the Resource Graph query itself, so it
+scopes both inventory and metrics (the metrics phase reads the same narrowed
+resource list). Consumption is the exception: `Get-UsageAggregates` is
+whole-subscription billing with no resource-group or resource-type filter, so it
+still covers the entire subscription. Add `-SkipConsumption` if you do not want
+that, or accept a consumption sheet that is broader than the resources you
+collected. There is no built-in way to collect only one service's metrics or only
+one service's consumption; `-Service` on its own leaves both phases
+subscription-wide (which is why a clean `-Service` recovery run pairs it with
+`-SkipMetrics -SkipConsumption`).
+
+## -ObfuscationDictionary, reuse tokens from a prior run
+
+You only need this when you re-collect a slice for recovery on an obfuscated
+run. You add `-ObfuscationDictionary <path>` to the recovery command, alongside
+`-Obfuscate` and whatever you are re-collecting (for example `-Service`), pointing
+it at the original run's `ObfuscationDictionary_*.json`:
+
+```powershell
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Obfuscate `
+    -ObfuscationDictionary "<original run folder>\ObfuscationDictionary_<stamp>.json" `
+    -Service <FailedService> -SkipMetrics -SkipConsumption
+```
+
+Why it matters: obfuscation tokens are random per run. If a recovery run made
+fresh tokens, the recovered rows would not line up with the rest of the original
+bundle when you merge them back. Seeding from the original dictionary makes the
+same real value produce the same `prod_` or `nonprod_` token it had before, so
+the merged result stays consistent. New values that were not in the seed still
+get fresh tokens, so you are extending the map, not breaking it.
+
+You do not need this on a normal first full run (there is nothing to line up with
+yet), and you do not need it at all on non-obfuscated runs.
+
+Note: the dictionary is local only and is never put in the shared ZIP. Use the
+copy in the original run's output folder on your machine.
+
+## Merge-RecoveryData, splice a repair run back in
+
+`Merge-RecoveryData` lives in `Functions/RecoveryMerge.Functions.ps1`.
+Dot-source the file, then call the function. It takes the incomplete bundle (the
+"gap" bundle) and the repair run's bundle, and produces one clean rebuilt
+bundle: inventory JSON, consumption CSV, metrics JSON, a regenerated HTML report,
+and a fresh ZIP.
 
 ```powershell
 . ./Functions/RecoveryMerge.Functions.ps1
 Merge-RecoveryData `
     -GapBundlePath      "<incomplete run's folder>" `
-    -RecoveryBundlePath "<scoped recovery run's folder>" `
+    -RecoveryBundlePath "<repair run's folder>" `
     -OutputPath         "<new empty folder>" `
     [-Service <name[,name...]>] `
     [-RecoverConsumption] `
     [-RecoverMetrics]
 ```
 
-It recovers **three independent dimensions**, each from the recovery bundle:
+It repairs three independent things, each taken from the repair bundle:
 
-| Dimension | Control | Default |
-|-----------|---------|---------|
-| Inventory service key(s) | `-Service` (default: every service key the recovery inventory contains) | spliced in |
-| Consumption CSV | `-RecoverConsumption` | **carried forward from the gap bundle** unless the switch is set |
-| Metrics file(s) | `-RecoverMetrics` | **carried forward from the gap bundle** unless the switch is set |
+| What | Switch | If you omit the switch |
+|------|--------|------------------------|
+| Inventory service(s) | `-Service` (default: every service in the repair inventory) | spliced in |
+| Consumption CSV | `-RecoverConsumption` | kept from the gap bundle |
+| Metrics file(s) | `-RecoverMetrics` | kept from the gap bundle |
 
-Behaviour:
+How it behaves:
 
-- **Inventory splice** adds/replaces the recovered service keys in the gap
-  inventory. If `-Service` explicitly names a key that is not in the recovery
-  inventory (total or partial miss), it **fails loud** rather than silently
-  dropping it.
-- **`-RecoverConsumption` / `-RecoverMetrics`** whole-file replace those files
-  with the recovery bundle's copies (metrics are rebased to the output bundle
-  name, batch suffixes preserved). Each fails loud if the recovery bundle lacks
-  the file. Without the switch, the gap bundle's copy is carried forward
-  byte-for-byte (the default, unchanged behaviour).
-- The return object reports `MergedServiceKeys`, `ConsumptionSource`
-  (`gap`/`recovery`), and `MetricsSource` (`gap`/`recovery`) for confirmation.
-- The obfuscation dictionaries are merged (local-only, never zipped).
+- The inventory splice adds or replaces the named service(s) in the gap
+  inventory. If you name a service with `-Service` that is not in the repair
+  inventory, it stops with an error instead of quietly dropping it.
+- `-RecoverConsumption` and `-RecoverMetrics` replace those whole files with the
+  repair bundle's copies (metrics files are renamed to match the output bundle,
+  keeping their batch suffixes). Each stops with an error if the repair bundle
+  does not have the file. Without the switch, the gap bundle's copy is carried
+  forward unchanged.
+- The result object reports `MergedServiceKeys`, `ConsumptionSource` (gap or
+  recovery), and `MetricsSource` (gap or recovery), so you can confirm what
+  happened.
+- The obfuscation dictionaries are merged too (local only, never zipped).
 
-## Recovery recipes
+## Worked recovery examples
 
-### A single inventory collector failed on a subscription
+The pattern is always the same: re-collect the missing slice with the original
+dictionary as the seed, then merge it back.
 
-Symptom: the run summary shows a collector failure for a subscription; that
-service's key is present but **empty** in the report.
+### One inventory collector failed
+
+Symptom: the run summary shows a collector failure, and that service is present
+but empty in the report.
 
 ```powershell
-# 1. Re-collect just that service, seeded from the original dictionary
-./ResourceInventory.ps1 -TenantID <t> -SubscriptionID <s> -Obfuscate `
-    -ObfuscationDictionary "<original dict for that sub>" `
+# 1. Re-collect just that service, seeded from the original run's dictionary
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Obfuscate `
+    -ObfuscationDictionary "<original run folder>\ObfuscationDictionary_<stamp>.json" `
     -Service <FailedService> -SkipMetrics -SkipConsumption
 
-# 2. Splice it back in
+# 2. Splice it back into the original bundle
 . ./Functions/RecoveryMerge.Functions.ps1
-Merge-RecoveryData -GapBundlePath "<original folder>" `
-    -RecoveryBundlePath "<step 1 folder>" -OutputPath "<new folder>"
+Merge-RecoveryData `
+    -GapBundlePath      "<original run folder>" `
+    -RecoveryBundlePath "<step 1 folder>" `
+    -OutputPath         "<new folder>"
 ```
 
 ### A subscription's consumption pull was interrupted
 
-See [consumption-data.md → Recovering from a consumption
-crash](consumption-data.md#recovering-from-a-consumption-crash). In short:
-re-run the subscription with consumption enabled (drop `-SkipConsumption`), then
-`Merge-RecoveryData … -RecoverConsumption`.
+Symptom: the billing sheet is short, and the diagnostics log shows where the
+consumption pull stopped.
 
-### Both at once
+```powershell
+# 1. Re-run the subscription with consumption on (no -SkipConsumption)
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Obfuscate `
+    -ObfuscationDictionary "<original run folder>\ObfuscationDictionary_<stamp>.json" `
+    -SkipMetrics
 
-Re-run the subscription with the failed inventory service collected **and**
-consumption/metrics enabled, then merge with the matching switches, e.g.
-`Merge-RecoveryData -Service <FailedService> -RecoverConsumption -RecoverMetrics …`.
+# 2. Merge only the consumption back in
+. ./Functions/RecoveryMerge.Functions.ps1
+Merge-RecoveryData `
+    -GapBundlePath      "<original run folder>" `
+    -RecoveryBundlePath "<step 1 folder>" `
+    -OutputPath         "<new folder>" `
+    -RecoverConsumption
+```
+
+See also consumption-data.md, "Recovering from a consumption crash".
+
+### A failed collector and interrupted billing together
+
+```powershell
+# 1. Re-run with the failed service collected, and consumption and metrics on
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Obfuscate `
+    -ObfuscationDictionary "<original run folder>\ObfuscationDictionary_<stamp>.json" `
+    -Service <FailedService>
+
+# 2. Merge all three back in
+. ./Functions/RecoveryMerge.Functions.ps1
+Merge-RecoveryData `
+    -GapBundlePath      "<original run folder>" `
+    -RecoveryBundlePath "<step 1 folder>" `
+    -OutputPath         "<new folder>" `
+    -Service <FailedService> -RecoverConsumption -RecoverMetrics
+```
 
 ## Diagnostics logs
 
-Two logs help diagnose partial failures (also summarised in the README):
+Two logs help you see what failed and where.
 
-- **`DebugLog_<ReportName>_<timestamp>.log`** — consolidated **local** debug log:
-  per-collector heartbeat (start/finish/failure) plus metrics-phase diagnostics
-  that previously scrolled past on the terminal. **Local-only**, never added to
-  the ZIP (it can contain real names and raw exception text).
-- **`Diagnostics_<ReportName>_<timestamp>.log`** — **shareable**, human-readable,
-  scrubbed diagnostics. Built on `-Obfuscate` runs and **included in the ZIP**.
-  Subscriptions appear as obfuscated tokens; identifiers are masked. It lists
-  phase timings and one-line health entries for collector failures, metrics
-  auth-skips, and **consumption failures — including exactly where a consumption
-  pull stopped** (`PageAtFailure` / `RecordsCollected`), so a truncated billing
-  sheet is obvious rather than inferred. It is a plain `.log` (not `.json`) on
-  purpose so the ingestion pipeline treats it as an attachment, not report data.
+`DebugLog_<ReportName>_<timestamp>.log`
+- The full local debug log: per-collector start, finish, and failure lines, plus
+  the metrics-phase detail that used to scroll past on the terminal.
+- Local only. It is never added to the ZIP, because it can contain real names and
+  raw error text.
 
-If a subscription is **not** listed under a failure heading, that dimension
-completed cleanly.
+`Diagnostics_<ReportName>_<timestamp>.log`
+- A shareable, scrubbed, readable log. It is built on `-Obfuscate` runs and is
+  included in the ZIP.
+- Subscriptions appear as tokens and identifiers are masked. It lists phase
+  timings and one line per health issue: collector failures, metrics auth skips,
+  and consumption failures. For consumption it records exactly where a pull
+  stopped (`PageAtFailure` and `RecordsCollected`), so a short billing sheet is
+  obvious instead of something you have to guess at.
+- It is a plain `.log`, not `.json`, on purpose, so the ingestion pipeline treats
+  it as an attachment and not as report data.
 
-## Reveal.ps1 — resilient un-masking
+If a subscription is not listed under any failure heading, that phase finished
+cleanly for it.
 
-`Reveal.ps1` turns an obfuscated report back into real values for the fields you
-choose. It runs in two modes:
+## Reveal.ps1, turn masked reports back into real values
 
-- **Single report:** `./Reveal.ps1 -InputZip <zip> [-DictionaryPath <json>]
-  [-Fields ResourceGroup,Subscription,...] [-All]`
-- **All subscriptions:** `./Reveal.ps1 [-InventoryRoot <dir>] [-Resume]` — walks
-  every per-subscription folder, pairs each obfuscated report with the
-  dictionary next to it, reveals each, and consolidates them into one outer ZIP.
+`Reveal.ps1` converts an obfuscated report back to real values for the fields you
+choose. It has two modes.
 
-Large-run resilience (relevant to recovery):
+```powershell
+# Single report
+./Reveal.ps1 -InputZip <zip> [-DictionaryPath <json>] [-Fields ResourceGroup,Subscription] [-All]
 
-- **Per-folder 20-minute timeout.** A pathological folder (huge or malformed
-  zip) that would otherwise stall the batch is abandoned after 20 minutes,
-  recorded as a timeout failure, and the run continues with the next folder.
-- **`-Resume`.** Re-runs against the same staging directory and skips folders
-  already revealed — so a resumed run doesn't redo completed work and advances
-  past a folder that previously stalled.
+# Every subscription under a folder
+./Reveal.ps1 [-InventoryRoot <dir>] [-Resume]
+```
+
+The all-subscriptions mode walks each per-subscription folder, pairs each masked
+report with the dictionary next to it, reveals them, and consolidates the results
+into one outer ZIP.
+
+Two features matter when you are recovering a large run:
+
+- Per-folder 20-minute timeout. A folder that would otherwise stall the whole
+  batch (a huge or malformed zip) is abandoned after 20 minutes, recorded as a
+  timeout, and the run moves on to the next folder.
+- `-Resume`. Re-running against the same staging folder skips the folders already
+  revealed, so you do not redo finished work, and you move past a folder that
+  stalled before.
 
 To diagnose a folder that timed out, reveal it on its own in single-report mode
-to surface the underlying error.
+to see the underlying error.
 
 ---
 
-Related: [Consumption data](consumption-data.md) · main [README](../README.md).
+Related: consumption-data.md, and the main README.

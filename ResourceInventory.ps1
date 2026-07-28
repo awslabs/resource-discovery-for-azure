@@ -1110,11 +1110,25 @@ function ExecuteInventoryProcessing()
             # process RSS (incl. LOH pages not returned to the OS). Values captured
             # into variables (not emitted bare) so nothing leaks onto the pipeline;
             # the $true call still forces a blocking full collection as before.
-            $MemHeapBeforeMB = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+            # Wrapped defensively: this runs as a bare statement after metrics are
+            # already written, and in non-Debug mode $ErrorActionPreference is
+            # 'SilentlyContinue' (which does NOT suppress a terminating .NET method
+            # exception). These APIs effectively never throw, but a diagnostic line
+            # must never be able to abort a subscription whose metrics already
+            # succeeded. The GC.Collect() itself stays outside so collection still
+            # happens even if the (best-effort) measurement/logging hiccups.
             [System.GC]::Collect()
-            $MemHeapAfterMB = [math]::Round([System.GC]::GetTotalMemory($true) / 1MB, 1)
-            $MemWorkingSetMB = [math]::Round([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB, 1)
-            Write-Log -Message ('[Memory] Post-metrics GC: managed heap {0} MB -> {1} MB after collect; process working set {2} MB.' -f $MemHeapBeforeMB, $MemHeapAfterMB, $MemWorkingSetMB) -Severity 'Info' -NoConsole -ToDebugLog
+            try
+            {
+                $MemHeapBeforeMB = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+                $MemHeapAfterMB = [math]::Round([System.GC]::GetTotalMemory($true) / 1MB, 1)
+                $MemWorkingSetMB = [math]::Round([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB, 1)
+                Write-Log -Message ('[Memory] Post-metrics GC: managed heap {0} MB -> {1} MB after collect; process working set {2} MB.' -f $MemHeapBeforeMB, $MemHeapAfterMB, $MemWorkingSetMB) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+            catch
+            {
+                Write-Log -Message ('[Memory] Post-metrics memory snapshot unavailable: {0}' -f $_.Exception.Message) -Severity 'Info' -NoConsole -ToDebugLog
+            }
         }
     }
 

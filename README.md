@@ -449,7 +449,11 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
-| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
+| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
+| `SkipStorageMetrics` | Switch | Skip only the Storage Account `UsedCapacity` metric (one metric-query call per storage account). Other metrics still collected. | False | `-SkipStorageMetrics` |
+| `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
+| `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = each family's native cadence (15 min VM, 30 min SQL, 60 min OSS-DB). Coarser values (e.g. `60`) cut data-point volume/memory; they do **not** reduce the API-call count. Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
+| `UseMetricsBatch` | Switch | Collect VM/disk/storage metrics via the Azure Monitor `metrics:getBatch` data-plane API (one request per ≤50 resources), which lowers the metric-query API-call count. Falls back to the per-call path on any failure. See `docs/metrics-batch-trial.md`. | False | `-UseMetricsBatch` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
 ### Metrics Lookback Window
@@ -481,6 +485,14 @@ Capacity and point-in-time metrics (storage used, limits, CosmosDB throughput,
 ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 **not** affected by this setting.
 
+> The Group A granularities above are the **native** cadences. `-MetricsIntervalMinutes`
+> (see Performance Parameters) can override the VM (`Percentage CPU`, `Available
+> Memory Bytes`), Azure SQL DB (`cpu_used`, `dtu_used`, `cpu_percent`) and OSS-DB
+> (`cpu_percent`, `memory_percent`) sampled series to a coarser grain — e.g. `60`
+> gives one hourly (peak) point instead of the 15/30-min default — to cut
+> data-point volume on very large tenants. It does not change VMSS, the daily
+> reads, or the capacity/point-in-time metrics.
+
 ### Privacy & Obfuscation Parameters
 
 | Parameter | Type | Description | Example |
@@ -503,8 +515,11 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 
 ### Run-AllSubscriptions Wrapper Parameters
 
-These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`, 
-`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-Service`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
+These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`,
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipStorageMetrics`, `-SkipDiskMetrics`,
+`-MetricsIntervalMinutes`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
+`ResourceInventory.ps1`, so they behave the same in both contexts (see
+[Performance Parameters](#performance-parameters) for the metric-volume controls).
 
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|---------|

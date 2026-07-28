@@ -18,12 +18,22 @@
 #                                           series carry that grain (hh:mm:ss)
 #
 # Each assertion is independently gated on its env var, so the suite is inert
-# (all Skipped) for scenarios / standalone runs that do not set them. Absence
-# checks are always safe (0 records is the pass state); the grain check skips
-# gracefully when the sub has no VM/SQL sampled-series metrics to inspect. The
-# grain check deliberately targets ONLY the VM/SQL sampled series - it does NOT
-# assert on Managed Disk (also 15-min but NOT covered by the interval knob) or
-# the daily SQL limit/capacity reads, which keep their native cadence.
+# (all Skipped) for scenarios / standalone runs that do not set them.
+#
+# COVERAGE NOTE (these are necessary, not sufficient, checks): the absence
+# assertions pass when there are 0 records of that Service, which is also true if
+# the target subscription simply has no storage accounts / no attached disks - so
+# a green result confirms "the flag did not leave any such records" but does NOT
+# by itself prove the flag removed something that would otherwise be present
+# (there is no with/without baseline here). Likewise the grain check Skips (not
+# fails) when the subscription has no VM/SQL/OSS-DB sampled series to inspect.
+# Treat these as output-shape smoke tests; the with/without proof is the
+# scenario matrix generating a real zip per flag combination.
+#
+# The grain check deliberately targets ONLY the knob-controlled sampled series
+# (scoped by BOTH Service and Metric) - it does NOT assert on Managed Disk (also
+# 15-min but NOT covered by the interval knob), VM Scale Sets (fixed 1-hr), or
+# the Series='false' capacity reads, which keep their native cadence.
 #
 # Run with (point TEST_ZIP_PATH at ONE concrete zip, not a wildcard):
 #   $env:TEST_ZIP_PATH = '/path/to/ResourcesReport_<timestamp>.zip'

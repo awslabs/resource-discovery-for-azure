@@ -26,11 +26,21 @@ param(
     # 60 min). 0 = keep each metric's native cadence. This does NOT change API-call
     # count (one call per resource+metric
     # regardless of grain) - it only reduces DATA-POINT volume (memory / JSON size
-    # / post-processing). The aggregation stays 'Maximum', so a coarser grain still
-    # captures each bucket's PEAK (e.g. 60 = hourly peak), just at lower temporal
-    # resolution. The daily SQL limit/capacity reads and the disk/storage metrics
-    # are intentionally NOT affected. ValidateSet limits it to Azure Monitor's
-    # supported sub-hourly grains so an invalid grain can never reach Get-AzMetric.
+    # / post-processing). Each series' own aggregation is unchanged by the grain
+    # (VM CPU and the DB series stay 'Maximum'; VM 'Available Memory Bytes' stays
+    # 'Minimum'), so a coarser grain still captures each bucket's extreme - the
+    # peak busy-ness, or the low-water available-memory point - e.g. 60 = the
+    # hourly extreme, just at lower temporal resolution. The daily SQL
+    # limit/capacity reads and the disk/storage metrics
+    # are intentionally NOT affected. The purpose is volume REDUCTION, so the
+    # intended values are equal-to or coarser-than each family's native cadence
+    # (60 is the safe, universally-supported choice); picking a grain FINER than a
+    # family's native (e.g. 5 for a VM whose native is 15) is allowed but INCREASES
+    # that family's data-point volume. ValidateSet only constrains the VALUE to the
+    # standard sub-hourly grains - it does NOT guarantee every metric supports the
+    # chosen grain; an unsupported (metric, grain) is handled by the existing
+    # per-call error path (zeroed record, logged to the local debug log), same as
+    # any other metric read failure.
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     # EXPERIMENTAL (default OFF): fetch VM CPU/memory metrics through the Azure
     # Monitor data-plane metrics:getBatch API (one REST call per <=50 resources,

@@ -6,6 +6,17 @@ param (
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
 
+    # EXPERIMENTAL (default OFF). Forwarded to ResourceInventory.ps1's
+    # -UseMetricsBatch (and on to Extension/Metrics.ps1) for every subscription,
+    # in both the sequential and parallel-streams paths. When set, VM/disk/storage
+    # metrics are collected via the Azure Monitor metrics:getBatch data-plane API
+    # (one request per <=50 resources) instead of one Get-AzMetric per
+    # (resource, metric), which is faster and lowers the metric-query API-call
+    # count. The tool will attempt to register the Microsoft.Insights provider if
+    # needed, and falls back to the per-call path on any batch failure (no data
+    # lost). See the -UseMetricsBatch notes in Extension/Metrics.ps1.
+    [switch]$UseMetricsBatch,
+
     # Scope collection to ONLY these service collectors (by their Services/*.ps1
     # BaseName, e.g. VirtualMachines, Streamanalytics), across every in-scope
     # subscription. Forwarded to ResourceInventory.ps1's own -Service filter.
@@ -857,6 +868,7 @@ if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 # Always forward ConcurrencyLimit so the operator can tune metrics-phase
 # throttling end-to-end from a single param instead of editing the inner
@@ -1258,6 +1270,7 @@ else
                 if ($Obfuscate) { $WorkerArgs.Obfuscate = $true }
                 if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
+                if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
                 if ($Service.Count -gt 0) { $WorkerArgs.Service = $Service }
 
                 $Jobs += Start-Job -ScriptBlock {

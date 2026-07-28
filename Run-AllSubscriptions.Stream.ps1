@@ -50,6 +50,12 @@ param (
     [switch] $Obfuscate,
     [switch] $SkipMetrics,
     [switch] $SkipConsumption,
+    # EXPERIMENTAL (default OFF). Forwarded by the parent wrapper and passed on to
+    # ResourceInventory.ps1's -UseMetricsBatch so this stream's subscriptions use
+    # the Azure Monitor metrics:getBatch data-plane fast-path (falls back to the
+    # per-call path on any failure). See the -UseMetricsBatch notes in
+    # Extension/Metrics.ps1.
+    [switch] $UseMetricsBatch,
     # Collector scope forwarded to ResourceInventory.ps1's -Service filter. The
     # parent (Run-AllSubscriptions.ps1) already normalized + validated it and
     # passes a clean array via the Start-Job argument hashtable, so the worker
@@ -171,6 +177,7 @@ if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($Service -and $Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 

@@ -44,6 +44,22 @@ is case-insensitive.
 
 This is the mechanism used to re-collect a single failed collector for recovery.
 
+### What is and isn't sliceable by `-Service`
+
+Only **inventory** is decomposable per service. The three phases scope differently:
+
+| Phase | Sliceable by `-Service`? | Why |
+|-------|--------------------------|-----|
+| Inventory | **Yes — per collector.** `-Service VirtualMachines` re-runs just that one collector. | Each `Services/*/*.ps1` collector is selected by name. |
+| Metrics | **No.** Metrics still cover the whole subscription, by resource type. | `Extension/Metrics.ps1` takes the whole raw Resource Graph result and filters it itself per type (e.g. `$Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }`), independent of the `-Service` collector selection. |
+| Consumption | **No — not decomposable at all.** | Consumption is subscription-wide billing via `Get-UsageAggregates`; there is no per-service dimension to slice. |
+
+Practical consequence for recovery: you can re-collect a single failed
+**inventory** collector with `-Service`, but to repair **metrics** or
+**consumption** you re-run the whole subscription's metrics/consumption phase
+(drop `-SkipMetrics` / `-SkipConsumption`) and splice the result back with
+`Merge-RecoveryData -RecoverMetrics` / `-RecoverConsumption`.
+
 ## `-ObfuscationDictionary` — seed tokens from a prior run
 
 `ResourceInventory.ps1 -Obfuscate -ObfuscationDictionary <path>` preloads the

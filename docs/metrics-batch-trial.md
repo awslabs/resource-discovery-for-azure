@@ -51,6 +51,13 @@ Single subscription instead of the whole tenant:
 pwsh ./ResourceInventory.ps1 -SubscriptionID <your-subscription-id> -UseMetricsBatch
 ```
 
+> Note on interactive sign-in: when you sign in interactively (for example with
+> `-DeviceLogin`), recent versions of the Az PowerShell modules ask you to pick a
+> subscription once, right after authentication. This choice only sets the default
+> context; the tool still discovers and processes **all** of your subscriptions
+> regardless of which one you pick, so any selection is fine. (This one-time prompt
+> only appears in an interactive session — it is not a data or security setting.)
+
 ## See the metric-query API-call footprint
 
 Open the `RunSummary_*.log` written to the output folder

@@ -20,6 +20,15 @@ param ($TenantID,
     # Falls back to the per-call path on any batch failure (no data lost). See
     # the -UseMetricsBatch notes in Extension/Metrics.ps1.
     [switch]$UseMetricsBatch,
+    # OPT-IN metric-volume controls forwarded to Extension/Metrics.ps1 (default
+    # OFF / native cadence, so behaviour is unchanged unless explicitly set).
+    # -SkipStorageMetrics / -SkipDiskMetrics drop the Storage Account UsedCapacity
+    # / Managed Disk composite I/O metrics (reduces API-call count + memory).
+    # -MetricsIntervalMinutes overrides the VM / SQL / OSS-DB utilization sampling
+    # grain (0 = native 15 min VM / 30 min SQL / 60 min OSS-DB). See Extension/Metrics.ps1.
+    [switch]$SkipStorageMetrics,
+    [switch]$SkipDiskMetrics,
+    [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
@@ -1082,7 +1091,7 @@ function ExecuteInventoryProcessing()
 
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -SkipStorageMetrics:$SkipStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsIntervalMinutes $MetricsIntervalMinutes
         }
     }
 
@@ -1090,9 +1099,22 @@ function ExecuteInventoryProcessing()
     {
         if (!$SkipMetrics.IsPresent)
         {
-            $([System.GC]::GetTotalMemory($false))
-            $([System.GC]::Collect())
-            $([System.GC]::GetTotalMemory($true))
+            # Managed-heap + process working-set snapshot around the post-metrics GC.
+            # Routed to the consolidated LOCAL debug log ONLY (-NoConsole so it never
+            # touches the terminal, -ToDebugLog so it is never zipped): under the
+            # wrapper each subscription runs in the SAME long-lived stream process
+            # (ResourceInventory.ps1 is invoked via '&'), so comparing these lines
+            # across subscriptions shows whether the process footprint is a stable
+            # high-water mark or is creeping (a real leak) over a large tenant.
+            # GetTotalMemory is the GC-managed heap only; WorkingSet64 is the fuller
+            # process RSS (incl. LOH pages not returned to the OS). Values captured
+            # into variables (not emitted bare) so nothing leaks onto the pipeline;
+            # the $true call still forces a blocking full collection as before.
+            $MemHeapBeforeMB = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+            [System.GC]::Collect()
+            $MemHeapAfterMB = [math]::Round([System.GC]::GetTotalMemory($true) / 1MB, 1)
+            $MemWorkingSetMB = [math]::Round([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB, 1)
+            Write-Log -Message ('[Memory] Post-metrics GC: managed heap {0} MB -> {1} MB after collect; process working set {2} MB.' -f $MemHeapBeforeMB, $MemHeapAfterMB, $MemWorkingSetMB) -Severity 'Info' -NoConsole -ToDebugLog
         }
     }
 
@@ -1181,6 +1203,19 @@ function ExecuteInventoryProcessing()
 
             $MatchedNames = @($Modules | ForEach-Object { $_.BaseName } | Sort-Object)
             Write-Log -Message ("-Service filter active: collecting {0} of {1} collectors: [{2}]" -f @($Modules).Count, @($AvailableServices).Count, ($MatchedNames -join ', ')) -Severity 'Info'
+
+            # -Service scopes the INVENTORY phase only; the metrics and consumption
+            # phases still run for the WHOLE subscription. Warn (do NOT enforce) when
+            # the operator has not also passed both skips, so a "-Service X" run does
+            # not silently spend time pulling every service's metrics + the whole
+            # subscription's billing. This is only a warning because the recovery
+            # recipe that re-collects metrics/consumption for a later
+            # Merge-RecoveryData -RecoverMetrics/-RecoverConsumption INTENTIONALLY runs
+            # -Service WITHOUT the skips - enforcing them would break that flow.
+            if (-not ($SkipMetrics.IsPresent -and $SkipConsumption.IsPresent))
+            {
+                Write-Log -Message ('-Service scopes the INVENTORY phase only; metrics and consumption still run for the WHOLE subscription. For a clean inventory-only run add -SkipMetrics -SkipConsumption. For targeted collection of a workload use -ResourceGroup (single subscription), which also scopes metrics. (Ignore this if you are re-collecting metrics/consumption for a later Merge-RecoveryData.)') -Severity 'Warning'
+            }
 
             $UnmatchedServices = @($Service | Where-Object { $_ -notin $MatchedNames })
             if (@($UnmatchedServices).Count -gt 0)

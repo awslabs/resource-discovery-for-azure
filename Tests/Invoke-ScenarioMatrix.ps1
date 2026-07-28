@@ -14,6 +14,10 @@
 #   5. skipconsumption  - -SkipConsumption only
 #   6. service          - -Service VirtualMachines (collector scoping): asserts the
 #                         inventory contains ONLY the requested service(s)
+#   7. skipstorage      - -SkipStorageMetrics: asserts no Storage Account metrics
+#   8. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
+#   9. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
+#                         series carry the 60-min grain
 #
 # IMPORTANT - obfuscation vs PII tests:
 #   The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
@@ -37,7 +41,7 @@
 param(
     [string]   $SubscriptionID,
     [string]   $TenantID,
-    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service'),
+    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'skipstorage', 'skipdisk', 'metricinterval'),
     [int]      $MetricsLookbackDays = 2,
     [int]      $ConcurrencyLimit = 6,
     [switch]   $KeepOutput
@@ -135,6 +139,14 @@ $Catalog = @{
     # ServiceScope suite reads $env:TEST_EXPECTED_SERVICES (set below) and asserts
     # the inventory contains ONLY the requested collector(s) + metadata.
     'service'         = @{ Args = @{ Service = @('VirtualMachines'); SkipMetrics = $true; SkipConsumption = $true }; Tests = @('ServiceScope.Tests.ps1') }
+    # Opt-in metric-volume controls. Each runs the structural suite (proving the
+    # flag produces a valid, schema-correct zip) plus MetricsVolumeControls.Tests.ps1,
+    # which reads the per-scenario TEST_EXPECT_* env vars set below to assert the
+    # flag's specific effect (no Storage Account / no Managed Disk metrics, or the
+    # VM/SQL sampled series at the requested grain).
+    'skipstorage'     = @{ Args = @{ SkipStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
+    'skipdisk'        = @{ Args = @{ SkipDiskMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
+    'metricinterval'  = @{ Args = @{ MetricsIntervalMinutes = 60 }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
 }
 
 New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
@@ -203,6 +215,19 @@ try
         else
         {
             Remove-Item Env:TEST_EXPECTED_SERVICES -ErrorAction SilentlyContinue
+        }
+
+        # Metric-volume-control expectations consumed by MetricsVolumeControls.Tests.ps1.
+        # Cleared first, then set only for the scenario that exercises each flag, so
+        # the suite stays inert (all Skipped) for every other scenario.
+        Remove-Item Env:TEST_EXPECT_NO_STORAGE_METRICS   -ErrorAction SilentlyContinue
+        Remove-Item Env:TEST_EXPECT_NO_DISK_METRICS      -ErrorAction SilentlyContinue
+        Remove-Item Env:TEST_EXPECT_METRIC_GRAIN_MINUTES -ErrorAction SilentlyContinue
+        switch ($name)
+        {
+            'skipstorage' { $env:TEST_EXPECT_NO_STORAGE_METRICS = '1' }
+            'skipdisk' { $env:TEST_EXPECT_NO_DISK_METRICS = '1' }
+            'metricinterval' { $env:TEST_EXPECT_METRIC_GRAIN_MINUTES = [string]$Scenario.Args.MetricsIntervalMinutes }
         }
 
         $TestPaths = $Scenario.Tests | ForEach-Object { Join-Path $PSScriptRoot $_ }
@@ -281,6 +306,9 @@ finally
     Remove-Item Env:TEST_USER_EMAIL          -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_DICT_PATH           -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_EXPECTED_SERVICES   -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_EXPECT_NO_STORAGE_METRICS   -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_EXPECT_NO_DISK_METRICS      -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_EXPECT_METRIC_GRAIN_MINUTES -ErrorAction SilentlyContinue
 
     if (-not $KeepOutput)
     {

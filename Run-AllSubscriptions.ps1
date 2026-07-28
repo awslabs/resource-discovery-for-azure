@@ -17,12 +17,34 @@ param (
     # lost). See the -UseMetricsBatch notes in Extension/Metrics.ps1.
     [switch]$UseMetricsBatch,
 
-    # Scope collection to ONLY these service collectors (by their Services/*.ps1
+    # OPT-IN metric-volume controls for very large tenants (default OFF / native
+    # cadence, so a run that omits them is unchanged). Forwarded to every
+    # subscription in both the sequential and parallel-streams paths.
+    #   -SkipStorageMetrics : skip the Storage Account 'UsedCapacity' metric
+    #                         (1 Azure Monitor call per storage account).
+    #   -SkipDiskMetrics    : skip the four Managed Disk composite I/O metrics
+    #                         (4 calls per attached disk - the biggest call source).
+    #   -MetricsIntervalMinutes : override the sampling grain of the high-frequency
+    #                         VM / Azure SQL DB / OSS-DB (MariaDB, MySQL, PostgreSQL
+    #                         + Flexible) utilization series. 0 = each series' native
+    #                         cadence (15 min VM, 30 min SQL, 60 min OSS-DB). Reduces
+    #                         data-point volume / memory / JSON size; does NOT reduce
+    #                         API-call count. Limited to Azure Monitor's supported
+    #                         sub-hourly grains. See the notes in Extension/Metrics.ps1.
+    [switch]$SkipStorageMetrics,
+    [switch]$SkipDiskMetrics,
+    [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
+
+    # Re-collect ONLY these inventory collectors (by their Services/*.ps1
     # BaseName, e.g. VirtualMachines, Streamanalytics), across every in-scope
     # subscription. Forwarded to ResourceInventory.ps1's own -Service filter.
-    # Useful for a migration that only cares about certain workloads (e.g. VMs +
-    # Stream Analytics) and does not want the rest even collected. Omit to collect
-    # all services (default). Accepts a comma list as one token
+    # This scopes the INVENTORY phase ONLY - metrics and consumption still run for
+    # the whole subscription - so it is intended for RECOVERING a specific failed
+    # collector, and should be paired with -SkipMetrics -SkipConsumption for a
+    # clean inventory-only run. It is NOT a general workload filter: to target a
+    # single workload (and scope its metrics too) run ResourceInventory.ps1
+    # directly with -SubscriptionID + -ResourceGroup instead. Omit to collect all
+    # services (default). Accepts a comma list as one token
     # (-Service VirtualMachines,Streamanalytics) or a PowerShell array; unknown
     # names fail fast up front with the valid list.
     [string[]]$Service,
@@ -869,6 +891,9 @@ if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
+if ($SkipStorageMetrics) { $InventoryPassthrough['SkipStorageMetrics'] = $true }
+if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
+if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
 if ($Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 # Always forward ConcurrencyLimit so the operator can tune metrics-phase
 # throttling end-to-end from a single param instead of editing the inner
@@ -1271,6 +1296,9 @@ else
                 if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
                 if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
+                if ($SkipStorageMetrics) { $WorkerArgs.SkipStorageMetrics = $true }
+                if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
+                if ($MetricsIntervalMinutes -gt 0) { $WorkerArgs.MetricsIntervalMinutes = $MetricsIntervalMinutes }
                 if ($Service.Count -gt 0) { $WorkerArgs.Service = $Service }
 
                 $Jobs += Start-Job -ScriptBlock {

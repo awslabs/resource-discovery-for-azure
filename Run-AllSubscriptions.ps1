@@ -128,7 +128,33 @@ param (
     # Tenant-scoped Azure Resource Graph rate limits (~15 req/sec/tenant) are
     # the hard ceiling - more than ~6 parallel streams in one tenant will
     # start to throttle and provide no further wall-time benefit.
-    [int]$ParallelStreams = 1
+    [int]$ParallelStreams = 1,
+
+    # --- Horizontal scale-out (sharding) ------------------------------------
+    # Split the tenant's subscriptions across N INDEPENDENT machines. Run the
+    # same command on each machine with the SAME -ShardCount and a distinct
+    # -ShardIndex (0..ShardCount-1); each machine processes ONLY its own shard of
+    # the subscriptions. Assignment is a deterministic hash of each subscription
+    # id, so the shards are disjoint and collectively cover every subscription
+    # with NO coordination between machines - and a subscription added/removed
+    # (or an access difference) on one machine only affects its own shard.
+    #
+    # This is orthogonal to -ParallelStreams: sharding scales ACROSS machines,
+    # -ParallelStreams scales ACROSS cores within one machine. A typical 10k-sub
+    # run uses one shard per machine, each still using parallel streams locally.
+    # Each shard keeps its own resume-state file
+    # (.resume-state-<TenantID>-shard-<Index>of<Count>.json) so shards never race
+    # on progress. Default ShardCount=1 (no sharding) is byte-identical to a
+    # non-sharded run. Each shard produces its OWN consolidated
+    # AllSubscriptions_ResourcesReport_*.zip covering only its slice; because the
+    # slices are disjoint they can be uploaded to the ingestion server separately
+    # (recommended - spreads load, no merge step). To instead build ONE
+    # tenant-wide MainSummary locally, extract the inner per-subscription zips out
+    # of every shard's outer zip into one folder, re-zip them into a single outer
+    # zip, then run Build-MainSummaryFromZip.ps1 -InputZip on that. See
+    # docs/horizontal-sharding.md and the README "Horizontal scaling" section.
+    [int]$ShardIndex = 0,
+    [int]$ShardCount = 1
 )
 
 # ---------------------------------------------------------------------------
@@ -476,8 +502,39 @@ catch
     Exit-Wrapper -Code 1
 }
 
-# Resume state helpers
-$ResumeStateFile = Join-Path $InventoryRoot (".resume-state-{0}.json" -f $TenantID)
+# Validate the sharding parameters up front (before any work). ShardCount>=1 and
+# a ShardIndex in [0, ShardCount-1] are the only valid combinations; anything
+# else is an operator mistake that would silently process the wrong slice, so
+# fail loud immediately. ShardCount=1 (default) is the no-sharding case.
+if ($ShardCount -lt 1)
+{
+    Write-Host ("ERROR: -ShardCount must be >= 1 (got {0})." -f $ShardCount) -ForegroundColor Red
+    Exit-Wrapper -Code 1
+}
+if ($ShardIndex -lt 0 -or $ShardIndex -ge $ShardCount)
+{
+    Write-Host ("ERROR: -ShardIndex must be in [0, {0}] for -ShardCount {1} (got {2})." -f ($ShardCount - 1), $ShardCount, $ShardIndex) -ForegroundColor Red
+    Exit-Wrapper -Code 1
+}
+
+# Resume state helpers. When sharding (ShardCount>1) each shard keeps its OWN
+# unified resume-state file so shards never clobber each other's completed/failed
+# progress. NOTE the intended topology is ONE shard per machine (each with its own
+# InventoryRoot): the PER-STREAM artefacts used by -ParallelStreams (the
+# .resume-state-<Tenant>-stream-<N>.json files, stream summaries and stream
+# failure logs) are keyed by tenant + stream index only, NOT by shard, so running
+# two shards concurrently on the SAME host with the SAME InventoryRoot and
+# -ParallelStreams>1 would collide on those. Run each shard on its own machine (or,
+# for same-box testing, give each a distinct InventoryRoot). The non-sharded
+# filename is unchanged, so a normal run resumes exactly as before.
+$ResumeStateFile = if ($ShardCount -gt 1)
+{
+    Join-Path $InventoryRoot (".resume-state-{0}-shard-{1}of{2}.json" -f $TenantID, $ShardIndex, $ShardCount)
+}
+else
+{
+    Join-Path $InventoryRoot (".resume-state-{0}.json" -f $TenantID)
+}
 
 
 
@@ -609,6 +666,28 @@ if ($Excluded.Count -gt 0)
     $ByState = $Excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
     Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $Excluded.Count, ($ByState -join ', ')) -ForegroundColor Yellow
 }
+
+# Horizontal scale-out: keep only THIS shard's slice of the eligible
+# subscriptions. Applied here - after the Enabled/disabled split but BEFORE
+# resume, the access gate, and the stream split - so every downstream phase
+# (resume skip, up-front access probe, parallel streams) operates only on this
+# shard's slice, not the whole tenant. Deterministic per-subscription-id hash
+# (Select-ShardSubscriptions) makes the N shards disjoint and exhaustive with no
+# cross-machine coordination. No-op when -ShardCount is 1 (returns the list
+# unchanged), so a non-sharded run is byte-identical.
+if ($ShardCount -gt 1)
+{
+    $BeforeShard = $Subscriptions.Count
+    $Subscriptions = @(Select-ShardSubscriptions -Subscriptions $Subscriptions -ShardIndex $ShardIndex -ShardCount $ShardCount)
+    Write-Host ("Shard {0} of {1}: processing {2} of {3} eligible subscription(s) on this machine." -f $ShardIndex, $ShardCount, $Subscriptions.Count, $BeforeShard) -ForegroundColor Cyan
+    Write-Host "  Run the other shards (same -ShardCount, different -ShardIndex) on separate machines to cover the full tenant." -ForegroundColor DarkGray
+    if ($Subscriptions.Count -eq 0)
+    {
+        Write-Host ("Shard {0} of {1} has no subscriptions assigned to it; nothing to process on this machine." -f $ShardIndex, $ShardCount) -ForegroundColor Yellow
+        Exit-Wrapper -Code 0
+    }
+}
+
 Write-Host ("Subscriptions to process: {0}" -f $Subscriptions.Count) -ForegroundColor Cyan
 
 # Always seed $CompletedIds from the existing state file. -Resume only
@@ -910,6 +989,21 @@ $DiagFile = $null
 # explanation is that the signed-in identity does not have Reader on the
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
+
+# Capture the in-scope (eligible, post-shard, post-access-gate) subscription
+# COUNT now, before the first ResourceInventory.ps1 call, into a variable the
+# inner script cannot clobber. WHY: the inner script sets
+# $Global:Subscriptions = @(Get-AzSubscription | Where HomeTenantId -eq TenantID)
+# (the full tenant list) on every invocation. When THIS wrapper is the entry
+# script (pwsh -File ...), its top-level $Subscriptions IS the global, so the
+# first sequential inner call (invoked in-process via &) overwrites our
+# filtered/sharded list back to the whole tenant. The processing foreach is
+# unaffected (it snapshots its collection at loop start), but the POST-loop
+# summary/run-summary counts would otherwise read the clobbered global - e.g.
+# a shard that processed 2 of 3 subs would wrongly report "Eligible/Processed: 3".
+# (Parallel-streams mode runs the inner script in child processes, so the parent
+# global is never touched there; capturing here is correct for both paths.)
+$EligibleCount = @($Subscriptions).Count
 
 if ($ParallelStreams -le 1)
 {
@@ -1740,7 +1834,7 @@ if ($Excluded.Count -gt 0)
 {
     Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $Excluded.Count) -ForegroundColor Green
 }
-Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundColor Green
+Write-Host ("Subscriptions Eligible:  {0}" -f $EligibleCount) -ForegroundColor Green
 # In parallel mode, $SkippedCount is not populated by the foreach loop above
 # (each worker skips independently). Derive it from the difference between
 # the number of eligible subs and the number of subs that actually ran in
@@ -1748,14 +1842,14 @@ Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundC
 if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0)
 {
     $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
-    $DerivedSkip = $Subscriptions.Count - $ActuallyProcessed
+    $DerivedSkip = $EligibleCount - $ActuallyProcessed
     if ($DerivedSkip -gt 0) { $SkippedCount = $DerivedSkip }
 }
 if ($Resume)
 {
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
 }
-Write-Host ("Subscriptions Processed: {0}" -f ($Subscriptions.Count - $SkippedCount)) -ForegroundColor Green
+Write-Host ("Subscriptions Processed: {0}" -f ($EligibleCount - $SkippedCount)) -ForegroundColor Green
 
 # Surface the per-subscription resource-count result so the user does not have
 # to scan individual transcripts to find subs that came back empty. Empty subs
@@ -2023,7 +2117,7 @@ try
         -Version $BundleVer `
         -StartTime $RunStartTime -EndTime (Get-Date) `
         -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
-        -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
+        -Eligible $EligibleCount -Processed ($EligibleCount - $SkippedCount) -Skipped $SkippedCount `
         -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
         -FailedSubscriptions $FailedSubscriptions `
         -CollectorFailures $Global:CollectorFailures `

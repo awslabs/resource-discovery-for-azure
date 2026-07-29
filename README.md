@@ -342,6 +342,34 @@ Recommended `-ParallelStreams` per environment:
 
 **Cloud Shell anti-abuse limits:** Microsoft warns that Cloud Shell is "not a general purpose computing platform" and that excessive usage can result in your tenant being blocked from Cloud Shell ([source](https://learn.microsoft.com/en-us/azure/cloud-shell/faq-troubleshooting#terminal-output---sorry-your-cloud-shell-failed-to-provision-codetenantdisabled-)). Long parallel runs against large tenants can trigger this. If you're running RDA across many subscriptions for a few hours at a time, use a local PowerShell 7 install instead. It avoids the risk and is usually faster anyway.
 
+#### Horizontal scaling across machines (very large tenants)
+
+`-ParallelStreams` scales a run across the **cores of one machine**, capped at ~6 useful streams by tenant-wide Azure Resource Graph rate limits. For very large tenants (thousands of subscriptions), one machine — even a big one — becomes the wall: the run is still fundamentally the whole tenant processed by up to 6 streams.
+
+`-ShardCount` / `-ShardIndex` scale a run **across independent machines**. You split the tenant into N shards and run one shard per machine (VM, container, or CI runner). Each machine runs the *same* command with the same `-ShardCount` and a distinct `-ShardIndex` from `0` to `ShardCount-1`:
+
+```powershell
+# Machine 0:
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 0 -Obfuscate
+# Machine 1:
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 1 -Obfuscate
+# ... through ShardIndex 9
+```
+
+How it works:
+
+- Each machine enumerates the whole tenant, then keeps only the subscriptions **deterministically assigned to its shard** (a stable hash of each subscription id). The N shards are **disjoint and cover every subscription** with no coordination between machines — a subscription added, removed, or invisible on one machine only ever affects its own shard, never the others.
+- Sharding is **orthogonal to `-ParallelStreams`**: each machine still uses parallel streams across its own cores. Concurrency multiplies as roughly *machines × streams-per-machine*, versus just the ~6 useful streams a single machine can drive.
+- Each shard keeps its own resume-state file (`.resume-state-<TenantID>-shard-<Index>of<Count>.json`), so `-Resume` / `-ResumeFailedOnly` work per machine independently.
+- **Run one shard per machine** (each with its own `InventoryReports` output directory). Two shards sharing one machine and output directory with `-ParallelStreams > 1` would collide on the per-stream working files — give each its own machine, or, for local testing, its own output directory.
+
+**Collecting the shards:** each machine produces its own `AllSubscriptions_ResourcesReport_<timestamp>.zip` covering only its shard — a complete, self-contained report identical in shape to a single-machine run's output.
+
+- **Recommended — upload the shard zips separately.** The ingestion server accepts each shard zip exactly like any normal run's output, so the N uploads together cover the whole tenant once (the shards are disjoint), with no duplicates and no gaps. This spreads ingestion load across N smaller uploads and needs no local merge step.
+- **Optional — merge locally into one MainSummary.** Only needed if you want a single combined `MainSummary.html` on your own machine. `Build-MainSummaryFromZip.ps1` rebuilds the summary from **one** already-consolidated outer zip (`-InputZip`); it does not combine multiple. To merge: extract the inner per-subscription `ResourcesReport_*.zip` out of every shard's outer zip into one folder, re-zip them into a single `AllSubscriptions_ResourcesReport_*.zip`, then run `Build-MainSummaryFromZip.ps1 -InputZip` on that. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md) for the full command sequence.
+
+Rough sizing: splitting a very large tenant across N machines gives each machine roughly *(total ÷ N)* subscriptions; each machine at `-ParallelStreams 6` then does the same workload as a single-machine run of that smaller slice. Add machines to cut wall-clock roughly linearly (until you approach the tenant-wide ARM/Resource Graph quotas shared across all shards).
+
 #### Run transcript and failure diagnostics
 
 Every time you run `Run-AllSubscriptions.ps1`, it writes a transcript of the whole run to `InventoryReports/RunAllSubscriptions_transcript_<timestamp>.txt`. This is different from the per-subscription transcripts that the inner script `ResourceInventory.ps1` writes inside each subscription folder. The wrapper transcript covers the run end-to-end: which tenant was resolved, how authentication was handled, any resume-state messages, which subscription is being processed at each step, the final consolidation, and the run summary. You get this file every run, whether you process one subscription or many.
@@ -532,7 +560,9 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
 | `AllowPartialAccess` | Switch | Change the up-front access check from hard-stop to skip-and-continue. By default the wrapper verifies read access to every in-scope subscription before any work and **stops** if any is unreadable (see [Subscription access check](#subscription-access-check-up-front)). With this switch, unreadable subscriptions are skipped (and listed) and the run proceeds with the accessible ones. | False | `-AllowPartialAccess` |
-| `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
+| `ParallelStreams` | Integer | Number of subscriptions to process concurrently on ONE machine. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
+| `ShardCount` | Integer | Split the tenant's subscriptions across N **independent machines** for horizontal scale-out. `1` (default) = no sharding. Run the same command on each machine with the same `-ShardCount` and a distinct `-ShardIndex`. See [Horizontal scaling across machines](#horizontal-scaling-across-machines-very-large-tenants). | 1 | `-ShardCount 10` |
+| `ShardIndex` | Integer | This machine's 0-based shard number (`0` .. `ShardCount-1`). Each machine processes only the subscriptions deterministically assigned to its shard. Only meaningful with `-ShardCount > 1`. | 0 | `-ShardIndex 3` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |

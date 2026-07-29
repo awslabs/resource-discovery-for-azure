@@ -374,6 +374,59 @@ function Resolve-AccessPreflight
     }
 }
 
+# ---- Horizontal sharding ----------------------------------------------------
+# Deterministically assign a subscription to one of $ShardCount shards, purely as
+# a function of its OWN subscription id - independent of what other subscriptions
+# are present in the caller's list. That independence is the whole point of
+# sharding for horizontal scale: N machines each run the same command with a
+# different -ShardIndex, each calls Get-AzSubscription for the full tenant, and
+# each keeps only the subs whose shard == its own index. Because the shard is a
+# pure function of the sub id, the N slices are guaranteed DISJOINT and
+# collectively EXHAUSTIVE with no coordination between machines - and a sub
+# created/deleted (or an access difference) on one machine only ever affects its
+# OWN slice, never reshuffling the others. A positional/round-robin split would
+# misalign the moment two machines saw even slightly different sub lists.
+#
+# Hash: SHA-256 of the lowercased id, first 4 bytes assembled BIG-ENDIAN into a
+# uint32, mod ShardCount. SHA-256 is stable across processes, OSes and CPU
+# architectures (unlike [string]::GetHashCode(), which is randomized per process
+# in modern .NET); the explicit big-endian assembly avoids any BitConverter
+# endianness dependence, so an x64 and an ARM host agree on the same shard for the
+# same id. Returns an int in [0, ShardCount-1]; ShardCount <= 1 is the
+# no-sharding case and always returns 0.
+function Get-ShardKeyForSubscription
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [Parameter(Mandatory = $true)][int]$ShardCount
+    )
+    if ($ShardCount -le 1) { return 0 }
+    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($SubscriptionId.ToLowerInvariant())
+    # SHA256.Create().ComputeHash (NOT the static [SHA256]::HashData, which is a
+    # .NET 5+ / PowerShell 7.1+ API) so this stays portable to a genuine
+    # '#Requires -Version 7.0' (.NET Core 3.1) host. Disposed to avoid leaking the
+    # provider across the per-subscription calls.
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $Hash = $Sha.ComputeHash($Bytes) } finally { $Sha.Dispose() }
+    $Value = ([uint32]$Hash[0] -shl 24) -bor ([uint32]$Hash[1] -shl 16) -bor ([uint32]$Hash[2] -shl 8) -bor [uint32]$Hash[3]
+    return [int]($Value % [uint32]$ShardCount)
+}
+
+# Filter a subscription list to only those owned by shard $ShardIndex of
+# $ShardCount, via Get-ShardKeyForSubscription. $ShardCount <= 1 is the
+# no-sharding case and returns the list unchanged. Pure (no Azure calls) so the
+# partition is unit-testable in isolation (see Tests/Sharding.Tests.ps1).
+function Select-ShardSubscriptions
+{
+    param(
+        $Subscriptions,
+        [Parameter(Mandatory = $true)][int]$ShardIndex,
+        [Parameter(Mandatory = $true)][int]$ShardCount
+    )
+    if ($ShardCount -le 1) { return @($Subscriptions) }
+    return @(@($Subscriptions) | Where-Object { (Get-ShardKeyForSubscription -SubscriptionId $_.Id -ShardCount $ShardCount) -eq $ShardIndex })
+}
+
 # === Pre-flight checks ===
 #
 # Detect the most common environment problems that make a long run pointless,

@@ -689,6 +689,11 @@ if ($Excluded.Count -gt 0)
 if ($Plan)
 {
     $PlanRec = Get-RecommendedParallelism
+    # Never recommend more parallel streams than there are subscriptions to
+    # process (a tiny tenant would otherwise be told to use more streams than it
+    # has work for; the real run clamps this too - see the -ParallelStreams path).
+    $PlanStreams = $PlanRec.Streams
+    if ($Subscriptions.Count -gt 0 -and $PlanStreams -gt $Subscriptions.Count) { $PlanStreams = $Subscriptions.Count }
     # Rough per-subscription time estimate, auto-picked from the phase switches:
     # inventory-only is fastest; metrics and consumption each add work. Printed as
     # an explicit estimate - real time varies with resource density.
@@ -697,13 +702,13 @@ if ($Plan)
     if ($SkipMetrics -and $SkipConsumption) { $PlanPerSub = 20.0; $PlanMode = 'inventory only' }
     elseif ($SkipMetrics -or $SkipConsumption) { $PlanPerSub = 40.0; $PlanMode = 'inventory + one of metrics/consumption' }
 
-    $PlanResult = Get-InventoryPlan -SubscriptionCount $Subscriptions.Count -Streams $PlanRec.Streams -PerSubSeconds $PlanPerSub -MaxSingleMachineHours 2
+    $PlanResult = Get-InventoryPlan -SubscriptionCount $Subscriptions.Count -Streams $PlanStreams -PerSubSeconds $PlanPerSub -MaxSingleMachineHours 2
 
     $FmtDur = {
         param([int]$Seconds)
-        $h = [math]::Floor($Seconds / 3600)
-        $m = [math]::Round(($Seconds % 3600) / 60)
-        if ($h -gt 0) { '{0}h {1}m' -f $h, $m } else { '{0}m' -f $m }
+        $Hours = [math]::Floor($Seconds / 3600)
+        $Minutes = [math]::Round(($Seconds % 3600) / 60)
+        if ($Hours -gt 0) { '{0}h {1}m' -f $Hours, $Minutes } else { '{0}m' -f $Minutes }
     }
 
     # Echo the phase/output flags the operator passed so the recommended command(s)
@@ -712,6 +717,9 @@ if ($Plan)
     if ($Obfuscate) { $ExtraFlags += '-Obfuscate' }
     if ($DeviceLogin) { $ExtraFlags += '-DeviceLogin' }
     if ($IncludeDisabled) { $ExtraFlags += '-IncludeDisabled' }
+    if ($AllowPartialAccess) { $ExtraFlags += '-AllowPartialAccess' }
+    if ($Detailed) { $ExtraFlags += '-Detailed' }
+    if ($Service) { $ExtraFlags += ('-Service {0}' -f ($Service -join ',')) }
     if ($SkipMetrics) { $ExtraFlags += '-SkipMetrics' }
     if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
@@ -724,7 +732,7 @@ if ($Plan)
     Write-Host ""
     Write-Host "================ Inventory Plan (assessment only - nothing was inventoried) ================" -ForegroundColor Green
     Write-Host ("Eligible subscriptions : {0}" -f $PlanResult.SubscriptionCount) -ForegroundColor Cyan
-    Write-Host ("This machine           : {0} vCPU / {1}  ->  -ParallelStreams {2} -ConcurrencyLimit {3}" -f $PlanRec.VCpu, $RamLabelPlan, $PlanRec.Streams, $PlanRec.Concurrency) -ForegroundColor Cyan
+    Write-Host ("This machine           : {0} vCPU / {1}  ->  -ParallelStreams {2} -ConcurrencyLimit {3}" -f $PlanRec.VCpu, $RamLabelPlan, $PlanStreams, $PlanRec.Concurrency) -ForegroundColor Cyan
     Write-Host ("Per-subscription est.  : ~{0}s ({1})" -f [int]$PlanResult.PerSubSeconds, $PlanMode) -ForegroundColor Cyan
     Write-Host ("Single-machine ceiling : {0} h" -f $PlanResult.MaxSingleMachineHours) -ForegroundColor Cyan
     Write-Host ""
@@ -737,7 +745,7 @@ if ($Plan)
     {
         Write-Host ("Recommendation: SINGLE MACHINE is sufficient (est. ~{0}, under the {1} h ceiling)." -f (& $FmtDur $PlanResult.EstimatedSeconds), $PlanResult.MaxSingleMachineHours) -ForegroundColor Green
         Write-Host "Run:" -ForegroundColor Green
-        Write-Host ("  ./Run-AllSubscriptions.ps1 -TenantID {0} -ParallelStreams {1} -ConcurrencyLimit {2}{3}" -f $TenantID, $PlanRec.Streams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
+        Write-Host ("  ./Run-AllSubscriptions.ps1 -TenantID {0} -ParallelStreams {1} -ConcurrencyLimit {2}{3}" -f $TenantID, $PlanStreams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
     }
     else
     {
@@ -748,7 +756,7 @@ if ($Plan)
         $ListCount = [math]::Min($PlanResult.ShardCount, $MaxToList)
         for ($i = 0; $i -lt $ListCount; $i++)
         {
-            Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f $TenantID, $PlanResult.ShardCount, $i, $PlanRec.Streams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
+            Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f $TenantID, $PlanResult.ShardCount, $i, $PlanStreams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
         }
         if ($PlanResult.ShardCount -gt $MaxToList)
         {

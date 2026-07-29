@@ -130,6 +130,25 @@ param (
     # start to throttle and provide no further wall-time benefit.
     [int]$ParallelStreams = 1,
 
+    # API headroom: leave this PERCENTAGE of the host's chosen metrics-collection
+    # concurrency unused, so the run intentionally consumes less of the shared
+    # Azure API throttle budget and leaves room for the customer's other/production
+    # workloads. 0 (default) = no reduction (full concurrency). Example:
+    # -HeadRoom 20 keeps ~20% of the concurrency in reserve (the effective
+    # -ConcurrencyLimit is scaled to 80% of its chosen value, floored, minimum 1).
+    #
+    # NOTE on scope: Azure Resource Manager throttles PER security principal PER
+    # subscription/tenant, plus a shared tenant-wide/global ceiling and per-
+    # resource-provider limits. Running under a dedicated identity already isolates
+    # most of RDA's per-principal budget from production; -HeadRoom additionally
+    # lowers RDA's peak request rate (it reduces the concurrent Get-AzMetric call
+    # count - the run's heaviest ARM / Azure Monitor consumer) so it competes less
+    # for the SHARED limits. It is a proportional throttle, not a hard reservation
+    # of a fixed fraction of the hourly request bucket. Scaling ONLY concurrency
+    # (not stream count) keeps the aggregate rate reduction predictable.
+    [ValidateRange(0, 90)]
+    [int]$HeadRoom = 0,
+
     # --- Horizontal scale-out (sharding) ------------------------------------
     # Split the tenant's subscriptions across N INDEPENDENT machines. Run the
     # same command on each machine with the SAME -ShardCount and a distinct
@@ -726,6 +745,7 @@ if ($Plan)
     if ($SkipStorageMetrics) { $ExtraFlags += '-SkipStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
+    if ($HeadRoom -gt 0) { $ExtraFlags += ('-HeadRoom {0}' -f $HeadRoom) }
     $ExtraStr = if ($ExtraFlags.Count -gt 0) { ' ' + ($ExtraFlags -join ' ') } else { '' }
     $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB } else { 'RAM undetected' }
 
@@ -1016,9 +1036,26 @@ $ConcurrencyAuto = -not $PSBoundParameters.ContainsKey('ConcurrencyLimit')
 if ($StreamsAuto) { $ParallelStreams = $AutoTune.Streams }
 if ($ConcurrencyAuto) { $ConcurrencyLimit = $AutoTune.Concurrency }
 
+# API headroom: intentionally leave part of the shared Azure API throttle budget
+# for other/production workloads by scaling down the metrics-collection
+# concurrency (the run's heaviest ARM / Azure Monitor consumer). Applies on top of
+# whatever ConcurrencyLimit was chosen (auto-tuned OR explicit), and because
+# $ConcurrencyLimit is the single source forwarded to the inner script and to
+# every parallel-stream worker, one reduction here propagates everywhere. No-op
+# when -HeadRoom is 0 (the default).
+if ($HeadRoom -gt 0)
+{
+    $ConcurrencyBeforeHeadroom = $ConcurrencyLimit
+    $ConcurrencyLimit = Get-HeadroomAdjustedConcurrency -Concurrency $ConcurrencyLimit -HeadRoomPercent $HeadRoom
+    Write-Host ("API headroom: -HeadRoom {0} -> ConcurrencyLimit {1} -> {2} (leaving ~{0}% of concurrency in reserve for other workloads)." -f $HeadRoom, $ConcurrencyBeforeHeadroom, $ConcurrencyLimit) -ForegroundColor DarkGray
+}
+
 $RamLabel = if ($AutoTune.RamGB -gt 0) { '{0} GB RAM' -f $AutoTune.RamGB } else { 'RAM undetected' }
 $StreamsSrc = if ($StreamsAuto) { 'auto' } else { 'explicit' }
 $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
+# Reflect the headroom reduction in the source label so the single-line
+# "Parallelism:" summary is not misread as the full un-reduced concurrency.
+if ($HeadRoom -gt 0) { $ConcurrencySrc = '{0}, -HeadRoom {1}' -f $ConcurrencySrc, $HeadRoom }
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 

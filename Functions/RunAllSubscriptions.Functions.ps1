@@ -150,6 +150,37 @@ function Get-RecommendedParallelism
     }
 }
 
+# Reduce a chosen metrics-collection concurrency by the requested API-headroom
+# percentage, so a run deliberately leaves part of the shared Azure API throttle
+# budget for other/production workloads. PURE (no Azure/host calls) - unit-tested
+# in Tests/Headroom.Tests.ps1.
+#
+# WHY concurrency (and not stream count): the metrics phase (the run's heaviest
+# ARM / Azure Monitor consumer) is throttled by this value - it is the size of
+# the Get-AzMetric runspace pool. Scaling ONLY concurrency keeps the aggregate
+# request-rate reduction predictable (streams x 0.8*concurrency ~= 80% of
+# baseline); scaling both streams and concurrency would compound (0.8*0.8 ~= 64%)
+# and over-shoot the requested headroom.
+#
+# HeadRoomPercent is clamped to [0,90]; the result is floored and never drops
+# below 1 (a 0 would stall the runspace pool). HeadRoomPercent 0 returns the
+# concurrency unchanged (the default no-op path).
+function Get-HeadroomAdjustedConcurrency
+{
+    param(
+        [Parameter(Mandatory = $true)][int]$Concurrency,
+        [Parameter(Mandatory = $true)][int]$HeadRoomPercent
+    )
+
+    if ($HeadRoomPercent -lt 0) { $HeadRoomPercent = 0 }
+    if ($HeadRoomPercent -gt 90) { $HeadRoomPercent = 90 }
+    if ($Concurrency -lt 1) { $Concurrency = 1 }
+
+    $Adjusted = [int][math]::Floor($Concurrency * (100 - $HeadRoomPercent) / 100.0)
+    if ($Adjusted -lt 1) { $Adjusted = 1 }
+    return $Adjusted
+}
+
 # Probe whether PowerShell background jobs (Start-Job) can actually be launched
 # in this session. Returns $true when jobs are usable, $false otherwise.
 #

@@ -206,3 +206,199 @@ Compress-Archive -Path (Join-Path $staging '*.zip') -DestinationPath $merged -Fo
 # 3. Build the aggregate MainSummary from the merged zip.
 ./Build-MainSummaryFromZip.ps1 -InputZip $merged
 ```
+
+## Running the shards on AKS (containers / CI-CD)
+
+The sharding above is transport-agnostic: each shard is just
+`Run-AllSubscriptions.ps1` with a distinct `-ShardIndex`, so you can run the
+shards as VMs, as CI/CD jobs, or as pods on AKS. This section shows the AKS
+path, because it is the most common "spin up N cheap workers, run, tear down"
+pattern — and it is the one verified end-to-end for this guide.
+
+> **Just want the step-by-step?** See the copy-paste runbook
+> [`deploy/CUSTOMER-SETUP.md`](../deploy/CUSTOMER-SETUP.md) — it walks through the
+> readiness checks, cluster + identity setup, running the Job, collecting output,
+> and troubleshooting. The rest of this section is the same material with more of
+> the "why".
+
+### The access trade-off — read this first
+
+Single-machine and multi-node runs need **different levels of access**:
+
+- A **single-machine** run typically uses the operator's own signed-in identity
+  (`Connect-AzAccount` on a laptop / Cloud Shell). It only needs **Reader** on
+  the subscriptions (plus Cost Management Reader / Monitoring Reader if
+  collecting consumption / metrics).
+- A **multi-node** run trades *more setup and more access* for *far less
+  wall-clock time*. The worker pods are non-interactive, so they authenticate as
+  a **workload identity** (a managed identity federated to the cluster), and
+  someone has to **stand up the cluster** and **grant that identity its roles**.
+
+So multi-node is faster, but it needs an identity with broader, pre-granted
+access and the rights to create the infrastructure. Budget for that before you
+start. Run the readiness check first:
+
+```powershell
+./deploy/Test-MultiNodeReadiness.ps1 -Location <region>
+```
+
+It is read-only and prints a PASS/WARN/FAIL table of everything below.
+
+### RBAC the worker identity (UAMI) needs
+
+Grant these to the user-assigned managed identity the pods federate to. Scope
+Reader at the tenant-root management group to cover the whole tenant in one
+grant, or per subscription for a smaller blast radius:
+
+| Role | Why | Scope |
+|------|-----|-------|
+| **Reader** | inventory (Resource Graph / ARM reads) | tenant-root MG or per subscription |
+| **Cost Management Reader** | consumption (omit if `-SkipConsumption`) | billing / subscription |
+| **Monitoring Reader** | metrics (omit if `-SkipMetrics`) | subscription |
+| **Storage Blob Data Contributor** | upload each node's output zip | the collection storage account |
+
+The person doing the setup also needs rights to **create AKS/ACR**
+(Contributor or Owner) and to **create role assignments + federated credentials**
+(Owner or User Access Administrator).
+
+### One-time setup (verified commands)
+
+All commands below were run end-to-end against a live subscription for this
+guide. Replace the placeholders; the GUID shown is the Azure documentation
+placeholder, not a real value.
+
+```bash
+RG=rda-inventory-rg
+LOC=<region>                     # e.g. eastus
+ACR=<globally-unique-name>       # lowercase alphanumeric
+CLUSTER=rda-aks
+
+# 0. Providers (no-op if already registered)
+az provider register -n Microsoft.ContainerService
+az provider register -n Microsoft.ContainerRegistry
+
+# 1. Resource group + registry
+az group create -n "$RG" -l "$LOC"
+az acr create -g "$RG" -n "$ACR" --sku Basic
+
+# 2. Build the worker image server-side (no local Docker needed). The
+#    Dockerfile ships at deploy/Dockerfile; build from the REPO ROOT (the
+#    trailing '.') so the product files - INCLUDING Version.json - are in the
+#    build context. .dockerignore keeps local/dev content out of the image.
+az acr build --registry "$ACR" --image rda:latest --file deploy/Dockerfile .
+
+# 3. Cluster. Pick an x64 node size that is AVAILABLE in your region — some
+#    subscriptions only offer Arm64 B-series (Standard_B2s was rejected in
+#    testing); the readiness check flags this. Standard_D2s_v3 is a safe x64
+#    default. Two small nodes are enough for a handful of subscriptions.
+az aks create -g "$RG" -n "$CLUSTER" --node-count 2 --node-vm-size Standard_D2s_v3 \
+  --tier free --generate-ssh-keys
+
+# 4. Let the cluster pull from the registry.
+az aks update -g "$RG" -n "$CLUSTER" --attach-acr "$ACR"
+
+# 5. Enable workload identity (OIDC issuer + the webhook).
+az aks update -g "$RG" -n "$CLUSTER" --enable-oidc-issuer --enable-workload-identity
+ISSUER=$(az aks show -g "$RG" -n "$CLUSTER" --query oidcIssuerProfile.issuerUrl -o tsv)
+
+# 6. Worker identity + its RBAC (Reader shown; add the others from the table).
+az identity create -g "$RG" -n rda-uami
+CLIENT_ID=$(az identity show -g "$RG" -n rda-uami --query clientId -o tsv)
+PRINCIPAL_ID=$(az identity show -g "$RG" -n rda-uami --query principalId -o tsv)
+az role assignment create --assignee-object-id "$PRINCIPAL_ID" \
+  --assignee-principal-type ServicePrincipal --role Reader \
+  --scope /subscriptions/12345678-1234-1234-1234-123456789012
+
+# 7. Federate the identity to the pod's Kubernetes service account.
+#    Subject MUST be system:serviceaccount:<namespace>:<serviceaccount>.
+az identity federated-credential create --name rda-fic --identity-name rda-uami -g "$RG" \
+  --issuer "$ISSUER" --subject system:serviceaccount:rda:rda-sa \
+  --audience api://AzureADTokenExchange
+```
+
+### The Kubernetes manifests
+
+Two manifests ship in the repo at `deploy/k8s/`:
+
+- `deploy/k8s/serviceaccount.yaml` — the ServiceAccount, annotated with the UAMI
+  client id, that the pods federate to.
+- `deploy/k8s/job.yaml` — the indexed Job. Each pod opts in to workload identity
+  with the `azure.workload.identity/use: "true"` label and derives its shard
+  from the indexed-Job completion index (`JOB_COMPLETION_INDEX`).
+
+Edit the two placeholders, then apply:
+
+```bash
+# 1. Set the UAMI client id in the ServiceAccount annotation.
+#    (CLIENT_ID was captured in setup step 6.)
+sed -i "s|<UAMI-client-id>|$CLIENT_ID|" deploy/k8s/serviceaccount.yaml
+# 2. Set your registry in the Job's image reference.
+sed -i "s|<acr>|$ACR|" deploy/k8s/job.yaml
+
+kubectl create namespace rda --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f deploy/k8s/serviceaccount.yaml
+kubectl apply -f deploy/k8s/job.yaml
+```
+
+In `deploy/k8s/job.yaml`, `completions`, `parallelism`, and the `SHARD_COUNT`
+env value MUST all equal the number of shards — change all three together. The
+`HEAD_ROOM`, `SKIP_METRICS`, and `SKIP_CONSUMPTION` env vars are optional knobs,
+commented in the manifest.
+
+The pod entrypoint ships at `deploy/entrypoint.ps1` and is baked in as the
+image `ENTRYPOINT`, so each pod runs it automatically — you don't author it. It
+signs in with **no secret** (the webhook injects the federated token and the
+identity env vars, and the tool exchanges them via the Az module), derives this
+pod's shard from `JOB_COMPLETION_INDEX`, honours the `SHARD_COUNT` / `HEAD_ROOM`
+/ `SKIP_METRICS` / `SKIP_CONSUMPTION` env vars, and runs the wrapper for THIS
+shard only. The no-secret sign-in it performs is:
+
+```powershell
+Connect-AzAccount -ServicePrincipal `
+  -ApplicationId $env:AZURE_CLIENT_ID `
+  -Tenant       $env:AZURE_TENANT_ID `
+  -FederatedToken (Get-Content -Raw $env:AZURE_FEDERATED_TOKEN_FILE).Trim() | Out-Null
+```
+
+### Output: write local, upload once
+
+Each pod writes its report to the node's **local ephemeral disk** first (fast,
+no per-object network round-trips), builds its one consolidated shard zip, and
+then uploads that single artifact to blob storage before it exits. Do **not**
+stream individual JSON files to blob — local-first then one upload is both
+faster and simpler.
+
+You don't hand-roll this: the wrapper has a built-in uploader. Set the
+`UPLOAD_BLOB_URI` env in the Job to a blob container URL and each pod ships its
+finalized zip there automatically. `entrypoint.ps1` forwards it to the wrapper's
+`-UploadToBlobContainerUri`, which uploads over the **same workload-identity
+sign-in the pod already did** — `New-AzStorageContext -UseConnectedAccount`, no
+account key, no SAS, and no second `Connect-AzAccount`. The blob name is made
+unique per shard (`shard-<i>of<n>-...`) so concurrent pods never collide.
+
+```yaml
+        # in deploy/k8s/job.yaml, alongside SHARD_COUNT:
+        - name: UPLOAD_BLOB_URI
+          value: "https://<account>.blob.core.windows.net/reports"
+```
+
+This requires the worker identity to have **Storage Blob Data Contributor** on
+the target storage account (the data-plane role in the RBAC table above —
+control-plane Contributor is not enough for `-UseConnectedAccount`). Upload is
+best-effort: if it fails, the run still succeeds and the zip remains on the
+node's local disk with a loud warning.
+
+Because the shard slices are disjoint, the uploaded zips together cover the
+whole tenant exactly once. Ingest them separately, or merge locally into one
+`MainSummary.html` as in "Collecting the results" above.
+
+### Cost note
+
+Worker nodes only need to live for the length of the run, so this is a good fit
+for **spot / evictable** node pools — often ~4-5x cheaper than pay-as-you-go for
+short batch runs. Size the nodes to your subscriptions (small nodes are fine for
+sparse subscriptions) and delete the resource group when done:
+
+```bash
+az group delete -n "$RG" --yes --no-wait
+```

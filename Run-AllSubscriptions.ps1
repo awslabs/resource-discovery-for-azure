@@ -175,6 +175,23 @@ param (
     [int]$ShardIndex = 0,
     [int]$ShardCount = 1,
 
+    # After the run, upload THIS machine's consolidated report zip to an Azure
+    # Blob container, so a multi-node / AKS operator does not have to SSH into
+    # every worker to collect output - each node ships its own zip. Pass the
+    # container URL, e.g. https://<account>.blob.core.windows.net/<container>
+    # (an optional path after the container becomes a blob-name prefix).
+    #
+    # The upload uses the CURRENT signed-in identity (Connect-AzAccount, or the
+    # AKS workload identity in a pod) via Azure AD - NO account key or SAS token -
+    # so that identity needs the "Storage Blob Data Contributor" role on the
+    # target account/container. When sharding (ShardCount > 1) the blob name is
+    # prefixed with the shard index (shard-<i>of<N>-), so the disjoint shards
+    # never collide; the report zip name also carries the run timestamp. The
+    # upload is best-effort: if it fails, the run still succeeds and the zip
+    # remains on the local disk (a loud WARNING is printed). Omit to skip upload
+    # (default).
+    [string]$UploadToBlobContainerUri,
+
     # Assess-only "getting started" bootstrap. When set, the wrapper authenticates,
     # enumerates the tenant's eligible subscriptions, and sizes the run against
     # THIS machine (CPU/RAM -> recommended parallel streams), then PRINTS a
@@ -548,6 +565,38 @@ if ($ShardIndex -lt 0 -or $ShardIndex -ge $ShardCount)
     Exit-Wrapper -Code 1
 }
 
+# Validate the blob-upload request up front (before the multi-hour run). The
+# operator EXPLICITLY asked to upload, so a malformed URL or a missing Az.Storage
+# module must fail LOUD here rather than silently degrading to a warning at the
+# very end - otherwise a whole run's output would be stranded on an ephemeral
+# node with no way to collect it. (The upload itself, later, stays best-effort
+# for transient/RBAC issues.)
+if ($UploadToBlobContainerUri)
+{
+    $UploadUriValid = $false
+    try
+    {
+        $PreflightUri = [System.Uri]$UploadToBlobContainerUri
+        $UploadUriValid = $PreflightUri.Scheme -eq 'https' -and
+            $PreflightUri.Host -match '\.blob\.' -and
+            -not [string]::IsNullOrWhiteSpace($PreflightUri.AbsolutePath.Trim('/'))
+    }
+    catch
+    {
+        $UploadUriValid = $false
+    }
+    if (-not $UploadUriValid)
+    {
+        Write-Host ("ERROR: -UploadToBlobContainerUri '{0}' is not a valid blob container URL. Expected https://<account>.blob.core.windows.net/<container>[/<prefix>]." -f $UploadToBlobContainerUri) -ForegroundColor Red
+        Exit-Wrapper -Code 1
+    }
+    if ($null -eq (Get-Module -Name Az.Storage -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1))
+    {
+        Write-Host "ERROR: -UploadToBlobContainerUri was requested but the Az.Storage module is not installed. Install it (Install-Module Az.Storage -Scope CurrentUser) or bake it into the container image, then re-run." -ForegroundColor Red
+        Exit-Wrapper -Code 1
+    }
+}
+
 # Resume state helpers. When sharding (ShardCount>1) each shard keeps its OWN
 # unified resume-state file so shards never clobber each other's completed/failed
 # progress. NOTE the intended topology is ONE shard per machine (each with its own
@@ -746,6 +795,7 @@ if ($Plan)
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
     if ($HeadRoom -gt 0) { $ExtraFlags += ('-HeadRoom {0}' -f $HeadRoom) }
+    if ($UploadToBlobContainerUri) { $ExtraFlags += ('-UploadToBlobContainerUri {0}' -f $UploadToBlobContainerUri) }
     $ExtraStr = if ($ExtraFlags.Count -gt 0) { ' ' + ($ExtraFlags -join ' ') } else { '' }
     $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB } else { 'RAM undetected' }
 
@@ -2375,6 +2425,51 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     finally
     {
         if ($null -ne $BundleStage) { Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# Per-node blob upload. When -UploadToBlobContainerUri is set, ship THIS
+# machine's finalized consolidated zip to the shared blob container so an
+# operator running many shards does not have to collect output from each node by
+# hand. Placed AFTER the bundle is finalized (MainSummary folded in) so the
+# uploaded artifact is complete. Passwordless: uses the current signed-in
+# identity (Connect-AzAccount / AKS workload identity) via Azure AD
+# (-UseConnectedAccount), requiring "Storage Blob Data Contributor" on the
+# target - no account key or SAS. Best-effort by design: a failure warns loudly
+# but does NOT fail the run, because the zip is already safe on local disk and
+# can be retrieved manually; making the pod error would also trigger Job retries
+# of the whole (already-successful) shard.
+if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+{
+    try
+    {
+        # Expect https://<account>.blob.core.windows.net/<container>[/<prefix>].
+        $BlobUri = [System.Uri]$UploadToBlobContainerUri
+        $StorageAccountName = $BlobUri.Host.Split('.')[0]
+        $PathParts = $BlobUri.AbsolutePath.Trim('/').Split('/', 2)
+        $ContainerName = $PathParts[0]
+        $BlobPrefix = if ($PathParts.Count -gt 1 -and $PathParts[1]) { $PathParts[1].Trim('/') + '/' } else { '' }
+        if ([string]::IsNullOrWhiteSpace($StorageAccountName) -or [string]::IsNullOrWhiteSpace($ContainerName))
+        {
+            throw "Could not parse '<account>' and '<container>' from -UploadToBlobContainerUri '$UploadToBlobContainerUri' (expected https://<account>.blob.core.windows.net/<container>)."
+        }
+
+        # Unique per shard + timestamp so concurrent nodes never overwrite each other.
+        $ShardTag = if ($ShardCount -gt 1) { 'shard-{0}of{1}-' -f $ShardIndex, $ShardCount } else { '' }
+        $BlobName = '{0}{1}{2}' -f $BlobPrefix, $ShardTag, (Split-Path -Path $OuterZipFile -Leaf)
+
+        Write-Host ("Uploading consolidated report to blob: {0} / {1} / {2}" -f $StorageAccountName, $ContainerName, $BlobName) -ForegroundColor Cyan
+        # -UseConnectedAccount uses the CURRENT Az login's identity AND its cloud
+        # environment, so a sovereign / gov-cloud account is targeted correctly
+        # whenever the operator connected to that cloud - no explicit endpoint is
+        # needed (and -EndpointSuffix is not valid in this parameter set).
+        $StorageContext = New-AzStorageContext -StorageAccountName $StorageAccountName -UseConnectedAccount -ErrorAction Stop
+        $null = Set-AzStorageBlobContent -File $OuterZipFile -Container $ContainerName -Blob $BlobName -Context $StorageContext -Force -ErrorAction Stop
+        Write-Host ("Blob upload complete: {0}" -f $BlobName) -ForegroundColor Green
+    }
+    catch
+    {
+        Write-Host ("WARNING: Blob upload failed ({0}). The consolidated zip remains on local disk at: {1}" -f $_.Exception.Message, $OuterZipFile) -ForegroundColor Yellow
     }
 }
 

@@ -1,0 +1,45 @@
+# Indexed Job that runs one RDA shard per pod. Kubernetes exposes
+# JOB_COMPLETION_INDEX (0..completions-1) to each pod, and entrypoint.ps1 uses
+# it as the shard index. Run all shards at once with parallelism == completions.
+#
+# IMPORTANT: completions, parallelism, and the SHARD_COUNT env value MUST all be
+# equal - they are the number of shards splitting the tenant. Change all three
+# together.
+#
+# Replace <acr> with your registry name before applying.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rda-shards
+  namespace: rda
+spec:
+  completions: 10           # ShardCount (number of shards / pods)
+  parallelism: 10           # run all shards at once (== completions)
+  completionMode: Indexed   # exposes JOB_COMPLETION_INDEX to each pod
+  backoffLimit: 0           # a shard failure is surfaced, not silently retried
+  template:
+    metadata:
+      labels:
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: rda-sa
+      restartPolicy: Never
+      containers:
+      - name: rda
+        image: <acr>.azurecr.io/rda:latest
+        imagePullPolicy: Always   # re-pull when a reused tag changes
+        env:
+        - name: SHARD_COUNT
+          value: "10"             # MUST equal completions/parallelism above
+        # Optional knobs (uncomment to use):
+        # - name: HEAD_ROOM         # leave N% of API concurrency in reserve
+        #   value: "20"
+        # - name: SKIP_METRICS      # "true" to skip the metrics phase
+        #   value: "true"
+        # - name: SKIP_CONSUMPTION  # "true" to skip the consumption phase
+        #   value: "true"
+        # - name: UPLOAD_BLOB_URI   # collect every shard's zip in one container
+        #   value: "https://<account>.blob.core.windows.net/<container>"
+        #   # Needs "Storage Blob Data Contributor" for the UAMI on that account.
+        #   # Each pod uploads its own zip (blob name is made unique per shard),
+        #   # so you don't exec into every node to fetch output.

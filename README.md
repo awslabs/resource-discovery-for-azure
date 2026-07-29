@@ -370,6 +370,14 @@ How it works:
 
 Rough sizing: splitting a very large tenant across N machines gives each machine roughly *(total ÷ N)* subscriptions; each machine at `-ParallelStreams 6` then does the same workload as a single-machine run of that smaller slice. Add machines to cut wall-clock roughly linearly (until you approach the tenant-wide ARM/Resource Graph quotas shared across all shards).
 
+**Running the shards on AKS / in CI-CD — and the access trade-off.** The shards are just the same command with a different `-ShardIndex`, so they run equally well as VMs, CI jobs, or AKS pods. Multi-node is *faster* but needs *more access* than a single-machine run: the non-interactive workers authenticate as an **AKS workload identity** (a user-assigned managed identity federated to a Kubernetes service account — no secrets stored or relayed), and that identity must be granted **Reader** (inventory) plus **Cost Management Reader** (consumption), **Monitoring Reader** (metrics), and **Storage Blob Data Contributor** (to collect each node's output zip). Standing up the cluster additionally needs rights to create AKS/ACR and to assign roles. Each node writes its report to local disk first and uploads its single consolidated zip to blob at the end (local-first is faster than streaming to blob). Before deploying, run the read-only readiness check — it verifies tooling, providers, an available x64 node size, and your permissions:
+
+```powershell
+./deploy/Test-MultiNodeReadiness.ps1 -Location <region>
+```
+
+For the step-by-step, copy-paste setup, follow the runbook **[deploy/CUSTOMER-SETUP.md](deploy/CUSTOMER-SETUP.md)** (readiness checks, cluster + identity, running the Job, collecting output, troubleshooting). See [docs/horizontal-sharding.md](docs/horizontal-sharding.md#running-the-shards-on-aks-containers--ci-cd) for the same material with more of the "why" behind the sharding.
+
 #### Run transcript and failure diagnostics
 
 Every time you run `Run-AllSubscriptions.ps1`, it writes a transcript of the whole run to `InventoryReports/RunAllSubscriptions_transcript_<timestamp>.txt`. This is different from the per-subscription transcripts that the inner script `ResourceInventory.ps1` writes inside each subscription folder. The wrapper transcript covers the run end-to-end: which tenant was resolved, how authentication was handled, any resume-state messages, which subscription is being processed at each step, the final consolidation, and the run summary. You get this file every run, whether you process one subscription or many.

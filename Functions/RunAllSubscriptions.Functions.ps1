@@ -427,6 +427,87 @@ function Select-ShardSubscriptions
     return @(@($Subscriptions) | Where-Object { (Get-ShardKeyForSubscription -SubscriptionId $_.Id -ShardCount $ShardCount) -eq $ShardIndex })
 }
 
+# Assess-only capacity planner behind the -Plan switch. PURE (no Azure/az calls)
+# so it is unit-testable in isolation (see Tests/InventoryPlan.Tests.ps1). Given
+# the eligible subscription COUNT, this host's recommended parallel-stream count,
+# and a per-subscription time estimate, it decides whether ONE machine can finish
+# within the single-machine wall-time ceiling ($MaxSingleMachineHours), or - if
+# not - the fewest machines (shards) to split across so each machine's slice fits
+# under that ceiling.
+#
+# Model: on one machine up to $Streams subscriptions run concurrently (one per
+# stream), each taking ~$PerSubSeconds, so wall-time is approximately
+#   ceil(SubscriptionCount / Streams) * PerSubSeconds.
+# Sharding assumes each additional machine is like this host (same $Streams); the
+# caller states that assumption in the printed guidance. All times are rough
+# estimates the operator can treat as a starting point, not a guarantee.
+#
+# Returns a PSCustomObject the caller formats for display:
+#   Mode ('Single'|'Sharded'), ShardCount, Streams, PerSubSeconds,
+#   EstimatedSeconds (single-machine estimate), PerMachineSubscriptions,
+#   EstimatedPerMachineSeconds, MaxSingleMachineHours.
+function Get-InventoryPlan
+{
+    param(
+        [Parameter(Mandatory = $true)][int]$SubscriptionCount,
+        [Parameter(Mandatory = $true)][int]$Streams,
+        [Parameter(Mandatory = $true)][double]$PerSubSeconds,
+        [double]$MaxSingleMachineHours = 2
+    )
+
+    if ($Streams -lt 1) { $Streams = 1 }
+    if ($PerSubSeconds -le 0) { $PerSubSeconds = 1 }
+    # Defensive: a non-positive ceiling has no sane meaning (and would make every
+    # tenant "over the ceiling"); fall back to the 2-hour default the wrapper uses.
+    if ($MaxSingleMachineHours -le 0) { $MaxSingleMachineHours = 2 }
+    $CeilingSeconds = $MaxSingleMachineHours * 3600
+
+    # Single-machine wall-time: ceil(SubCount / Streams) batches * PerSubSeconds.
+    $SingleBatches = if ($SubscriptionCount -le 0) { 0 } else { [math]::Ceiling($SubscriptionCount / $Streams) }
+    $SingleSeconds = $SingleBatches * $PerSubSeconds
+
+    if ($SubscriptionCount -le 0 -or $SingleSeconds -le $CeilingSeconds)
+    {
+        return [pscustomobject]@{
+            SubscriptionCount          = $SubscriptionCount
+            Mode                       = 'Single'
+            ShardCount                 = 1
+            Streams                    = $Streams
+            PerSubSeconds              = $PerSubSeconds
+            EstimatedSeconds           = [int]$SingleSeconds
+            PerMachineSubscriptions    = $SubscriptionCount
+            EstimatedPerMachineSeconds = [int]$SingleSeconds
+            MaxSingleMachineHours      = $MaxSingleMachineHours
+        }
+    }
+
+    # Over the ceiling: most subscriptions one machine can finish in time, then
+    # the fewest machines needed to cover them all.
+    $MaxBatchesPerMachine = [math]::Floor($CeilingSeconds / $PerSubSeconds)
+    if ($MaxBatchesPerMachine -lt 1) { $MaxBatchesPerMachine = 1 }
+    $MaxSubsPerMachine = [int]($Streams * $MaxBatchesPerMachine)
+    if ($MaxSubsPerMachine -lt 1) { $MaxSubsPerMachine = 1 }
+
+    $ShardCount = [int][math]::Ceiling($SubscriptionCount / $MaxSubsPerMachine)
+    if ($ShardCount -lt 2) { $ShardCount = 2 }
+
+    $PerMachineSubs = [int][math]::Ceiling($SubscriptionCount / $ShardCount)
+    $PerMachineBatches = [math]::Ceiling($PerMachineSubs / $Streams)
+    $PerMachineSeconds = $PerMachineBatches * $PerSubSeconds
+
+    return [pscustomobject]@{
+        SubscriptionCount          = $SubscriptionCount
+        Mode                       = 'Sharded'
+        ShardCount                 = $ShardCount
+        Streams                    = $Streams
+        PerSubSeconds              = $PerSubSeconds
+        EstimatedSeconds           = [int]$SingleSeconds
+        PerMachineSubscriptions    = $PerMachineSubs
+        EstimatedPerMachineSeconds = [int]$PerMachineSeconds
+        MaxSingleMachineHours      = $MaxSingleMachineHours
+    }
+}
+
 # === Pre-flight checks ===
 #
 # Detect the most common environment problems that make a long run pointless,

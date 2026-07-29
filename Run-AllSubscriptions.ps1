@@ -154,7 +154,19 @@ param (
     # zip, then run Build-MainSummaryFromZip.ps1 -InputZip on that. See
     # docs/horizontal-sharding.md and the README "Horizontal scaling" section.
     [int]$ShardIndex = 0,
-    [int]$ShardCount = 1
+    [int]$ShardCount = 1,
+
+    # Assess-only "getting started" bootstrap. When set, the wrapper authenticates,
+    # enumerates the tenant's eligible subscriptions, and sizes the run against
+    # THIS machine (CPU/RAM -> recommended parallel streams), then PRINTS a
+    # recommendation and EXITS without inventorying anything. For a tenant that one
+    # machine can finish within a ~2-hour wall-time ceiling it recommends a single
+    # run with concrete -ParallelStreams/-ConcurrencyLimit; for a larger tenant it
+    # recommends how many machines (shards) to split across and prints the ready-
+    # to-paste per-node command (same command, distinct -ShardIndex). The per-
+    # subscription time is a rough estimate (auto-picked from the -Skip* switches),
+    # so treat the output as guidance, not a guarantee.
+    [switch]$Plan
 )
 
 # ---------------------------------------------------------------------------
@@ -665,6 +677,88 @@ if ($Excluded.Count -gt 0)
 {
     $ByState = $Excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
     Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $Excluded.Count, ($ByState -join ', ')) -ForegroundColor Yellow
+}
+
+# -Plan: assess-only "getting started" sizing. Reuses the just-computed eligible
+# subscription set and this host's CPU/RAM to recommend either a single-machine
+# run (with concrete parallelism flags) or a shard count + ready-to-paste per-node
+# commands, then EXITS without inventorying anything. Placed after the
+# eligible/disabled split (so it sizes the real workload) but before the shard
+# filter / access gate / consumption gate, since it is advice only and makes no
+# per-subscription calls.
+if ($Plan)
+{
+    $PlanRec = Get-RecommendedParallelism
+    # Rough per-subscription time estimate, auto-picked from the phase switches:
+    # inventory-only is fastest; metrics and consumption each add work. Printed as
+    # an explicit estimate - real time varies with resource density.
+    $PlanPerSub = 60.0
+    $PlanMode = 'inventory + metrics + consumption'
+    if ($SkipMetrics -and $SkipConsumption) { $PlanPerSub = 20.0; $PlanMode = 'inventory only' }
+    elseif ($SkipMetrics -or $SkipConsumption) { $PlanPerSub = 40.0; $PlanMode = 'inventory + one of metrics/consumption' }
+
+    $PlanResult = Get-InventoryPlan -SubscriptionCount $Subscriptions.Count -Streams $PlanRec.Streams -PerSubSeconds $PlanPerSub -MaxSingleMachineHours 2
+
+    $FmtDur = {
+        param([int]$Seconds)
+        $h = [math]::Floor($Seconds / 3600)
+        $m = [math]::Round(($Seconds % 3600) / 60)
+        if ($h -gt 0) { '{0}h {1}m' -f $h, $m } else { '{0}m' -f $m }
+    }
+
+    # Echo the phase/output flags the operator passed so the recommended command(s)
+    # are copy-paste accurate (the parallelism flags come from the recommendation).
+    $ExtraFlags = @()
+    if ($Obfuscate) { $ExtraFlags += '-Obfuscate' }
+    if ($DeviceLogin) { $ExtraFlags += '-DeviceLogin' }
+    if ($IncludeDisabled) { $ExtraFlags += '-IncludeDisabled' }
+    if ($SkipMetrics) { $ExtraFlags += '-SkipMetrics' }
+    if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
+    if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
+    if ($SkipStorageMetrics) { $ExtraFlags += '-SkipStorageMetrics' }
+    if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
+    if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
+    $ExtraStr = if ($ExtraFlags.Count -gt 0) { ' ' + ($ExtraFlags -join ' ') } else { '' }
+    $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB } else { 'RAM undetected' }
+
+    Write-Host ""
+    Write-Host "================ Inventory Plan (assessment only - nothing was inventoried) ================" -ForegroundColor Green
+    Write-Host ("Eligible subscriptions : {0}" -f $PlanResult.SubscriptionCount) -ForegroundColor Cyan
+    Write-Host ("This machine           : {0} vCPU / {1}  ->  -ParallelStreams {2} -ConcurrencyLimit {3}" -f $PlanRec.VCpu, $RamLabelPlan, $PlanRec.Streams, $PlanRec.Concurrency) -ForegroundColor Cyan
+    Write-Host ("Per-subscription est.  : ~{0}s ({1})" -f [int]$PlanResult.PerSubSeconds, $PlanMode) -ForegroundColor Cyan
+    Write-Host ("Single-machine ceiling : {0} h" -f $PlanResult.MaxSingleMachineHours) -ForegroundColor Cyan
+    Write-Host ""
+
+    if ($PlanResult.SubscriptionCount -le 0)
+    {
+        Write-Host "No eligible subscriptions to plan for." -ForegroundColor Yellow
+    }
+    elseif ($PlanResult.Mode -eq 'Single')
+    {
+        Write-Host ("Recommendation: SINGLE MACHINE is sufficient (est. ~{0}, under the {1} h ceiling)." -f (& $FmtDur $PlanResult.EstimatedSeconds), $PlanResult.MaxSingleMachineHours) -ForegroundColor Green
+        Write-Host "Run:" -ForegroundColor Green
+        Write-Host ("  ./Run-AllSubscriptions.ps1 -TenantID {0} -ParallelStreams {1} -ConcurrencyLimit {2}{3}" -f $TenantID, $PlanRec.Streams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
+    }
+    else
+    {
+        Write-Host ("Recommendation: SHARD across {0} machines (a single machine would take ~{1}, over the {2} h ceiling)." -f $PlanResult.ShardCount, (& $FmtDur $PlanResult.EstimatedSeconds), $PlanResult.MaxSingleMachineHours) -ForegroundColor Green
+        Write-Host ("  Each machine handles ~{0} subscription(s) in ~{1}." -f $PlanResult.PerMachineSubscriptions, (& $FmtDur $PlanResult.EstimatedPerMachineSeconds)) -ForegroundColor Green
+        Write-Host "  Run ONE of these per machine (same command, distinct -ShardIndex):" -ForegroundColor Green
+        $MaxToList = 10
+        $ListCount = [math]::Min($PlanResult.ShardCount, $MaxToList)
+        for ($i = 0; $i -lt $ListCount; $i++)
+        {
+            Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f $TenantID, $PlanResult.ShardCount, $i, $PlanRec.Streams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
+        }
+        if ($PlanResult.ShardCount -gt $MaxToList)
+        {
+            Write-Host ("    ... through -ShardIndex {0} (use -ShardIndex 0..{0}, one per machine, across all {1} machines)." -f ($PlanResult.ShardCount - 1), $PlanResult.ShardCount) -ForegroundColor DarkGray
+        }
+        Write-Host "  Then upload each machine's AllSubscriptions_ResourcesReport_*.zip (see docs/horizontal-sharding.md)." -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    Write-Host "(Estimate only - actual time varies with resource density and metrics/consumption volume.)" -ForegroundColor DarkGray
+    Exit-Wrapper -Code 0
 }
 
 # Horizontal scale-out: keep only THIS shard's slice of the eligible

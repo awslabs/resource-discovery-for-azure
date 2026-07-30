@@ -32,6 +32,17 @@ spec:
         - name: SHARD_COUNT
           value: "10"             # MUST equal completions/parallelism above
         # Optional knobs (uncomment to use):
+        # - name: ALLOW_PARTIAL_ACCESS  # "true" = proceed even if the identity cannot verify
+        #   value: "true"               # FULL subscription coverage (read every sub under the
+        #                               # tenant-root management group) or cannot read a sub it
+        #                               # enumerated. DEFAULT (unset) HARD-STOPS such a shard,
+        #                               # because the tool's job is to capture ALL subscriptions.
+        #                               # For production, instead grant the UAMI Reader at the
+        #                               # tenant-root management group (inherits to every sub AND
+        #                               # makes coverage verifiable). Use this only for a
+        #                               # deliberate partial/test run (e.g. a first demo before
+        #                               # MG-root Reader is in place); it warns loudly and
+        #                               # proceeds with whatever subscriptions are visible.
         # - name: HEAD_ROOM         # leave N% of API concurrency in reserve
         #   value: "20"
         # - name: SKIP_METRICS      # "true" to skip the metrics phase

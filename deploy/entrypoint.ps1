@@ -63,6 +63,17 @@ $WrapperArgs = @{
 if ($HeadRoom -gt 0) { $WrapperArgs.HeadRoom = $HeadRoom }
 if ("$($env:SKIP_METRICS)" -eq 'true') { $WrapperArgs.SkipMetrics = $true }
 if ("$($env:SKIP_CONSUMPTION)" -eq 'true') { $WrapperArgs.SkipConsumption = $true }
+# Coverage / access gate override. By default the wrapper HARD-STOPS a shard if
+# it cannot verify full subscription coverage (identity can read every
+# subscription under the tenant-root management group) or cannot read a
+# subscription it enumerated - the tool's purpose is to capture ALL subscriptions,
+# so an unverifiable/partial run is refused. The correct production fix is to grant
+# the UAMI Reader at the tenant-root management group (it inherits to every
+# subscription AND makes coverage verifiable). Set ALLOW_PARTIAL_ACCESS=true only
+# for a deliberate partial/test run (e.g. a first demo before MG-root Reader is in
+# place): it downgrades that hard stop to a loud warning and proceeds with whatever
+# subscriptions this identity can currently see. Forwards to -AllowPartialAccess.
+if ("$($env:ALLOW_PARTIAL_ACCESS)" -eq 'true') { $WrapperArgs.AllowPartialAccess = $true }
 # Metrics data-plane batch fast-path (metrics:getBatch). Opt-in; forwards to the
 # wrapper's -UseMetricsBatch (VM/disk/storage/SQL/scale-set/Cosmos, with per-call
 # fallback). Cuts the metrics phase's Azure Monitor call volume on large tenants.

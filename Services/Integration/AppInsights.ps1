@@ -12,9 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = $Data.CreationDate
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = if ($null -ne $Data.CreationDate) { [datetime]($Data.CreationDate) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
             $Sampling = if ([string]::IsNullOrEmpty($Data.SamplingPercentage)) { 'Disabled' }else { $Data.SamplingPercentage }
 
             $Obj = @{

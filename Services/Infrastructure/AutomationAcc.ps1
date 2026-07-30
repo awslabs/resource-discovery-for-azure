@@ -15,9 +15,7 @@ if ($Task -eq 'Processing')
             $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name }
 
             $Data0 = $0.properties
-            $Timecreated = $Data0.creationTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = if ($null -ne $Data0.creationTime) { [datetime]($Data0.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
 
             if ($null -ne $Rbs)
             {
@@ -35,7 +33,7 @@ if ($Task -eq 'Processing')
                         'AutomationAccountCreatedTime'  = $Timecreated;
                         'Location'                      = $0.LOCATION;
                         'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
-                        'LastModifiedTime'              = ([datetime]$Data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
+                        'LastModifiedTime'              = if ($null -ne $Data.lastModifiedTime) { ([datetime]$Data.lastModifiedTime).ToString('MM/dd/yyyy hh:mm') } else { 'Unknown' } ;
                         'RunbookState'                  = $Data.state;
                         'RunbookType'                   = $Data.runbookType;
                         'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };

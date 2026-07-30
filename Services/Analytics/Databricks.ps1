@@ -13,9 +13,7 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $Sku = $1.SKU
-            $Timecreated = $Data.createdDateTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = if ($null -ne $Data.createdDateTime) { [datetime]($Data.createdDateTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
 
             $Obj = @{
                 'ID'                        = $1.id;

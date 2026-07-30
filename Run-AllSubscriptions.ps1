@@ -693,6 +693,38 @@ catch
     Exit-Wrapper -Code 1
 }
 
+# ---------------------------------------------------------------------------
+# Identity banner. Print WHO this run is authenticated as, before any work.
+# Diagnostic aid: on AKS / workload identity the pod signs in as a service
+# principal / managed identity (Connect-AzAccount -ServicePrincipal
+# -FederatedToken), whereas an operator on a VM signs in as themselves. A run
+# that returns 0 resources for an identity that "should" see them is almost
+# always a DIFFERENT principal (Account.Type != 'User') than the interactive
+# user - the Account.Type line below surfaces that at a glance.
+#
+# Native Az only: the tool depends solely on the Az PowerShell context
+# (Search-AzGraph, Get-AzSubscription, Get-AzMetric, Get-UsageAggregates,
+# Invoke-AzRestMethod are all Az module cmdlets) and never invokes the az CLI at
+# runtime, so this banner reads the identity from Get-AzContext - no az shell-out
+# and no az.cmd/cmd.exe quoting boundary.
+Write-Host ""
+Write-Host "Running identity:" -ForegroundColor Cyan
+$BannerCtx = Get-AzContext -ErrorAction SilentlyContinue
+if ($BannerCtx -and $BannerCtx.Account)
+{
+    Write-Host ("  Az PowerShell : {0} (type: {1})" -f $BannerCtx.Account.Id, $BannerCtx.Account.Type) -ForegroundColor Green
+    Write-Host ("  Tenant        : {0}" -f $BannerCtx.Tenant.Id) -ForegroundColor Green
+    if ($BannerCtx.Subscription -and $BannerCtx.Subscription.Id)
+    {
+        Write-Host ("  Active sub    : {0}" -f $BannerCtx.Subscription.Id) -ForegroundColor Green
+    }
+}
+else
+{
+    Write-Host "  Az PowerShell : NOT signed in (Get-AzContext returned nothing)" -ForegroundColor Red
+}
+Write-Host ""
+
 # Get all Azure subscriptions.
 #
 # Get-AzSubscription emits warnings (rather than throwing) when token

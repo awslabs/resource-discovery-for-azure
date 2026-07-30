@@ -12,7 +12,7 @@ If ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm"
+            $Timecreated = if ($null -ne $Data.creationTime) { [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
 
             # The four cross-resource references (storage / key vault / app insights /
             # container registry) are *optional* on an Azure ML workspace - a workspace

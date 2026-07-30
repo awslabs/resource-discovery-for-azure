@@ -61,6 +61,18 @@ Pass `-AllowPartialAccess` to consciously downgrade that to a warning and procee
 with only what the identity can see. The in-pod preflight (section 5) checks the
 same gap before you fan out.
 
+> **Quick first test (before tenant-root Reader is in place).** If you just want
+> to prove the pipeline end-to-end today and the UAMI only has Reader on a subset
+> of subscriptions, set `ALLOW_PARTIAL_ACCESS: "true"` in `deploy/k8s/job.yaml`
+> (it is a commented knob in the manifest — it maps to the wrapper's
+> `-AllowPartialAccess`). Each shard then warns about unverifiable coverage and
+> proceeds with the subscriptions it *can* see, so you still get output to review
+> and ingest. This is a **test-only** shortcut: for a real run, grant Reader at
+> the tenant-root management group instead so coverage is guaranteed and the gate
+> passes cleanly. Remember each shard emits **one** zip covering all subscriptions
+> in *its* slice — so the number of zips equals the number of non-empty shards,
+> not the number of subscriptions.
+
 | Role | Needed for | Omit if |
 |------|-----------|---------|
 | **Reader** | inventory (Resource Graph / ARM reads) — always required | never |

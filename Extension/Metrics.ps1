@@ -41,10 +41,13 @@ param(
     # values are supported: every controlled metric is stored at Azure's PT1M base
     # grain (validated against the Microsoft Learn supported-metrics reference).
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
-    # EXPERIMENTAL (default OFF): fetch VM CPU/memory metrics through the Azure
-    # Monitor data-plane metrics:getBatch API (one REST call per <=50 resources,
-    # all aggregations in one request) instead of one Get-AzMetric per
-    # (resource, metric). Falls back to the per-call path on ANY batch failure
+    # EXPERIMENTAL (default OFF): fetch the batchable services' metrics through the
+    # Azure Monitor data-plane metrics:getBatch API (one REST call per <=50
+    # resources, all aggregations in one request) instead of one Get-AzMetric per
+    # (resource, metric). Batchable services are VMs, managed disks, storage
+    # accounts, SQL databases, VM scale sets, and Cosmos DB (see $BatchNamespaceMap
+    # below); every other service stays on the per-call path.
+    # Falls back to the per-call path on ANY batch failure
     # (e.g. Microsoft.Insights RP not registered, narrow RBAC, regional issue),
     # so metrics are never lost. When omitted, behaviour is byte-identical to the
     # established per-call path.
@@ -122,7 +125,7 @@ if ($Task -eq 'Processing')
             {
                 # Fallback: resource not in main dictionary (e.g., deleted/transient resource)
                 # Cache the obfuscated value so same resource correlates across metrics
-                if (![string]::IsNullOrEmpty($OriginalId))
+                if (![string]::IsNullOrEmpty($OriginalId) -and $null -ne $ResourceIdDictionary)
                 {
                     $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
                     $ResourceIdDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
@@ -133,6 +136,19 @@ if ($Task -eq 'Processing')
                     $metric.Name = $ResourceNameDictionary[$OriginalId]
                     $metric.Subscription = $ResourceSubDictionary[$OriginalId]
                     $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
+                }
+                else
+                {
+                    # No usable resource id (empty/null), or no dictionary available:
+                    # this record cannot be correlated, so blank the descriptive fields
+                    # to the standard 'obfuscated' sentinel rather than risk leaving a
+                    # real Name/Subscription/ResourceGroup in the shared JSON. Defensive:
+                    # metric records normally always carry a resource id, but a missing
+                    # one must fail closed (no PII), not fall through unmasked.
+                    $metric.ID = 'obfuscated'
+                    $metric.Name = 'obfuscated'
+                    $metric.Subscription = 'obfuscated'
+                    $metric.ResourceGroup = 'obfuscated'
                 }
             }
         }
@@ -699,7 +715,7 @@ if ($Task -eq 'Processing')
     $script:MetricsBatchHttpCalls = 0
 
     # ---------------------------------------------------------------------
-    # OPTIONAL data-plane batch fast-path for VM / disk / storage metrics (default OFF).
+    # OPTIONAL data-plane batch fast-path for VM / disk / storage / SQL / scale-set / Cosmos DB metrics (default OFF).
     # ---------------------------------------------------------------------
     # When -UseMetricsBatch is set, fetch these services' metrics through the
     # Azure Monitor metrics:getBatch API (one REST call per <=50 resources, all
@@ -715,9 +731,12 @@ if ($Task -eq 'Processing')
         # "_0" chunk is deterministic. Add a service here to batch it (its metric
         # defs must be attached to a resource whose ARM id yields the namespace).
         $BatchNamespaceMap = [ordered]@{
-            'Virtual Machines' = 'microsoft.compute/virtualMachines'
-            'Managed Disk'     = 'microsoft.compute/disks'
-            'Storage Account'  = 'microsoft.storage/storageAccounts'
+            'Virtual Machines'            = 'microsoft.compute/virtualMachines'
+            'Managed Disk'                = 'microsoft.compute/disks'
+            'Storage Account'             = 'microsoft.storage/storageAccounts'
+            'SQL Database'                = 'microsoft.sql/servers/databases'
+            'Virtual Machines Scale Sets' = 'microsoft.compute/virtualMachineScaleSets'
+            'CosmosDB'                    = 'microsoft.documentdb/databaseAccounts'
         }
 
         $RemainingDefs = [System.Collections.Generic.List[object]]::new()
@@ -951,8 +970,8 @@ if ($Task -eq 'Processing')
                         $Throttled = $false
 
                         $Job = Start-ThreadJob -ScriptBlock {
-                            param($mArgs)
-                            Get-AzMetric @mArgs
+                            param($MArgs)
+                            Get-AzMetric @MArgs
                         } -ArgumentList $MetricArgs
 
                         if (Wait-Job -Job $Job -Timeout $CallTimeoutSeconds)

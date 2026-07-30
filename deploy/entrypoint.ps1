@@ -63,6 +63,25 @@ $WrapperArgs = @{
 if ($HeadRoom -gt 0) { $WrapperArgs.HeadRoom = $HeadRoom }
 if ("$($env:SKIP_METRICS)" -eq 'true') { $WrapperArgs.SkipMetrics = $true }
 if ("$($env:SKIP_CONSUMPTION)" -eq 'true') { $WrapperArgs.SkipConsumption = $true }
+# Metrics data-plane batch fast-path (metrics:getBatch). Opt-in; forwards to the
+# wrapper's -UseMetricsBatch (VM/disk/storage/SQL/scale-set/Cosmos, with per-call
+# fallback). Cuts the metrics phase's Azure Monitor call volume on large tenants.
+if ("$($env:USE_METRICS_BATCH)" -eq 'true') { $WrapperArgs.UseMetricsBatch = $true }
+# Per-pod parallelism (streams across THIS pod's cores; distinct from sharding
+# across pods). Omit / 0 / non-numeric = let the wrapper auto-tune from the pod's
+# CPU/RAM (capped at ~6 by the tenant ARG rate limit). A positive integer overrides.
+if (-not [string]::IsNullOrWhiteSpace("$($env:PARALLEL_STREAMS)"))
+{
+    $ParsedStreams = 0
+    if ([int]::TryParse("$($env:PARALLEL_STREAMS)", [ref]$ParsedStreams) -and $ParsedStreams -gt 0)
+    {
+        $WrapperArgs.ParallelStreams = $ParsedStreams
+    }
+    else
+    {
+        Write-Host ("[entrypoint] PARALLEL_STREAMS '{0}' is not a positive integer; ignoring (wrapper will auto-tune)." -f "$($env:PARALLEL_STREAMS)")
+    }
+}
 # Per-node upload. When UPLOAD_BLOB_URI is set, each pod ships its finalized
 # consolidated zip to the shared blob container (blob name is made unique per
 # shard by the wrapper), so an operator running N pods collects all output from

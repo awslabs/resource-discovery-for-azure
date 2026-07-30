@@ -64,6 +64,23 @@ Before running the script, ensure your Azure user account has the following role
 - **✅ Monitoring Reader Role** - Access to Azure Monitor metrics
 - **✅ Cost Management Reader Role** - Access to cost management data
 
+> **⚠️ Scope Reader at the tenant-root management group — NOT per subscription.**
+> The tool discovers subscriptions with `Get-AzSubscription`, which only returns
+> subscriptions the identity holds a role on. If you assign Reader per
+> subscription and miss some, those subscriptions are **silently absent** from the
+> report — the run looks complete but isn't, and at scale that can be hundreds of
+> subscriptions. Assigning **Reader at the tenant-root management group** inherits
+> to every current *and future* subscription, so nothing is silently missed. It
+> also grants the management-group read the coverage check needs to *confirm* full
+> coverage. This is the **required** scope for a verifiably-complete run:
+> `Run-AllSubscriptions.ps1` runs an up-front coverage gate that compares the
+> subscriptions the identity can enumerate against the true set under the
+> tenant-root management group, and **hard-stops** if any are missing or if the
+> true set cannot be read (i.e. the identity lacks management-group read). Pass
+> `-AllowPartialAccess` to consciously downgrade that to a warning and proceed with
+> only the subscriptions the identity can currently see. (The AKS in-pod preflight
+> `deploy/Test-NodeReadiness.ps1` checks for exactly this gap too.)
+
 ### Environment Options
 
 The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pick based on the size of the tenant you're inventorying:
@@ -359,7 +376,7 @@ Recommended `-ParallelStreams` per environment:
 How it works:
 
 - Each machine enumerates the whole tenant, then keeps only the subscriptions **deterministically assigned to its shard** (a stable hash of each subscription id). The N shards are **disjoint and cover every subscription** with no coordination between machines — a subscription added, removed, or invisible on one machine only ever affects its own shard, never the others.
-- Sharding is **orthogonal to `-ParallelStreams`**: each machine still uses parallel streams across its own cores. Concurrency multiplies as roughly *machines × streams-per-machine*, versus just the ~6 useful streams a single machine can drive.
+- Sharding is **orthogonal to `-ParallelStreams`**: each machine still uses parallel streams across its own cores (auto-tuned, capped at ~6 by the tenant-wide Azure Resource Graph limit of ~15 req/sec). Sharding scales the phases that throttle **per subscription** — metrics and consumption, normally the wall-time-dominant part — roughly *machines × streams-per-machine*, because disjoint shards hit different per-subscription buckets. Resource Graph **discovery**, by contrast, draws from the one shared ~15 req/sec **tenant** budget across all shards, so it does not scale linearly with machine count. `-UseMetricsBatch` (Azure Monitor `metrics:getBatch`) further cuts the metrics phase's call volume. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md) — "Rate limits: why ~6 streams per machine, and what sharding actually speeds up".
 - Each shard keeps its own resume-state file (`.resume-state-<TenantID>-shard-<Index>of<Count>.json`), so `-Resume` / `-ResumeFailedOnly` work per machine independently.
 - **Run one shard per machine** (each with its own `InventoryReports` output directory). Two shards sharing one machine and output directory with `-ParallelStreams > 1` would collide on the per-stream working files — give each its own machine, or, for local testing, its own output directory.
 

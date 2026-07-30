@@ -44,9 +44,22 @@ the shard count, and (optionally) an output blob container.
 - Rights to create role assignments and federated credentials
   (Owner or User Access Administrator on the RBAC scope).
 
-**The worker identity (`rda-uami`)** needs these roles. Scope Reader at the
-tenant-root management group to cover the whole tenant in one grant, or per
-subscription for a smaller blast radius:
+**The worker identity (`rda-uami`)** needs these roles. **Scope Reader at the
+tenant-root management group — not per subscription.** The tool discovers
+subscriptions with `Get-AzSubscription`, which returns only the subscriptions the
+identity holds a role on; if you grant Reader per subscription and miss some, those
+subscriptions are **silently absent** from the report (at scale, potentially
+hundreds). A single Reader assignment at the **tenant-root management group**
+(`GroupId` = your tenant id) inherits to every current and future subscription, so
+nothing is silently missed, and it also grants the management-group read used to
+*confirm* full coverage. This scope is effectively **required**: the wrapper
+(`Run-AllSubscriptions.ps1`, which the pod runs) performs an up-front coverage gate
+that compares the subscriptions the identity can enumerate against the true set
+under the tenant-root management group and **hard-stops** if any are missing — or
+if that true set cannot be read because the identity lacks management-group read.
+Pass `-AllowPartialAccess` to consciously downgrade that to a warning and proceed
+with only what the identity can see. The in-pod preflight (section 5) checks the
+same gap before you fan out.
 
 | Role | Needed for | Omit if |
 |------|-----------|---------|
@@ -86,7 +99,7 @@ RG=rda-inventory-rg
 LOC=<region>                     # e.g. eastus
 ACR=<globally-unique-name>       # lowercase alphanumeric
 CLUSTER=rda-aks
-SUB=12345678-1234-1234-1234-123456789012   # target subscription (or use an MG scope)
+TENANT_ID=12345678-1234-1234-1234-123456789012   # your tenant id (= tenant-root management-group id)
 
 # 0. Providers (no-op if already registered)
 az provider register -n Microsoft.ContainerService
@@ -120,12 +133,19 @@ ISSUER=$(az aks show -g "$RG" -n "$CLUSTER" --query oidcIssuerProfile.issuerUrl 
 
 # 6. Worker identity + its RBAC (Reader shown; add the others from the table in
 #    section 2 as needed for consumption/metrics/upload).
+#    Scope Reader at the TENANT-ROOT MANAGEMENT GROUP (its id = your tenant id),
+#    NOT per subscription: it inherits Reader to every current and future
+#    subscription (so none is silently missed) AND grants the management-group
+#    read the wrapper's up-front coverage gate needs to CONFIRM it is seeing every
+#    subscription. A per-subscription grant makes the run hard-fail the coverage
+#    gate (or require -AllowPartialAccess). Granting at this scope requires you to
+#    be Owner or User Access Administrator at the tenant-root management group.
 az identity create -g "$RG" -n rda-uami
 CLIENT_ID=$(az identity show -g "$RG" -n rda-uami --query clientId -o tsv)
 PRINCIPAL_ID=$(az identity show -g "$RG" -n rda-uami --query principalId -o tsv)
 az role assignment create --assignee-object-id "$PRINCIPAL_ID" \
   --assignee-principal-type ServicePrincipal --role Reader \
-  --scope /subscriptions/$SUB
+  --scope /providers/Microsoft.Management/managementGroups/$TENANT_ID
 
 # 7. Federate the identity to the pod's Kubernetes ServiceAccount.
 #    Subject MUST be system:serviceaccount:<namespace>:<serviceaccount>.
@@ -160,6 +180,15 @@ Optional Job env knobs (uncomment in `job.yaml`):
   customer's production Azure workloads).
 - `SKIP_METRICS` = `"true"` — skip the metrics phase (drop Monitoring Reader).
 - `SKIP_CONSUMPTION` = `"true"` — skip consumption (drop Cost Management Reader).
+- `USE_METRICS_BATCH` = `"true"` — use the Azure Monitor `metrics:getBatch`
+  data-plane fast-path (VMs, managed disks, storage accounts, SQL databases, VM
+  scale sets, Cosmos DB; anything else stays per-call, and any batch failure falls
+  back to per-call). Cuts the metrics phase's Azure Monitor call volume on large
+  tenants. The tool attempts to register the `Microsoft.Insights` provider.
+- `PARALLEL_STREAMS` — per-pod concurrency across this pod's cores (distinct from
+  sharding across pods). Omit to auto-tune from the pod's CPU/RAM; capped at ~6 by
+  the tenant-wide Resource Graph limit (~15 req/sec). Give the node ~0.7 GB RAM
+  headroom per stream at metrics-phase peak.
 - `UPLOAD_BLOB_URI` — a blob container URL
   (`https://<account>.blob.core.windows.net/<container>[/<prefix>]`). When set, the
   entrypoint passes it to the wrapper and each pod uploads its finalized zip there

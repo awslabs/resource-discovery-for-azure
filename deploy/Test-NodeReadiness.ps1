@@ -36,7 +36,14 @@
          -ServicePrincipal -FederatedToken) - the exact call entrypoint.ps1 makes.
       3. Az.ResourceGraph present and a Search-AzGraph query succeeds - proves the
          UAMI has Reader somewhere and the inventory phase can run.
-      4. (only if -UploadToBlobContainerUri is given) Az.Storage present and a
+      4. Subscription coverage: the count the identity can enumerate
+         (Get-AzSubscription) equals the true count under the tenant-root
+         management group (Get-AzManagementGroup -Recurse). A shortfall - OR any
+         inability to verify the true total - is a HARD FAIL, because a
+         per-subscription-scoped identity silently misses subscriptions and this
+         tool must capture ALL of them. The robust fix is Reader at the
+         tenant-root management group, which inherits to every subscription.
+      5. (only if -UploadToBlobContainerUri is given) Az.Storage present and a
          probe blob can be WRITTEN then DELETED via -UseConnectedAccount - proves
          the UAMI has Storage Blob Data Contributor on the collection container,
          which the per-node upload (-UploadToBlobContainerUri) needs.
@@ -91,6 +98,38 @@ function Get-MaskedIdentity
     if ([string]::IsNullOrWhiteSpace($Identity)) { return '<unknown>' }
     if ($Identity.Length -gt 6) { return ($Identity.Substring(0, 6) + '***') }
     return '***'
+}
+
+# Recursively collect the subscription IDs (each subscription child's .Name is its
+# subscription GUID) under a management-group tree returned by Get-AzManagementGroup
+# -Expand -Recurse. Subscription children carry a Type like '/subscriptions'; nested
+# management-group children carry a 'managementGroups' Type and their own .Children,
+# so we recurse into those. Returning the ID SET (not just a count) lets check 4
+# compare it directly against the ids the identity can enumerate - which is more
+# robust than a raw count (immune to a phantom/transitioning subscription that could
+# coincidentally balance a real missing one) and lets it NAME exactly which
+# subscriptions would be silently missed. Establishes the TRUE subscription set under
+# the tenant-root MG, independent of what the running identity can enumerate via
+# Get-AzSubscription. Mirrors Get-RdaMgSubscriptionId in the wrapper's shared
+# Functions library so the preflight and the runtime gate use the same logic.
+function Get-RdaMgSubscriptionId
+{
+    param($Node)
+
+    $Ids = @()
+    if ($null -eq $Node -or $null -eq $Node.Children) { return $Ids }
+    foreach ($Child in @($Node.Children))
+    {
+        if ("$($Child.Type)" -like '*subscriptions*')
+        {
+            if (-not [string]::IsNullOrWhiteSpace($Child.Name)) { $Ids += [string]$Child.Name }
+        }
+        else
+        {
+            $Ids += Get-RdaMgSubscriptionId -Node $Child
+        }
+    }
+    return $Ids
 }
 
 Write-Host ''
@@ -191,7 +230,110 @@ if ($SignedIn)
     }
 }
 
-# 4. Blob write+delete - only when centralized upload is requested. Proves the
+# 4. Subscription coverage (tenant-root management-group scope) - the silent
+#    blind-spot guard. Get-AzSubscription only returns subscriptions the identity
+#    holds a role on, so an identity scoped per-subscription can SILENTLY MISS
+#    subscriptions (a report that looks complete but isn't - at scale, potentially
+#    hundreds). The robust fix is Reader at the tenant-root management group, which
+#    inherits to every subscription. Here we compare what the identity can ACCESS
+#    (Get-AzSubscription) against what the tenant-root MG actually CONTAINS
+#    (Get-AzManagementGroup -Recurse). A definite shortfall is a FAIL (subs will be
+#    missed). If the MG cannot be read (no management-group read, or Az.Resources
+#    absent) the total is unknowable - which is itself a HARD FAIL, not a warning:
+#    this tool must capture ALL subscriptions, so an unverifiable coverage claim is
+#    unacceptable. The tenant-root MG's GroupId equals the tenant id.
+if ($SignedIn)
+{
+    try
+    {
+        # Enumerate ALL subscriptions the identity can see (state-agnostic). The MG
+        # side (Get-RdaMgSubscriptionId) also collects every subscription child
+        # regardless of enabled/disabled state, so the comparison is
+        # apples-to-apples: a genuine shortfall reflects a real visibility gap
+        # (subscriptions the identity has no role on), not a state mismatch. We
+        # compare the actual ID SETS (not just counts), mirroring the wrapper's
+        # runtime gate: the missed subscriptions are exactly the ids present under
+        # the tenant-root MG but NOT enumerable by this identity, which is immune to
+        # a phantom/transitioning subscription coincidentally balancing the counts
+        # and lets us NAME which subscriptions would be missed.
+        $AccessibleSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
+        $AccessibleCount = $AccessibleSubs.Count
+
+        $MgIds = $null
+        try
+        {
+            $RootMg = Get-AzManagementGroup -GroupName $TenantId -Expand -Recurse -ErrorAction Stop
+            $MgIds = @(Get-RdaMgSubscriptionId -Node $RootMg | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        }
+        catch
+        {
+            # No management-group read (or Az.Resources / Get-AzManagementGroup
+            # unavailable): cannot establish the true set. Leave $MgIds null ->
+            # HARD FAIL below (unverifiable coverage is not acceptable).
+            $MgIds = $null
+        }
+
+        if ($null -eq $MgIds)
+        {
+            # MG set unknowable: the tenant-root management group could not be read -
+            # either this identity has no management-group read, or the Az.Resources
+            # cmdlet Get-AzManagementGroup is not in the image. Either way
+            # completeness cannot be verified, and this tool's purpose is to capture
+            # ALL subscriptions, so it is a HARD FAIL, not a warning - proceeding
+            # could yield a silently incomplete inventory. The fix (Reader at the
+            # tenant-root MG) both guarantees access to every subscription and makes
+            # this check verifiable.
+            Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
+                -Detail ("Cannot verify full subscription coverage: the tenant-root management group could not be read (this identity lacks management-group read, or the Az.Resources module / Get-AzManagementGroup is unavailable), so there is no way to confirm the {0} accessible subscription(s) are ALL of them. Grant the identity Reader at the tenant-root management group (GroupId = tenant id) - it inherits to every subscription AND lets this check confirm coverage - then re-run." -f $AccessibleCount)
+        }
+        elseif ($MgIds.Count -eq 0)
+        {
+            # MG read SUCCEEDED but reported zero subscriptions under the root -
+            # implausible for a real tenant (there is at least the one this identity
+            # signed in against), so the MG tree is not returning true membership
+            # and coverage cannot be trusted. Still a HARD FAIL for the same reason.
+            Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
+                -Detail ("Cannot verify full subscription coverage: the tenant-root management group was read but reported zero subscriptions, while the identity can access {0} - the management-group hierarchy is not returning its true membership, so coverage cannot be confirmed. Grant the identity Reader at the tenant-root management group (GroupId = tenant id) and ensure it can read the full MG hierarchy, then re-run." -f $AccessibleCount)
+        }
+        else
+        {
+            # Compare the actual ID SETS: the missed subscriptions are the ones
+            # present under the tenant-root MG but NOT enumerable by this identity.
+            # Compare case-insensitively - subscription ids are GUIDs but normalise
+            # to be safe. If NOTHING under the root MG is missing, coverage is
+            # complete by definition (any extra subs the identity sees are still
+            # being captured, so they are not a gap); otherwise the missed ids would
+            # be SILENTLY dropped - a HARD FAIL, naming them (capped) so the gap is
+            # actionable. A subscription mid-transition (e.g. Deleting) can briefly
+            # linger in the MG tree while dropping out of Get-AzSubscription; the
+            # FAIL message tells the operator to re-run, which clears that edge.
+            $AccessibleIdSet = @{}
+            foreach ($S in $AccessibleSubs) { $AccessibleIdSet[([string]$S.Id).ToLowerInvariant()] = $true }
+            $MissedIds = @($MgIds | Where-Object { -not $AccessibleIdSet.ContainsKey(([string]$_).ToLowerInvariant()) })
+            if ($MissedIds.Count -gt 0)
+            {
+                $ShownMissed = @($MissedIds | Select-Object -First 10)
+                $MoreNote = if ($MissedIds.Count -gt $ShownMissed.Count) { (' (+{0} more)' -f ($MissedIds.Count - $ShownMissed.Count)) } else { '' }
+                Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
+                    -Detail ("Identity can access only {0} of {1} subscription(s) under the tenant-root management group - {2} would be SILENTLY MISSED from the inventory (missed: {3}{4}). Grant Reader at the tenant-root management group (it inherits to all subscriptions) instead of per-subscription, then re-run." -f $AccessibleCount, $MgIds.Count, $MissedIds.Count, ($ShownMissed -join ', '), $MoreNote)
+            }
+            else
+            {
+                Add-Result -Name 'Subscription coverage (MG scope)' -Status 'PASS' `
+                    -Detail ("Identity can access all {0} subscription(s) under the tenant-root management group - full coverage confirmed." -f $MgIds.Count)
+            }
+        }
+    }
+    catch
+    {
+        # Could not even list subscriptions / evaluate coverage. Cannot guarantee a
+        # complete inventory, so fail hard rather than risk a partial run.
+        Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
+            -Detail ("Could not evaluate subscription coverage ({0}). Grant the identity Reader at the tenant-root management group so full coverage can be confirmed, then re-run." -f $_.Exception.Message)
+    }
+}
+
+# 5. Blob write+delete - only when centralized upload is requested. Proves the
 #    UAMI has Storage Blob Data Contributor on the collection container, which the
 #    per-node -UploadToBlobContainerUri upload needs. Uses -UseConnectedAccount
 #    (passwordless, same as the real upload); writes a tiny probe blob then

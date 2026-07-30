@@ -405,6 +405,80 @@ function Resolve-AccessPreflight
     }
 }
 
+# ---- Subscription-coverage gate ---------------------------------------------
+# The access gate above proves the identity can READ the subscriptions it
+# enumerated; the coverage gate proves it enumerated them ALL. Get-AzSubscription
+# returns ONLY subscriptions the identity holds a role on, so an identity granted
+# access per-subscription (rather than at the tenant-root management group)
+# silently misses the rest. The only reliable way to know the TRUE total is to
+# read it from the tenant-root management group.
+#
+# Recursively collect the subscription IDs (each subscription child's .Name is
+# its subscription GUID) under a management-group tree returned by
+# Get-AzManagementGroup -Expand -Recurse. Subscription children carry a Type like
+# '/subscriptions'; nested management-group children carry a 'managementGroups'
+# Type and their own .Children, so we recurse into those. Returning the actual ID
+# SET (not just a count) lets the caller compare it against the ids the identity
+# can enumerate - which is more robust than a raw count (immune to a transient
+# count mismatch, e.g. a sub mid-deletion still listed in the MG tree) and lets it
+# NAME exactly which subscriptions would be missed. Pure (no Azure calls) so it is
+# unit-testable against a synthetic tree - the side-effecting fetch is factored
+# into Get-TenantSubscriptionId below (mirrors the Test-SubscriptionAccessAll /
+# Resolve-AccessPreflight split). Uses the established $arr = @() + '+=' idiom;
+# subscription counts are small so the concatenation cost is irrelevant.
+function Get-RdaMgSubscriptionId
+{
+    param($Node)
+
+    $Ids = @()
+    if ($null -eq $Node -or $null -eq $Node.Children) { return $Ids }
+    foreach ($Child in @($Node.Children))
+    {
+        if ("$($Child.Type)" -like '*subscriptions*')
+        {
+            if (-not [string]::IsNullOrWhiteSpace($Child.Name)) { $Ids += [string]$Child.Name }
+        }
+        else
+        {
+            $Ids += Get-RdaMgSubscriptionId -Node $Child
+        }
+    }
+    return $Ids
+}
+
+# Establish the TRUE set of subscription IDs under the tenant-root management
+# group (its GroupName/GroupId equals the tenant id), independent of what the
+# running identity can enumerate via Get-AzSubscription. Side-effecting (one
+# control-plane call); the traversal lives in the pure Get-RdaMgSubscriptionId
+# above. Returns a [pscustomobject] with:
+#   Ids    - the DISTINCT subscription-id string[] under the tenant-root MG, or
+#            $null when the set cannot be established (the identity lacks
+#            management-group read, Get-AzManagementGroup is unavailable, or the
+#            tree came back empty). $null is the caller's signal for
+#            "unverifiable", handled distinctly from a real (possibly-empty-of-
+#            missing) set.
+#   Detail - $null on success, otherwise the reason the set is unverifiable, so
+#            the caller can tell the operator WHY (mirrors Test-ConsumptionAccess).
+function Get-TenantSubscriptionId
+{
+    param([Parameter(Mandatory = $true)][string]$TenantId)
+
+    try
+    {
+        $RootMg = Get-AzManagementGroup -GroupName $TenantId -Expand -Recurse -ErrorAction Stop
+        $Ids = @(Get-RdaMgSubscriptionId -Node $RootMg | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        if ($Ids.Count -eq 0)
+        {
+            return [pscustomobject]@{ Ids = $null; Detail = 'The tenant-root management group returned zero subscriptions.' }
+        }
+        return [pscustomobject]@{ Ids = $Ids; Detail = $null }
+    }
+    catch
+    {
+        return [pscustomobject]@{ Ids = $null; Detail = $_.Exception.Message }
+    }
+}
+
 # ---- Horizontal sharding ----------------------------------------------------
 # Deterministically assign a subscription to one of $ShardCount shards, purely as
 # a function of its OWN subscription id - independent of what other subscriptions

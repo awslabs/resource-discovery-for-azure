@@ -975,6 +975,86 @@ if ($ResumeFailedOnly)
 }
 
 # ---------------------------------------------------------------------------
+# Up-front subscription-COVERAGE gate. The access gate below proves the identity
+# can READ the subscriptions it enumerated; this proves it enumerated them ALL.
+# Get-AzSubscription returns ONLY subscriptions the identity holds a role on, so
+# an identity granted access per-subscription (rather than at the tenant-root
+# management group) SILENTLY MISSES the rest - a report that looks complete but
+# is not, at scale potentially hundreds of subscriptions. This tool's purpose is
+# to capture EVERY subscription, so a shortfall - or any inability to verify the
+# true total - HARD-STOPS by default. The robust fix is Reader at the tenant-root
+# management group (its GroupName/GroupId equals the TenantID), which inherits to
+# every subscription AND makes the true count verifiable. -AllowPartialAccess is
+# the conscious override (the SAME switch as the access gate): it downgrades the
+# shortfall/unverifiable case to a loud warning and proceeds with whatever the
+# identity can currently see.
+#
+# Compares the FULL-tenant enumeration ($AllSubscriptions - state-agnostic,
+# BEFORE the Enabled filter and before any shard/scope split) against the true
+# count under the tenant-root MG, so the verdict is identical on every shard
+# machine and independent of -Resume / -ParallelStreams scoping (each shard still
+# hashes over the whole tenant, so an incomplete enumeration would blind every
+# shard).
+Write-Host "Verifying full subscription coverage (tenant-root management group)..." -ForegroundColor Cyan
+$Coverage = Get-TenantSubscriptionId -TenantId $TenantID
+if ($null -eq $Coverage.Ids)
+{
+    $CoverageMsg = ("Could not verify full subscription coverage: the tenant-root management group (GroupName = tenant id) could not be read by this identity, so there is no way to confirm the {0} enumerated subscription(s) are ALL of them." -f $AllSubscriptions.Count)
+    if ($AllowPartialAccess)
+    {
+        Write-Host ("WARNING: {0}" -f $CoverageMsg) -ForegroundColor Yellow
+        if (-not [string]::IsNullOrWhiteSpace($Coverage.Detail)) { Write-Host ("  Reason: {0}" -f $Coverage.Detail) -ForegroundColor DarkYellow }
+        Write-Host "  -AllowPartialAccess set: continuing with the enumerated subscription(s), which may not be the full tenant." -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host ("ERROR: {0}" -f $CoverageMsg) -ForegroundColor Red
+        if (-not [string]::IsNullOrWhiteSpace($Coverage.Detail)) { Write-Host ("  Reason: {0}" -f $Coverage.Detail) -ForegroundColor Red }
+        Write-Host "  Grant the identity Reader at the tenant-root management group (it inherits to every subscription and makes coverage verifiable), then re-run." -ForegroundColor Red
+        Write-Host "  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)" -ForegroundColor Red
+        Exit-Wrapper -Code 1
+    }
+}
+else
+{
+    # Compare the actual ID SETS, not just counts: the missed subscriptions are the
+    # ones present under the tenant-root MG but NOT enumerable by this identity.
+    # Using the id set (rather than a count delta) is immune to a transient count
+    # mismatch (e.g. a subscription mid-deletion still listed in the MG tree) and
+    # lets us NAME exactly which subscriptions would be silently missed. Compare
+    # case-insensitively - subscription ids are GUIDs but normalise to be safe.
+    $AccessibleIdSet = @{}
+    foreach ($S in $AllSubscriptions) { $AccessibleIdSet[([string]$S.Id).ToLowerInvariant()] = $true }
+    $MissedIds = @($Coverage.Ids | Where-Object { -not $AccessibleIdSet.ContainsKey(([string]$_).ToLowerInvariant()) })
+    if ($MissedIds.Count -gt 0)
+    {
+        # Show the missed ids (capped) to make the gap actionable, mirroring how the
+        # access gate below lists each inaccessible subscription id.
+        $ShownMissed = @($MissedIds | Select-Object -First 10)
+        $MoreNote = if ($MissedIds.Count -gt $ShownMissed.Count) { (' (+{0} more)' -f ($MissedIds.Count - $ShownMissed.Count)) } else { '' }
+        $CoverageMsg = ("Subscription coverage shortfall: the tenant-root management group contains {0} subscription(s) but this identity can enumerate only {1} - {2} would be SILENTLY MISSED from the inventory." -f $Coverage.Ids.Count, $AllSubscriptions.Count, $MissedIds.Count)
+        if ($AllowPartialAccess)
+        {
+            Write-Host ("WARNING: {0}" -f $CoverageMsg) -ForegroundColor Yellow
+            Write-Host ("  Missed: {0}{1}" -f ($ShownMissed -join ', '), $MoreNote) -ForegroundColor DarkYellow
+            Write-Host ("  -AllowPartialAccess set: continuing with the {0} visible subscription(s)." -f $AllSubscriptions.Count) -ForegroundColor Yellow
+        }
+        else
+        {
+            Write-Host ("ERROR: {0}" -f $CoverageMsg) -ForegroundColor Red
+            Write-Host ("  Missed: {0}{1}" -f ($ShownMissed -join ', '), $MoreNote) -ForegroundColor Red
+            Write-Host "  Grant the identity Reader at the tenant-root management group (it inherits to all subscriptions) instead of per-subscription, then re-run." -ForegroundColor Red
+            Write-Host "  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)" -ForegroundColor Red
+            Exit-Wrapper -Code 1
+        }
+    }
+    else
+    {
+        Write-Host ("  Coverage verified: all {0} subscription(s) under the tenant-root management group are visible to this identity." -f $Coverage.Ids.Count) -ForegroundColor Green
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Up-front access gate. Before ANY per-subscription work, verify the signed-in
 # identity can actually read every in-scope subscription. Azure Resource Graph
 # returns 0 rows (not a 403) for a subscription the identity has no role on, so a

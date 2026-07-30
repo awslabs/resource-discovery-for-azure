@@ -38,6 +38,15 @@ spec:
         #   value: "true"
         # - name: SKIP_CONSUMPTION  # "true" to skip the consumption phase
         #   value: "true"
+        # - name: USE_METRICS_BATCH # "true" = Azure Monitor metrics:getBatch data-plane
+        #   value: "true"           # fast-path (VM/disk/storage/SQL/scale-set/Cosmos; per-call
+        #                           # fallback). Cuts the metrics phase's API-call volume on
+        #                           # large tenants. Needs Microsoft.Insights registered (the
+        #                           # tool attempts this) + Reader/Monitoring Reader.
+        # - name: PARALLEL_STREAMS  # per-pod concurrency ACROSS this pod's cores (distinct
+        #   value: "6"              # from sharding ACROSS pods). Omit to auto-tune from CPU/RAM;
+        #                           # capped ~6 by the tenant ARG rate limit. Ensure the node has
+        #                           # RAM headroom (~0.7 GB per stream at metrics-phase peak).
         # - name: UPLOAD_BLOB_URI   # collect every shard's zip in one container
         #   value: "https://<account>.blob.core.windows.net/<container>"
         #   # Needs "Storage Blob Data Contributor" for the UAMI on that account.

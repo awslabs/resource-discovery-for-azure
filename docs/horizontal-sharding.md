@@ -136,6 +136,53 @@ two other approaches address it:
   from a crashed worker, at the cost of an external dependency and a claim
   protocol.
 
+## Rate limits: why ~6 streams per machine, and what sharding actually speeds up
+
+Two different Azure limits govern a run, and they behave very differently under
+scale-out. Understanding them is the key to sizing a large-tenant run.
+
+**Azure Resource Graph (ARG) — the discovery limit — is tenant-wide (~15 req/sec
+per tenant).** Every subscription's resource discovery goes through
+`Search-AzGraph`. This is why `-ParallelStreams` is capped at ~6: beyond roughly
+six concurrent streams in one tenant the ARG calls start returning 429s (the tool
+retries them with backoff, so nothing is lost — but you get no further wall-time
+benefit). Crucially, this limit is **per tenant, not per machine**. When you shard
+across N machines, all N shards still draw ARG queries from the *same* ~15 req/sec
+tenant budget during their discovery bursts. So sharding does **not** linearly
+speed up the discovery phase — at high shard counts, discovery is a shared
+ceiling and shards will back off against each other.
+
+**The metrics and consumption limits are per subscription (per principal).**
+Azure Monitor metric queries and consumption/usage reads throttle at the
+*subscription* level, not tenant-wide. Because each shard owns a **disjoint** set
+of subscriptions (deterministic hash — see above), the shards hit *different*
+throttle buckets. So the metrics and consumption phases — which are normally the
+wall-time-dominant part of a run — parallelize **beautifully** across shards:
+N shards ≈ N× the metrics/consumption throughput.
+
+**What this means in practice:**
+
+- Sharding is worth it because it scales the expensive part (metrics/consumption),
+  even though the cheap part (ARG discovery) stays tenant-limited.
+- Adding more, smaller machines past the point where discovery dominates gives
+  diminishing returns — the ARG ceiling caps aggregate discovery regardless of
+  machine count.
+- `-HeadRoom N` (leave N% of concurrency in reserve) lowers the run's peak request
+  rate so it competes less with the customer's production workloads for the shared
+  limits — recommended on a live production tenant.
+- `-UseMetricsBatch` (Azure Monitor `metrics:getBatch`, one REST call per ≤50
+  resources instead of one `Get-AzMetric` per resource-per-metric) sharply cuts
+  the metrics phase's call volume and time. It does **not** change the ARG cap
+  (different subsystem), but by shrinking metrics it lets each stream/shard finish
+  faster and consume far less of the Azure Monitor budget. Batchable services:
+  VMs, managed disks, storage accounts, SQL databases, VM scale sets, Cosmos DB;
+  anything else stays on the per-call path, and any batch failure falls back to
+  per-call (no data lost).
+
+If ARG's ~15 req/sec/tenant genuinely becomes your bottleneck at very high shard
+counts, that is an ARG tenant-quota conversation with Microsoft, not a tuning knob
+in this tool.
+
 ## Parameters reference
 
 | Parameter      | Meaning                                                        | Default |
@@ -246,13 +293,19 @@ It is read-only and prints a PASS/WARN/FAIL table of everything below.
 
 ### RBAC the worker identity (UAMI) needs
 
-Grant these to the user-assigned managed identity the pods federate to. Scope
-Reader at the tenant-root management group to cover the whole tenant in one
-grant, or per subscription for a smaller blast radius:
+Grant these to the user-assigned managed identity the pods federate to. **Scope
+Reader at the tenant-root management group — not per subscription.** Subscriptions
+are discovered with `Get-AzSubscription`, which only returns those the identity has
+a role on, so per-subscription grants that miss some subscriptions cause them to be
+**silently omitted** from every shard (at scale, potentially hundreds). A single
+Reader assignment at the **tenant-root management group** (`GroupId` = tenant id)
+inherits to all current and future subscriptions, eliminating that blind spot. The
+in-pod preflight (`deploy/Test-NodeReadiness.ps1`) fails if the identity can reach
+fewer subscriptions than the tenant-root MG contains.
 
 | Role | Why | Scope |
 |------|-----|-------|
-| **Reader** | inventory (Resource Graph / ARM reads) | tenant-root MG or per subscription |
+| **Reader** | inventory (Resource Graph / ARM reads) **and** the management-group read the up-front coverage gate needs | **tenant-root management group (required)** — a per-subscription grant hard-fails the coverage gate unless you pass `-AllowPartialAccess` |
 | **Cost Management Reader** | consumption (omit if `-SkipConsumption`) | billing / subscription |
 | **Monitoring Reader** | metrics (omit if `-SkipMetrics`) | subscription |
 | **Storage Blob Data Contributor** | upload each node's output zip | the collection storage account |
@@ -263,15 +316,24 @@ The person doing the setup also needs rights to **create AKS/ACR**
 
 ### One-time setup (verified commands)
 
-All commands below were run end-to-end against a live subscription for this
-guide. Replace the placeholders; the GUID shown is the Azure documentation
-placeholder, not a real value.
+The cluster / registry / identity / federation commands below were run
+end-to-end against a live subscription for this guide. **One exception:** the
+step-6 Reader assignment is shown at **tenant-root management-group** scope
+because that is what the coverage gate requires, but that specific grant was
+**not** exercised in the guide's test environment (it lacked management-group
+administrator rights). What *was* verified live is the gate's behaviour when the
+identity has no management-group read: the run hard-stops (or, with
+`-AllowPartialAccess`, warns and continues). Granting Reader at the MG root
+resolves that hard-stop; do it if you have the rights (Owner / User Access
+Administrator at the MG). Replace the placeholders; the GUID shown is the Azure
+documentation placeholder, not a real value.
 
 ```bash
 RG=rda-inventory-rg
 LOC=<region>                     # e.g. eastus
 ACR=<globally-unique-name>       # lowercase alphanumeric
 CLUSTER=rda-aks
+TENANT_ID=12345678-1234-1234-1234-123456789012   # your tenant id (= tenant-root management-group id)
 
 # 0. Providers (no-op if already registered)
 az provider register -n Microsoft.ContainerService
@@ -302,12 +364,18 @@ az aks update -g "$RG" -n "$CLUSTER" --enable-oidc-issuer --enable-workload-iden
 ISSUER=$(az aks show -g "$RG" -n "$CLUSTER" --query oidcIssuerProfile.issuerUrl -o tsv)
 
 # 6. Worker identity + its RBAC (Reader shown; add the others from the table).
+#    Scope Reader at the TENANT-ROOT MANAGEMENT GROUP (its id = your tenant id),
+#    NOT per subscription: it inherits Reader to every current and future
+#    subscription AND grants the management-group read the wrapper's coverage gate
+#    needs to CONFIRM full coverage. A per-subscription grant makes the run
+#    hard-fail the coverage gate (or require -AllowPartialAccess). This assignment
+#    requires you to be Owner / User Access Administrator at the MG root.
 az identity create -g "$RG" -n rda-uami
 CLIENT_ID=$(az identity show -g "$RG" -n rda-uami --query clientId -o tsv)
 PRINCIPAL_ID=$(az identity show -g "$RG" -n rda-uami --query principalId -o tsv)
 az role assignment create --assignee-object-id "$PRINCIPAL_ID" \
   --assignee-principal-type ServicePrincipal --role Reader \
-  --scope /subscriptions/12345678-1234-1234-1234-123456789012
+  --scope /providers/Microsoft.Management/managementGroups/$TENANT_ID
 
 # 7. Federate the identity to the pod's Kubernetes service account.
 #    Subject MUST be system:serviceaccount:<namespace>:<serviceaccount>.

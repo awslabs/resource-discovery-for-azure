@@ -1150,6 +1150,91 @@ if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
 }
 
 # ---------------------------------------------------------------------------
+# Up-front blob-upload WRITE probe. The URI-format + Az.Storage checks earlier
+# prove the request is well-formed, but NOT that this identity can actually write
+# to the target container. Without this, a missing "Storage Blob Data Contributor"
+# role is only discovered by the best-effort upload at the very END - after a
+# potentially multi-hour run - stranding the whole output on an ephemeral node.
+# So when an upload was requested, prove write+delete NOW (passwordless,
+# -UseConnectedAccount, the SAME path the real upload uses) and fail fast on a
+# genuine authorization denial. A transient/token error is NOT fatal here (mirrors
+# the consumption gate above): it warns and continues, and the end-of-run upload
+# and its warning still cover that recoverable class. The probe blob is namespaced
+# + GUID-suffixed and removed best-effort after the write, so it never collides
+# with a real shard artifact.
+if ($UploadToBlobContainerUri)
+{
+    Write-Host "Verifying blob-upload write access..." -ForegroundColor Cyan
+    $BlobProbeFile = $null
+    $BlobProbeContext = $null
+    $BlobProbeName = $null
+    $BlobProbeContainer = $null
+    $BlobProbeWritten = $false
+    try
+    {
+        $BlobProbeUri = [System.Uri]$UploadToBlobContainerUri
+        $BlobProbeAccount = $BlobProbeUri.Host.Split('.')[0]
+        $BlobProbePathParts = $BlobProbeUri.AbsolutePath.Trim('/').Split('/', 2)
+        $BlobProbeContainer = $BlobProbePathParts[0]
+        $BlobProbePrefix = if ($BlobProbePathParts.Count -gt 1 -and $BlobProbePathParts[1]) { $BlobProbePathParts[1].Trim('/') + '/' } else { '' }
+
+        $BlobProbeName = '{0}_rda-upload-probe/{1}.txt' -f $BlobProbePrefix, ([guid]::NewGuid().ToString('N'))
+        $BlobProbeFile = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-upload-probe-{0}.txt' -f ([guid]::NewGuid().ToString('N')))
+        Set-Content -LiteralPath $BlobProbeFile -Value 'rda upload access probe' -Encoding UTF8
+
+        $BlobProbeContext = New-AzStorageContext -StorageAccountName $BlobProbeAccount -UseConnectedAccount -ErrorAction Stop
+        # WRITE is the only capability the real upload uses, so it is the only
+        # thing the probe verifies. A successful write = access confirmed; the
+        # probe blob is then removed best-effort in the finally below. We do NOT
+        # require delete to succeed - the tool never deletes blobs in normal
+        # operation, so a delete-permission gap must not fail an otherwise-valid
+        # write-only identity.
+        $null = Set-AzStorageBlobContent -File $BlobProbeFile -Container $BlobProbeContainer -Blob $BlobProbeName -Context $BlobProbeContext -Force -ErrorAction Stop
+        $BlobProbeWritten = $true
+        Write-Host ("Blob-upload access confirmed (wrote a probe blob in {0}/{1})." -f $BlobProbeAccount, $BlobProbeContainer) -ForegroundColor Green
+    }
+    catch
+    {
+        $BlobProbeErr = $_.Exception.Message
+        # Fatal up front on a DETERMINISTIC misconfiguration - an authorization
+        # denial (missing "Storage Blob Data Contributor" -> 403) OR a container
+        # that does not exist (mistyped container -> ContainerNotFound / 404). Both
+        # would fail the real upload identically, so catch them now rather than
+        # after a multi-hour run. A mistyped storage ACCOUNT surfaces as a name-
+        # resolution error, which falls into the transient class below (warn and
+        # continue) - the best-effort upload at the end will then surface it. Any
+        # other transient token/throttling error is likewise NOT fatal here
+        # (mirrors the consumption gate).
+        if ($BlobProbeErr -match 'AuthorizationPermissionMismatch|AuthorizationFailure|AuthorizationFailed|\b403\b|Forbidden|not authorized|does not have|ContainerNotFound|\b404\b|does not exist')
+        {
+            Write-Host ""
+            Write-Host "ERROR: Blob upload was requested (-UploadToBlobContainerUri), but the target container could not be written to (missing 'Storage Blob Data Contributor' role, or the container does not exist)." -ForegroundColor Red
+            Write-Host ("Reason: {0}" -f $BlobProbeErr) -ForegroundColor Red
+            Write-Host "Grant this identity 'Storage Blob Data Contributor' and verify the storage account/container name is correct, or re-run without -UploadToBlobContainerUri to keep each zip node-local." -ForegroundColor Yellow
+            Exit-Wrapper -Code 1
+        }
+        else
+        {
+            Write-Host "WARNING: Could not verify blob-upload access up front (a transient/token issue, not an authorization denial). Continuing; the upload at the end of the run is best-effort and will warn if it fails." -ForegroundColor Yellow
+            Write-Host ("  Probe error (why it could not be verified): {0}" -f $BlobProbeErr) -ForegroundColor DarkYellow
+        }
+    }
+    finally
+    {
+        # Best-effort cleanup: attempt to remove the probe blob if it was written,
+        # and always remove the local temp file. This removal is cleanup only, NOT
+        # a verified capability - the probe passes on write alone, so a delete-
+        # permission gap simply leaves the tiny GUID-named probe blob behind and
+        # never fails the run.
+        if ($BlobProbeWritten -and $BlobProbeContext -and $BlobProbeName -and $BlobProbeContainer)
+        {
+            Remove-AzStorageBlob -Container $BlobProbeContainer -Blob $BlobProbeName -Context $BlobProbeContext -Force -ErrorAction SilentlyContinue
+        }
+        if ($BlobProbeFile -and (Test-Path -LiteralPath $BlobProbeFile)) { Remove-Item -LiteralPath $BlobProbeFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Auto-tune parallelism to the host (dummy-proof defaults).
 #
 # When the operator does not pass -ParallelStreams / -ConcurrencyLimit, size them
@@ -2552,6 +2637,15 @@ if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -Lite
         Write-Host ("WARNING: Blob upload failed ({0}). The consolidated zip remains on local disk at: {1}" -f $_.Exception.Message, $OuterZipFile) -ForegroundColor Yellow
     }
 }
+elseif ($UploadToBlobContainerUri)
+{
+    # Upload was explicitly requested but there is no consolidated zip to send
+    # (consolidation produced nothing, or it is missing). Never skip a requested
+    # feature silently - say so, so the operator knows nothing was uploaded and
+    # can check why the AllSubscriptions_*.zip was not produced.
+    $NoZipDetail = if ($OuterZipFile) { "expected zip not found at: $OuterZipFile" } else { 'no consolidated zip was produced' }
+    Write-Host ("WARNING: Blob upload was requested (-UploadToBlobContainerUri) but nothing was uploaded - {0}. Check that the run produced an AllSubscriptions_*.zip (look for the earlier 'Reporting Data File:' line)." -f $NoZipDetail) -ForegroundColor Yellow
+}
 
 # Final, last-thing-the-user-sees banner when a requested data phase could not
 # be collected due to authentication. Printed AFTER the summary block so it is
@@ -2615,9 +2709,15 @@ if ($WrapperTranscriptStarted)
 # Stop-Transcript so the finalized transcript is captured, and scoped to this
 # run via $RunStartTime. Failure exits are handled separately by Exit-Wrapper.
 $RunHadFailures = ($FailedSubscriptions.Count -gt 0) -or (@($Global:CollectorFailures).Count -gt 0) -or (@($Global:MetricsFailedSubs).Count -gt 0) -or (@($Global:ConsumptionFailedSubs).Count -gt 0)
-if ($RunHadFailures)
+# Collect the local support logs when the run had any per-phase failure, and ALSO
+# whenever a blob upload target is configured - in the latter case the bundle is
+# uploaded to blob so the logs are retrievable without pod/node access. This is
+# what surfaces an otherwise-invisible "returned 0 resources (no Reader)" run: it
+# is a clean success (no failure counters), so without this an operator running in
+# AKS would get only an empty report zip and no way to see the per-sub warnings.
+if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
 {
-    Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime
+    Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount
 }
 
 

@@ -32,7 +32,17 @@ function Invoke-RdaSupportLogCollection
 {
     param(
         [string]$InventoryRoot,
-        [datetime]$SinceTime
+        [datetime]$SinceTime,
+        # When set, ALSO upload the produced support-log bundle to this blob
+        # container (passwordless, -UseConnectedAccount - the same identity/path
+        # the report upload uses). This is what lets an operator who cannot easily
+        # reach the node filesystem (e.g. an AKS pod) retrieve the troubleshooting
+        # logs. Best-effort and isolated: an upload failure warns but never throws.
+        # ShardIndex/ShardCount make the blob name unique so concurrent shards do
+        # not overwrite each other's logs.
+        [string]$ContainerUri,
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1
     )
     if (-not (Get-Command New-RdaSupportLogBundle -ErrorAction SilentlyContinue)) { return }
     try
@@ -45,6 +55,33 @@ function Invoke-RdaSupportLogCollection
         {
             Write-Host ("Support logs collected: {0}" -f $SupportBundle) -ForegroundColor Cyan
             Write-Host "  Send this file to support over a secure/private channel (it contains real identifiers)." -ForegroundColor Cyan
+
+            # Optional blob upload so the logs are retrievable without node/pod
+            # filesystem access. Own try/catch so an upload failure can NEVER
+            # disrupt collection or the exit path - the bundle always remains on
+            # local disk as the fallback. The bundle carries REAL identifiers, so
+            # this must only ever target the operator's own (private) container.
+            if (-not [string]::IsNullOrWhiteSpace($ContainerUri))
+            {
+                try
+                {
+                    $LogBlobUri = [System.Uri]$ContainerUri
+                    $LogAccount = $LogBlobUri.Host.Split('.')[0]
+                    $LogPathParts = $LogBlobUri.AbsolutePath.Trim('/').Split('/', 2)
+                    $LogContainer = $LogPathParts[0]
+                    $LogPrefix = if ($LogPathParts.Count -gt 1 -and $LogPathParts[1]) { $LogPathParts[1].Trim('/') + '/' } else { '' }
+                    $LogShardTag = if ($ShardCount -gt 1) { 'shard-{0}of{1}-' -f $ShardIndex, $ShardCount } else { '' }
+                    $LogBlobName = '{0}{1}{2}' -f $LogPrefix, $LogShardTag, (Split-Path -Path $SupportBundle -Leaf)
+                    Write-Host ("Uploading support logs to blob: {0} / {1} / {2}" -f $LogAccount, $LogContainer, $LogBlobName) -ForegroundColor Cyan
+                    $LogCtx = New-AzStorageContext -StorageAccountName $LogAccount -UseConnectedAccount -ErrorAction Stop
+                    $null = Set-AzStorageBlobContent -File $SupportBundle -Container $LogContainer -Blob $LogBlobName -Context $LogCtx -Force -ErrorAction Stop
+                    Write-Host ("Support-log upload complete: {0}" -f $LogBlobName) -ForegroundColor Green
+                }
+                catch
+                {
+                    Write-Host ("WARNING: Support-log upload to blob failed ({0}). The bundle remains on local disk at: {1}" -f $_.Exception.Message, $SupportBundle) -ForegroundColor Yellow
+                }
+            }
         }
     }
     catch { Write-Verbose ("Support-log collection failed: {0}" -f $_.Exception.Message) }
@@ -62,16 +99,20 @@ function Exit-Wrapper
         catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
     }
 
-    # On a FAILURE exit, collect this run's LOCAL support/diagnostic logs into one
-    # zip so an operator whose run hard-stopped BEFORE producing a report bundle
-    # (auth / access-gate / consumption denial / output-verification) still has a
-    # single artefact to send to support. The transcript is finalized just above,
-    # so it is captured. $InventoryRoot / $RunStartTime are read from the caller
-    # (parent-wrapper) scope, the same way $WrapperTranscriptStarted is above; the
-    # collection is isolated in the helper so it can NEVER change the exit code.
-    if ($Code -ne 0)
+    # Collect this run's LOCAL support/diagnostic logs into one zip so an operator
+    # whose run hard-stopped BEFORE producing a report bundle (auth / access-gate /
+    # consumption denial / output-verification) still has a single artefact for
+    # support. The transcript is finalized just above, so it is captured. When an
+    # upload target was configured, ALSO upload that bundle to blob so an operator
+    # who cannot reach the pod filesystem still gets the logs even on a hard-stop -
+    # hence the guard fires on any failure exit OR whenever upload is enabled.
+    # $InventoryRoot / $RunStartTime / $UploadToBlobContainerUri / $ShardIndex /
+    # $ShardCount are read from the caller (parent-wrapper) scope, the same way
+    # $WrapperTranscriptStarted is above; the helper is isolated so it can NEVER
+    # change the exit code.
+    if ($Code -ne 0 -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
     {
-        Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime
+        Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount
     }
 
     exit $Code

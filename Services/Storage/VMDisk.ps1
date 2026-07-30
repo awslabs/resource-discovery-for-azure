@@ -32,6 +32,12 @@ if ($Task -eq 'Processing')
                 'DiskIOPS'              = $Data.diskIOPSReadWrite;
                 'DiskMBps'              = $Data.diskMBpsReadWrite;
                 'CreatedTime'           = $Timecreated;
+                # Migration phase: a CustomerKey / PlatformAndCustomerKeys disk is encrypted
+                # with a customer-managed key (referenced by the disk-encryption-set below).
+                # That key must be available / re-wrapped before the disk can be migrated;
+                # platform-key disks need no key prep. Surfaced for AWS migration planning.
+                'EncryptionType'        = $Data.encryption.type;
+                'DiskEncryptionSet'     = if (![string]::IsNullOrEmpty($Data.encryption.diskEncryptionSetId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.encryption.diskEncryptionSetId)) { $ResourceIdDictionary[$Data.encryption.diskEncryptionSetId] } else { 'obfuscated' } } else { $Data.encryption.diskEncryptionSetId };
             }
 
             $Tmp += $Obj

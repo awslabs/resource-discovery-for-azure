@@ -30,6 +30,11 @@ if ($Task -eq 'Processing')
                 'StorageAccount'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.parameters.storageAccountName.value };
                 'StorageAccountSKU'         = $Data.parameters.storageAccountSkuName.value;
                 'CreatedTime'               = $Timecreated;
+                # Migration phase: the identity type the workspace uses to access its managed
+                # storage (e.g. SystemAssigned) affects how storage access is re-established at
+                # the target. Only the identity TYPE is emitted - never principalId/tenantId
+                # (those are real GUIDs). Surfaced for AWS migration planning.
+                'StorageAccountIdentityType' = $Data.storageAccountIdentity.type;
             }
 
             $Tmp += $Obj

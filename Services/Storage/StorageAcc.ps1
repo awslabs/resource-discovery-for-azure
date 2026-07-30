@@ -32,6 +32,11 @@ if ($Task -eq 'Processing')
                 'StatusOfPrimary'                      = $Data.statusOfPrimary;
                 'HierarchicalNamespace'                = $HnsEnabled;
                 'CreatedTime'                          = $Timecreated;
+                # Migration phase: keySource = 'Microsoft.Keyvault' means the account is
+                # encrypted with a customer-managed key (the CMK must be handled before
+                # migration); 'Microsoft.Storage' is the platform-managed default and needs
+                # no key prep. Surfaced for AWS migration planning.
+                'EncryptionKeySource'                  = $Data.encryption.keySource;
             }
 
             $Tmp += $Obj

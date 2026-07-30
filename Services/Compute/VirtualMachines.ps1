@@ -97,6 +97,12 @@ If ($Task -eq 'Processing')
                 'PowerState'                    = $PowerState;
                 'Zones'                         = $vm.zones.count;
                 'CreatedTime'                   = $Timecreated;
+                # Migration phase: SecurityType = 'ConfidentialVM' is a hard migration blocker
+                # (vTPM/enclave-backed, no direct lift-and-shift equivalent); 'TrustedLaunch'
+                # needs equivalent target config; EncryptionAtHost indicates host-level disk
+                # encryption to reproduce. Surfaced for AWS migration planning.
+                'SecurityType'                  = $Data.securityProfile.securityType;
+                'EncryptionAtHost'              = $Data.securityProfile.encryptionAtHost;
                 'Tags'                          = $Tags;
             }
 

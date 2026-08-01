@@ -39,6 +39,22 @@ parameters:
   displayName: 'Allow partial access (OFF = fail loud on any unreadable subscription)'
   type: boolean
   default: false
+- name: collectMetrics
+  displayName: 'Collect metrics (OFF = -SkipMetrics; needs Monitoring Reader)'
+  type: boolean
+  default: true
+- name: collectConsumption
+  displayName: 'Collect consumption/billing (OFF = -SkipConsumption; needs Cost Management Reader)'
+  type: boolean
+  default: true
+- name: useMetricsBatch
+  displayName: 'Use Azure Monitor metrics:getBatch (recommended at scale; safe per-call fallback)'
+  type: boolean
+  default: true
+- name: headRoom
+  displayName: 'API headroom % left in reserve (0 = full concurrency; ~20 on a live production tenant)'
+  type: number
+  default: 0
 
 variables:
   serviceConnection: keda-serviceConnection   # ARM service connection (WIF)
@@ -78,11 +94,23 @@ jobs:
         # Set allowPartialAccess=true ONLY as a conscious override (e.g. a sandbox
         # that genuinely cannot read the tenant-root management group).
         $rdaArgs = @{
-          TenantID        = '${{ parameters.tenantId }}'
-          Obfuscate       = $true
-          SkipMetrics     = $true
-          SkipConsumption = $true
+          TenantID  = '${{ parameters.tenantId }}'
+          Obfuscate = $true
         }
+        # Metrics + consumption are collected by DEFAULT. Turn either off at queue
+        # time (collectMetrics/collectConsumption = false) for an inventory-only run.
+        # Their access is gated up front: metrics needs Monitoring Reader, consumption
+        # needs Cost Management Reader (both at the tenant-root MG for full coverage).
+        if (-not $${{ parameters.collectMetrics }})     { $rdaArgs['SkipMetrics'] = $true }
+        if (-not $${{ parameters.collectConsumption }}) { $rdaArgs['SkipConsumption'] = $true }
+        # metrics:getBatch sharply cuts the Azure Monitor call count at scale (one
+        # REST call per <=50 resources vs one Get-AzMetric per resource-per-metric);
+        # it falls back to the per-call path on any batch failure (no data lost).
+        if ($${{ parameters.useMetricsBatch }})         { $rdaArgs['UseMetricsBatch'] = $true }
+        # API headroom: leave N% of metrics concurrency in reserve so RDA competes
+        # less with the tenant's production workloads (0 = full concurrency).
+        $hr = [int]'${{ parameters.headRoom }}'
+        if ($hr -gt 0) { $rdaArgs['HeadRoom'] = $hr }
         $ps = [int]'${{ parameters.parallelStreams }}'
         if ($ps -gt 0) { $rdaArgs['ParallelStreams'] = $ps }
 

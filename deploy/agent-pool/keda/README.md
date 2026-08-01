@@ -174,11 +174,16 @@ single-agent, fail-loud, no-upload run):
 | `shardCount` | `1` | Number of **parallel agents** to fan out across (see [Sharding](#sharding-across-multiple-agents)). `1` = a single agent covers the whole tenant. Each agent's shard **index is assigned automatically** — you do not set it. |
 | `uploadContainerUri` | `''` | Blob container URL to upload this run's zip to (see [Blob upload](#centralized-blob-upload)). Empty = keep the zip on the agent as a pipeline artifact only. |
 | `allowPartialAccess` | `false` | `true` consciously downgrades the coverage hard-stop to a warning (for an environment that genuinely cannot read the tenant-root MG). Leave `false` for real runs. |
+| `collectMetrics` | `true` | Collect resource metrics. `false` = `-SkipMetrics` (inventory only). Requires **Monitoring Reader** on the scope. |
+| `collectConsumption` | `true` | Collect consumption/billing data. `false` = `-SkipConsumption`. Requires **Cost Management Reader**; access is gated up front (a hard authorization denial fails the run). |
+| `useMetricsBatch` | `true` | Use the Azure Monitor `metrics:getBatch` data-plane API (one REST call per ≤50 resources instead of one `Get-AzMetric` per resource-per-metric). **Recommended at scale**; falls back to the per-call path on any batch failure (no data lost). |
+| `headRoom` | `0` | Leave this **percentage** of metrics concurrency in reserve so RDA competes less with the tenant's production workloads. `0` = full concurrency; **~20 is a good starting point on a live production tenant**. |
 
-The step builds these into a splatted argument set for `Run-AllSubscriptions.ps1`;
-the report is always obfuscated and (in the shipped default) runs with
-`-SkipMetrics -SkipConsumption` — adjust the inline in `pipeline.yml` if you want
-metrics/consumption (and grant the matching roles from step 4).
+The step builds these into a splatted argument set for `Run-AllSubscriptions.ps1`.
+The report is always obfuscated. **Metrics and consumption are collected by
+default** (`collectMetrics`/`collectConsumption` = `true`) with `useMetricsBatch`
+on — so grant the matching roles from step 4 (Monitoring Reader, Cost Management
+Reader). Set either `collect*` to `false` for an inventory-only run.
 
 ### 7. Centralized blob upload
 

@@ -178,6 +178,7 @@ single-agent, fail-loud, no-upload run):
 | `collectConsumption` | `true` | Collect consumption/billing data. `false` = `-SkipConsumption`. Requires **Cost Management Reader**; access is gated up front (a hard authorization denial fails the run). |
 | `useMetricsBatch` | `true` | Use the Azure Monitor `metrics:getBatch` data-plane API (one REST call per ≤50 resources instead of one `Get-AzMetric` per resource-per-metric). **Recommended at scale**; falls back to the per-call path on any batch failure (no data lost). |
 | `headRoom` | `0` | Leave this **percentage** of metrics concurrency in reserve so RDA competes less with the tenant's production workloads. `0` = full concurrency; **~20 is a good starting point on a live production tenant**. |
+| `jobTimeoutMinutes` | `480` | Per-shard job timeout in minutes. **ADO's default is 60 min** — far too short for a large tenant, so each shard is capped here instead. Raise it if a shard could run longer than 8 h (size it above your expected per-shard wall-clock). |
 
 The step builds these into a splatted argument set for `Run-AllSubscriptions.ps1`.
 The report is always obfuscated. **Metrics and consumption are collected by
@@ -234,6 +235,16 @@ Kubernetes `completionMode: Indexed` Job's `JOB_COMPLETION_INDEX`.
 > `AzurePowerShell@5` step) — it counts eligible subscriptions and prints a
 > recommended shard count, then exits without inventorying. It is guidance only;
 > you never have to run it.
+
+> **Two ceilings must be ≥ your `shardCount`.** The fan-out is bounded by (1) the
+> ScaledJob's `maxReplicaCount` in `agent-scaledjob.yaml` — the most agent pods KEDA
+> runs at once (shipped at **50**; raise it if you shard higher), and (2) the node
+> pool's cluster-autoscaler `--max-count`, because the hard one-shard-per-node
+> anti-affinity needs one schedulable node per concurrent shard. Neither being below
+> `shardCount` is fatal — surplus shards don't fail, they queue and run in **waves**
+> as pods/nodes free up — but for full parallelism set both ≥ your `shardCount`
+> (e.g. a very large run at `shardCount ~40` wants `maxReplicaCount` ≥ 40 and
+> autoscaler `--max-count` ≥ 40).
 
 Each shard produces its **own** `AllSubscriptions_ResourcesReport_*.zip` covering
 only its slice — uploaded as `shard-<i>of<N>-…` when `uploadContainerUri` is set,

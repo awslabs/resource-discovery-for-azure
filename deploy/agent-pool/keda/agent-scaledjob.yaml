@@ -69,13 +69,18 @@ spec:
                 key: AZP_TOKEN
           - name: AZP_POOL
             value: "keda-pool"          # must match the ADO self-hosted pool name
-          # RDA's metrics phase is memory-hungry (~0.7 GB per parallel stream at
-          # peak). The pipeline auto-tunes -ParallelStreams from the pod's CPU/RAM
-          # (typically 1 on a 2-vCPU pod). These
-          # values are sized for a LOW-RESOURCE sandbox node (2 vCPU / 4 GB) so
-          # the agent pod schedules alongside the AKS system + KEDA pods. RAISE
-          # them for production / large tenants (e.g. 2Gi request / 4Gi limit) or
-          # RDA can be OOMKilled mid-run.
+          # RDA's metrics phase is memory-hungry (~0.7-1 GB per parallel stream at
+          # peak) and -ParallelStreams auto-tunes from the pod's CPU/RAM (~1 stream
+          # on a 2-vCPU pod). The request/limit below are sized for a LOW-RESOURCE
+          # SANDBOX node (2 vCPU / 4 GB) so the pod schedules next to the AKS system
+          # + KEDA pods.
+          #
+          # RAISE these before a real run (they set what each shard agent gets):
+          #   smaller run : cpu 1 / 2,  memory 2Gi / 4Gi  on a 2-4 vCPU node
+          #   large run : cpu 2 / 4,  memory 4Gi / 8Gi  on a 4 vCPU / 16 GB node
+          # Bigger requests => more -ParallelStreams per shard => fewer shards (and,
+          # with the hard one-shard-per-node anti-affinity, fewer nodes) needed.
+          # Under-provisioning memory gets RDA OOMKilled mid-run.
           resources:
             requests:
               cpu: "500m"
@@ -84,7 +89,17 @@ spec:
               cpu: "1"
               memory: "2Gi"
   pollingInterval: 30
-  maxReplicaCount: 10
+  # Concurrency CEILING: the most agent pods KEDA will run at once. KEDA never
+  # spawns more pods than there are pending jobs, so this only bites when a run's
+  # shardCount approaches it - set it >= the LARGEST shardCount you queue (a
+  # very large run can use shardCount ~40). It is a safe ceiling, not a target:
+  # a shardCount=8 run still spawns only 8 pods. 50 leaves headroom above ~40.
+  #
+  # COUPLED WITH NODE CAPACITY: because the podAntiAffinity above is a HARD
+  # one-shard-per-node guarantee, N concurrent pods need N schedulable nodes. Set
+  # the node pool's cluster-autoscaler --max-count >= this value (or at least >=
+  # your actual shardCount) or surplus pods sit Pending until nodes free/scale.
+  maxReplicaCount: 50
   successfulJobsHistoryLimit: 5
   failedJobsHistoryLimit: 5
   triggers:

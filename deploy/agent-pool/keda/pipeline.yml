@@ -55,6 +55,10 @@ parameters:
   displayName: 'API headroom % left in reserve (0 = full concurrency; ~20 on a live production tenant)'
   type: number
   default: 0
+- name: jobTimeoutMinutes
+  displayName: 'Per-shard job timeout (minutes). ADO default is 60 - too short for large runs. Raise for very large runs.'
+  type: number
+  default: 480
 
 variables:
   serviceConnection: keda-serviceConnection   # ARM service connection (WIF)
@@ -62,6 +66,9 @@ variables:
 jobs:
 - job: rda
   displayName: 'RDA shard'
+  # ADO's default job timeout is 60 min - far too short for a large tenant. Each
+  # shard is capped here (raise jobTimeoutMinutes at queue time for a very large run).
+  timeoutInMinutes: ${{ parameters.jobTimeoutMinutes }}
   pool:
     name: keda-pool             # self-hosted KEDA agent pool
   # Fan out into `shardCount` parallel jobs. shardCount=1 (default) is a single

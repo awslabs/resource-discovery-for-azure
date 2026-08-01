@@ -1,0 +1,63 @@
+# Repro pipeline for RDA on a self-hosted Azure DevOps agent.
+#
+# Purpose: reproduce a common enterprise setup where RDA runs DIRECTLY on a self-hosted
+# Red Hat (RHEL 9) agent from a VMSS-backed Azure DevOps agent pool, authenticated
+# by an ARM service connection (pre-authed, non-interactive). This is the
+# "agent-direct" path from deploy/AZURE-DEVOPS-PIPELINE.md - NOT the AKS route.
+#
+# Prereqs (see deploy/agent-pool/README.md):
+#   1. Run provision-vmss.sh to create the RHEL 9 VMSS (with cloud-init.yaml).
+#   2. In ADO, create an "Azure virtual machine scale set agents" pool over it.
+#   3. Create an ARM service connection (workload-identity federation preferred).
+#   4. Set the variables below and run this pipeline manually.
+
+trigger: none            # manual/scheduled repro run, not code CI
+
+pool:
+  name: 'rda-rhel-vmss'  # the ADO elastic (VMSS) agent pool name you create in step 2
+
+variables:
+  serviceConnection: 'rda-arm'                          # your ARM service connection name
+  TENANT_ID: '12345678-1234-1234-1234-123456789012'     # MUST equal the service connection's tenant id
+
+steps:
+- checkout: self
+
+# Diagnostic: AzurePowerShell@5 on a SELF-HOSTED agent requires the Az module to
+# already be present (unlike Microsoft-hosted agents, it does NOT install it).
+# cloud-init.yaml bakes PS7 + Az + az CLI into each node; this step proves it.
+- script: |
+    pwsh -NoProfile -Command '$PSVersionTable.PSVersion; Get-Module -ListAvailable Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph | Select-Object Name,Version'
+    az version
+  displayName: 'Show agent PowerShell 7 / Az / az versions'
+
+# The pre-authed run. AzurePowerShell@5 establishes the Az PowerShell context from
+# the service connection, so Run-AllSubscriptions.ps1's auth gate should print
+# "Existing session detected ... skipping interactive login" and never prompt.
+#   -TenantID        : MUST match the service connection tenant, or the gate
+#                      re-runs Connect-AzAccount (interactive) and hangs.
+#   -ParallelStreams 1: force the sequential path; avoids the Save/Import-AzContext
+#                      fork whose token-refresh behavior with a federated service
+#                      connection is unverified.
+- task: AzurePowerShell@5
+  displayName: 'Run RDA (agent-direct, pre-authed)'
+  inputs:
+    azureSubscription: $(serviceConnection)
+    azurePowerShellVersion: 'LatestVersion'
+    pwsh: true            # tool requires PowerShell 7
+    ScriptType: 'InlineScript'
+    Inline: |
+      ./Run-AllSubscriptions.ps1 `
+        -TenantID $(TENANT_ID) `
+        -ParallelStreams 1 `
+        -Obfuscate
+
+# Collect the produced report as a pipeline artifact.
+- task: CopyFiles@2
+  displayName: 'Stage report zip'
+  inputs:
+    SourceFolder: '$(System.DefaultWorkingDirectory)'
+    Contents: 'AllSubscriptions_ResourcesReport_*.zip'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)'
+- publish: '$(Build.ArtifactStagingDirectory)'
+  artifact: rda-reports

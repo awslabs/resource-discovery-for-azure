@@ -22,7 +22,12 @@
 
 function GetLocalVersion()
 {
-    $VersionJsonPath = "./Version.json"
+    # Anchor on this file's location, not the current working directory, so the
+    # version reads correctly no matter where the tool is launched from (e.g. an
+    # Azure DevOps agent whose working directory is not the repo root). This
+    # Functions file lives one level below the repo root (Functions/), and
+    # Version.json is at the repo root - hence the parent of $PSScriptRoot.
+    $VersionJsonPath = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'Version.json'
     if (Test-Path $VersionJsonPath)
     {
         $LocalVersionJson = Get-Content $VersionJsonPath | ConvertFrom-Json
@@ -30,7 +35,7 @@ function GetLocalVersion()
     }
     else
     {
-        Write-Host "Local Version.json not found. Clone the repo and execute the script from the root. Exiting." -ForegroundColor Red
+        Write-Host ("Version.json not found at '{0}' (expected at the repo root, alongside ResourceInventory.ps1). Ensure the full repo is present. Exiting." -f $VersionJsonPath) -ForegroundColor Red
         Exit
     }
 }

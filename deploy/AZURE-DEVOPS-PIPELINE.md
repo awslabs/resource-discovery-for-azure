@@ -3,8 +3,11 @@
 This guide shows how to deploy the Resource Discovery for Azure horizontal shards
 onto AKS **from an Azure DevOps (ADO) pipeline** and collect the output as
 pipeline artifacts. For the manual/`kubectl` version see
-[`RUN-SHEET.md`](RUN-SHEET.md); for the concepts see
-[`CUSTOMER-SETUP.md`](CUSTOMER-SETUP.md).
+[`AKS-Kubectl-Manual.md`](AKS-Kubectl-Manual.md); for the concepts see
+[`AKS-WorkloadIdentity-Setup.md`](AKS-WorkloadIdentity-Setup.md). To run RDA
+directly on **KEDA-scaled Azure DevOps agents** (`AzurePowerShell@5` + service
+connection), see
+[`agent-pool/keda/README.md`](agent-pool/keda/README.md).
 
 ## How it works — two identities, two execution contexts
 
@@ -19,6 +22,34 @@ The pipeline only **deploys** the Job. The inventory itself is collected **insid
 the cluster by the pods under the UAMI's workload identity** — the ADO service
 connection is *not* involved in reading Azure data, and **no service-principal
 secret is ever injected into the pods**. Keep the manifests passwordless.
+
+## Running RDA as a pipeline step: use `AzurePowerShell@5` only
+
+If you run `Run-AllSubscriptions.ps1` **as a pipeline step** — either directly on
+the agent, or on a self-hosted / KEDA-scaled agent, rather than inside the pod —
+run it **only** from the **`AzurePowerShell@5`** task, with **`pwsh: true`**, and
+pass **`-TenantID`** equal to the service connection's tenant:
+
+- **Use `AzurePowerShell@5` (task version 5), NOT `AzureCLI@2`.** RDA reads its
+  identity from the **Az PowerShell** context (`Get-AzContext`). `AzurePowerShell@5`
+  establishes that context from the service connection; `AzureCLI@2` only signs in
+  the `az` CLI, leaving `Get-AzContext` empty — RDA then has no usable session and,
+  on a headless agent, now **fails fast with a clear error** (exit 1) instead of
+  hanging on an interactive sign-in prompt.
+- **`pwsh: true`** selects PowerShell 7, which RDA requires (`#Requires -Version 7.0`).
+- On a **self-hosted** agent (e.g. a KEDA agent pod), the Az PowerShell modules must
+  already be in the agent image — `AzurePowerShell@5` does not install them.
+
+```yaml
+- task: AzurePowerShell@5
+  inputs:
+    azureSubscription: <your-service-connection>
+    azurePowerShellVersion: 'LatestVersion'
+    pwsh: true
+    ScriptType: 'InlineScript'
+    Inline: |
+      ./Run-AllSubscriptions.ps1 -TenantID <service-connection-tenant-id> -ParallelStreams 1 -Obfuscate
+```
 
 ## Prerequisites
 
@@ -38,15 +69,15 @@ secret is ever injected into the pods**. Keep the manifests passwordless.
    `checkout: self`, or referenced as a repository resource).
 4. **An existing AKS cluster** with **workload identity enabled** (stage 1 enables
    it if missing) and a **namespace** to run in. Review "Namespace fit" in
-   `RUN-SHEET.md` (PodSecurity/`restricted` rejects the root image; NetworkPolicy
+   `AKS-Kubectl-Manual.md` (PodSecurity/`restricted` rejects the root image; NetworkPolicy
    egress to Azure; ResourceQuota).
 
 ## Restricted networking (no public internet egress)
 
-If the customer's environment has **no public internet access**, read this first —
+If your environment has **no public internet access**, read this first —
 it changes the agent, the image, and how the pipeline reaches the cluster.
 
-**Reality check (state this to the customer up front).** The tool signs in with
+**Reality check (state this up front).** The tool signs in with
 **workload identity** and reads Azure, which *requires* reaching Microsoft Entra
 (`login.microsoftonline.com`) and Azure Resource Manager (`management.azure.com`).
 **Neither supports Private Link** — they are global public endpoints. So this
@@ -65,7 +96,7 @@ Endpoints** for the services that support them.
 
 **2. Image with no MCR access.** The Dockerfile bases on
 `mcr.microsoft.com/azure-powershell`. If ACR can't reach MCR at build time:
-- Import the base once into the customer's private ACR:
+- Import the base once into your private ACR:
   `az acr import --name $(ACR) --source mcr.microsoft.com/azure-powershell:latest --image azure-powershell:latest`
   (runs server-side; needs the ACR to have an MCR path, or pre-stage the tar), **then** point the Dockerfile `FROM` at `$(ACR).azurecr.io/azure-powershell:latest` — or configure **ACR Artifact Cache** for MCR so the existing `FROM mcr.microsoft.com/...` resolves transparently.
 - Give the ACR a **Private Endpoint** so the cluster pulls over the private network. `az acr build` still runs on ACR's server-side build compute; if that compute can't reach the base image, build the image on a self-hosted agent (Docker) and `az acr import` the finished `rda:latest` instead.
@@ -111,6 +142,15 @@ or private ACR from the agent itself, use a **self-hosted agent in the VNet**.
   each time they want an inventory.
 
 ## Sample `azure-pipelines.yml`
+
+> **Why this example uses `AzureCLI@2`, not `AzurePowerShell@5`.** In this
+> pod-native model RDA runs *inside* the AKS pods and authenticates via **workload
+> identity** — the pipeline never runs `Run-AllSubscriptions.ps1` itself. Its
+> stages only provision, build/deploy, and collect using `az` and `kubectl`, so
+> `AzureCLI@2` is the correct task here. The "use `AzurePowerShell@5` only" rule
+> above applies to the *other* model, where RDA runs **as a pipeline step** on the
+> agent (see [`agent-pool/keda/README.md`](agent-pool/keda/README.md)) and needs an
+> `Az` PowerShell context (`Get-AzContext`) that only `AzurePowerShell@5` sets up.
 
 ```yaml
 trigger: none            # run manually / scheduled; this is not a code CI pipeline
@@ -262,7 +302,7 @@ stages:
 - **`kubectl wait` is required** before Collect, or you'll download an empty/partial
   container before the shards finish.
 - **Namespace fit** (PodSecurity `restricted` rejects the root image; egress
-  NetworkPolicy; ResourceQuota) applies exactly as in `RUN-SHEET.md`.
+  NetworkPolicy; ResourceQuota) applies exactly as in `AKS-Kubectl-Manual.md`.
 - **Self-hosted agents:** work the same; only needed if the agent must sit inside a
   private network to reach a private AKS API server.
 
@@ -270,7 +310,15 @@ stages:
 
 If the tenant is small enough that one machine can finish in your wall-clock
 window, skip AKS entirely: run `Run-AllSubscriptions.ps1` **directly in an
-`AzureCLI@2` (PowerShell) task** using the service connection's identity, then
-publish the produced zip as an artifact. AKS sharding is only worth the extra
-moving parts for very large (thousands-of-subscriptions) tenants. Confirm the
-subscription count before choosing the AKS path.
+`AzurePowerShell@5` task** (with `pwsh: true`) using the service connection's
+identity, then publish the produced zip as an artifact. Use `AzurePowerShell@5`,
+**not** `AzureCLI@2`, for this step: the wrapper reads its identity from the Az
+PowerShell context (`Get-AzContext`), which `AzurePowerShell@5` establishes from
+the service connection. An `AzureCLI@2` task only pre-auths the `az` CLI, leaving
+`Get-AzContext` empty — so the wrapper's auth gate falls through to an interactive
+`Connect-AzAccount` and hangs on the non-interactive agent. Pass `-TenantID` equal
+to the service connection's tenant (otherwise the gate re-authenticates), and
+`-ParallelStreams 1` to keep a single Az context (avoiding the
+`Save`/`Import-AzContext` fork across child processes). AKS sharding is only worth
+the extra moving parts for very large (thousands-of-subscriptions) tenants.
+Confirm the subscription count before choosing the AKS path.

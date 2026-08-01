@@ -1,0 +1,96 @@
+# KEDA ScaledJob: one ephemeral Azure DevOps agent pod per queued pipeline job.
+# KEDA's azure-pipelines trigger watches the pool's pending-job queue and spawns
+# a Job (pod) per pending job; start.sh runs the agent with --once so the pod
+# exits after its single job. Scales to zero when the queue is empty.
+#
+# Replace <acr> and poolID before applying (README explains how to get poolID).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: azdevops-agent
+  namespace: ado
+spec:
+  jobTargetRef:
+    template:
+      metadata:
+        labels:
+          app: azdevops-agent          # matched by the podAntiAffinity below
+      spec:
+        restartPolicy: Never
+        # Spread shard agent pods across DIFFERENT nodes so each shard gets its own
+        # hardware (CPU/RAM) instead of several memory-hungry RDA runs colliding on
+        # one node.
+        #
+        # Default is a HARD guarantee ('required'): no two shard agent pods may
+        # share a node. This is deliberate - a SOFT 'preferred' spread does NOT
+        # guarantee it: when N shard pods are queued at once they are scheduled
+        # before any is Running, so none "sees" the others and they can all land on
+        # one node. 'required' is the only way to actually ensure one shard per node.
+        #
+        # TRADE-OFF: with 'required' the cluster MUST have at least as many
+        # schedulable nodes as shards, or surplus shard pods sit Pending until a
+        # node frees/scales. Enable the cluster autoscaler so nodes scale up to the
+        # fan-out (e.g. `az aks nodepool update -g <rg> --cluster-name <aks>
+        # -n <pool> --enable-cluster-autoscaler --min-count 1 --max-count
+        # <maxShardCount>`). If you would rather never wait on capacity and accept
+        # possible co-location, switch to the 'preferred' block in the trailing
+        # comment instead.
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: azdevops-agent
+              topologyKey: kubernetes.io/hostname
+            # SOFT alternative - best-effort spread that never leaves a pod
+            # Pending, but MAY co-locate shards on one node when they schedule
+            # simultaneously (no hard guarantee):
+            # preferredDuringSchedulingIgnoredDuringExecution:
+            # - weight: 100
+            #   podAffinityTerm:
+            #     labelSelector:
+            #       matchLabels:
+            #         app: azdevops-agent
+            #     topologyKey: kubernetes.io/hostname
+        containers:
+        - name: azdevops-agent
+          image: <acr>.azurecr.io/azp-agent:latest
+          imagePullPolicy: Always
+          env:
+          - name: AZP_URL
+            valueFrom:
+              secretKeyRef:
+                name: ado-agent-auth
+                key: AZP_URL
+          - name: AZP_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: ado-agent-auth
+                key: AZP_TOKEN
+          - name: AZP_POOL
+            value: "keda-pool"          # must match the ADO self-hosted pool name
+          # RDA's metrics phase is memory-hungry (~0.7 GB per parallel stream at
+          # peak). The pipeline auto-tunes -ParallelStreams from the pod's CPU/RAM
+          # (typically 1 on a 2-vCPU pod). These
+          # values are sized for a LOW-RESOURCE sandbox node (2 vCPU / 4 GB) so
+          # the agent pod schedules alongside the AKS system + KEDA pods. RAISE
+          # them for production / large tenants (e.g. 2Gi request / 4Gi limit) or
+          # RDA can be OOMKilled mid-run.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+  pollingInterval: 30
+  maxReplicaCount: 10
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  triggers:
+  - type: azure-pipelines
+    metadata:
+      poolID: "<pool-id>"               # numeric pool id (see README: az pipelines pool list)
+      organizationURLFromEnv: "AZP_URL"
+    authenticationRef:
+      name: pipeline-trigger-auth

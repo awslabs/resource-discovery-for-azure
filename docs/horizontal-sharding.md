@@ -168,7 +168,7 @@ N shards ≈ N× the metrics/consumption throughput.
   diminishing returns — the ARG ceiling caps aggregate discovery regardless of
   machine count.
 - `-HeadRoom N` (leave N% of concurrency in reserve) lowers the run's peak request
-  rate so it competes less with the customer's production workloads for the shared
+  rate so it competes less with your production workloads for the shared
   limits — recommended on a live production tenant.
 - `-UseMetricsBatch` (Azure Monitor `metrics:getBatch`, one REST call per ≤50
   resources instead of one `Get-AzMetric` per resource-per-metric) sharply cuts
@@ -263,7 +263,7 @@ path, because it is the most common "spin up N cheap workers, run, tear down"
 pattern — and it is the one verified end-to-end for this guide.
 
 > **Just want the step-by-step?** See the copy-paste runbook
-> [`deploy/CUSTOMER-SETUP.md`](../deploy/CUSTOMER-SETUP.md) — it walks through the
+> [`deploy/AKS-WorkloadIdentity-Setup.md`](../deploy/AKS-WorkloadIdentity-Setup.md) — it walks through the
 > readiness checks, cluster + identity setup, running the Job, collecting output,
 > and troubleshooting. The rest of this section is the same material with more of
 > the "why".

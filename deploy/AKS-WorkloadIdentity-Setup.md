@@ -1,11 +1,20 @@
-# RDA on AKS — Customer Setup Guide
+# RDA on AKS — Kubernetes Job + Workload Identity Setup
 
 This guide stands up Resource Discovery for Azure (RDA) as a set of worker pods
-on AKS. The pods authenticate with **workload identity** — a user-assigned
-managed identity (UAMI) federated to a Kubernetes ServiceAccount — so **no client
-secret is stored, mounted, or handed to anyone**. Each pod signs itself in,
-processes its shard of the tenant's subscriptions, and produces a self-contained
-report.
+on AKS, run as a native **Kubernetes indexed Job**. The pods authenticate with
+**workload identity** — a user-assigned managed identity (UAMI) federated to a
+Kubernetes ServiceAccount — so **no client secret is stored, mounted, or handed
+to anyone**. Each pod signs itself in, processes its shard of the tenant's
+subscriptions, and produces a self-contained report.
+
+> **Running RDA from an Azure DevOps pipeline instead?** If your agents are
+> **KEDA-scaled self-hosted Azure DevOps agents on AKS** and RDA runs as a
+> pipeline step under **`AzurePowerShell@5`** against an **ARM service
+> connection**, that is a *different*
+> execution model — RDA runs on the pipeline agent, not as this Kubernetes Job,
+> and it authenticates via the service connection rather than a pod-federated
+> UAMI. Use [`agent-pool/keda/README.md`](agent-pool/keda/README.md) for that
+> route; this document is the pod-native / workload-identity path.
 
 If you only need a single machine (laptop, VM, or Cloud Shell) rather than a
 cluster, you do not need any of this — see the top-level `README.md`. This guide
@@ -31,7 +40,7 @@ the operational checklist.
 | Indexed Job `rda-shards` | runs one shard per pod |
 
 There is exactly **one secret-less identity** in this design. The only
-per-customer values are the resource names, the UAMI client id, the RBAC scope,
+per-environment values are the resource names, the UAMI client id, the RBAC scope,
 the shard count, and (optionally) an output blob container.
 
 ---
@@ -188,8 +197,8 @@ kubectl apply -f deploy/k8s/serviceaccount.yaml
 
 Optional Job env knobs (uncomment in `job.yaml`):
 
-- `HEAD_ROOM` — leave N% of API concurrency in reserve (competes less with the
-  customer's production Azure workloads).
+- `HEAD_ROOM` — leave N% of API concurrency in reserve (competes less with your
+  production Azure workloads).
 - `SKIP_METRICS` = `"true"` — skip the metrics phase (drop Monitoring Reader).
 - `SKIP_CONSUMPTION` = `"true"` — skip consumption (drop Cost Management Reader).
 - `USE_METRICS_BATCH` = `"true"` — use the Azure Monitor `metrics:getBatch`

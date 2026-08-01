@@ -1,9 +1,9 @@
-# RDA on an EXISTING AKS cluster — One-Page Run Sheet
+# RDA on an EXISTING AKS cluster — Manual kubectl Guide
 
-For a customer who already has an AKS cluster and a namespace and just wants to
+For an operator who already has an AKS cluster and a namespace and just wants to
 run the Resource Discovery for Azure horizontal shards inside it and collect the
 output. (Building a cluster from scratch is covered in
-[`CUSTOMER-SETUP.md`](CUSTOMER-SETUP.md); this sheet assumes the cluster exists.)
+[`AKS-WorkloadIdentity-Setup.md`](AKS-WorkloadIdentity-Setup.md); this sheet assumes the cluster exists.)
 
 ## Assumptions
 
@@ -155,9 +155,9 @@ az storage blob download-batch --account-name <account> --source <container> \
 - Each zip → inner `ResourcesReport_*.zip` → `Inventory_*.json`, `Metrics_*.json`, `Consumption_*.csv` (+ HTML).
 - Optional single rolled-up view: `Build-MainSummaryFromZip.ps1` (see `docs/horizontal-sharding.md`).
 
-## 9. Tear down (leave the customer's cluster intact)
+## 9. Tear down (leave the existing cluster intact)
 
-Remove only what you added — do **not** delete their cluster:
+Remove only what you added — do **not** delete the existing cluster:
 
 ```bash
 kubectl -n $NS delete -f deploy/k8s/job.yaml

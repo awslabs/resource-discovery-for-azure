@@ -393,7 +393,7 @@ Rough sizing: splitting a very large tenant across N machines gives each machine
 ./deploy/Test-MultiNodeReadiness.ps1 -Location <region>
 ```
 
-For the step-by-step, copy-paste setup, follow the runbook **[deploy/CUSTOMER-SETUP.md](deploy/CUSTOMER-SETUP.md)** (readiness checks, cluster + identity, running the Job, collecting output, troubleshooting). See [docs/horizontal-sharding.md](docs/horizontal-sharding.md#running-the-shards-on-aks-containers--ci-cd) for the same material with more of the "why" behind the sharding.
+For the step-by-step, copy-paste setup, follow the runbook **[deploy/AKS-WorkloadIdentity-Setup.md](deploy/AKS-WorkloadIdentity-Setup.md)** (readiness checks, cluster + identity, running the Job, collecting output, troubleshooting). To run RDA from an **Azure DevOps pipeline on KEDA-scaled AKS agents** (`AzurePowerShell@5` + service connection), see **[deploy/agent-pool/keda/README.md](deploy/agent-pool/keda/README.md)** instead. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md#running-the-shards-on-aks-containers--ci-cd) for the same material with more of the "why" behind the sharding.
 
 #### Run transcript and failure diagnostics
 

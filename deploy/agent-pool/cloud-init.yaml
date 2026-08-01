@@ -1,0 +1,19 @@
+#cloud-config
+# Per-node bootstrap for the RHEL 9 VMSS that backs the Azure DevOps agent pool.
+# Runs once at first boot on every scale-set instance. Installs everything the
+# RDA agent-direct run needs so AzurePowerShell@5 (which does NOT install Az on
+# self-hosted agents) finds it already present:
+#   - PowerShell 7 (pwsh)
+#   - az CLI (for parity with a typical enterprise toolchain / diagnostics)
+#   - the five Az submodules RDA uses (Accounts/Compute/Monitor/Billing/ResourceGraph)
+#   - libicu (required by the .NET-based ADO agent + pwsh on RHEL)
+#
+# The Azure DevOps elastic-pool service installs and runs the pipeline AGENT
+# itself on each node - do NOT install the agent here.
+package_update: true
+runcmd:
+  - rpm --import https://packages.microsoft.com/keys/microsoft.asc
+  - curl -sSL -o /etc/yum.repos.d/microsoft-prod.repo https://packages.microsoft.com/config/rhel/9/prod.repo
+  - dnf install -y powershell azure-cli libicu git
+  - pwsh -NoProfile -Command "Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Scope AllUsers -Force -AllowClobber"
+  - pwsh -NoProfile -Command "$PSVersionTable.PSVersion | Out-File -FilePath /var/log/rda-agent-bootstrap.log; Get-Module -ListAvailable Az.Accounts | Select-Object Name,Version | Out-File -Append /var/log/rda-agent-bootstrap.log"

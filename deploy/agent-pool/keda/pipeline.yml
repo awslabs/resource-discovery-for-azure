@@ -1,0 +1,138 @@
+# KEDA repro run pipeline: runs RDA on KEDA-scaled self-hosted agent pods in AKS.
+#
+# Queuing this pipeline once fans out into `shardCount` parallel jobs (a job
+# `strategy: parallel`). Each job is a pending entry in the `keda-pool` queue, so
+# the KEDA azure-pipelines scaler spawns one azp-agent pod per shard on the AKS
+# node(s). Each agent runs RDA via AzurePowerShell@5 using the ARM service
+# connection, processes ONLY its shard's slice of subscriptions, then the pod
+# exits and KEDA scales back to zero.
+#
+# Dynamic shard-index assignment (the important bit): with `strategy: parallel: N`
+# Azure DevOps injects System.JobPositionInPhase (1..N) and System.TotalJobsInPhase
+# (N) into each parallel job. Each agent derives its own 0-based ShardIndex from
+# those - so you set ONE number (shardCount) at queue time and every agent picks a
+# distinct shard automatically. This is the ADO analogue of a Kubernetes
+# `completionMode: Indexed` Job's JOB_COMPLETION_INDEX.
+#
+# tenantId is supplied at queue time (templateParameters), so no real tenant id
+# ever lives in the repo.
+trigger: none
+
+parameters:
+- name: tenantId
+  displayName: 'Azure tenant id'
+  type: string
+  default: ''
+- name: parallelStreams
+  displayName: 'Parallel streams PER agent (0 = let RDA auto-tune from agent CPU/RAM)'
+  type: number
+  default: 0
+- name: shardCount
+  displayName: 'Shard count = number of parallel agents (1 = single agent, whole tenant)'
+  type: number
+  default: 1
+- name: uploadContainerUri
+  displayName: 'Blob container URI to upload each shard zip to (empty = no upload)'
+  type: string
+  default: ''
+- name: allowPartialAccess
+  displayName: 'Allow partial access (OFF = fail loud on any unreadable subscription)'
+  type: boolean
+  default: false
+
+variables:
+  serviceConnection: keda-serviceConnection   # ARM service connection (WIF)
+
+jobs:
+- job: rda
+  displayName: 'RDA shard'
+  pool:
+    name: keda-pool             # self-hosted KEDA agent pool
+  # Fan out into `shardCount` parallel jobs. shardCount=1 (default) is a single
+  # agent covering the whole tenant. Each parallel job gets a distinct
+  # System.JobPositionInPhase, which the step below turns into its ShardIndex.
+  strategy:
+    parallel: ${{ parameters.shardCount }}
+  steps:
+  - checkout: self
+
+  - task: AzurePowerShell@5
+    displayName: 'Run RDA (KEDA agent, pre-authed via service connection)'
+    inputs:
+      azureSubscription: $(serviceConnection)
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: true
+      ScriptType: 'InlineScript'
+      Inline: |
+        # Build the RDA argument set via HASHTABLE splatting (named params +
+        # switches). -ParallelStreams is only added when a positive value is
+        # supplied; otherwise RDA auto-tunes the per-agent stream count from the
+        # agent's CPU/RAM (Get-RecommendedParallelism).
+        #
+        # By DEFAULT -AllowPartialAccess is NOT passed (allowPartialAccess=false):
+        # RDA's up-front access gate stays ACTIVE, verifies read access to EVERY
+        # in-scope subscription, and HARD-STOPS (fail loud, exit non-zero) if it
+        # cannot read one or more of them. The operator then fixes the missing RBAC
+        # (grant the service connection Reader on all subs / the tenant-root MG) and
+        # re-runs, rather than silently producing a report missing subscriptions.
+        # Set allowPartialAccess=true ONLY as a conscious override (e.g. a sandbox
+        # that genuinely cannot read the tenant-root management group).
+        $rdaArgs = @{
+          TenantID        = '${{ parameters.tenantId }}'
+          Obfuscate       = $true
+          SkipMetrics     = $true
+          SkipConsumption = $true
+        }
+        $ps = [int]'${{ parameters.parallelStreams }}'
+        if ($ps -gt 0) { $rdaArgs['ParallelStreams'] = $ps }
+
+        # Dynamic shard assignment. With strategy: parallel:N, ADO sets these two
+        # per-job variables; ShardIndex is JobPositionInPhase (1-based) minus 1.
+        $paramShardCount = [int]'${{ parameters.shardCount }}'
+        $posRaw = '$(System.JobPositionInPhase)'
+        $totRaw = '$(System.TotalJobsInPhase)'
+        $shardCount = if ($totRaw -match '^\d+$') { [int]$totRaw } else { 0 }
+        $shardIndex = if ($posRaw -match '^\d+$') { [int]$posRaw - 1 } else { -1 }
+        # Fail loud on a shard-collapse: if we asked for >1 shard but the parallel
+        # strategy did not inject a valid distinct index, every agent would run
+        # shard 0 and the other slices would be SILENTLY skipped. Never do that.
+        if ($paramShardCount -gt 1 -and ($shardCount -ne $paramShardCount -or $shardIndex -lt 0)) {
+          throw "shardCount=$paramShardCount but the parallel strategy did not inject a valid per-agent index (JobPositionInPhase='$posRaw', TotalJobsInPhase='$totRaw'). Every agent would run shard 0 and the other slices would be silently skipped."
+        }
+        if ($shardCount -gt 1) {
+          $rdaArgs['ShardCount'] = $shardCount
+          $rdaArgs['ShardIndex'] = $shardIndex
+          Write-Host ("This agent = shard $shardIndex of $shardCount.")
+        }
+        else {
+          Write-Host "Single agent (no sharding); covering the whole tenant."
+        }
+
+        # Blob upload: when a container URI is supplied, RDA uploads this agent's
+        # report zip (shard-prefixed when sharding) to the container via Azure AD
+        # using the service-connection identity (needs Storage Blob Data Contributor
+        # and the Az.Storage module baked into the agent image).
+        $uploadUri = '${{ parameters.uploadContainerUri }}'
+        if (-not [string]::IsNullOrWhiteSpace($uploadUri)) { $rdaArgs['UploadToBlobContainerUri'] = $uploadUri }
+        if ($${{ parameters.allowPartialAccess }}) { $rdaArgs['AllowPartialAccess'] = $true }
+
+        ./Run-AllSubscriptions.ps1 @rdaArgs
+        # Fail the pipeline loudly on any non-zero RDA exit. The AzurePowerShell@5
+        # task runs this inline via a dot-sourced wrapper, where a called script's
+        # `exit N` does NOT set the task's process exit code - so a hard-stop (e.g.
+        # the up-front subscription access gate) would otherwise show GREEN. RDA now
+        # always exits with a deterministic code, so re-raise it as a terminating
+        # error (which the task honors) to surface the failure and force a fix + retry.
+        if ($LASTEXITCODE -ne 0) { throw "Run-AllSubscriptions.ps1 exited $LASTEXITCODE - see the log above (subscription access gate / auth skip / collector failures). Fix the cause and re-run." }
+
+  - task: CopyFiles@2
+    displayName: 'Stage report zip'
+    inputs:
+      SourceFolder: '$(System.DefaultWorkingDirectory)'
+      Contents: |
+        AllSubscriptions_ResourcesReport_*.zip
+        shard-*-AllSubscriptions_ResourcesReport_*.zip
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+  # Publish under a per-shard artifact name so parallel agents don't collide.
+  - publish: '$(Build.ArtifactStagingDirectory)'
+    artifact: 'rda-reports-shard$(System.JobPositionInPhase)'

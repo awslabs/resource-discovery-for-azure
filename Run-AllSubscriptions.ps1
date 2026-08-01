@@ -578,8 +578,7 @@ if ($UploadToBlobContainerUri)
     {
         $PreflightUri = [System.Uri]$UploadToBlobContainerUri
         $UploadUriValid = $PreflightUri.Scheme -eq 'https' -and
-            $PreflightUri.Host -match '\.blob\.' -and
-            -not [string]::IsNullOrWhiteSpace($PreflightUri.AbsolutePath.Trim('/'))
+        $PreflightUri.Host -match '\.blob\.' -and -not [string]::IsNullOrWhiteSpace($PreflightUri.AbsolutePath.Trim('/'))
     }
     catch
     {
@@ -677,6 +676,25 @@ try
         {
             Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
         }
+
+        # Do not launch an interactive sign-in in a non-interactive/headless session
+        # (e.g. an Azure DevOps agent, cron, or any redirected-stdin run):
+        # Connect-AzAccount would block on a browser/device-code prompt that no one
+        # can answer, hanging the run until it times out. Fail loud with actionable
+        # guidance and a non-zero exit instead. -DeviceLogin is an explicit opt-in to
+        # the device-code flow, so it is still honored. Uses the same interactivity
+        # test as the PowerShell 7 / Az module install prompts above.
+        $SessionInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+        if (-not $SessionInteractive -and -not $DeviceLogin)
+        {
+            Write-Host ("ERROR: No usable Az PowerShell session for tenant {0}, and this is a non-interactive session - refusing to launch an interactive sign-in (it would hang here)." -f $TenantID) -ForegroundColor Red
+            Write-Host "Establish a session before running (choose one):" -ForegroundColor Yellow
+            Write-Host "  - Use an AzurePowerShell@5 pipeline task (NOT AzureCLI@2) so the Az PowerShell context is set from the service connection." -ForegroundColor Yellow
+            Write-Host ("  - Or run 'Connect-AzAccount -Tenant {0}' interactively first, then re-run." -f $TenantID) -ForegroundColor Yellow
+            Write-Host "  - Or pass -DeviceLogin to use the device-code flow (still requires a human to complete it)." -ForegroundColor Yellow
+            Exit-Wrapper -Code 1
+        }
+
         if ($DeviceLogin)
         {
             Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication | Out-Null
@@ -717,6 +735,23 @@ if ($BannerCtx -and $BannerCtx.Account)
     if ($BannerCtx.Subscription -and $BannerCtx.Subscription.Id)
     {
         Write-Host ("  Active sub    : {0}" -f $BannerCtx.Subscription.Id) -ForegroundColor Green
+    }
+    # When the sign-in is a service principal / workload identity (type != 'User' -
+    # e.g. 'ClientAssertion' under an Azure DevOps AzurePowerShell@5 service
+    # connection), Account.Id is the Application (client) id. Azure DevOps' log
+    # scrubber masks that id as '***' in pipeline output because the service
+    # connection registered it as a secret - that is ADO masking the LOG, not the
+    # tool hiding it (Tenant / Active sub are not secrets, so they print normally).
+    # Explain it inline, since this masked principal is exactly the identity that
+    # must hold Reader (+ Cost Management / Monitoring Reader) for the run to see
+    # resources, and it differs from an interactive VM login.
+    if ($BannerCtx.Account.Type -and $BannerCtx.Account.Type -ne 'User')
+    {
+        Write-Host "  Note          : running as a service principal / workload identity. If the id above shows as '***', that" -ForegroundColor DarkYellow
+        Write-Host "                  is Azure DevOps masking the service connection's client id in the log - not the tool." -ForegroundColor DarkYellow
+        Write-Host "                  Identify this principal in Project Settings > Service connections, or resolve its object id" -ForegroundColor DarkYellow
+        Write-Host "                  with  Get-AzADServicePrincipal -ApplicationId <app-id>  from a workstation, then grant THAT" -ForegroundColor DarkYellow
+        Write-Host "                  object id Reader at the tenant-root management group (it differs from an interactive login)." -ForegroundColor DarkYellow
     }
 }
 else
@@ -2756,8 +2791,13 @@ if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainer
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
-if ($WrapperExitCode -ne 0)
-{
-    exit $WrapperExitCode
-}
+# Always exit with the computed wrapper code (0 on a fully clean run). An explicit
+# exit makes $LASTEXITCODE deterministic for callers and CI. In particular the
+# Azure DevOps AzurePowerShell@5 task runs this script via a dot-sourced wrapper
+# where a bare fall-through would leave $LASTEXITCODE at the last native command's
+# value - so a clean run could look non-zero, and a hard-stop's own exit code does
+# not otherwise reach the task. Exiting unconditionally lets the pipeline check
+# $LASTEXITCODE and fail loudly on any non-zero (access gate, auth skip, collector
+# failures) instead of showing green.
+exit $WrapperExitCode
 

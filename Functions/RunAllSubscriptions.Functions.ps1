@@ -654,6 +654,33 @@ function Get-InventoryPlan
     }
 }
 
+# Render the operator/machine-facing shard directive for the -Plan output. PURE
+# (no Azure, no host writes) so it is unit-testable in isolation. Given the
+# recommended shard count it returns the lines the -Plan block prints:
+#   1. A single MACHINE-READABLE token, 'PLAN_SHARDCOUNT=<n>', that an automating
+#      wrapper can grep for a stable integer instead of scraping the human prose
+#      (the prose caps the printed command list at 10, which a naive parser can
+#      misread). Emitted in BOTH single (n=1) and sharded (n>1) cases.
+#   2. When sharding (n>1), one unmissable directive making the FULL required
+#      index range explicit - you must run every -ShardIndex 0..n-1, one per
+#      machine; any index not run is silently omitted from the combined result
+#      (the shards are disjoint and there is no cross-machine coordinator).
+# Returns [string[]]; the caller decides how to colour/emit them.
+function Get-PlanShardDirective
+{
+    param(
+        [Parameter(Mandatory = $true)][int]$ShardCount
+    )
+    $Count = if ($ShardCount -lt 1) { 1 } else { $ShardCount }
+    $Lines = @()
+    $Lines += ('PLAN_SHARDCOUNT={0}' -f $Count)
+    if ($Count -gt 1)
+    {
+        $Lines += ('IMPORTANT: this is {0} shards. Run ALL of them - one per machine - with -ShardIndex 0 through {1} (i.e. 0..{1}). Each -ShardIndex is a distinct ~1/{0} slice of the tenant; any index you do NOT run is SILENTLY omitted from the combined result (the shards are disjoint and do not coordinate).' -f $Count, ($Count - 1))
+    }
+    return $Lines
+}
+
 # === Pre-flight checks ===
 #
 # Detect the most common environment problems that make a long run pointless,

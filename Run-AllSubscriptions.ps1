@@ -901,6 +901,15 @@ if ($Plan)
         }
         Write-Host "  Then upload each machine's AllSubscriptions_ResourcesReport_*.zip (see docs/horizontal-sharding.md)." -ForegroundColor DarkGray
     }
+    # Machine-readable shard-count token + (when sharding) an explicit "run ALL
+    # 0..N-1" directive, so an automating wrapper does not have to scrape the
+    # human prose (which caps the printed command list at 10) and an operator
+    # cannot misread the required index range.
+    foreach ($DirLine in (Get-PlanShardDirective -ShardCount $PlanResult.ShardCount))
+    {
+        if ($DirLine -like 'IMPORTANT:*') { Write-Host $DirLine -ForegroundColor Yellow }
+        else { Write-Host $DirLine -ForegroundColor DarkGray }
+    }
     Write-Host ""
     Write-Host "(Estimate only - actual time varies with resource density and metrics/consumption volume.)" -ForegroundColor DarkGray
     Exit-Wrapper -Code 0

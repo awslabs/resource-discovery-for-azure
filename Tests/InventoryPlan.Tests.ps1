@@ -109,3 +109,50 @@ Describe 'Get-InventoryPlan' {
         }
     }
 }
+
+Describe 'Get-PlanShardDirective' {
+
+    Context 'Single-machine plan (ShardCount = 1)' {
+        It 'emits the machine-readable token as 1 and NO IMPORTANT directive' {
+            $lines = @(Get-PlanShardDirective -ShardCount 1)
+            $lines | Should -Contain 'PLAN_SHARDCOUNT=1'
+            ($lines | Where-Object { $_ -like 'IMPORTANT:*' }).Count | Should -Be 0
+        }
+
+        It 'never recommends a shard count below 1 (guards ShardCount 0)' {
+            $lines = @(Get-PlanShardDirective -ShardCount 0)
+            $lines | Should -Contain 'PLAN_SHARDCOUNT=1'
+        }
+    }
+
+    Context 'Sharded plan (ShardCount > 1)' {
+        It 'emits the token equal to the shard count and an IMPORTANT full-range directive (large-tenant example: 28)' {
+            $lines = @(Get-PlanShardDirective -ShardCount 28)
+            $lines | Should -Contain 'PLAN_SHARDCOUNT=28'
+            $imp = @($lines | Where-Object { $_ -like 'IMPORTANT:*' })
+            $imp.Count | Should -Be 1
+            # The required range must be spelled out as 0 through N-1 / 0..N-1 so it
+            # cannot be misread as the 10-line printed sample.
+            $imp[0] | Should -Match '0 through 27'
+            $imp[0] | Should -Match '0\.\.27'
+            # And it must warn that un-run indices are silently dropped.
+            $imp[0] | Should -Match 'SILENTLY'
+        }
+
+        It 'spells the range end as ShardCount-1 at the sharding boundary (2 shards -> 0 through 1)' {
+            $lines = @(Get-PlanShardDirective -ShardCount 2)
+            $lines | Should -Contain 'PLAN_SHARDCOUNT=2'
+            $imp = @($lines | Where-Object { $_ -like 'IMPORTANT:*' })
+            $imp[0] | Should -Match '0 through 1\b'
+        }
+
+        It 'the token line is always exactly parseable as PLAN_SHARDCOUNT=<int> (wrapper contract)' {
+            foreach ($n in 2, 5, 28, 100) {
+                $token = @(Get-PlanShardDirective -ShardCount $n) | Where-Object { $_ -like 'PLAN_SHARDCOUNT=*' }
+                $token | Should -Be ("PLAN_SHARDCOUNT={0}" -f $n)
+                # It must parse back to the exact integer a wrapper needs.
+                [int]($token -replace '^PLAN_SHARDCOUNT=', '') | Should -Be $n
+            }
+        }
+    }
+}

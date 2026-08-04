@@ -40,6 +40,15 @@ param (
     [string[]] $SubscriptionIds = @(),
     [string[]] $SubscriptionNames = @(),
 
+    # Shard identity + state-blob container, forwarded by the parent ONLY when
+    # blob-backed resume state is enabled. Used to mirror THIS stream's per-stream
+    # resume state to a shard+stream-namespaced blob for AKS pod-reschedule
+    # durability. StateBlobContainerUri empty (default) -> per-stream state stays
+    # local-only, exactly as before.
+    [int]    $ShardIndex = 0,
+    [int]    $ShardCount = 1,
+    [string] $StateBlobContainerUri = '',
+
     [switch] $Resume,
     # The parent already narrowed $SubscriptionIds to just the failed subs
     # before starting this worker, so the worker does no filtering of its own.
@@ -158,9 +167,38 @@ catch
 # Each stream owns a separate file. No races, no locking, simple semantics.
 $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId)
 
-
-
-
+# Optional per-stream blob mirror (AKS pod-reschedule durability). $StreamBlobArgs
+# is EMPTY when no state-blob container was forwarded, so Write-StreamState below
+# takes the local-only path unchanged. The blob name is shard+stream-namespaced so
+# it (a) never collides with another shard pod's stream in the SHARED container and
+# (b) matches the prefix the parent's Get-StateBlobNames lists on when it folds
+# per-stream blobs back into the unified state. The worker has already imported the
+# Az context snapshot above, so -UseConnectedAccount resolves; a context-build blip
+# falls back to local-only rather than killing the stream.
+$StreamBlobArgs = @{}
+if (-not [string]::IsNullOrWhiteSpace($StateBlobContainerUri))
+{
+    try
+    {
+        # Explicit import: this worker is a fresh Start-Job process that only
+        # imports Az.Accounts above, so New-AzStorageContext would otherwise rely
+        # on module autoloading. Importing here makes a blob-enabled run fail LOUD
+        # into the catch (local-only fallback) if Az.Storage is unavailable,
+        # rather than silently losing durability when autoload is off.
+        Import-Module Az.Storage -ErrorAction Stop
+        $StreamBlobParts = Split-BlobContainerUri -Uri $StateBlobContainerUri
+        $StreamBlobArgs = @{
+            BlobContext   = New-StateBlobContext -Account $StreamBlobParts.Account
+            BlobContainer = $StreamBlobParts.Container
+            BlobName      = Get-StateBlobName -Prefix $StreamBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount -StreamId ([int]$StreamId)
+        }
+    }
+    catch
+    {
+        Write-Stream ("WARNING: could not initialise state-blob context; per-stream state stays local-only: {0}" -f $_.Exception.Message) 'Yellow'
+        $StreamBlobArgs = @{}
+    }
+}
 
 $CompletedIds = @()
 $FailedAttempts = @()
@@ -280,7 +318,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
             # If this is a retry that finally succeeded, drop the sub from
             # FailedAttempts so the unified resume-state file reflects truth.
             $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
-            Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
+            Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts @StreamBlobArgs
         }
     }
     catch
@@ -332,7 +370,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # history to the next -ResumeFailedOnly invocation.
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
             -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
-        Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts
+        Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts @StreamBlobArgs
     }
 }
 

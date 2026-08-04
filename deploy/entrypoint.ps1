@@ -100,6 +100,18 @@ if (-not [string]::IsNullOrWhiteSpace("$($env:PARALLEL_STREAMS)"))
 # uploads via the SAME workload identity signed in above (Storage Blob Data
 # Contributor on the target). Omit the env var to keep each zip node-local.
 if (-not [string]::IsNullOrWhiteSpace("$($env:UPLOAD_BLOB_URI)")) { $WrapperArgs.UploadToBlobContainerUri = $env:UPLOAD_BLOB_URI }
+# Blob-backed resume state (AKS pod-reschedule durability). A pod's local disk is
+# destroyed on eviction/reschedule, so the resume/state file is mirrored to blob
+# and read back blob-first when a shard's pod is rescheduled. Prefer an explicit
+# STATE_BLOB_URI; otherwise reuse the SAME container as UPLOAD_BLOB_URI (state
+# lives under a dedicated _state/ subfolder, shard-namespaced, so it never
+# collides with the report zips). Passwordless via the SAME workload identity as
+# the upload (Storage Blob Data Contributor on the target). Leave both unset to
+# keep state node-local.
+$StateBlobUri = if (-not [string]::IsNullOrWhiteSpace("$($env:STATE_BLOB_URI)")) { $env:STATE_BLOB_URI }
+elseif (-not [string]::IsNullOrWhiteSpace("$($env:UPLOAD_BLOB_URI)")) { $env:UPLOAD_BLOB_URI }
+else { '' }
+if (-not [string]::IsNullOrWhiteSpace($StateBlobUri)) { $WrapperArgs.StateBlobContainerUri = $StateBlobUri }
 
 & /rda/Run-AllSubscriptions.ps1 @WrapperArgs
 exit $LASTEXITCODE

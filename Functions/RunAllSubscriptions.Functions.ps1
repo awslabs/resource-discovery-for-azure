@@ -862,58 +862,106 @@ function Resolve-TenantId
     return $Resolved
 }
 
-function Get-CompletedSubscriptionIds
+# Return the parsed resume-state object for this tenant, BLOB-FIRST (a
+# rescheduled AKS pod has no local file, so the blob mirror is the source of
+# truth across pod lifetimes) with a local-file fallback, or $null if neither
+# exists / is readable / matches the tenant. Centralises the blob-first-then-
+# local read + tenant guard for every Get-* reader below so the logic (and its
+# one tenant-mismatch message) lives in exactly one place. The blob branch is
+# skipped entirely when no blob is configured, so the local path is byte-for-
+# byte the historical behaviour.
+function Get-ResumeStateObject
 {
-    param([string]$Path, [string]$Tenant)
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if ($BlobContext -and $BlobContainer -and $BlobName)
+    {
+        $BlobState = Read-StateBlob -Context $BlobContext -Container $BlobContainer -BlobName $BlobName
+        if ($null -ne $BlobState)
+        {
+            if ($BlobState.TenantID -ne $Tenant)
+            {
+                Write-Host ("Resume state blob is for a different tenant ({0}); ignoring." -f $BlobState.TenantID) -ForegroundColor Yellow
+                return $null
+            }
+            return $BlobState
+        }
+        # Blob absent/unreadable -> fall through to the local file, if any.
+    }
+    if (-not (Test-Path -Path $Path -PathType Leaf)) { return $null }
     try
     {
         $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant)
         {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
-            return @()
+            return $null
         }
-        if ($null -eq $State.CompletedSubscriptionIds) { return @() }
-        return @($State.CompletedSubscriptionIds)
+        return $State
     }
     catch
     {
         Write-Host ("Could not read resume state file ({0}); starting fresh. $_" -f $Path) -ForegroundColor Yellow
-        return @()
+        return $null
     }
 }
 
-# Read the FailedAttempts list out of the same resume-state file. Returns an
-# array of objects shaped { Id, Name, LastFailedAt, Reason, Attempts }, or an
-# empty array if the file is absent, malformed, or for a different tenant.
-# Backward-compatible: a state file written by an older version of this
-# script (which has CompletedSubscriptionIds but no FailedAttempts key) reads
-# back as empty here, so existing on-disk state never blocks an upgrade.
+function Get-CompletedSubscriptionIds
+{
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
+
+    $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    if ($null -eq $State -or $null -eq $State.CompletedSubscriptionIds) { return @() }
+    return @($State.CompletedSubscriptionIds)
+}
+
+# Read the FailedAttempts list out of the same resume-state (blob-first, then
+# local). Returns an array of objects shaped { Id, Name, LastFailedAt, Reason,
+# Attempts }, or an empty array if the state is absent, malformed, or for a
+# different tenant. Backward-compatible: state written by an older version of
+# this script (which has CompletedSubscriptionIds but no FailedAttempts key)
+# reads back as empty here, so existing on-disk/blob state never blocks an upgrade.
 function Get-FailedAttempts
 {
-    param([string]$Path, [string]$Tenant)
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
-    try
-    {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
-        if ($State.TenantID -ne $Tenant) { return @() }
-        if ($null -eq $State.FailedAttempts) { return @() }
-        return @($State.FailedAttempts)
-    }
-    catch
-    {
-        return @()
-    }
+    $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    if ($null -eq $State -or $null -eq $State.FailedAttempts) { return @() }
+    return @($State.FailedAttempts)
+}
+
+# Read the EnumeratedAtStart object ({ CapturedUtc; SubscriptionIds }) recorded
+# at the start of the run, blob-first then local, or $null if none. Lets a
+# resumed / rescheduled run keep the ORIGINAL start-of-run universe for the
+# end-of-run reconciliation instead of re-capturing an already-moved mid-run
+# snapshot. Returns $null for state written before this key existed.
+function Get-StartSnapshot
+{
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
+
+    $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    if ($null -eq $State) { return $null }
+    return $State.EnumeratedAtStart
 }
 
 function Save-CompletedSubscriptionIds
 {
-    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @())
+    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @(),
+        # EnumeratedAtStart object { CapturedUtc; SubscriptionIds } captured once
+        # at run start and passed on EVERY write, so the start-of-run universe
+        # survives a crash/resume for the end-of-run reconciliation. $null omits
+        # the key entirely (identical to the historical file shape).
+        $StartSnapshot = $null,
+        # Optional blob mirror for AKS pod-reschedule durability. When all three
+        # are supplied the freshly-written local file is also PUT to blob,
+        # best-effort (the local atomic write is authoritative; a blob blip must
+        # not abort the run).
+        $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
 
-    $State = [pscustomobject]@{
+    # [ordered] so the optional EnumeratedAtStart key appends AFTER the historical
+    # keys (TenantID, CompletedSubscriptionIds, FailedAttempts, LastUpdated),
+    # keeping the existing shape unchanged for readers that ignore the new key.
+    $StateMap = [ordered]@{
         TenantID                  = $Tenant
         CompletedSubscriptionIds  = @($Ids)
         # FailedAttempts is the canonical "what to retry" list. The wrapper
@@ -924,6 +972,8 @@ function Save-CompletedSubscriptionIds
         FailedAttempts            = @($FailedAttempts)
         LastUpdated               = (Get-Date).ToString('o')
     }
+    if ($null -ne $StartSnapshot) { $StateMap['EnumeratedAtStart'] = $StartSnapshot }
+    $State = [pscustomobject]$StateMap
     try
     {
         # Atomic write: serialize to a sibling temp file, then swap it into place
@@ -935,14 +985,24 @@ function Save-CompletedSubscriptionIds
         # reprocess every subscription from scratch (potentially hours of work in
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
+        # Depth 5 (was 4) so the nested EnumeratedAtStart.SubscriptionIds array
+        # serialises fully.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8
+        $State | ConvertTo-Json -Depth 5 | Set-Content -Path $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch
     {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
+        return
+    }
+    # Mirror to blob AFTER the authoritative local write succeeded. Best-effort:
+    # Save-StateBlob warns and returns $false on a transient blob failure rather
+    # than throwing, so a blob blip never loses the local progress or aborts the run.
+    if ($BlobContext -and $BlobContainer -and $BlobName)
+    {
+        $null = Save-StateBlob -Context $BlobContext -Container $BlobContainer -BlobName $BlobName -File $Path -BestEffort
     }
 }
 
@@ -1170,7 +1230,12 @@ function Read-StreamState
 
 function Write-StreamState
 {
-    param([string]$Path, [string[]]$Completed, $FailedAttempts = @())
+    param([string]$Path, [string[]]$Completed, $FailedAttempts = @(),
+        # Optional per-stream blob mirror (AKS pod-reschedule durability). When
+        # supplied, the freshly-written local per-stream file is also PUT to blob,
+        # best-effort - so a pod that dies mid-parallel-run leaves its in-flight
+        # stream progress in blob for the rescheduled shard's parent to fold in.
+        $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
     $Tmp = "$Path.tmp"
     try
     {
@@ -1192,6 +1257,11 @@ function Write-StreamState
     {
         Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
+        return
+    }
+    if ($BlobContext -and $BlobContainer -and $BlobName)
+    {
+        $null = Save-StateBlob -Context $BlobContext -Container $BlobContainer -BlobName $BlobName -File $Path -BestEffort
     }
 }
 

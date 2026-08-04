@@ -192,6 +192,19 @@ param (
     # (default).
     [string]$UploadToBlobContainerUri,
 
+    # Mirror the resume/state file to an Azure Blob container so a run survives
+    # the loss of local disk - the case that matters on AKS, where a pod's
+    # emptyDir is destroyed on eviction/reschedule/node-reclaim (exactly when
+    # -Resume is needed). Same URL shape as -UploadToBlobContainerUri
+    # (https://<account>.blob.core.windows.net/<container>[/<prefix>]); state
+    # lives under a dedicated _state/ subfolder (shard-namespaced) so it never
+    # collides with the report zips in the same container. Uses the SAME
+    # passwordless identity as the upload (Storage Blob Data Contributor). Writes
+    # are write-through (local atomic write first, then a best-effort blob PUT);
+    # reads on start are blob-first with a local fallback. Omit to keep state
+    # local-only (default) - behaviour is then byte-identical to before.
+    [string]$StateBlobContainerUri,
+
     # Assess-only "getting started" bootstrap. When set, the wrapper authenticates,
     # enumerates the tenant's eligible subscriptions, and sizes the run against
     # THIS machine (CPU/RAM -> recommended parallel streams), then PRINTS a
@@ -615,6 +628,41 @@ else
     Join-Path $InventoryRoot (".resume-state-{0}.json" -f $TenantID)
 }
 
+# Blob-backed resume state (AKS pod-reschedule durability). Validate the URL
+# shape + Az.Storage module up front - mirroring the -UploadToBlobContainerUri
+# preflight - so a malformed URL / missing module fails LOUD here rather than
+# after a multi-hour run. The passwordless storage CONTEXT is built later (after
+# authentication + enumeration), just before the state is first read/written.
+# $StateBlobParts is $null when the feature is off, keeping every downstream
+# blob step a no-op and the run byte-identical to a local-only run.
+$StateBlobParts = $null
+if ($StateBlobContainerUri)
+{
+    $StateUriValid = $false
+    try
+    {
+        $StatePreflightUri = [System.Uri]$StateBlobContainerUri
+        $StateUriValid = $StatePreflightUri.Scheme -eq 'https' -and
+        $StatePreflightUri.Host -match '\.blob\.' -and -not [string]::IsNullOrWhiteSpace($StatePreflightUri.AbsolutePath.Trim('/'))
+    }
+    catch
+    {
+        $StateUriValid = $false
+    }
+    if (-not $StateUriValid)
+    {
+        Write-Host ("ERROR: -StateBlobContainerUri '{0}' is not a valid blob container URL. Expected https://<account>.blob.core.windows.net/<container>[/<prefix>]." -f $StateBlobContainerUri) -ForegroundColor Red
+        Exit-Wrapper -Code 1
+    }
+    if ($null -eq (Get-Module -Name Az.Storage -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1))
+    {
+        Write-Host "ERROR: -StateBlobContainerUri was requested but the Az.Storage module is not installed. Install it (Install-Module Az.Storage -Scope CurrentUser) or bake it into the container image, then re-run." -ForegroundColor Red
+        Exit-Wrapper -Code 1
+    }
+    $StateBlobParts = Split-BlobContainerUri -Uri $StateBlobContainerUri
+    Write-Host ("Resume state will be mirrored to blob: {0}/{1}_state/ (shard-namespaced)" -f $StateBlobParts.Container, $StateBlobParts.Prefix) -ForegroundColor Cyan
+}
+
 
 
 
@@ -940,15 +988,53 @@ if ($ShardCount -gt 1)
 
 Write-Host ("Subscriptions to process: {0}" -f $Subscriptions.Count) -ForegroundColor Cyan
 
-# Always seed $CompletedIds from the existing state file. -Resume only
-# controls whether we *use* that list to skip subscriptions; reading it
-# either way ensures the per-iteration writes below append to existing
-# state instead of overwriting it.
-$CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID
-# Always seed $FailedAttempts the same way. Read on every run so the writes
-# below preserve any existing failure history; -ResumeFailedOnly is what
-# uses it to filter the subscription list.
-$FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
+# Build the passwordless state-blob context now that we are authenticated and the
+# tenant is enumerated (New-StateBlobContext uses -UseConnectedAccount, which
+# needs a live Az context). $StateBlobArgs splats the { BlobContext; BlobContainer;
+# BlobName } trio into the state read/write helpers; it is EMPTY when blob state
+# is off, so those helpers take exactly the local-only path. The unified
+# (non-stream) blob name is shard-namespaced under the container's _state/ area.
+$StateBlobArgs = @{}
+if ($null -ne $StateBlobParts)
+{
+    $StateBlobCtx = New-StateBlobContext -Account $StateBlobParts.Account
+    $StateBlobArgs = @{
+        BlobContext   = $StateBlobCtx
+        BlobContainer = $StateBlobParts.Container
+        BlobName      = Get-StateBlobName -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount -StreamId -1
+    }
+}
+
+# Read the existing resume state ONCE (blob-first, then local), then derive the
+# completed / failed / start-snapshot views from it. -Resume only controls whether
+# we *use* the completed list to skip subscriptions; reading it either way ensures
+# the per-iteration writes below append to existing state instead of overwriting
+# it. -ResumeFailedOnly uses the failed list to filter the subscription list.
+$SeedState = Get-ResumeStateObject -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs
+# Wrap the WHOLE if in @(...): a bare `else { @() }` captured from an if
+# expression collapses to $null (PowerShell unrolls the empty array on
+# assignment), which would make the first `$CompletedIds += $Sub.Id` do STRING
+# concatenation instead of array append - silently corrupting the completed set
+# into one mashed-together string. @(...) forces a real (possibly empty) array.
+$CompletedIds = @(if ($SeedState -and $SeedState.CompletedSubscriptionIds) { $SeedState.CompletedSubscriptionIds } else { @() })
+$FailedAttempts = @(if ($SeedState -and $SeedState.FailedAttempts) { $SeedState.FailedAttempts } else { @() })
+
+# Start-of-run subscription universe, for the end-of-run reconciliation of a
+# MOVING target (another team creating/deleting subscriptions mid-run). Prefer a
+# snapshot already recorded in the state - a resumed / rescheduled run MUST keep
+# the ORIGINAL universe rather than re-capture an already-moved one - otherwise
+# capture the CURRENT full-tenant enumeration ($AllSubscriptions is state-agnostic,
+# taken before the Enabled/scope filters). $StateSaveArgs adds this snapshot to the
+# blob trio so every Save-CompletedSubscriptionIds call persists it.
+$StartSnapshot = if ($SeedState -and $SeedState.EnumeratedAtStart)
+{
+    $SeedState.EnumeratedAtStart
+}
+else
+{
+    [pscustomobject]@{ CapturedUtc = (Get-Date).ToString('o'); SubscriptionIds = @($AllSubscriptions.Id) }
+}
+$StateSaveArgs = @{ StartSnapshot = $StartSnapshot } + $StateBlobArgs
 
 # Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
 # A parallel run persists each stream's Completed/FailedAttempts to its own
@@ -995,7 +1081,7 @@ if ($Resume -or $ResumeFailedOnly)
             # Heal the unified file immediately so even a re-interrupted run keeps
             # the recovered picture. Per-stream files are intentionally left for
             # the end-of-run merge to reconcile and clean up.
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
         }
     }
 }
@@ -1512,7 +1598,7 @@ if ($ParallelStreams -le 1)
             if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
             if ($StateChanged)
             {
-                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }
         }
         catch
@@ -1601,7 +1687,7 @@ if ($ParallelStreams -le 1)
             $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
                 -Id $Sub.Id -Name $Sub.Name `
                 -Reason $ErrRecord.Exception.Message
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
         }
 
         Write-Host "-----------------------------------" -ForegroundColor Gray
@@ -1680,7 +1766,7 @@ else
                 {
                     $CompletedIds += $Sub.Id
                     $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
-                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
                 }
             }
             catch
@@ -1711,7 +1797,7 @@ else
                 $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
                     -Id $Sub.Id -Name $Sub.Name `
                     -Reason $ErrRecord.Exception.Message
-                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }
         }
         # Skip the parallel orchestration entirely; fall through to the
@@ -1826,6 +1912,17 @@ else
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
                 if ($MetricsIntervalMinutes -gt 0) { $WorkerArgs.MetricsIntervalMinutes = $MetricsIntervalMinutes }
                 if ($Service.Count -gt 0) { $WorkerArgs.Service = $Service }
+                # Forward the state-blob container + shard identity so each worker
+                # mirrors its per-stream resume state to a shard+stream-namespaced
+                # blob for AKS pod-reschedule durability. Omitted -> worker stays
+                # local-only. ShardIndex/ShardCount are only meaningful for the
+                # blob name, so they ride along only when the container is set.
+                if ($StateBlobContainerUri)
+                {
+                    $WorkerArgs.StateBlobContainerUri = $StateBlobContainerUri
+                    $WorkerArgs.ShardIndex = $ShardIndex
+                    $WorkerArgs.ShardCount = $ShardCount
+                }
 
                 $Jobs += Start-Job -ScriptBlock {
                     param($WorkerScript, $WorkerArgs)
@@ -2028,6 +2125,24 @@ else
                     Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
                 }
             }
+            # Also fold in any per-stream state mirrored to BLOB. On AKS a pod that
+            # died mid-parallel-run left its in-flight stream progress in blob, NOT
+            # on this (possibly rescheduled) pod's local disk, so the local scan
+            # above would miss it. Discovered by the shard-namespaced _state prefix
+            # and merged into the SAME accumulators. No-op when blob state is off.
+            if ($null -ne $StateBlobParts)
+            {
+                $StreamBlobNames = @(Get-StateBlobNames -Context $StateBlobCtx -Container $StateBlobParts.Container -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount)
+                foreach ($StreamBlobName in $StreamBlobNames)
+                {
+                    $BlobObj = Read-StateBlob -Context $StateBlobCtx -Container $StateBlobParts.Container -BlobName $StreamBlobName
+                    if ($null -ne $BlobObj)
+                    {
+                        if ($null -ne $BlobObj.Completed) { $AllCompletedFromStreams += @($BlobObj.Completed) }
+                        if ($null -ne $BlobObj.FailedAttempts) { $AllFailedFromStreams += @($BlobObj.FailedAttempts) }
+                    }
+                }
+            }
             if ($AllCompletedFromStreams.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
@@ -2037,7 +2152,7 @@ else
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
             {
-                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
@@ -2049,6 +2164,21 @@ else
             {
                 $PerStreamFile = $StreamFile.FullName
                 try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+            }
+            # Match the local cleanup for the per-stream BLOBS folded in above:
+            # once their progress is merged into the unified state (which IS
+            # preserved), remove the transient per-stream blobs so they do not
+            # accumulate under _state/ or resurrect stale FailedAttempts on a later
+            # run with a different stream count. Best-effort; the UNIFIED state
+            # blob is intentionally NOT deleted. $StreamBlobNames is in scope
+            # whenever $StateBlobParts is non-null (both set in the merge block).
+            if ($null -ne $StateBlobParts)
+            {
+                foreach ($MergedStreamBlob in $StreamBlobNames)
+                {
+                    try { Remove-AzStorageBlob -Container $StateBlobParts.Container -Blob $MergedStreamBlob -Context $StateBlobCtx -Force -ErrorAction Stop }
+                    catch { Write-Verbose ("Could not remove per-stream state blob {0}: {1}" -f $MergedStreamBlob, $_.Exception.Message) }
+                }
             }
         }
         finally
@@ -2097,6 +2227,68 @@ else
                 }
             }
         }
+    }
+}
+
+# === Moving-target subscription reconciliation ==============================
+#
+# Another team can create/delete subscriptions DURING a long run, so the single
+# start-of-run Get-AzSubscription is stale by now. Re-enumerate and classify the
+# delta against the ORIGINAL start snapshot ($StartSnapshot, preserved across
+# resume): subs deleted mid-run (Vanished) must NOT be reported as failures, and
+# subs created mid-run (New) would otherwise be SILENTLY MISSING from the report.
+# This is REPORT-ONLY and does not change the exit code - a moving tenant is
+# expected here, not a run fault. Best-effort: a re-enumeration blip must not fail
+# an otherwise-complete run. No-op unless a start snapshot was recorded.
+$StartIds = if ($StartSnapshot -and $StartSnapshot.SubscriptionIds) { @($StartSnapshot.SubscriptionIds) } else { @() }
+if ($StartIds.Count -gt 0)
+{
+    try
+    {
+        $EndSubs = @(Get-AzSubscription -TenantId $TenantID -WarningAction SilentlyContinue)
+        $EndIds = @($EndSubs | ForEach-Object { $_.Id })
+        $Delta = Get-SubscriptionDelta -StartIds $StartIds -EndIds $EndIds -CompletedIds $CompletedIds
+        # Scope Vanished + Incomplete to the subscriptions THIS run was responsible
+        # for (the eligible, post-Enabled, post-shard, post-resume slice in
+        # $Subscriptions). The start snapshot is the FULL tenant so New can still
+        # flag subs that NO shard will ever process, but "deleted that I owed" and
+        # "I did not finish" are only meaningful for this run's own slice -
+        # otherwise a default run would flag every Disabled sub, and a sharded run
+        # every OTHER shard's subs, as not-completed. New stays tenant-level.
+        $ResponsibleSet = @{}
+        foreach ($ResponsibleSub in $Subscriptions) { $ResponsibleSet[([string]$ResponsibleSub.Id).ToLowerInvariant()] = $true }
+        $VanishedMine = @($Delta.Vanished | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
+        $IncompleteMine = @($Delta.Incomplete | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
+        if ($VanishedMine.Count -gt 0 -or $Delta.New.Count -gt 0 -or $IncompleteMine.Count -gt 0)
+        {
+            Write-Host ""
+            Write-Host "Subscription reconciliation (start-of-run vs now):" -ForegroundColor Cyan
+        }
+        if ($VanishedMine.Count -gt 0)
+        {
+            Write-Host ("  Deleted mid-run ({0}): {1}" -f $VanishedMine.Count, (($VanishedMine | Select-Object -First 10) -join ', ')) -ForegroundColor DarkYellow
+            Write-Host "    These no longer exist; failures against them are expected and are dropped from the retry list (not run faults)." -ForegroundColor DarkGray
+            # Prune vanished subs from the retry list so -ResumeFailedOnly does not
+            # chase a deleted subscription, and persist the pruned state.
+            $VanishedSet = @{}
+            foreach ($VanishedId in $VanishedMine) { $VanishedSet[([string]$VanishedId).ToLowerInvariant()] = $true }
+            $FailedAttempts = @($FailedAttempts | Where-Object { $_ -and -not $VanishedSet.ContainsKey(([string]$_.Id).ToLowerInvariant()) })
+            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
+        }
+        if ($Delta.New.Count -gt 0)
+        {
+            Write-Host ("  Created mid-run ({0}): {1}" -f $Delta.New.Count, (($Delta.New | Select-Object -First 10) -join ', ')) -ForegroundColor Yellow
+            Write-Host "    NOT in this report - they did not exist when the run started. Re-run with -Resume to pick them up." -ForegroundColor Yellow
+        }
+        if ($IncompleteMine.Count -gt 0)
+        {
+            Write-Host ("  Owed by this run but not completed ({0}): {1}" -f $IncompleteMine.Count, (($IncompleteMine | Select-Object -First 10) -join ', ')) -ForegroundColor Yellow
+            Write-Host "    Re-run with -Resume to finish these." -ForegroundColor Yellow
+        }
+    }
+    catch
+    {
+        Write-Host ("WARNING: subscription reconciliation skipped (re-enumeration failed): {0}" -f $_.Exception.Message) -ForegroundColor Yellow
     }
 }
 

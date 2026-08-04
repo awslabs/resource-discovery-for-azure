@@ -18,6 +18,15 @@
 #   8. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
 #   9. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
 #                         series carry the 60-min grain
+#  10. recovery         - LIVE end-to-end recovery workflow: generate an obfuscated
+#                         scoped "gap" bundle, re-collect one populated service
+#                         seeded with the gap dictionary, splice with
+#                         Merge-RecoveryData, then run the structural + obfuscation
+#                         suite against the merged bundle. Proves the operator
+#                         recovery path yields a server-valid, PII-clean zip against
+#                         REAL collector output (RecoveryMerge.Tests.ps1 covers the
+#                         splice mechanics offline; this covers it live). Self-skips
+#                         if the subscription has no records in the scoped services.
 #
 # IMPORTANT - obfuscation vs PII tests:
 #   The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
@@ -41,7 +50,7 @@
 param(
     [string]   $SubscriptionID,
     [string]   $TenantID,
-    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'skipstorage', 'skipdisk', 'metricinterval'),
+    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'skipstorage', 'skipdisk', 'metricinterval', 'recovery'),
     [int]      $MetricsLookbackDays = 2,
     [int]      $ConcurrencyLimit = 6,
     [switch]   $KeepOutput
@@ -147,6 +156,97 @@ $Catalog = @{
     'skipstorage'     = @{ Args = @{ SkipStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'skipdisk'        = @{ Args = @{ SkipDiskMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'metricinterval'  = @{ Args = @{ MetricsIntervalMinutes = 60 }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
+    # Live recovery workflow. It does NOT fit the one-generation-per-scenario
+    # shape (it needs two generations + a Merge-RecoveryData splice), so it is
+    # handled by a dedicated self-contained branch at the top of the loop rather
+    # than the shared generation path below. The merged bundle is obfuscated, so
+    # it is validated with the same structural + obfuscation suite as 'obfuscate'.
+    'recovery'        = @{ Recovery = $true; Tests = ($StructuralTests + $ObfuscationTests) }
+}
+
+# -------------------------------------------------------------------------
+# Recovery-scenario generator. Produces the LIVE gap + seeded-recovery bundles
+# and splices them with Merge-RecoveryData, returning the merged (obfuscated)
+# bundle so the loop can run the obfuscation/structural suite against it.
+#
+# Returns a hashtable:
+#   @{ Skip = $true;  Reason = <string> }                      # nothing to recover
+#   @{ Skip = $false; Zip = <FileInfo>; Dict = <FileInfo>; Recovered = <key> }
+#
+# Both generations are collector-scoped and skip metrics/consumption: the
+# recovery workflow is about the INVENTORY splice, so this keeps the two extra
+# generations fast. The recovery run is seeded with the gap bundle's dictionary
+# (-ObfuscationDictionary) so its tokens match the gap exactly - the guarantee
+# Merge-RecoveryData relies on. Fails loud if the splice does not land the key.
+# -------------------------------------------------------------------------
+function New-RecoveryMergedBundle
+{
+    param(
+        [Parameter(Mandatory)][string]$InventoryPs1,
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$TenantID,
+        [Parameter(Mandatory)][string]$SubscriptionID,
+        [Parameter(Mandatory)][string]$OutDir,
+        [int]$MetricsLookbackDays = 2,
+        [int]$ConcurrencyLimit = 6,
+        [string[]]$GapServices = @('VirtualMachines', 'StorageAcc', 'VMDisk', 'PublicIP', 'AppServices')
+    )
+
+    $GapDir = Join-Path $OutDir 'gap'
+    $RecoveryDir = Join-Path $OutDir 'recovery'
+    $MergedDir = Join-Path $OutDir 'merged'
+
+    # 1. Gap bundle: scoped, obfuscated. Metrics/consumption skipped for speed.
+    & $InventoryPs1 -TenantID $TenantID -SubscriptionID $SubscriptionID -OutputDirectory $GapDir `
+        -Service $GapServices -Obfuscate -SkipMetrics -SkipConsumption `
+        -MetricsLookbackDays $MetricsLookbackDays -ConcurrencyLimit $ConcurrencyLimit *>&1 | Out-Null
+
+    $GapInvFile = Get-ChildItem $GapDir -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $GapDictFile = Get-ChildItem $GapDir -Filter 'ObfuscationDictionary_*.json' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $GapInvFile -or -not $GapDictFile)
+    {
+        # An empty subscription still emits an Inventory_*.json + dictionary, so a
+        # MISSING one means the gap generation itself failed - a real failure, not
+        # a legitimate "nothing to recover" skip. Fail loud (the caller's catch
+        # records it as a failure); reserve Skip for the genuine no-records case.
+        throw 'recovery scenario: gap generation produced no Inventory_*.json / ObfuscationDictionary_*.json (generation likely failed).'
+    }
+
+    # 2. Pick the recovery target: the first scoped service key that actually has
+    #    records in the gap inventory. None -> nothing to recover here, so skip.
+    $GapInv = Get-Content -Path $GapInvFile.FullName -Raw | ConvertFrom-Json
+    $Populated = @($GapServices | Where-Object { ($GapInv.PSObject.Properties.Name -contains $_) -and (@($GapInv.$_).Count -gt 0) })
+    if (@($Populated).Count -eq 0)
+    {
+        return @{ Skip = $true; Reason = 'no scoped service returned records in this subscription' }
+    }
+    $Recovered = $Populated[0]
+
+    # 3. Recovery bundle: re-collect ONLY the target service, seeded with the gap
+    #    dictionary so obfuscation tokens match exactly (the splice guarantee).
+    & $InventoryPs1 -TenantID $TenantID -SubscriptionID $SubscriptionID -OutputDirectory $RecoveryDir `
+        -Service $Recovered -Obfuscate -ObfuscationDictionary $GapDictFile.FullName -SkipMetrics -SkipConsumption `
+        -MetricsLookbackDays $MetricsLookbackDays -ConcurrencyLimit $ConcurrencyLimit *>&1 | Out-Null
+
+    # 4. Splice recovery -> gap and re-package.
+    . (Join-Path $RepoRoot 'Functions/RecoveryMerge.Functions.ps1')
+    $Merge = Merge-RecoveryData -GapBundlePath $GapDir -RecoveryBundlePath $RecoveryDir -OutputPath $MergedDir -Service $Recovered -WarningAction SilentlyContinue
+
+    # 5. Splice guard (the offline suite covers this exhaustively; here we only
+    #    fail loud if the LIVE splice did not land the recovered key).
+    $MergedInv = Get-Content -Path $Merge.OutputInventory -Raw | ConvertFrom-Json
+    if ($MergedInv.PSObject.Properties.Name -notcontains $Recovered)
+    {
+        throw ("recovery scenario: merged inventory is missing the recovered service key '{0}'." -f $Recovered)
+    }
+
+    $Zip = Get-ChildItem $MergedDir -Filter '*.zip' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $Dict = Get-ChildItem $MergedDir -Filter 'ObfuscationDictionary_*.json' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    return @{ Skip = $false; Zip = $Zip; Dict = $Dict; Recovered = $Recovered }
 }
 
 New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
@@ -166,6 +266,91 @@ try
         $OutDir = Join-Path $WorkRoot $name
         Write-Host ""
         Write-Host ("======== SCENARIO: {0} ========" -f $name) -ForegroundColor Magenta
+
+        # Recovery is a two-generation + Merge-RecoveryData workflow that does not
+        # fit the shared single-generation path below, so handle it self-contained
+        # and move on. The merged bundle is obfuscated, so it is validated with the
+        # same structural + obfuscation suite as the 'obfuscate' scenario.
+        if ($Scenario.Recovery)
+        {
+            New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+            $Rec = $null
+            try
+            {
+                $Rec = New-RecoveryMergedBundle -InventoryPs1 $InventoryPs1 -RepoRoot $RepoRoot `
+                    -TenantID $TenantID -SubscriptionID $SubscriptionID -OutDir $OutDir `
+                    -MetricsLookbackDays $MetricsLookbackDays -ConcurrencyLimit $ConcurrencyLimit
+            }
+            catch
+            {
+                Write-Host ("  recovery generation error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = 1; Skipped = 0 }
+                continue
+            }
+
+            if ($Rec.Skip)
+            {
+                Write-Host ("  SKIPPED: {0}." -f $Rec.Reason) -ForegroundColor Yellow
+                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = 0; Skipped = 1 }
+                continue
+            }
+            if (-not $Rec.Zip)
+            {
+                # No usable zip: mirror the shared path's "no zip produced" sentinel (-1).
+                Write-Host "  FAILED: recovery merge produced no zip." -ForegroundColor Red
+                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = -1; Skipped = 0 }
+                continue
+            }
+            Write-Host ("  merged bundle produced (recovered '{0}'): {1:N0} bytes" -f $Rec.Recovered, $Rec.Zip.Length) -ForegroundColor Green
+
+            # Point the obfuscation suite at the merged (obfuscated) bundle exactly
+            # like the 'obfuscate' scenario: real sub id + user email for the
+            # PII-leak scans, merged dictionary for the dictionary checks.
+            $env:TEST_ZIP_PATH = $Rec.Zip.FullName
+            $env:TEST_SUBSCRIPTION_ID = $SubscriptionID
+            $env:TEST_USER_EMAIL = $Ctx.Account.Id
+            if ($Rec.Dict) { $env:TEST_DICT_PATH = $Rec.Dict.FullName } else { Remove-Item Env:TEST_DICT_PATH -ErrorAction SilentlyContinue }
+            Remove-Item Env:TEST_EXPECTED_SERVICES -ErrorAction SilentlyContinue
+            # Recovery does not run MetricsVolumeControls, but clear its expectation
+            # env vars anyway so no value left over from a prior scenario leaks in.
+            Remove-Item Env:TEST_EXPECT_NO_STORAGE_METRICS   -ErrorAction SilentlyContinue
+            Remove-Item Env:TEST_EXPECT_NO_DISK_METRICS      -ErrorAction SilentlyContinue
+            Remove-Item Env:TEST_EXPECT_METRIC_GRAIN_MINUTES -ErrorAction SilentlyContinue
+
+            $TestPaths = $Scenario.Tests | ForEach-Object { Join-Path $PSScriptRoot $_ }
+            $Cfg = New-PesterConfiguration
+            $Cfg.Run.Path = $TestPaths
+            $Cfg.Run.PassThru = $true
+            $Cfg.Output.Verbosity = 'None'
+            $Res = Invoke-Pester -Configuration $Cfg
+
+            $Passed = $Res.PassedCount
+            $Failed = $Res.FailedCount
+            $Skipped = $Res.SkippedCount
+            $RealFailures = @($Res.Failed)
+
+            # Same discovery-crash detection as the shared path: a container whose
+            # body throws before any It runs leaves FailedCount at 0, so key off a
+            # non-empty ErrorRecord instead.
+            $DiscoveryFailures = @($Res.Containers | Where-Object { @($_.ErrorRecord).Count -gt 0 })
+            if ($DiscoveryFailures.Count -gt 0)
+            {
+                $Failed = $Failed + $DiscoveryFailures.Count
+                foreach ($C in $DiscoveryFailures)
+                {
+                    $ItemName = if ($C.Item) { $C.Item.ToString() } else { 'unknown container' }
+                    $ErrText = ($C.ErrorRecord | Select-Object -First 1)
+                    Write-Host ("    CONTAINER FAILED (discovery): {0} - {1}" -f $ItemName, $ErrText) -ForegroundColor Red
+                }
+            }
+
+            $Color = if ($Failed -eq 0) { 'Green' } else { 'Red' }
+            Write-Host ("  Pester: Passed={0} Failed={1} Skipped={2}" -f $Passed, $Failed, $Skipped) -ForegroundColor $Color
+            foreach ($t in $RealFailures) { Write-Host ("    FAIL: {0}" -f $t.ExpandedName) -ForegroundColor Red }
+
+            $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $true; Passed = $Passed; Failed = $Failed; Skipped = $Skipped }
+            continue
+        }
 
         $Splat = @{
             TenantID            = $TenantID

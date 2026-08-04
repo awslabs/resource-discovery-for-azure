@@ -145,6 +145,121 @@ Function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
     return $Result
 }
 
+# Pure helper: given a caught exception from a throttled Azure call, return how
+# many seconds to wait before retrying - honoring the SERVICE'S OWN retry
+# directive when it exposed one, instead of blind exponential guessing. A 429 is
+# a backoff signal, and Azure tells you how long to wait; obeying that both
+# recovers faster and stops a shard hammering an already-throttled, tenant-shared
+# budget (consumption/billing is the most aggressive of the three phases).
+#
+# Reads the throttle header off BOTH $Exception.Response.Headers and
+# $Exception.InnerException.Response.Headers (the metrics Get-AzMetric path wraps
+# the real ErrorResponseException one level down). Header precedence:
+#   1. Retry-After                                       (integer seconds)
+#   2. x-ms-ratelimit-microsoft.consumption-retry-after  (integer seconds)
+#   3. x-ms-user-quota-resets-after                      (hh:mm:ss TimeSpan)
+# The honored value is clamped to [1, MaxSeconds] so a pathological header can
+# never wedge a shard for minutes. When no usable header is present (or it does
+# not parse) the caller's exponential FallbackSeconds is returned unchanged, so
+# behavior is never worse than the pre-existing backoff. No cmdlet calls, no side
+# effects - deterministically unit-testable with synthetic exceptions.
+function Get-RetryWaitSeconds
+{
+    param(
+        [Parameter(Mandatory = $true)]$Exception,
+        [Parameter(Mandatory = $true)][double]$FallbackSeconds,
+        [double]$MaxSeconds = 120
+    )
+
+    # Pull the first value of a named header (case-insensitive) out of a header
+    # container, whether it is a Dictionary[string,IEnumerable[string]] (ARG /
+    # consumption / metrics ErrorResponseException) or an HttpResponseHeaders
+    # (metrics getBatch). Both enumerate as KeyValuePair<string,IEnumerable[string]>.
+    $ReadHeader = {
+        param($Container, $Name)
+        if ($null -eq $Container) { return $null }
+        # Enumerate via GetEnumerator(): PowerShell's foreach does NOT iterate an
+        # IDictionary (a generic Dictionary - the ARG/consumption header container
+        # - or a Hashtable) entry-by-entry; it treats it as one scalar object.
+        # GetEnumerator() yields KeyValuePair (Dictionary / HttpResponseHeaders,
+        # the metrics getBatch container) or DictionaryEntry (Hashtable) - both
+        # expose .Key / .Value - so this walks all three real container shapes.
+        $Enum = $null
+        try { $Enum = $Container.GetEnumerator() } catch { return $null }
+        if ($null -eq $Enum) { return $null }
+        while ($Enum.MoveNext())
+        {
+            $Pair = $Enum.Current
+            if ($Pair.Key -and (([string]$Pair.Key).Trim().ToLowerInvariant() -eq $Name))
+            {
+                $Val = @($Pair.Value)[0]
+                if ($null -ne $Val) { return [string]$Val }
+            }
+        }
+        return $null
+    }
+
+    # Candidate header containers: the exception itself plus one level of inner.
+    $Containers = @()
+    foreach ($Ex in @($Exception, $Exception.InnerException))
+    {
+        if ($null -ne $Ex -and $null -ne $Ex.Response -and $null -ne $Ex.Response.Headers)
+        {
+            $Containers += $Ex.Response.Headers
+        }
+    }
+    if ($Containers.Count -eq 0) { return $FallbackSeconds }
+
+    # Read a named header from whichever container carries it (search order:
+    # exception then inner), so header precedence below is applied GLOBALLY by
+    # header type rather than per-container - i.e. Retry-After always wins over a
+    # quota header no matter which of the two containers each lives on.
+    $FirstHeader = {
+        param($Name)
+        foreach ($Container in $Containers)
+        {
+            $Found = & $ReadHeader $Container $Name
+            if ($Found) { return $Found }
+        }
+        return $null
+    }
+
+    # 1. Retry-After (integer seconds - Azure throttling emits a numeric value).
+    $Raw = & $FirstHeader 'retry-after'
+    if ($Raw)
+    {
+        $Sec = 0
+        if ([int]::TryParse($Raw.Trim(), [ref]$Sec) -and $Sec -gt 0)
+        {
+            return [math]::Min([math]::Max($Sec, 1), $MaxSeconds)
+        }
+    }
+
+    # 2. Consumption/billing ratelimit header (integer seconds).
+    $Raw = & $FirstHeader 'x-ms-ratelimit-microsoft.consumption-retry-after'
+    if ($Raw)
+    {
+        $Sec = 0
+        if ([int]::TryParse($Raw.Trim(), [ref]$Sec) -and $Sec -gt 0)
+        {
+            return [math]::Min([math]::Max($Sec, 1), $MaxSeconds)
+        }
+    }
+
+    # 3. Resource Graph user-quota reset window (hh:mm:ss TimeSpan).
+    $Raw = & $FirstHeader 'x-ms-user-quota-resets-after'
+    if ($Raw)
+    {
+        $Span = [TimeSpan]::Zero
+        if ([TimeSpan]::TryParse($Raw.Trim(), [ref]$Span) -and $Span.TotalSeconds -ge 1)
+        {
+            return [math]::Min($Span.TotalSeconds, $MaxSeconds)
+        }
+    }
+
+    return $FallbackSeconds
+}
+
 # Runs an Azure Resource Graph query via the native Az.ResourceGraph cmdlet
 # (Search-AzGraph) and returns an object exposing a .data member, mirroring the
 # shape the call sites already consume. A failed query (expired auth, throttling,
@@ -184,16 +299,26 @@ function Invoke-AzGraphQuerySafe
     # network mid-run, VPN switch, ARM throttling, 5xx). Without this a single
     # transient blip during discovery throws and fails the whole subscription
     # (recorded to FailedAttempts and resumable, but the entire sub restarts).
-    # Mirrors the Get-AzMetric wrapper in Extension/Metrics.ps1: up to 3 retries
-    # (4 attempts total) with exponential backoff + jitter, longer backoff when
-    # throttled. Stable internals, deliberately NOT promoted to script params.
+    # Up to 30 retries (31 attempts total) with exponential backoff + jitter,
+    # longer backoff when throttled. The high ceiling lets a shard ride out
+    # SUSTAINED Resource Graph throttling at very large scale - many shards share
+    # one tenant-wide ARG budget, so a throttle storm is expected - rather than
+    # failing a whole subscription on it. When the throttling response carries a
+    # server retry directive (Retry-After / x-ms-user-quota-resets-after), that
+    # value is honored via Get-RetryWaitSeconds instead of guessing - a 429 is a
+    # backoff signal and the service tells you how long to wait, so obeying it both
+    # recovers sooner and stops hammering an already-throttled shared budget.
+    # Backoff PER ATTEMPT is still capped (exponential 30s / 60s throttled,
+    # server-directed 120s) + jittered, so the worst case is a long-but-bounded
+    # wait before a genuinely dead query finally gives up. Stable internal;
+    # deliberately NOT promoted to a script param.
     # A CLEARLY-PERMANENT failure (authorization denied, malformed KQL / bad
     # request) is NOT retried - it throws immediately, matching the project's
     # fail-loud-fast stance for genuine access denial rather than burning ~30s
     # of backoff on an error a retry cannot fix. On the final failed attempt the
     # throw is identical to the pre-retry behavior, so the per-subscription
     # catch -> FailedAttempts -> -Resume path is unchanged (see #22).
-    $GraphMaxRetries = 3
+    $GraphMaxRetries = 30
     $Rows = $null
 
     for ($Attempt = 0; ; $Attempt++)
@@ -221,6 +346,11 @@ function Invoke-AzGraphQuerySafe
             $Throttled = $Message -match 'TooManyRequests|\b429\b|throttl'
             $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
             if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
+            # Honor the service's own retry directive when the throttling response
+            # exposed one (Retry-After / x-ms-user-quota-resets-after); otherwise
+            # keep the exponential backoff just computed. Clamped to 120s so a
+            # pathological header cannot wedge the shard.
+            $Backoff = Get-RetryWaitSeconds -Exception $_.Exception -FallbackSeconds $Backoff -MaxSeconds 120
             $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
             Start-Sleep -Seconds ([math]::Round($Backoff + $Jitter, 2))
         }
@@ -402,4 +532,104 @@ function Write-RdaShareableDiagnosticsLog
         Write-Log -Message ('Could not build/write shareable diagnostics log: {0}' -f $_.Exception.Message) -Severity 'Warning'
         return $null
     }
+}
+
+
+
+# Best-effort extraction of a SERVER-DIRECTED retry delay (seconds) from a failed
+# Azure cmdlet's error, so a throttled caller waits EXACTLY as long as the service
+# asks instead of guessing with blind exponential backoff.
+#
+# Azure's Cost Management / Consumption throttle emits the wait time on a 429 via
+# the 'x-ms-ratelimit-microsoft.consumption-retry-after' header (and ARM generally
+# via the standard 'Retry-After'). Get-UsageAggregates (alias -> Get-AzUsageAggregate,
+# Az.Billing) surfaces the failure as a Microsoft.Rest.Azure.CloudException whose
+# .Response.Headers is an IDictionary[string, IEnumerable[string]] (verified against
+# the loaded Az.Billing module), so the header is readable straight off the thrown
+# ErrorRecord. Honoring it is strictly better than blind backoff: it avoids both
+# retrying too early (burning a retry, earning another 429) and waiting far longer
+# than the service actually needs.
+#
+# Header value is per RFC 7231: delta-seconds (an integer) or an HTTP-date. The
+# consumption header is delta-seconds; both forms are handled. Returns the delay in
+# seconds (>= 0) when a usable header is found, otherwise 0 - the caller then falls
+# back to its own backoff. NEVER throws: a diagnostics aid must not itself break the
+# retry loop, so every access is guarded and any oddity degrades to 0.
+function Get-RdaRetryAfterSeconds
+{
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord
+    )
+
+    # Priority order: the consumption/billing-specific header first (that is what
+    # the Cost Management throttle emits), then the standard HTTP Retry-After.
+    $HeaderNames = @('x-ms-ratelimit-microsoft.consumption-retry-after', 'Retry-After')
+
+    try
+    {
+        # PowerShell may surface the CloudException directly as .Exception or nested
+        # under one or more .InnerException levels; walk the chain (bounded).
+        $Ex = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ErrorRecord.Exception } else { $ErrorRecord }
+        $Depth = 0
+        while ($null -ne $Ex -and $Depth -lt 5)
+        {
+            $Headers = $null
+            $ResponseProp = $Ex.PSObject.Properties['Response']
+            if ($ResponseProp -and $null -ne $ResponseProp.Value)
+            {
+                $HeadersProp = $ResponseProp.Value.PSObject.Properties['Headers']
+                if ($HeadersProp) { $Headers = $HeadersProp.Value }
+            }
+
+            if ($null -ne $Headers -and $Headers.Keys)
+            {
+                foreach ($Name in $HeaderNames)
+                {
+                    # Case-insensitive lookup: HTTP header names are
+                    # case-insensitive, but the underlying dictionary is ordinal.
+                    $Raw = $null
+                    foreach ($Key in $Headers.Keys)
+                    {
+                        if ($Key -and $Key.Equals($Name, [System.StringComparison]::OrdinalIgnoreCase))
+                        {
+                            $Raw = @($Headers[$Key])[0]
+                            break
+                        }
+                    }
+                    if ([string]::IsNullOrWhiteSpace($Raw)) { continue }
+
+                    $Raw = ([string]$Raw).Trim()
+
+                    # delta-seconds form (what the consumption header uses).
+                    $Seconds = 0
+                    if ([int]::TryParse($Raw, [ref]$Seconds))
+                    {
+                        if ($Seconds -lt 0) { $Seconds = 0 }
+                        return $Seconds
+                    }
+
+                    # HTTP-date form: wait until that instant. Parse with the
+                    # invariant culture and AssumeUniversal - RFC 7231 HTTP-dates are
+                    # English/GMT, so a non-English-culture host must not fail to parse
+                    # them (which would silently degrade to blind backoff).
+                    $When = [datetimeoffset]::MinValue
+                    if ([datetimeoffset]::TryParse($Raw, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$When))
+                    {
+                        $Delta = [int][math]::Ceiling(($When - [datetimeoffset]::UtcNow).TotalSeconds)
+                        if ($Delta -lt 0) { $Delta = 0 }
+                        return $Delta
+                    }
+                }
+            }
+
+            $Ex = $Ex.InnerException
+            $Depth++
+        }
+    }
+    catch
+    {
+        # Best-effort only - fall through to 0 so the caller uses its own backoff.
+    }
+
+    return 0
 }

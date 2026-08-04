@@ -49,8 +49,9 @@ if ($Task -eq 'Processing')
 
             $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
 
-            $Cpus = $Vmsizemap[$1.sku.name].CPU;
-            $Ram = $Vmsizemap[$1.sku.name].RAM;
+            $SkuName = $1.sku.name
+            $Cpus = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].CPU } else { $null }
+            $Ram = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].RAM } else { $null }
 
             $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
             $Ram = if ($null -ne $Ram) { $Ram } else { '0' }

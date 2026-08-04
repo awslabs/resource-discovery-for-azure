@@ -1612,19 +1612,38 @@ function ExecuteInventoryProcessing()
 
                     $Params.ContinuationToken = $UsageData.ContinuationToken
 
-                    # Bounded retry with exponential backoff around the billing pull.
-                    # On a very large tenant this loop pages through millions of usage
-                    # records; a single transient HTTP failure (e.g. "Error while copying
-                    # content to a stream", a timeout, or 429/503 throttling) would
+                    # Bounded retry with exponential backoff + jitter around the billing
+                    # pull. On a very large tenant this loop pages through millions of
+                    # usage records; a single transient HTTP failure (e.g. "Error while
+                    # copying content to a stream", a timeout, or 429/503 throttling) would
                     # otherwise abort the ENTIRE remaining consumption pull for this
                     # subscription via the outer catch. Retrying the SAME page is safe: a
                     # failed assignment leaves $usageData holding the previous page's
                     # ContinuationToken, so the retried call re-requests the same page (no
-                    # duplicate rows, no skipped rows). Mirrors the retry the metrics phase
-                    # already uses. A permanent error simply exhausts the retries and then
-                    # propagates to the outer catch, preserving the existing
-                    # warn-and-continue per-subscription health reporting.
-                    $ConsumptionMaxRetries = 3
+                    # duplicate rows, no skipped rows). A permanent error simply exhausts
+                    # the retries and then propagates to the outer catch, preserving the
+                    # existing warn-and-continue per-subscription health reporting.
+                    #
+                    # The Cost Management / Consumption rate limit is SHARED across all
+                    # callers in the tenant (not per-user). When another billing pipeline
+                    # is draining the same token bucket the throttle can persist well
+                    # beyond a few seconds, so a short fixed 2/4/8s (3 retries, ~14s) can
+                    # be exhausted while contention is still ongoing - truncating this
+                    # subscription's consumption. So the retry HONORS the server-directed
+                    # wait when Azure supplies one (the Cost Management / Consumption 429
+                    # returns 'x-ms-ratelimit-microsoft.consumption-retry-after' /
+                    # 'Retry-After' - Get-RdaRetryAfterSeconds reads it off the thrown
+                    # CloudException); absent that, a throttling failure (429 /
+                    # TooManyRequests) backs off LONGER than a generic transient one. The
+                    # retry budget is larger and each wait is capped (server-directed waits
+                    # clamped to 300s; computed backoff to ~120s), so the run keeps trying
+                    # across a sustained throttle instead of truncating after ~14s. Jitter
+                    # keeps parallel streams (which share that same tenant bucket) from
+                    # retrying in lockstep. The retry budget matches the Resource Graph
+                    # wrapper (Invoke-AzGraphQuerySafe) so both tenant-wide shared limits -
+                    # Resource Graph and Cost Management / Consumption - ride out the same
+                    # sustained, self-contended throttling when many shards run at once.
+                    $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
                     while ($true)
                     {
@@ -1637,8 +1656,36 @@ function ExecuteInventoryProcessing()
                         {
                             $ConsumptionAttempt++
                             if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }
-                            $ConsumptionBackoffSeconds = [int][math]::Pow(2, $ConsumptionAttempt)
-                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}): {3}. Retrying in {4}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $_.Exception.Message, $ConsumptionBackoffSeconds) -Severity 'Warning'
+
+                            $ConsumptionThrottled = $_.Exception.Message -match 'TooManyRequests|\b429\b|throttl|rate limit'
+
+                            # Prefer the SERVER-DIRECTED wait when Azure supplies one: the
+                            # Cost Management / Consumption 429 returns the exact delay via
+                            # 'x-ms-ratelimit-microsoft.consumption-retry-after' (or the
+                            # standard 'Retry-After'), which Get-RdaRetryAfterSeconds reads
+                            # off the thrown CloudException. Honoring it is more accurate
+                            # than blind backoff and is what keeps us from re-hitting a
+                            # bucket another billing pipeline is draining. Clamp to 300s so
+                            # a pathological/misparsed value cannot stall the run. Absent a
+                            # header, fall back to exponential (2^attempt) capped at 60s,
+                            # doubled (capped 120s) when throttled.
+                            $ConsumptionRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_
+                            if ($ConsumptionRetryAfter -gt 0)
+                            {
+                                $ConsumptionThrottled = $true
+                                $ConsumptionBackoffSeconds = [math]::Min($ConsumptionRetryAfter, 300)
+                            }
+                            else
+                            {
+                                $ConsumptionBackoffSeconds = [math]::Min([math]::Pow(2, $ConsumptionAttempt), 60)
+                                if ($ConsumptionThrottled) { $ConsumptionBackoffSeconds = [math]::Min($ConsumptionBackoffSeconds * 2, 120) }
+                            }
+                            # Sub-second jitter on top so concurrent streams released by the
+                            # same server window do not retry on the exact same tick.
+                            $ConsumptionBackoffSeconds = [math]::Round($ConsumptionBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
+
+                            $ConsumptionRetryMarker = if ($ConsumptionRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($ConsumptionThrottled) { ', throttled' } else { '' }
+                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $ConsumptionRetryMarker, $_.Exception.Message, $ConsumptionBackoffSeconds) -Severity 'Warning'
                             Start-Sleep -Seconds $ConsumptionBackoffSeconds
                         }
                     }

@@ -19,7 +19,8 @@
 # The seam: `Search-AzGraph` is mocked to simulate each failure class (it THROWS
 # on failure, unlike the old az CLI which set a non-zero exit code), and
 # `Start-Sleep` is mocked so the backoff waits are not actually incurred (tests
-# run in ms, not the ~7s of real 1+2+4 backoff). Assertions are on OBSERVABLE
+# run in ms, not the many minutes of real backoff a full 30-retry exhaustion
+# would incur). Assertions are on OBSERVABLE
 # behavior: how many times Search-AzGraph was invoked, whether/how long it
 # slept, and what was thrown.
 #
@@ -94,21 +95,21 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
             { Invoke-AzGraphQuerySafe -Query 'resources | summarize count()' } | Should -Throw
         }
 
-        It 'attempts 4 times total (1 initial + 3 retries)' {
+        It 'attempts 31 times total (1 initial + 30 retries)' {
             try { Invoke-AzGraphQuerySafe -Query 'resources | summarize count()' | Out-Null } catch { }
-            Should -Invoke -CommandName Search-AzGraph -Exactly -Times 4
+            Should -Invoke -CommandName Search-AzGraph -Exactly -Times 31
         }
 
-        It 'sleeps 3 times (once before each retry)' {
+        It 'sleeps 30 times (once before each retry)' {
             try { Invoke-AzGraphQuerySafe -Query 'resources | summarize count()' | Out-Null } catch { }
-            Should -Invoke -CommandName Start-Sleep -Exactly -Times 3
+            Should -Invoke -CommandName Start-Sleep -Exactly -Times 30
         }
 
         It 'surfaces the real error text and the attempt count in the throw' {
             $Msg = $null
             try { Invoke-AzGraphQuerySafe -Query 'resources | summarize count()' | Out-Null }
             catch { $Msg = $_.Exception.Message }
-            $Msg | Should -Match 'after 4 attempt\(s\)'
+            $Msg | Should -Match 'after 31 attempt\(s\)'
             $Msg | Should -Match 'ServiceUnavailable'
         }
     }
@@ -158,17 +159,106 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
             Mock -CommandName Search-AzGraph -MockWith { throw 'TooManyRequests (429) - request rate exceeded' }
         }
 
-        It 'still attempts 4 times' {
+        It 'still attempts 31 times' {
             try { Invoke-AzGraphQuerySafe -Query 'resources' | Out-Null } catch { }
-            Should -Invoke -CommandName Search-AzGraph -Exactly -Times 4
+            Should -Invoke -CommandName Search-AzGraph -Exactly -Times 31
         }
 
         It 'every backoff is the doubled (throttled) duration, >= 2s' {
-            # Non-throttled backoff would be 1,2,4 (first < 2). Throttled doubles
-            # to 2,4,8, so ALL three sleeps must be >= 2s. Proves the throttle
-            # branch actually took the longer-backoff path.
+            # Non-throttled backoff starts 1,2,4 (first < 2). Throttled doubles it,
+            # so the FIRST sleep is >= 2s; assert every one of the 30 throttled
+            # sleeps is >= 2s. Proves the throttle branch took the longer-backoff
+            # path (the per-attempt cap means later sleeps sit at the 60s ceiling).
+            # These string-throw mocks carry no .Response, so Get-RetryWaitSeconds
+            # finds no server header and returns the exponential fallback unchanged
+            # - the timing assertion still holds.
             try { Invoke-AzGraphQuerySafe -Query 'resources' | Out-Null } catch { }
-            Should -Invoke -CommandName Start-Sleep -Exactly -Times 3 -ParameterFilter { $Seconds -ge 2 }
+            Should -Invoke -CommandName Start-Sleep -Exactly -Times 30 -ParameterFilter { $Seconds -ge 2 }
         }
+    }
+}
+
+Describe 'Get-RetryWaitSeconds header honoring' {
+
+    BeforeAll {
+        # Build a synthetic throttling exception whose .Response.Headers (or
+        # .InnerException.Response.Headers) mimics the real shape: each header
+        # value is an IEnumerable[string] (a single-element string array).
+        # PSCustomObject property access with no StrictMode returns $null for
+        # absent members, so the helper's null guards exercise the same fallback
+        # path they do in production. Defined in BeforeAll so it is available to
+        # the It scriptblocks at run time (Pester v5 scoping).
+        function New-FakeThrottleException
+        {
+            param([hashtable]$Headers, [switch]$OnInner)
+
+            # A PowerShell [hashtable] is NOT auto-enumerated by foreach, but the
+            # real ARG/consumption/metrics header containers are a
+            # Dictionary[string,IEnumerable[string]] / HttpResponseHeaders, which
+            # DO enumerate as KeyValuePair<string,IEnumerable[string]>. Convert to
+            # a generic Dictionary (values as string[]) so the fake faithfully
+            # matches the shape Get-RetryWaitSeconds walks in production.
+            $Dict = [System.Collections.Generic.Dictionary[string, object]]::new()
+            foreach ($Key in $Headers.Keys) { $Dict[$Key] = [string[]]@($Headers[$Key]) }
+            $ResponseObj = [pscustomobject]@{ Headers = $Dict }
+            if ($OnInner)
+            {
+                [pscustomobject]@{ InnerException = [pscustomobject]@{ Response = $ResponseObj } }
+            }
+            else
+            {
+                [pscustomobject]@{ Response = $ResponseObj }
+            }
+        }
+    }
+
+    It 'honors an integer Retry-After header (in seconds)' {
+        $Ex = New-FakeThrottleException -Headers @{ 'Retry-After' = @('5') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 | Should -Be 5
+    }
+
+    It 'honors the consumption ratelimit header' {
+        $Ex = New-FakeThrottleException -Headers @{ 'x-ms-ratelimit-microsoft.consumption-retry-after' = @('12') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 | Should -Be 12
+    }
+
+    It 'parses the ARG quota-resets-after hh:mm:ss window into seconds' {
+        $Ex = New-FakeThrottleException -Headers @{ 'x-ms-user-quota-resets-after' = @('00:00:08') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 | Should -Be 8
+    }
+
+    It 'matches header names case-insensitively' {
+        $Ex = New-FakeThrottleException -Headers @{ 'RETRY-AFTER' = @('7') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 | Should -Be 7
+    }
+
+    It 'reads the header off InnerException.Response (the metrics wrap)' {
+        $Ex = New-FakeThrottleException -Headers @{ 'Retry-After' = @('9') } -OnInner
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 | Should -Be 9
+    }
+
+    It 'prefers Retry-After over the quota header (global type-first precedence)' {
+        $Ex = New-FakeThrottleException -Headers @{ 'Retry-After' = @('3'); 'x-ms-user-quota-resets-after' = @('00:01:00') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 | Should -Be 3
+    }
+
+    It 'clamps an oversized header value to MaxSeconds' {
+        $Ex = New-FakeThrottleException -Headers @{ 'Retry-After' = @('999') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 30 -MaxSeconds 120 | Should -Be 120
+    }
+
+    It 'returns the exponential fallback when no usable header is present' {
+        $Ex = New-FakeThrottleException -Headers @{ 'Content-Type' = @('application/json') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 42 | Should -Be 42
+    }
+
+    It 'returns the fallback when the exception exposes no Response at all' {
+        $Ex = [pscustomobject]@{ Message = 'ServiceUnavailable' }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 17 | Should -Be 17
+    }
+
+    It 'ignores a non-positive Retry-After and falls back' {
+        $Ex = New-FakeThrottleException -Headers @{ 'Retry-After' = @('0') }
+        Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 25 | Should -Be 25
     }
 }

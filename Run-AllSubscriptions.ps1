@@ -911,6 +911,8 @@ if ($Plan)
         else { Write-Host $DirLine -ForegroundColor DarkGray }
     }
     Write-Host ""
+    Write-Host "Throttling: Resource Graph queries auto-retry with exponential backoff + jitter (up to 30 retries, backoff capped per attempt) and honor the service's own Retry-After / quota-reset header when it sends one, so a shard rides out sustained tenant-wide throttling at scale instead of failing a subscription." -ForegroundColor DarkGray
+    Write-Host ""
     Write-Host "(Estimate only - actual time varies with resource density and metrics/consumption volume.)" -ForegroundColor DarkGray
     Exit-Wrapper -Code 0
 }

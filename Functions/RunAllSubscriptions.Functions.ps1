@@ -1745,3 +1745,224 @@ function New-RdaSupportLogBundle
         if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
+
+# =============================================================================
+# Blob-backed resume state (AKS / ephemeral-pod durability)
+#
+# On AKS the wrapper runs in a pod whose local disk (emptyDir) is destroyed when
+# the pod is evicted, rescheduled, or the node is reclaimed - exactly when
+# -Resume matters. To survive that, the resume-state file is MIRRORED to Azure
+# Blob storage: the local atomic write stays the fast, authoritative path within
+# a pod's life, and the blob copy is the durable layer a rescheduled pod reads
+# from (it has no local file). Writes are write-through (local first, then blob);
+# reads are blob-first with a local fallback.
+#
+# Why the SDK (Az.Storage) and not a blobfuse CSI mount: the local write relies
+# on [IO.File]::Move being an ATOMIC rename for crash-safety, and blobfuse does
+# not honour that. A whole-object block-blob PUT (Set-AzStorageBlobContent)
+# commits atomically on its own - a reader never sees a partial blob - so it is
+# actually safer than a mounted rename, and it is passwordless via the pod's
+# workload identity (-UseConnectedAccount), matching the existing upload path.
+#
+# Concurrency: the existing state model is disjoint-by-writer (each shard = its
+# own pod = its own unified file; each stream = its own process = its own
+# per-stream file), so no two writers target the same blob and no lease/ETag
+# arbitration is needed. The ONE catch is that the local per-stream filename is
+# keyed by tenant + stream index only (NOT shard) - safe on local disk because
+# each shard pod has its own disk, but in a SHARED blob container two shard pods
+# would collide on it. So EVERY state blob name is additionally namespaced by
+# shard (see Get-StateBlobName / Get-StateBlobNames).
+#
+# These identifiers (subscription GUIDs) live only in the LOCAL/blob resume
+# state, which is never part of the zipped report, so - like the existing
+# CompletedSubscriptionIds - they do NOT route through the obfuscation layer.
+# =============================================================================
+
+# Parse a blob container URL into its parts. Pure (no Azure calls) so it is
+# unit-testable offline. Accepts:
+#   https://<account>.blob.core.windows.net/<container>[/<prefix...>]
+# and returns { Account; Container; Prefix } where Prefix is '' or ends in '/'.
+function Split-BlobContainerUri
+{
+    param([Parameter(Mandatory = $true)][string]$Uri)
+
+    $Parsed = [System.Uri]$Uri
+    $Account = $Parsed.Host.Split('.')[0]
+    $PathParts = $Parsed.AbsolutePath.Trim('/').Split('/', 2)
+    $Container = $PathParts[0]
+    $Prefix = if ($PathParts.Count -gt 1 -and $PathParts[1]) { $PathParts[1].Trim('/') + '/' } else { '' }
+    return [pscustomobject]@{
+        Account   = $Account
+        Container = $Container
+        Prefix    = $Prefix
+    }
+}
+
+# Build the shard-namespaced blob NAME for a state file, under the container's
+# optional path prefix plus a dedicated _state/ area (kept separate from the
+# report zips so the *.zip consolidation glob never trips over it). Pure.
+#   - StreamId < 0  -> the shard's unified file (.resume-state-<tenant>.json)
+#   - StreamId >= 0 -> a per-stream file (.resume-state-<tenant>-stream-<n>.json)
+# Shard namespacing (shard-<i>of<n>/) is applied whenever ShardCount > 1 because
+# the blob container is shared across shard pods (see region header).
+function Get-StateBlobName
+{
+    param(
+        # Empty string is a valid prefix (the container root, when the container
+        # URL carries no path segment), so it must be allowed past the mandatory
+        # non-empty default that [string] parameters enforce.
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$Tenant,
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1,
+        [int]$StreamId = -1
+    )
+    $ShardSeg = if ($ShardCount -gt 1) { 'shard-{0}of{1}/' -f $ShardIndex, $ShardCount } else { '' }
+    $Leaf = if ($StreamId -ge 0)
+    {
+        '.resume-state-{0}-stream-{1}.json' -f $Tenant, $StreamId
+    }
+    else
+    {
+        '.resume-state-{0}.json' -f $Tenant
+    }
+    return ('{0}_state/{1}{2}' -f $Prefix, $ShardSeg, $Leaf)
+}
+
+# Classify how the subscription universe moved between the START-of-run snapshot
+# and an END re-enumeration, given which subs actually completed. This is the
+# "moving target" reconciliation: another team can create/delete subscriptions
+# mid-run, so the single start-time Get-AzSubscription is a stale picture by the
+# end. Pure (no Azure calls) so it is unit-testable offline. Case-insensitive on
+# ids (they are GUIDs, but normalise to be safe). Returns:
+#   Vanished   - present at start, GONE at end   -> deleted mid-run; a failure
+#                against one of these is expected, not a real fault.
+#   New        - absent at start, present at end -> created mid-run; never
+#                enumerated, so SILENTLY MISSING from the report unless handled.
+#   Incomplete - existed at start AND still exists at end, but not in the
+#                completed set -> genuine resume gaps. Deliberately EXCLUDES the
+#                New set (a mid-run-created sub is reported under New, not double-
+#                counted here), so New and Incomplete are disjoint.
+function Get-SubscriptionDelta
+{
+    param(
+        [string[]]$StartIds = @(),
+        [string[]]$EndIds = @(),
+        [string[]]$CompletedIds = @()
+    )
+    $Start = @{}
+    foreach ($x in $StartIds) { if ($x) { $Start[([string]$x).ToLowerInvariant()] = $x } }
+    $End = @{}
+    foreach ($x in $EndIds) { if ($x) { $End[([string]$x).ToLowerInvariant()] = $x } }
+    $Done = @{}
+    foreach ($x in $CompletedIds) { if ($x) { $Done[([string]$x).ToLowerInvariant()] = $true } }
+
+    $Vanished = @()
+    foreach ($k in $Start.Keys) { if (-not $End.ContainsKey($k)) { $Vanished += $Start[$k] } }
+    $New = @()
+    foreach ($k in $End.Keys) { if (-not $Start.ContainsKey($k)) { $New += $End[$k] } }
+    $Incomplete = @()
+    foreach ($k in $End.Keys) { if ($Start.ContainsKey($k) -and -not $Done.ContainsKey($k)) { $Incomplete += $End[$k] } }
+
+    return [pscustomobject]@{
+        Vanished   = @($Vanished)
+        New        = @($New)
+        Incomplete = @($Incomplete)
+    }
+}
+
+# Passwordless storage context for the current signed-in identity (the AKS
+# workload identity in a pod), matching the existing blob-upload path. Kept as a
+# one-line wrapper so every state-blob call constructs the context identically
+# and so tests have a single seam to stub.
+function New-StateBlobContext
+{
+    param([Parameter(Mandatory = $true)][string]$Account)
+    return New-AzStorageContext -StorageAccountName $Account -UseConnectedAccount -ErrorAction Stop
+}
+
+# Whole-blob PUT of a local file. A block-blob upload commits atomically, so a
+# concurrent/rescheduled reader never observes a truncated state doc - no
+# temp+rename needed on the blob side. -BestEffort (used on the hot per-sub write
+# path) downgrades a transient blob failure to a WARNING and returns $false
+# instead of throwing, because the local atomic write already succeeded and a
+# blob blip must never abort a multi-hour run. Returns $true on success.
+function Save-StateBlob
+{
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Container,
+        [Parameter(Mandatory = $true)][string]$BlobName,
+        [Parameter(Mandatory = $true)][string]$File,
+        [switch]$BestEffort
+    )
+    try
+    {
+        $null = Set-AzStorageBlobContent -File $File -Container $Container -Blob $BlobName -Context $Context -Force -ErrorAction Stop
+        return $true
+    }
+    catch
+    {
+        if ($BestEffort)
+        {
+            Write-Host ("WARNING: could not mirror resume state to blob {0}/{1}: {2}" -f $Container, $BlobName, $_.Exception.Message) -ForegroundColor Yellow
+            return $false
+        }
+        throw
+    }
+}
+
+# Download a state blob and return its parsed object, or $null if the blob is
+# absent/unreadable. Used for blob-first resume reads (a rescheduled pod has no
+# local state file). Never throws - an absent blob is a normal "start fresh"
+# signal, identical to a missing local file.
+function Read-StateBlob
+{
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Container,
+        [Parameter(Mandatory = $true)][string]$BlobName
+    )
+    $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-state-dl-{0}.json' -f ([guid]::NewGuid().ToString('N')))
+    try
+    {
+        $null = Get-AzStorageBlobContent -Container $Container -Blob $BlobName -Destination $Tmp -Context $Context -Force -ErrorAction Stop
+        return (Get-Content -LiteralPath $Tmp -Raw | ConvertFrom-Json)
+    }
+    catch
+    {
+        return $null
+    }
+    finally
+    {
+        Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# List the per-stream state blob names under the shard's _state area, so a
+# rescheduled pod (or the end-of-run merge) can fold in per-stream progress that
+# was mirrored to blob. This is the blob-backend analogue of the local
+# Get-StreamResumeStateFiles disk scan. Returns @() if none / on any error.
+function Get-StateBlobNames
+{
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Container,
+        # Empty string is the valid container-root prefix (see Get-StateBlobName).
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$Tenant,
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1
+    )
+    $ShardSeg = if ($ShardCount -gt 1) { 'shard-{0}of{1}/' -f $ShardIndex, $ShardCount } else { '' }
+    $ListPrefix = '{0}_state/{1}.resume-state-{2}-stream-' -f $Prefix, $ShardSeg, $Tenant
+    try
+    {
+        $Blobs = Get-AzStorageBlob -Container $Container -Prefix $ListPrefix -Context $Context -ErrorAction Stop
+        return @($Blobs | Select-Object -ExpandProperty Name)
+    }
+    catch
+    {
+        return @()
+    }
+}

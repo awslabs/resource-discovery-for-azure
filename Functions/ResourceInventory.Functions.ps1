@@ -22,22 +22,45 @@
 
 function GetLocalVersion()
 {
-    # Anchor on this file's location, not the current working directory, so the
-    # version reads correctly no matter where the tool is launched from (e.g. an
-    # Azure DevOps agent whose working directory is not the repo root). This
-    # Functions file lives one level below the repo root (Functions/), and
-    # Version.json is at the repo root - hence the parent of $PSScriptRoot.
-    $VersionJsonPath = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'Version.json'
-    if (Test-Path $VersionJsonPath)
+    # Anchor on this file's OWN location, never the current working directory, so
+    # the version reads correctly regardless of where the tool is launched from -
+    # e.g. an Azure DevOps agent, or a background job (Start-Job) on an AKS pod,
+    # whose working directory is not the repo checkout root. This Functions file
+    # lives one level below the repo root (Functions/) and Version.json sits at
+    # the repo root, hence the parent of $PSScriptRoot. Join-Path builds the path
+    # with the correct separator on Windows and Linux/macOS alike.
+    #
+    # $PSScriptRoot is empty only when this file was not loaded from disk (e.g. an
+    # inline Start-Job -ScriptBlock). Guard it so that case yields a clear message
+    # instead of a cryptic Join-Path/Split-Path binding error.
+    if ([string]::IsNullOrWhiteSpace($PSScriptRoot))
     {
-        $LocalVersionJson = Get-Content $VersionJsonPath | ConvertFrom-Json
-        return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
+        Write-Host 'Cannot resolve the script location ($PSScriptRoot is empty). Run the tool from its files on disk, not an inline script block. Exiting.' -ForegroundColor Red
+        Exit 1
     }
-    else
+
+    $VersionJsonPath = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'Version.json'
+
+    if (-not (Test-Path -LiteralPath $VersionJsonPath -PathType Leaf))
     {
         Write-Host ("Version.json not found at '{0}' (expected at the repo root, alongside ResourceInventory.ps1). Ensure the full repo is present. Exiting." -f $VersionJsonPath) -ForegroundColor Red
-        Exit
+        Exit 1
     }
+
+    # -Raw + explicit parse guard: a truncated or malformed Version.json (e.g. a
+    # partial copy baked into a container image) fails LOUD with the offending
+    # path instead of a bare ConvertFrom-Json exception.
+    try
+    {
+        $LocalVersionJson = Get-Content -LiteralPath $VersionJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Host ("Version.json at '{0}' could not be read or parsed as JSON: {1}. Exiting." -f $VersionJsonPath, $_.Exception.Message) -ForegroundColor Red
+        Exit 1
+    }
+
+    return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
 }
 
 # Deterministically tokenize a free-text / identity value into

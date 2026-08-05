@@ -12,7 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $snapshot.subscriptionId }
             $Data = $snapshot.PROPERTIES
-            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                                    = $snapshot.id;

@@ -69,7 +69,7 @@ if ($Task -eq 'Processing')
             if ([string]::IsNullOrEmpty($RelatedAKSId)) { $RelatedId = ($SFC | Where-Object { $_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint }).id }else { $RelatedId = $RelatedAKSId }
             $Related = if ([string]::IsNullOrEmpty($RelatedId)) { $RelatedId } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($RelatedId)) { $ResourceIdDictionary[$RelatedId] } else { 'obfuscated' } } else { $RelatedId.split('/')[8] }
 
-            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $SkuName = $1.sku.name
             $Cpus = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].CPU } else { $null }
@@ -77,6 +77,13 @@ if ($Task -eq 'Processing')
 
             $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
             $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
+
+            # Emit tags as a { Name, Value } list, matching the VirtualMachines and
+            # AKS collectors. Tag KEYS are kept verbatim; tag VALUES are obfuscated
+            # deterministically by the per-collector Tags loop in ResourceInventory.ps1
+            # (keyed on this 'Tags' field + { Name, Value } shape), so no special
+            # handling is needed here.
+            $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
             $Obj = @{
                 'ID'                            = $1.id;
@@ -99,6 +106,7 @@ if ($Task -eq 'Processing')
                 'StorageAccountType'            = $Data.virtualMachineProfile.storageProfile.osDisk.managedDisk.storageAccountType;
                 'AcceleratedNetworkingEnabled'  = $Data.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.properties.enableAcceleratedNetworking;
                 'CreatedTime'                   = $Timecreated;
+                'Tags'                          = $Tags;
             }
 
             $Tmp += $Obj

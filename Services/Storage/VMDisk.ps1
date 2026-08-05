@@ -12,7 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $disk.subscriptionId }
             $Data = $disk.PROPERTIES
-            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
             $SKU = $disk.SKU
 
             $Obj = @{

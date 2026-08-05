@@ -15,7 +15,7 @@ if ($Task -eq 'Processing')
             $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name }
 
             $Data0 = $0.properties
-            $Timecreated = if ($null -ne $Data0.creationTime) { [datetime]($Data0.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data0.creationTime) { [datetime]($Data0.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($null -ne $Rbs)
             {

@@ -12,7 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = if ($null -ne $Data.creationTime) { [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data.creationTime) { [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($Data.isHnsEnabled) { $HnsEnabled = $true } else { $HnsEnabled = $false }
 

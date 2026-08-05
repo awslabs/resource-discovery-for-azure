@@ -11,8 +11,30 @@ If ($Task -eq 'Processing')
     {
         $SavedDebugPref = $DebugPreference
         $DebugPreference = 'SilentlyContinue'
-        $Skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
-        $DebugPreference = $SavedDebugPref
+        try
+        {
+            $Skus = Get-AzComputeResourceSku -Location $location -ErrorAction Stop | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        }
+        catch
+        {
+            # A per-region SKU lookup failure (throttle / transient / permission) must
+            # not abort the whole VM collector. A terminating .NET exception here is
+            # NOT suppressed by the run's $ErrorActionPreference = 'SilentlyContinue',
+            # so it would otherwise propagate and drop the entire virtual-machines
+            # section. Skip this region's SKU map instead; any VM whose size is not in
+            # the map falls back to '0' vCPUs/RAM below. Leave a low-noise trace
+            # (silent unless -Verbose) so a region-wide SKU failure is
+            # distinguishable from genuinely-unknown sizes. Write-Verbose (not
+            # Write-Warning) so a broad SKU-API failure across many regions cannot
+            # flood a normal run; the finally still restores DebugPreference on
+            # every path.
+            Write-Verbose ("VirtualMachines: SKU lookup skipped for '{0}': {1}. CPU/Memory fall back to '0' for VMs in that region." -f $location, $_.Exception.Message)
+            $Skus = $null
+        }
+        finally
+        {
+            $DebugPreference = $SavedDebugPref
+        }
 
         foreach ($vmsize in $Skus)
         {

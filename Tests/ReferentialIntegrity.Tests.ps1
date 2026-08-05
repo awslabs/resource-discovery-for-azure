@@ -359,4 +359,34 @@ Describe "Metric Per-Resource Cached Token (P8)" {
             $id | Should -Not -Be 'obfuscated' -Because "the metric fallback assigns a correlatable cached token, not the lossy sentinel"
         }
     }
+
+    It "Metric resource IDs resolve to inventory resource IDs (the metrics-to-inventory join holds under obfuscation)" {
+        if ($script:MetricRows.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows in this fixture"; return }
+        $InvIdSet = @($script:AllIds)
+        if ($InvIdSet.Count -eq 0) { Set-ItResult -Skipped -Because "no inventory IDs in this fixture"; return }
+
+        $MetricIds = @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) } | Select-Object -ExpandProperty ID -Unique)
+        if ($MetricIds.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows carried an ID in this fixture"; return }
+
+        # A metric record's obfuscated ID is produced by looking the resource's
+        # REAL id up in the SAME $ResourceIdDictionary the inventory row used, so a
+        # metric-bearing resource that is ALSO inventoried MUST carry the identical
+        # token - that is the join the server relies on to attach a metric series to
+        # its resource. If metric obfuscation regressed (dictionary populated too
+        # late, a casing/key mismatch, or the fallback minting fresh GUIDs for
+        # in-scope resources), the metric IDs would instead be brand-new tokens that
+        # appear NOWHERE in the inventory. Two guards catch that without false-failing
+        # on the legitimate fallback (a genuinely deleted/transient resource that was
+        # metric-eligible but not inventoried, which is the rare exception):
+        #   1. Catastrophic break: zero overlap => every metric minted a fresh token.
+        #   2. Category/partial break: the matched set must be the majority; the
+        #      absent set is the exception, never the rule, in a healthy run - e.g. a
+        #      whole metric path (the batched getBatch fast-path) obfuscating IDs
+        #      inconsistently with the inventory would push absent past matched.
+        $Matched = @($MetricIds | Where-Object { $_ -in $InvIdSet })
+        $Absent = @($MetricIds | Where-Object { $_ -notin $InvIdSet })
+
+        $Matched.Count | Should -BeGreaterThan 0 -Because "at least one metric resource must carry the same obfuscated ID as its inventory row; zero overlap means metrics minted fresh tokens and the metrics-to-inventory join is broken"
+        $Matched.Count | Should -BeGreaterOrEqual $Absent.Count -Because ("metric IDs should predominantly resolve to inventory IDs (matched={0}, absent={1}); absent exceeding matched indicates a whole metric path is obfuscating IDs inconsistently with the inventory" -f $Matched.Count, $Absent.Count)
+    }
 }

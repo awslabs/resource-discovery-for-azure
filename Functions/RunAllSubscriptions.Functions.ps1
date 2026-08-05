@@ -927,7 +927,11 @@ function Get-FailedAttempts
 
     $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
     if ($null -eq $State -or $null -eq $State.FailedAttempts) { return @() }
-    return @($State.FailedAttempts)
+    # Strip nulls: state written by a version that serialised an empty list as
+    # `[ null ]` reads back as a one-element array holding a null; the existing
+    # $null guard above does not catch that (the array itself is not $null). This
+    # self-heals such a file so a phantom null never enters the retry list.
+    return @($State.FailedAttempts | Where-Object { $null -ne $_ })
 }
 
 # Read the EnumeratedAtStart object ({ CapturedUtc; SubscriptionIds }) recorded
@@ -969,7 +973,14 @@ function Save-CompletedSubscriptionIds
         # next successful attempt for the same sub, so the file is always
         # an accurate snapshot of "subs that failed at least once and have
         # not yet succeeded since".
-        FailedAttempts            = @($FailedAttempts)
+        # The `| Where-Object { $null -ne $_ }` is REQUIRED, not cosmetic: on a
+        # clean run the caller's `$FailedAttempts = Merge-FailedAttempts ...`
+        # collapses the merge's empty-array result to $null (PowerShell unrolls
+        # an empty array on assignment), and a bare `@($null)` then serialises to
+        # `[ null ]` - a one-element array holding a null - instead of `[]`.
+        # Stripping nulls here guarantees the persisted list never contains one,
+        # regardless of which caller collapsed an empty array upstream.
+        FailedAttempts            = @($FailedAttempts | Where-Object { $null -ne $_ })
         LastUpdated               = (Get-Date).ToString('o')
     }
     if ($null -ne $StartSnapshot) { $StateMap['EnumeratedAtStart'] = $StartSnapshot }
@@ -1217,8 +1228,10 @@ function Read-StreamState
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
-            # no FailedAttempts key, so default to @().
-            Failed    = if ($null -eq $Obj.FailedAttempts) { @() } else { @($Obj.FailedAttempts) }
+            # no FailedAttempts key, so default to @(). Also strip nulls so a file
+            # written as `[ null ]` (empty list collapsed to $null upstream) does
+            # not fold a phantom null into the parent's unified state.
+            Failed    = if ($null -eq $Obj.FailedAttempts) { @() } else { @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
         }
     }
     catch
@@ -1243,7 +1256,11 @@ function Write-StreamState
             Tenant         = $TenantID
             StreamId       = $StreamId
             Completed      = $Completed
-            FailedAttempts = @($FailedAttempts)
+            # Strip nulls (see Save-CompletedSubscriptionIds): an empty
+            # FailedAttempts collapsed to $null upstream would otherwise serialise
+            # to `[ null ]` here too, and the parent folds this file straight back
+            # into the unified state.
+            FailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ })
         } | ConvertTo-Json -Depth 4
         # Atomic write: serialise to a sibling temp file, then replace the target
         # in a single filesystem operation. A crash mid-write can only ever

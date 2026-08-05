@@ -42,7 +42,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -564,5 +564,68 @@ Describe 'Test-BackgroundJobSupport' {
         $Before = @(Get-Job).Count
         $null = Test-BackgroundJobSupport
         @(Get-Job).Count | Should -Be $Before -Because 'the probe job must never pollute the caller''s job table'
+    }
+}
+
+Describe 'FailedAttempts null-serialization regression' {
+    BeforeEach {
+        $script:StatePath = Join-Path $script:TestRoot ((([guid]::NewGuid()).ToString('N')) + '.json')
+    }
+    AfterEach {
+        if (Test-Path $script:StatePath) { Remove-Item -Path $script:StatePath -Force }
+    }
+
+    # Each test reads the FailedAttempts token back off the freshly-written state
+    # file inline (a helper defined in the Describe body is not in scope inside
+    # It under Pester v5). The bug serialised an EMPTY list as `[ null ]` (Count
+    # 1, one null element) instead of `[]` (Count 0).
+
+    It 'serialises an explicitly empty FailedAttempts list as [] (no null element)' {
+        Save-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't' -Ids @('s1') -FailedAttempts @()
+        $Parsed = Get-Content -Path $script:StatePath -Raw | ConvertFrom-Json
+        @($Parsed.FailedAttempts).Count | Should -Be 0
+        @($Parsed.FailedAttempts | Where-Object { $null -eq $_ }).Count | Should -Be 0
+    }
+
+    It 'serialises a $null FailedAttempts (empty-array collapse) as [] (no null element)' {
+        # This is the exact clean-run shape: `$FailedAttempts = Merge-FailedAttempts ...`
+        # returns an empty array that PowerShell collapses to $null on assignment.
+        Save-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't' -Ids @('s1') -FailedAttempts $null
+        $Parsed = Get-Content -Path $script:StatePath -Raw | ConvertFrom-Json
+        @($Parsed.FailedAttempts).Count | Should -Be 0
+        @($Parsed.FailedAttempts | Where-Object { $null -eq $_ }).Count | Should -Be 0
+    }
+
+    It 'a clean-run Merge-FailedAttempts result round-trips through Save as [] (not [ null ])' {
+        # Drive the REAL root-cause path end to end: an all-clean merge (no stream
+        # failures) yields an empty array that collapses to $null at the call
+        # site, which the bug then wrote as `[ null ]`.
+        $Merged = Merge-FailedAttempts -ExistingFailedAttempts @() -StreamFailedAttempts @() -CompletedIds @('s1')
+        Save-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't' -Ids @('s1') -FailedAttempts $Merged
+        $Parsed = Get-Content -Path $script:StatePath -Raw | ConvertFrom-Json
+        @($Parsed.FailedAttempts).Count | Should -Be 0
+        @($Parsed.FailedAttempts | Where-Object { $null -eq $_ }).Count | Should -Be 0
+    }
+
+    It 'preserves a real FailedAttempts entry (no over-stripping)' {
+        $Entry = [pscustomobject]@{ Id = 's2'; Name = 'Sub Two'; LastFailedAt = (Get-Date).ToString('o'); Reason = 'boom'; Attempts = 1 }
+        Save-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't' -Ids @('s1') -FailedAttempts @($Entry)
+        $Parsed = Get-Content -Path $script:StatePath -Raw | ConvertFrom-Json
+        @($Parsed.FailedAttempts).Count | Should -Be 1
+        @($Parsed.FailedAttempts)[0].Id | Should -Be 's2'
+    }
+
+    It 'Get-FailedAttempts self-heals a legacy [ null ] file to an empty list' {
+        # Hand-craft the exact bad shape a pre-fix version wrote.
+        $Bad = [ordered]@{
+            TenantID                 = 't'
+            CompletedSubscriptionIds = @('s1')
+            FailedAttempts           = @($null)
+            LastUpdated              = (Get-Date).ToString('o')
+        }
+        ($Bad | ConvertTo-Json -Depth 5) | Set-Content -Path $script:StatePath -Encoding utf8
+        $Read = @(Get-FailedAttempts -Path $script:StatePath -Tenant 't')
+        $Read.Count | Should -Be 0
+        @($Read | Where-Object { $null -eq $_ }).Count | Should -Be 0
     }
 }

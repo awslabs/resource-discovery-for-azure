@@ -22,6 +22,7 @@ if ($Task -eq 'Processing')
                 foreach ($1 in $Rbs)
                 {
                     $Data = $1.PROPERTIES
+                    $LastModified = try { if ($null -ne $Data.lastModifiedTime) { ([datetime]$Data.lastModifiedTime).ToString('MM/dd/yyyy hh:mm') } else { 'Unknown' } } catch { 'Unknown' }
 
                     $Obj = @{
                         'ID'                            = $1.id;
@@ -33,7 +34,7 @@ if ($Task -eq 'Processing')
                         'AutomationAccountCreatedTime'  = $Timecreated;
                         'Location'                      = $0.LOCATION;
                         'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
-                        'LastModifiedTime'              = if ($null -ne $Data.lastModifiedTime) { ([datetime]$Data.lastModifiedTime).ToString('MM/dd/yyyy hh:mm') } else { 'Unknown' } ;
+                        'LastModifiedTime'              = $LastModified;
                         'RunbookState'                  = $Data.state;
                         'RunbookType'                   = $Data.runbookType;
                         'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };

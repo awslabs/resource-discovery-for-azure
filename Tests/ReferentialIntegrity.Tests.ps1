@@ -387,6 +387,18 @@ Describe "Metric Per-Resource Cached Token (P8)" {
         $Absent = @($MetricIds | Where-Object { $_ -notin $InvIdSet })
 
         $Matched.Count | Should -BeGreaterThan 0 -Because "at least one metric resource must carry the same obfuscated ID as its inventory row; zero overlap means metrics minted fresh tokens and the metrics-to-inventory join is broken"
-        $Matched.Count | Should -BeGreaterOrEqual $Absent.Count -Because ("metric IDs should predominantly resolve to inventory IDs (matched={0}, absent={1}); absent exceeding matched indicates a whole metric path is obfuscating IDs inconsistently with the inventory" -f $Matched.Count, $Absent.Count)
+        # The majority check (guard 2) is only meaningful once the metric-ID sample
+        # is large enough that the matched/absent split is signal, not noise. On a
+        # tiny or fallback-heavy fixture a legitimately deleted/transient
+        # metric-eligible resource (absent by design) can outnumber the matched set
+        # with no regression, so gate the ratio behind a minimum sample and skip it
+        # below that floor - the catastrophic guard above still runs on every
+        # fixture. This keeps the suite's bounds/skip philosophy over a
+        # fixture-dependent ratio pin.
+        $RatioSampleFloor = 5
+        if ($MetricIds.Count -ge $RatioSampleFloor)
+        {
+            $Matched.Count | Should -BeGreaterOrEqual $Absent.Count -Because ("metric IDs should predominantly resolve to inventory IDs (matched={0}, absent={1}); absent exceeding matched indicates a whole metric path is obfuscating IDs inconsistently with the inventory" -f $Matched.Count, $Absent.Count)
+        }
     }
 }

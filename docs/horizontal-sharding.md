@@ -6,7 +6,11 @@ several machines at once, with each machine responsible for a slice of the
 subscriptions — no central coordinator, no shared database, and no risk of two
 machines doing the same subscription or of a subscription being missed.
 
-This document explains how it works in plain terms and how to use it.
+This document explains how it works in plain terms and how to use it. If you
+just want to know how many machines to use, skip to
+[Choosing the shard count](#choosing-the-shard-count--plan); if you need to
+recover an interrupted run or catch a subscription added later, see
+[Resuming, retrying, and adding subscriptions later](#resuming-retrying-and-adding-subscriptions-later).
 
 ## The problem it solves
 
@@ -183,6 +187,37 @@ If ARG's ~15 req/sec/tenant genuinely becomes your bottleneck at very high shard
 counts, that is an ARG tenant-quota conversation with Microsoft, not a tuning knob
 in this tool.
 
+## Choosing the shard count (`-Plan`)
+
+You don't have to guess how many machines to use. Run the wrapper once with
+`-Plan` and it sizes the job for you, then exits **without inventorying
+anything**:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -Plan
+```
+
+It counts the eligible subscriptions, reads this machine's CPU and RAM, and
+recommends one of two things:
+
+- **Single machine** — if the whole tenant fits comfortably under a ~2-hour
+  wall-clock ceiling, it prints one ready-to-run command with tuned
+  `-ParallelStreams` / `-ConcurrencyLimit`.
+- **Shard across N machines** — otherwise it prints the recommended shard count,
+  the approximate subscriptions-per-machine and per-machine time, and the
+  ready-to-paste per-node commands (same command, distinct `-ShardIndex`). It
+  also emits a machine-readable `PLAN_SHARDCOUNT=<n>` line and an explicit
+  "run ALL indices `0..N-1`" reminder, so an automating wrapper doesn't have to
+  scrape the prose.
+
+Pass the same phase switches you intend to use for the real run (`-SkipMetrics` /
+`-SkipConsumption`) so the per-subscription estimate matches — inventory-only is
+much faster than inventory + metrics + consumption. The output is guidance, not a
+guarantee: actual time varies with resource density. Treat the shard count as a
+sensible starting point, and keep the rate-limit ceiling above in mind — past the
+point where Resource Graph discovery dominates, adding machines gives diminishing
+returns.
+
 ## Parameters reference
 
 | Parameter      | Meaning                                                        | Default |
@@ -199,6 +234,58 @@ Notes:
 - Run **one shard per machine**. Each machine should use its own inventory
   output folder. The resume-state file is scoped per shard, so `-Resume` on a
   machine only resumes that machine's own slice.
+
+## Resuming, retrying, and adding subscriptions later
+
+Each shard keeps its own **resume-state file**
+(`.resume-state-<tenant>-shard-<index>of<count>.json`), written after every
+subscription. It records which subscriptions completed successfully
+(`CompletedSubscriptionIds`) and which failed, with the reason and attempt count
+(`FailedAttempts`). Because the filename is shard-scoped, shards never clobber
+each other's progress.
+
+Two switches read that file:
+
+- **`-Resume`** — continue an **interrupted** run (a timeout, a kill, a Cloud
+  Shell session ending). It skips the subscriptions already marked complete and
+  processes the rest — both the ones that failed and the ones never reached. Run
+  the same command that was interrupted, on the same machine (same `-ShardIndex`
+  / `-ShardCount`), with `-Resume` added.
+- **`-ResumeFailedOnly`** — the run **completed**, but a handful of subscriptions
+  failed (a transient throttle or auth blip). This processes **only** the
+  `FailedAttempts` list — a fast, surgical retry that does not re-walk the whole
+  slice. A retried subscription that now succeeds moves to the completed list and
+  drops off the failure list; if there were no failures it prints "Nothing to
+  retry" and exits 0.
+
+### Adding a subscription after the campaign has finished
+
+Because a subscription's shard is a pure function of its own id
+(`hash(id) mod ShardCount`), a subscription added later already has a
+well-defined owner shard — nothing has to "learn" about it. To pick it up:
+
+1. Keep **`-ShardCount` identical** to the original campaign.
+2. Re-run **every** index `0 .. ShardCount-1` with `-Resume`.
+
+Each shard re-enumerates the whole tenant (so it now sees the new subscription),
+the hash routes that subscription to its one shard, and `-Resume` skips
+everything already done. So the single shard that owns it collects just the new
+subscription, the other shards collect nothing new — cheap, and you never have to
+work out which shard it landed in.
+
+### Keep `-ShardCount` constant for the whole campaign
+
+`-ShardCount` is **not** stored in the resume state — it lives only in the state
+filename. The tool has no memory that you used, say, 10 yesterday. If you change
+the count, **every** subscription's `mod` changes, so the whole partition
+reshuffles: subscriptions already collected under the old count now hash to
+different shards, and `-Resume` reads a differently-named state file and
+re-collects from scratch — producing overlaps and gaps versus your earlier zips.
+Pin `-ShardCount` in the command or script so it can't drift between runs.
+(Adding subscriptions does **not** require changing the count — a growing tenant
+just puts a few more subscriptions in each existing shard. Only change the count
+if you deliberately want a different fan-out, and if you do, re-run the whole
+set.)
 
 ## Collecting the results
 
@@ -459,6 +546,44 @@ node's local disk with a loud warning.
 Because the shard slices are disjoint, the uploaded zips together cover the
 whole tenant exactly once. Ingest them separately, or merge locally into one
 `MainSummary.html` as in "Collecting the results" above.
+
+### Surviving pod eviction: blob-backed resume state
+
+A pod's working directory is ephemeral — an evicted pod, a reclaimed node, or a
+rescheduled Job loses the local resume-state file, exactly when `-Resume` would
+need it (see [Resuming, retrying, and adding subscriptions later](#resuming-retrying-and-adding-subscriptions-later)).
+Set **`STATE_BLOB_URI`** on the Job (forwarded by `entrypoint.ps1` to the
+wrapper's `-StateBlobContainerUri`) to mirror every state write to blob as well:
+
+```yaml
+        # in deploy/k8s/job.yaml, alongside UPLOAD_BLOB_URI:
+        - name: STATE_BLOB_URI
+          value: "https://<account>.blob.core.windows.net/reports"
+```
+
+State lives under a dedicated `_state/` subfolder in the container,
+shard-namespaced so shards never collide, and separate from the report zips.
+Reads on start are **blob-first with a local fallback**, so a fresh pod that
+replaces an evicted one picks up its shard's progress from blob and resumes where
+it left off. It reuses the **same passwordless workload-identity sign-in** the
+pod already did (so the UAMI needs Storage Blob Data Contributor — the same
+data-plane role as the upload). If `STATE_BLOB_URI` is unset, the entrypoint
+reuses the `UPLOAD_BLOB_URI` container for state; leave both unset to keep state
+node-local (the default — behaviour identical to before).
+
+### Alternative deployment: Azure DevOps + KEDA-scaled agents
+
+If your workers are Azure DevOps self-hosted agents rather than a raw Kubernetes
+Job, you don't assign shard indices by hand there either. Queue **one** pipeline
+run with a `shardCount` parameter; the job uses `strategy: parallel: <shardCount>`,
+so Azure DevOps fans it into N parallel jobs and injects `System.JobPositionInPhase`
+(1..N) into each. Every agent derives its own `ShardIndex = JobPositionInPhase - 1`,
+and KEDA's `azure-pipelines` scaler spawns one agent pod per pending job — the ADO
+analogue of an indexed Job's `JOB_COMPLETION_INDEX`. The full setup (Dockerfile,
+`ScaledJob`, pipeline, and RBAC) ships under
+[`deploy/agent-pool/keda/`](../deploy/agent-pool/keda/README.md), with a
+walkthrough in
+[`deploy/AZURE-DEVOPS-PIPELINE.md`](../deploy/AZURE-DEVOPS-PIPELINE.md).
 
 ### Cost note
 

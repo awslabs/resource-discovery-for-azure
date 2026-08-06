@@ -275,6 +275,18 @@ if ($Task -eq 'Processing')
             $ResourceIds = @($Group.Group | Select-Object -ExpandProperty Id -Unique)
             for ($Offset = 0; $Offset -lt $ResourceIds.Count; $Offset += 50)
             {
+                # Pre-emptive token refresh: Azure tokens expire after ~60-75 min. For
+                # very large subscriptions the chunk loop can run for 30+ min across many
+                # region groups. Rather than failing mid-batch and falling back to the
+                # per-call path (wasteful), check the token's ExpiresOn before each chunk
+                # and refresh only when within 5 minutes of expiry. Cheap: a local
+                # DateTimeOffset comparison, no API call unless actually needed.
+                if ($null -ne $TokenObj.ExpiresOn -and $TokenObj.ExpiresOn -lt [DateTimeOffset]::UtcNow.AddMinutes(5))
+                {
+                    $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
+                    $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
+                }
+
                 $Chunk = @($ResourceIds[$Offset..([math]::Min($Offset + 49, $ResourceIds.Count - 1))])
                 $Uri = "{0}/subscriptions/{1}/metrics:getBatch?api-version=2023-10-01&metricnamespace={2}&metricnames={3}&aggregation={4}&interval={5}&starttime={6}&endtime={7}" -f `
                     $Endpoint, $SubscriptionId, $NsParam, $NamesParam, $AggParam, $IntervalIso, $StartIso, $EndIso

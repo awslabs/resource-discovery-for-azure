@@ -4,7 +4,7 @@
 # WHY THIS TEST EXISTS
 # --------------------
 # The obfuscate-mode consumption path in ResourceInventory.ps1
-# (GetResorceConsumption) rebuilds each usage record's resourceUri. Some Azure
+# (GetResourceConsumption) rebuilds each usage record's resourceUri. Some Azure
 # meter types legitimately have a NULL resourceUri (marketplace purchases,
 # certain reservations, tenant-level charges). The original code fed that value
 # straight into [hashtable].ContainsKey($rawUri); ContainsKey($null) THROWS
@@ -22,7 +22,7 @@
 
 BeforeAll {
     # Faithful copy of the consumption resourceUri obfuscation block from
-    # ResourceInventory.ps1 GetResorceConsumption() (obfuscate branch). The test
+    # ResourceInventory.ps1 GetResourceConsumption() (obfuscate branch). The test
     # replicates the logic rather than calling production code, so it stays
     # self-contained (no live Azure, no output zip).
     function Get-ObfuscatedConsumptionUriForTest

@@ -705,7 +705,7 @@ Function RunInventorySetup()
         $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()"
         $AVDSizeCount = $AVDSize.data.'count_'
 
-        Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
+        Write-Log -Message ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -Severity 'Success'
 
         if ($AVDSizeCount -ge 1)
         {
@@ -1238,7 +1238,7 @@ function ExecuteInventoryProcessing()
             }
         }
 
-        $Resource = $Resources | Select-Object -First $Resources.count
+        $Resource = $Resources
         #$Resource = ($Resource | ConvertTo-Json -Depth 50)
 
         # Circuit breaker for collector failures (#22). A single collector
@@ -1489,7 +1489,7 @@ function ExecuteInventoryProcessing()
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
     }
 
-    function GetResorceConsumption()
+    function GetResourceConsumption()
     {
         $DebugPreference = "SilentlyContinue"
 
@@ -1962,7 +1962,7 @@ function ExecuteInventoryProcessing()
     if (!$SkipConsumption.IsPresent)
     {
         $ConsumptionPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        GetResorceConsumption
+        GetResourceConsumption
         #ProcessResourceConsumption
         $ConsumptionPhaseTimer.Stop()
         $script:PhaseTimings['Consumption / cost collection (billing)'] = $ConsumptionPhaseTimer.Elapsed

@@ -1766,14 +1766,34 @@ function ExecuteInventoryProcessing()
                             # Per-run caches keyed by REAL value, so the same real sub
                             # id / RG / resource name always maps to the same obfuscated
                             # token within a run (deterministic, per the obfuscation
-                            # rules in steering). Kept separate from $ResourceIdDictionary
-                            # because that dictionary's public contract (the
-                            # ObfuscationDictionary file) maps obfuscated full Azure IDs
-                            # to their real values - we don't want to pollute it with
-                            # per-name-segment entries from consumption ARM-path rebuilds.
+                            # rules in steering). The sub / RG / intermediate-name caches
+                            # are kept separate from $ResourceIdDictionary because that
+                            # dictionary's public contract (the ObfuscationDictionary
+                            # file) maps obfuscated FULL Azure IDs to their real values -
+                            # we don't pollute it with bare sub / RG / name fragments.
                             if (-not $script:ConsumptionSubCache) { $script:ConsumptionSubCache = @{} }
                             if (-not $script:ConsumptionRgCache) { $script:ConsumptionRgCache = @{} }
                             if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
+
+                            # Cross-dataset link (consumption <-> inventory / metrics):
+                            # if this row's real resourceUri IS an inventoried resource,
+                            # the LEAF resource-name segment must REUSE the exact token
+                            # inventory (and metrics) assigned to that resource via
+                            # $Global:ResourceIdDictionary - NOT a freshly minted name
+                            # token - otherwise the consumption row cannot be joined back
+                            # to its inventory/metrics record (the whole point of the
+                            # tool). Resource IDs are ingested lowercased
+                            # (Invoke-AzGraphQuerySafe -Lowercase) and $RawUri is the
+                            # lowercased real uri here, so a direct ContainsKey match is
+                            # correct. This is READ-ONLY against the dictionary (we do not
+                            # add consumption entries to it), so the ObfuscationDictionary
+                            # contract stays clean, and the ARM path structure below is
+                            # still preserved for dashboard categorisation - so this does
+                            # NOT reintroduce the flat-token regression that broke
+                            # categorisation. $null when the resource is not inventoried
+                            # (deleted / not in Resource Graph), in which case the leaf
+                            # falls back to the per-name cache exactly as before.
+                            $InventoryLeafToken = if ($null -ne $Global:ResourceIdDictionary -and $Global:ResourceIdDictionary.ContainsKey($RawUri)) { $Global:ResourceIdDictionary[$RawUri] } else { $null }
 
                             if ($RawUri -match '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
                             {
@@ -1814,6 +1834,18 @@ function ExecuteInventoryProcessing()
                                     # are at indices 1,3,5,... (i.e. odd) and NAME
                                     # segments are at indices 2,4,6,... (i.e. even).
                                     $ProvParts = $RealProv -split '/'
+                                    # The LEAF resource-name segment is the last name
+                                    # segment (largest even index >= 2). Only THAT segment
+                                    # reuses the inventory token (it identifies THIS
+                                    # resource, which is what inventory/metrics keyed on);
+                                    # any intermediate name segments - parent names in a
+                                    # child-resource path - stay on the per-name cache
+                                    # because they are a different resource's identity.
+                                    $LeafNameIndex = -1
+                                    for ($Li = $ProvParts.Count - 1; $Li -ge 2; $Li--)
+                                    {
+                                        if ($Li % 2 -eq 0) { $LeafNameIndex = $Li; break }
+                                    }
                                     $Rebuilt = @()
                                     for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
                                     {
@@ -1821,12 +1853,23 @@ function ExecuteInventoryProcessing()
                                         $IsNameSegment = ($Pi -ge 2 -and ($Pi % 2 -eq 0))
                                         if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
                                         {
-                                            $ObfName = if ($script:ConsumptionNameCache.ContainsKey($Part)) { $script:ConsumptionNameCache[$Part] } else
+                                            if ($Pi -eq $LeafNameIndex -and $null -ne $InventoryLeafToken)
                                             {
-                                                $V = $Prefix + [guid]::NewGuid().ToString()
-                                                $script:ConsumptionNameCache[$Part] = $V; $V
+                                                # Reuse inventory/metrics token so this
+                                                # consumption row's leaf id matches the
+                                                # SAME resource in Inventory_*.json /
+                                                # Metrics_*.json (cross-dataset link).
+                                                $Rebuilt += $InventoryLeafToken
                                             }
-                                            $Rebuilt += $ObfName
+                                            else
+                                            {
+                                                $ObfName = if ($script:ConsumptionNameCache.ContainsKey($Part)) { $script:ConsumptionNameCache[$Part] } else
+                                                {
+                                                    $V = $Prefix + [guid]::NewGuid().ToString()
+                                                    $script:ConsumptionNameCache[$Part] = $V; $V
+                                                }
+                                                $Rebuilt += $ObfName
+                                            }
                                         }
                                         else
                                         {
@@ -2338,8 +2381,9 @@ if ($Obfuscate.IsPresent)
     Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
-    Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
+    Write-Log -Message ("The following files are NEVER placed in the shared report zip and must NOT be shared with a report consumer:") -Severity 'Warning'
     Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
+    Write-Log -Message ("      (the de-obfuscation key. Kept local by default; under the multi-subscription wrapper, if a blob upload target is set it is mirrored to that operator-PRIVATE container - which must stay private.)") -Severity 'Warning'
     Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
     # The error log is created only when an error was logged; it can contain raw
     # exception text / local paths carrying real identifiers, so it is local-only

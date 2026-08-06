@@ -2901,6 +2901,42 @@ if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -Lite
         $StorageContext = New-AzStorageContext -StorageAccountName $StorageAccountName -UseConnectedAccount -ErrorAction Stop
         $null = Set-AzStorageBlobContent -File $OuterZipFile -Container $ContainerName -Blob $BlobName -Context $StorageContext -Force -ErrorAction Stop
         Write-Host ("Blob upload complete: {0}" -f $BlobName) -ForegroundColor Green
+
+        # Decouple compute from storage for the obfuscation dictionaries too.
+        # Each subscription's ObfuscationDictionary_*.json is a LOCAL file that is
+        # deliberately kept OUT of the shared report zip (it is the de-obfuscation
+        # key - it maps every obfuscated token back to the real value). On
+        # ephemeral compute (an AKS pod's emptyDir) that local file dies with the
+        # node, taking with it the ONLY record of this run's token mapping - and
+        # thus the only thing that lets a later scoped/recovery run reproduce the
+        # SAME tokens via -ObfuscationDictionary seeding. Since a blob target is
+        # already configured, mirror the dictionaries to that SAME container - as
+        # their OWN objects under a _dictionaries/ prefix, still NOT inside the zip
+        # - exactly as the resume state and support-log bundle (which also carry
+        # real identifiers) already do. That makes this container an operator-
+        # PRIVATE artefact store: it must never be handed to a report consumer
+        # as-is. Its OWN try/catch + best-effort so a dictionary-upload problem can
+        # never mask or fail the (already-successful) report upload above. Only
+        # obfuscated runs produce dictionaries; scoped to THIS run by write time so
+        # a shared InventoryRoot does not resurface a prior run's dictionaries.
+        try
+        {
+            $DictionaryFiles = @(Get-ChildItem -Path $InventoryRoot -Recurse -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime })
+            if ($DictionaryFiles.Count -gt 0)
+            {
+                Write-Host ("Uploading {0} obfuscation dictionary file(s) to blob (PRIVATE - de-obfuscation key; never share this container as-is)..." -f $DictionaryFiles.Count) -ForegroundColor Cyan
+                foreach ($DictFile in $DictionaryFiles)
+                {
+                    $DictBlobName = '{0}_dictionaries/{1}{2}' -f $BlobPrefix, $ShardTag, $DictFile.Name
+                    $null = Set-AzStorageBlobContent -File $DictFile.FullName -Container $ContainerName -Blob $DictBlobName -Context $StorageContext -Force -ErrorAction Stop
+                }
+                Write-Host ("Obfuscation dictionaries uploaded to {0}/{1}_dictionaries/ (keep PRIVATE)." -f $ContainerName, $BlobPrefix) -ForegroundColor Green
+            }
+        }
+        catch
+        {
+            Write-Host ("WARNING: Obfuscation dictionary upload failed ({0}). The dictionaries remain on local disk under {1} - capture them before the node is reclaimed if you need token-consistent recovery later." -f $_.Exception.Message, $InventoryRoot) -ForegroundColor Yellow
+        }
     }
     catch
     {

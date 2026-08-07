@@ -1730,10 +1730,23 @@ function ExecuteInventoryProcessing()
                             Location = $InstanceInfo.'Microsoft.Resources'.location
                             additionalInfo = [PSCustomObject]@{
                                 ConsumptionMeter = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter }
-                                vCores = 0
-                                VCPUs = 0
-                                ServiceType = ""
+                                ImageType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType }
+                                AHB = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB }
+                                vCores = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores }
+                                VCPUs = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs }
+                                ServiceType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType }
                                 ResourceCategory = ""
+                                Edition = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition }
+                                LicenseType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType }
+                                HostLicenseType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType }
+                                OS = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS }
+                                IsVM = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM }
+                                NumberOfCores = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores }
+                                NumberOfLogicalProcessors = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfLogicalProcessors) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfLogicalProcessors }
+                                SLO = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO }
+                                ServerSku = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku }
+                                ServerEdition = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition }
+                                IsHAEnabled = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled }
                             }
                         }
 
@@ -1846,6 +1859,30 @@ function ExecuteInventoryProcessing()
                                     {
                                         if ($Li % 2 -eq 0) { $LeafNameIndex = $Li; break }
                                     }
+
+                                    # Cross-link diagnostic (case-drift early warning): a
+                                    # TOP-LEVEL resource path (provider/type/name, no child
+                                    # segments -> $LeafNameIndex -eq 2) whose real uri is NOT
+                                    # in $Global:ResourceIdDictionary means the leaf cannot
+                                    # reuse the inventory/metrics token and falls back to the
+                                    # per-name cache. That is legitimate for resources deleted
+                                    # between the graph scan and the billing pull, or for a
+                                    # -Service-narrowed inventory - but it is ALSO the silent
+                                    # signature of a lowercasing regression, because the
+                                    # dictionary is a case-SENSITIVE Dictionary[string,string]
+                                    # and $RawUri must already be lowercased (via the
+                                    # InstanceData .tolower() upstream). Child/sub-resource
+                                    # rows ($LeafNameIndex >= 4) legitimately miss and would
+                                    # flood, so only the top-level case is surfaced. Routed to
+                                    # the LOCAL debug log ONLY (-NoConsole so it never touches
+                                    # the terminal, -ToDebugLog so it is never zipped) because
+                                    # $RawUri is a real resource id; a no-op before the debug
+                                    # log path is set, so it never adds run noise or risk.
+                                    if ($LeafNameIndex -eq 2 -and $null -eq $InventoryLeafToken)
+                                    {
+                                        Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; if unexpected, verify resourceUri lowercasing vs the case-sensitive dictionary): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
+                                    }
+
                                     $Rebuilt = @()
                                     for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
                                     {

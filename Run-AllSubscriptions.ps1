@@ -215,7 +215,19 @@ param (
     # to-paste per-node command (same command, distinct -ShardIndex). The per-
     # subscription time is a rough estimate (auto-picked from the -Skip* switches),
     # so treat the output as guidance, not a guarantee.
-    [switch]$Plan
+    [switch]$Plan,
+
+    # -Plan only: override the estimated wall-time cost, in seconds, of a single
+    # Azure Monitor metric query. -Plan sizes shards from each subscription's
+    # projected metric-query volume (counted live via Resource Graph: attached
+    # disks x4, VMs x2, SQL databases x8, storage accounts x1, scale sets x2,
+    # Cosmos x4, etc.) multiplied by this per-query cost. When 0 (default) the
+    # cost is auto-picked: a small value when -UseMetricsBatch is set (getBatch
+    # amortizes up to 50 resources per REST call) and a larger throttled per-call
+    # value otherwise. These defaults are deliberately rough - for an accurate
+    # estimate on your tenant/config, pass a value measured from a prior run's
+    # Diagnostics phase timings (metrics seconds / metric-query count).
+    [double]$PlanPerQuerySeconds = 0
 )
 
 # ---------------------------------------------------------------------------
@@ -872,37 +884,46 @@ if ($Excluded.Count -gt 0)
 if ($Plan)
 {
     $PlanRec = Get-RecommendedParallelism
+    # Honor an operator's EXPLICIT -ParallelStreams / -ConcurrencyLimit exactly as
+    # the real run does (the auto-tune block later only fills the ones NOT passed),
+    # so the plan sizes and prints the SAME parallelism the recommended command
+    # would actually use rather than always the auto-tuned recommendation.
+    # $PSBoundParameters is reliable here because the PS7 relaunch forwards only
+    # bound params.
+    $PlanStreamsExplicit = $PSBoundParameters.ContainsKey('ParallelStreams')
+    $PlanConcurrencyExplicit = $PSBoundParameters.ContainsKey('ConcurrencyLimit')
+    $PlanStreams = if ($PlanStreamsExplicit) { $ParallelStreams } else { $PlanRec.Streams }
+    $PlanConcurrency = if ($PlanConcurrencyExplicit) { $ConcurrencyLimit } else { $PlanRec.Concurrency }
     # Never recommend more parallel streams than there are subscriptions to
     # process (a tiny tenant would otherwise be told to use more streams than it
     # has work for; the real run clamps this too - see the -ParallelStreams path).
-    $PlanStreams = $PlanRec.Streams
     if ($Subscriptions.Count -gt 0 -and $PlanStreams -gt $Subscriptions.Count) { $PlanStreams = $Subscriptions.Count }
-    # Rough per-subscription time estimate, auto-picked from the phase switches:
-    # inventory-only is fastest; metrics and consumption each add work. Printed as
-    # an explicit estimate - real time varies with resource density.
-    $PlanPerSub = 60.0
-    $PlanMode = 'inventory + metrics + consumption'
-    if ($SkipMetrics -and $SkipConsumption) { $PlanPerSub = 20.0; $PlanMode = 'inventory only' }
-    elseif ($SkipMetrics -or $SkipConsumption) { $PlanPerSub = 40.0; $PlanMode = 'inventory + one of metrics/consumption' }
-
-    $PlanResult = Get-InventoryPlan -SubscriptionCount $Subscriptions.Count -Streams $PlanStreams -PerSubSeconds $PlanPerSub -MaxSingleMachineHours 2
 
     $FmtDur = {
-        param([int]$Seconds)
-        $Hours = [math]::Floor($Seconds / 3600)
-        $Minutes = [math]::Round(($Seconds % 3600) / 60)
+        param([long]$Seconds)
+        # Round to whole minutes FIRST, then split into h/m, so a remainder that
+        # rounds to 60 rolls into the next hour (e.g. 7199s -> "2h 0m", not "1h 60m").
+        $TotalMinutes = [long][math]::Round($Seconds / 60.0)
+        $Hours = [math]::Floor($TotalMinutes / 60)
+        $Minutes = $TotalMinutes % 60
         if ($Hours -gt 0) { '{0}h {1}m' -f $Hours, $Minutes } else { '{0}m' -f $Minutes }
     }
 
+    # Render a value-bearing argument as a robust single-quoted PowerShell literal
+    # (single quotes doubled) so a value with spaces or shell-significant
+    # characters round-trips when the operator pastes the recommended command.
+    $QuoteArg = { param($Value) "'" + ([string]$Value -replace "'", "''") + "'" }
+
     # Echo the phase/output flags the operator passed so the recommended command(s)
-    # are copy-paste accurate (the parallelism flags come from the recommendation).
+    # are copy-paste accurate (the parallelism flags come from the recommendation
+    # or the operator's explicit values).
     $ExtraFlags = @()
     if ($Obfuscate) { $ExtraFlags += '-Obfuscate' }
     if ($DeviceLogin) { $ExtraFlags += '-DeviceLogin' }
     if ($IncludeDisabled) { $ExtraFlags += '-IncludeDisabled' }
     if ($AllowPartialAccess) { $ExtraFlags += '-AllowPartialAccess' }
     if ($Detailed) { $ExtraFlags += '-Detailed' }
-    if ($Service) { $ExtraFlags += ('-Service {0}' -f ($Service -join ',')) }
+    if ($Service) { $ExtraFlags += ('-Service {0}' -f (& $QuoteArg ($Service -join ','))) }
     if ($SkipMetrics) { $ExtraFlags += '-SkipMetrics' }
     if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
@@ -910,14 +931,190 @@ if ($Plan)
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
     if ($HeadRoom -gt 0) { $ExtraFlags += ('-HeadRoom {0}' -f $HeadRoom) }
-    if ($UploadToBlobContainerUri) { $ExtraFlags += ('-UploadToBlobContainerUri {0}' -f $UploadToBlobContainerUri) }
+    if ($UploadToBlobContainerUri) { $ExtraFlags += ('-UploadToBlobContainerUri {0}' -f (& $QuoteArg $UploadToBlobContainerUri)) }
+    if ($StateBlobContainerUri) { $ExtraFlags += ('-StateBlobContainerUri {0}' -f (& $QuoteArg $StateBlobContainerUri)) }
     $ExtraStr = if ($ExtraFlags.Count -gt 0) { ' ' + ($ExtraFlags -join ' ') } else { '' }
     $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB } else { 'RAM undetected' }
+
+    # Composition-aware sizing (preferred): count each subscription's projected
+    # metric-query volume live via Resource Graph, then size shards from the
+    # BUSIEST shard under the real runtime hash partition. Falls through to the
+    # flat per-sub estimate below (byte-identical to the previous behaviour) when
+    # metrics are skipped, the Graph query is unavailable/fails, or there are no
+    # eligible subscriptions.
+    $WeightedPlan = $null
+    $PlanArgUnavailable = $false
+    $PlanZeroWeightSubs = 0
+    $PlanCallPerQuery = 0.0
+    $PlanBatchPerQuery = 0.0
+    if (-not $SkipMetrics -and $Subscriptions.Count -gt 0)
+    {
+        $PlanSubWeights = Get-PlanSubscriptionWeights -SubscriptionIds @($Subscriptions | ForEach-Object { [string]$_.Id }) -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:$SkipStorageMetrics
+        # $null == the query was UNUSABLE (Search-AzGraph missing or it threw);
+        # an EMPTY hashtable is a usable "no metric-eligible resources" answer.
+        if ($null -ne $PlanSubWeights)
+        {
+            # Rough, DELIBERATELY CONSERVATIVE per-metric-query costs (seconds).
+            # Per-call is the slow path; the batchable types (VM/disk/storage/SQL/
+            # VMSS/Cosmos) cost far less per query, so under -UseMetricsBatch only
+            # their portion of the weight gets the batch cost - the rest stays
+            # per-call. An operator-supplied -PlanPerQuerySeconds overrides both.
+            # These are throttling-dependent estimates, not measurements (see the
+            # note printed below), so the model rounds UP, never down.
+            $PlanCallPerQuery = if ($PlanPerQuerySeconds -gt 0) { $PlanPerQuerySeconds } else { 9.5 }
+            $PlanBatchPerQuery = if ($PlanPerQuerySeconds -gt 0) { $PlanPerQuerySeconds } else { 0.5 }
+            # Fixed per-subscription overhead the metric weight does NOT capture:
+            # inventory collection, consumption, packaging/upload, process
+            # startup. Deliberately generous so a "fits" verdict keeps headroom.
+            $PlanBaseSeconds = 90.0
+            # Safety margin on the metric estimate to absorb intra-shard per-stream
+            # imbalance and throttling variance (the sizing model is a lower bound,
+            # not a full scheduler simulation).
+            $PlanSafetyFactor = 1.3
+            $PlanSubSeconds = @{}
+            foreach ($PlanSub in $Subscriptions)
+            {
+                $SubKey = [string]$PlanSub.Id
+                if ($PlanSubWeights.ContainsKey($SubKey))
+                {
+                    $SubW = $PlanSubWeights[$SubKey]
+                    $BatchW = [double]$SubW.Batch
+                    $CallW = [double]$SubW.Total - $BatchW
+                    if ($CallW -lt 0) { $CallW = 0 }
+                    $MetricSeconds = if ($UseMetricsBatch)
+                    {
+                        ($PlanBatchPerQuery * $BatchW) + ($PlanCallPerQuery * $CallW)
+                    }
+                    else
+                    {
+                        $PlanCallPerQuery * [double]$SubW.Total
+                    }
+                    $PlanSubSeconds[$SubKey] = $PlanBaseSeconds + ($MetricSeconds * $PlanSafetyFactor)
+                }
+                else
+                {
+                    # No ARG row for this subscription -> no metric-eligible
+                    # resources in scope, so size it at base overhead. If the
+                    # operator EXPECTS metrics here, the identity may simply lack
+                    # Resource Graph visibility into it - surfaced in the note below.
+                    $PlanZeroWeightSubs++
+                    $PlanSubSeconds[$SubKey] = $PlanBaseSeconds
+                }
+            }
+            $WeightedPlan = Get-WeightedInventoryPlan -SubSeconds $PlanSubSeconds -Streams $PlanStreams -MaxSingleMachineHours 2
+        }
+        else
+        {
+            $PlanArgUnavailable = $true
+        }
+    }
+
+    if ($null -ne $WeightedPlan)
+    {
+        $CostSource = if ($PlanPerQuerySeconds -gt 0) { 'operator-supplied -PlanPerQuerySeconds' } elseif ($UseMetricsBatch) { 'auto: batched, rough' } else { 'auto: per-call, rough' }
+        $StreamsSrcPlan = if ($PlanStreamsExplicit) { 'explicit' } else { 'auto' }
+        $ConcSrcPlan = if ($PlanConcurrencyExplicit) { 'explicit' } else { 'auto' }
+        Write-Host ""
+        Write-Host "================ Inventory Plan (assessment only - nothing was inventoried) ================" -ForegroundColor Green
+        Write-Host ("Eligible subscriptions   : {0}" -f $WeightedPlan.SubscriptionCount) -ForegroundColor Cyan
+        Write-Host ("This machine             : {0} vCPU / {1}  ->  -ParallelStreams {2} ({3}) -ConcurrencyLimit {4} ({5})" -f $PlanRec.VCpu, $RamLabelPlan, $PlanStreams, $StreamsSrcPlan, $PlanConcurrency, $ConcSrcPlan) -ForegroundColor Cyan
+        Write-Host  "Sizing basis             : live metric-query volume (Resource Graph)" -ForegroundColor Cyan
+        if ($UseMetricsBatch)
+        {
+            Write-Host ("Per-metric-query cost    : ~{0}s per-call, ~{1}s batched types [{2}]" -f $PlanCallPerQuery, $PlanBatchPerQuery, $CostSource) -ForegroundColor Cyan
+        }
+        else
+        {
+            Write-Host ("Per-metric-query cost    : ~{0}s [{1}]" -f $PlanCallPerQuery, $CostSource) -ForegroundColor Cyan
+        }
+        Write-Host ("Single-machine ceiling   : {0} h" -f $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Cyan
+        Write-Host ("Slowest single sub (est) : ~{0}" -f (& $FmtDur $WeightedPlan.LargestSingleSubSeconds)) -ForegroundColor Cyan
+        Write-Host ""
+
+        if ($WeightedPlan.CeilingUnreachable)
+        {
+            # LEAD with an accurate warning (keyed off the reason) BEFORE any
+            # recommendation, so the operator never reads a "within the ceiling"
+            # line the plan then contradicts. Never claim the sharded fallback
+            # fits - it does not.
+            if ($WeightedPlan.CeilingUnreachableReason -eq 'single-subscription-exceeds-ceiling')
+            {
+                Write-Host ("WARNING: the single slowest subscription alone is ~{0}, over the {1} h ceiling. Sharding splits work ACROSS subscriptions and cannot speed up ONE subscription, so NO shard count fixes this - reduce that subscription's metrics load instead (-SkipDiskMetrics removes the disk queries that dominate volume, -UseMetricsBatch cuts the per-query cost, -MetricsIntervalMinutes 60 shrinks each response). See docs/Plan.md." -f (& $FmtDur $WeightedPlan.LargestSingleSubSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Yellow
+            }
+            else
+            {
+                Write-Host ("WARNING: even at {0} shard(s) - one per subscription, the maximum useful - the busiest shard is ~{1}, over the {2} h ceiling, because the hash partition clumps several heavy subscriptions together. Reduce metrics load (-SkipDiskMetrics / -UseMetricsBatch / -MetricsIntervalMinutes 60) to bring the busiest shard down. See docs/Plan.md." -f $WeightedPlan.ShardCount, (& $FmtDur $WeightedPlan.BusiestShardSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Yellow
+            }
+            Write-Host ""
+            Write-Host ("Best achievable with the current settings: SHARD across {0} machine(s) (busiest shard still ~{1} - does NOT get under the ceiling)." -f $WeightedPlan.ShardCount, (& $FmtDur $WeightedPlan.BusiestShardSeconds)) -ForegroundColor Yellow
+            $MaxToList = 10
+            $ListCount = [math]::Min($WeightedPlan.ShardCount, $MaxToList)
+            for ($i = 0; $i -lt $ListCount; $i++)
+            {
+                Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f (& $QuoteArg $TenantID), $WeightedPlan.ShardCount, $i, $PlanStreams, $PlanConcurrency, $ExtraStr) -ForegroundColor White
+            }
+            if ($WeightedPlan.ShardCount -gt $MaxToList)
+            {
+                Write-Host ("    ... through -ShardIndex {0} (use -ShardIndex 0..{0}, one per machine)." -f ($WeightedPlan.ShardCount - 1)) -ForegroundColor DarkGray
+            }
+        }
+        elseif ($WeightedPlan.Mode -eq 'Single')
+        {
+            Write-Host ("Recommendation: SINGLE MACHINE is sufficient (busiest-path est. ~{0}, under the {1} h ceiling)." -f (& $FmtDur $WeightedPlan.BusiestShardSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Green
+            Write-Host "Run:" -ForegroundColor Green
+            Write-Host ("  ./Run-AllSubscriptions.ps1 -TenantID {0} -ParallelStreams {1} -ConcurrencyLimit {2}{3}" -f (& $QuoteArg $TenantID), $PlanStreams, $PlanConcurrency, $ExtraStr) -ForegroundColor White
+        }
+        else
+        {
+            Write-Host ("Recommendation: SHARD across {0} machines (busiest shard est. ~{1}, within the {2} h ceiling)." -f $WeightedPlan.ShardCount, (& $FmtDur $WeightedPlan.BusiestShardSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Green
+            Write-Host ("  ~{0} subscription(s) per machine (shards balanced by the real hash partition, so heavy subscriptions are spread out)." -f $WeightedPlan.PerMachineSubscriptions) -ForegroundColor Green
+            Write-Host "  Run ONE of these per machine (same command, distinct -ShardIndex):" -ForegroundColor Green
+            $MaxToList = 10
+            $ListCount = [math]::Min($WeightedPlan.ShardCount, $MaxToList)
+            for ($i = 0; $i -lt $ListCount; $i++)
+            {
+                Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f (& $QuoteArg $TenantID), $WeightedPlan.ShardCount, $i, $PlanStreams, $PlanConcurrency, $ExtraStr) -ForegroundColor White
+            }
+            if ($WeightedPlan.ShardCount -gt $MaxToList)
+            {
+                Write-Host ("    ... through -ShardIndex {0} (use -ShardIndex 0..{0}, one per machine, across all {1} machines)." -f ($WeightedPlan.ShardCount - 1), $WeightedPlan.ShardCount) -ForegroundColor DarkGray
+            }
+            Write-Host "  Then upload each machine's AllSubscriptions_ResourcesReport_*.zip (see docs/horizontal-sharding.md)." -ForegroundColor DarkGray
+        }
+
+        if ($PlanZeroWeightSubs -gt 0)
+        {
+            Write-Host ("Note: {0} of {1} subscription(s) matched no metric-eligible resources and were sized at base overhead only. If you expect metrics there, the signed-in identity may lack Resource Graph visibility into them." -f $PlanZeroWeightSubs, $WeightedPlan.SubscriptionCount) -ForegroundColor DarkGray
+        }
+        foreach ($DirLine in (Get-PlanShardDirective -ShardCount $WeightedPlan.ShardCount))
+        {
+            if ($DirLine -like 'IMPORTANT:*') { Write-Host $DirLine -ForegroundColor Yellow }
+            else { Write-Host $DirLine -ForegroundColor DarkGray }
+        }
+        Write-Host ""
+        Write-Host "(Estimate only - the per-metric-query cost is throttling-dependent and the sizing is a conservative lower bound with a built-in safety margin; pass -PlanPerQuerySeconds measured from a prior run's Diagnostics timings for a tenant-accurate estimate. See docs/Plan.md.)" -ForegroundColor DarkGray
+        Exit-Wrapper -Code 0
+    }
+
+    # Flat per-sub fallback estimate - reached only when the composition-aware
+    # path above did NOT run (metrics skipped, Resource Graph unavailable/failed,
+    # or no eligible subscriptions). Auto-picked from the phase switches:
+    # inventory-only is fastest; metrics and consumption each add work.
+    if ($PlanArgUnavailable)
+    {
+        Write-Host ""
+        Write-Host "NOTE: could not size by live metric-query volume (Resource Graph unavailable or the query failed), so this is a COARSE flat per-subscription estimate - it ignores per-subscription metric composition and can under- or over-size a tenant with uneven metric load. For a composition-aware plan ensure the Az.ResourceGraph module is available; for a tenant-accurate figure pass -PlanPerQuerySeconds measured from a prior run's Diagnostics timings." -ForegroundColor Yellow
+    }
+    $PlanPerSub = 60.0
+    $PlanMode = 'inventory + metrics + consumption'
+    if ($SkipMetrics -and $SkipConsumption) { $PlanPerSub = 20.0; $PlanMode = 'inventory only' }
+    elseif ($SkipMetrics -or $SkipConsumption) { $PlanPerSub = 40.0; $PlanMode = 'inventory + one of metrics/consumption' }
+    $PlanResult = Get-InventoryPlan -SubscriptionCount $Subscriptions.Count -Streams $PlanStreams -PerSubSeconds $PlanPerSub -MaxSingleMachineHours 2
 
     Write-Host ""
     Write-Host "================ Inventory Plan (assessment only - nothing was inventoried) ================" -ForegroundColor Green
     Write-Host ("Eligible subscriptions : {0}" -f $PlanResult.SubscriptionCount) -ForegroundColor Cyan
-    Write-Host ("This machine           : {0} vCPU / {1}  ->  -ParallelStreams {2} -ConcurrencyLimit {3}" -f $PlanRec.VCpu, $RamLabelPlan, $PlanStreams, $PlanRec.Concurrency) -ForegroundColor Cyan
+    Write-Host ("This machine           : {0} vCPU / {1}  ->  -ParallelStreams {2} -ConcurrencyLimit {3}" -f $PlanRec.VCpu, $RamLabelPlan, $PlanStreams, $PlanConcurrency) -ForegroundColor Cyan
     Write-Host ("Per-subscription est.  : ~{0}s ({1})" -f [int]$PlanResult.PerSubSeconds, $PlanMode) -ForegroundColor Cyan
     Write-Host ("Single-machine ceiling : {0} h" -f $PlanResult.MaxSingleMachineHours) -ForegroundColor Cyan
     Write-Host ""
@@ -930,7 +1127,7 @@ if ($Plan)
     {
         Write-Host ("Recommendation: SINGLE MACHINE is sufficient (est. ~{0}, under the {1} h ceiling)." -f (& $FmtDur $PlanResult.EstimatedSeconds), $PlanResult.MaxSingleMachineHours) -ForegroundColor Green
         Write-Host "Run:" -ForegroundColor Green
-        Write-Host ("  ./Run-AllSubscriptions.ps1 -TenantID {0} -ParallelStreams {1} -ConcurrencyLimit {2}{3}" -f $TenantID, $PlanStreams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
+        Write-Host ("  ./Run-AllSubscriptions.ps1 -TenantID {0} -ParallelStreams {1} -ConcurrencyLimit {2}{3}" -f (& $QuoteArg $TenantID), $PlanStreams, $PlanConcurrency, $ExtraStr) -ForegroundColor White
     }
     else
     {
@@ -941,7 +1138,7 @@ if ($Plan)
         $ListCount = [math]::Min($PlanResult.ShardCount, $MaxToList)
         for ($i = 0; $i -lt $ListCount; $i++)
         {
-            Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f $TenantID, $PlanResult.ShardCount, $i, $PlanStreams, $PlanRec.Concurrency, $ExtraStr) -ForegroundColor White
+            Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -ShardCount {1} -ShardIndex {2} -ParallelStreams {3} -ConcurrencyLimit {4}{5}" -f (& $QuoteArg $TenantID), $PlanResult.ShardCount, $i, $PlanStreams, $PlanConcurrency, $ExtraStr) -ForegroundColor White
         }
         if ($PlanResult.ShardCount -gt $MaxToList)
         {

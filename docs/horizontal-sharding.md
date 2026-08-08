@@ -129,11 +129,18 @@ For most tenants, with thousands of subscriptions, this evens out well enough in
 practice. If subscription size is very uneven and wall-clock balance matters,
 two other approaches address it:
 
-- **Weighted plan:** do one cheap pre-pass that counts resources per
-  subscription, then split so each machine's *total resource count* is roughly
-  equal. This must be computed **once** and shared with all machines (evenness is
-  a global property — it depends on all subscriptions together — so it cannot be
-  computed independently per machine without risking overlaps or gaps).
+- **Weighted plan (`-Plan`):** do one cheap pre-pass that counts each
+  subscription's projected **metric-query volume** (via Resource Graph — this is
+  what actually drives wall time; see [Plan.md](Plan.md)), not its raw resource
+  count. Rather than compute a custom subscription→machine assignment (which
+  would have to be shared with every machine and would break the coordination-
+  free property above), `-Plan` keeps the deterministic hash partition and
+  **simulates** it across candidate shard counts, recommending the smallest count
+  whose busiest shard — under that real hash assignment, so heavy subscriptions
+  clumping together is accounted for — fits under the wall-time ceiling. The
+  assignment each machine uses at run time is still the independent hash, so no
+  cross-machine coordination is needed; only the recommended shard *count* comes
+  from the plan.
 - **Dynamic work-queue:** workers claim subscriptions from a shared store (e.g.
   Azure Table Storage) as they finish, so a machine that draws a whale simply
   claims fewer subscriptions. This balances by actual wall-clock and recovers

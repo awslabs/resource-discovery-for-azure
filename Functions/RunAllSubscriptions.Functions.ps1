@@ -681,6 +681,290 @@ function Get-PlanShardDirective
     return $Lines
 }
 
+# Authoritative per-resource-type metric-query weights for -Plan sizing. Each
+# entry's Weight is the number of Azure Monitor metric queries the metrics phase
+# issues PER resource of that type - mirroring the metric definitions in
+# Extension/Metrics.ps1 (keep the two in sync if metric names are added/removed
+# there). ExtraFilter is the additional KQL predicate that scopes the type to the
+# resources actually queried (attached disks only; non-master SQL databases;
+# function apps only). Gate marks the types dropped by -SkipDiskMetrics /
+# -SkipStorageMetrics. Batched marks the types the metrics phase can fetch via
+# the Azure Monitor metrics:getBatch API (VMs, managed disks, storage accounts,
+# SQL databases, VM scale sets, Cosmos DB - see $BatchNamespaceMap in
+# Extension/Metrics.ps1); every other type stays on the slower per-call path.
+# -Plan discounts only the batched types under -UseMetricsBatch. NOTE: the SQL
+# database weight is the SERVERLESS worst case (9 metric defs: the 8 issued for
+# every DB plus the extra app_cpu_billed for serverless vCore DBs). Non-serverless
+# DBs issue 8, so this is a deliberate +1 conservative rounding (a planner should
+# over-, never under-estimate). PURE (no Azure) so it is unit-testable.
+function Get-MetricQueryWeightMap
+{
+    return @(
+        [pscustomobject]@{ Type = 'microsoft.compute/virtualmachines'; Weight = 2; ExtraFilter = $null; Gate = $null; Batched = $true }
+        [pscustomobject]@{ Type = 'microsoft.compute/disks'; Weight = 4; ExtraFilter = 'isnotempty(managedBy)'; Gate = 'Disk'; Batched = $true }
+        [pscustomobject]@{ Type = 'microsoft.storage/storageaccounts'; Weight = 1; ExtraFilter = $null; Gate = 'Storage'; Batched = $true }
+        [pscustomobject]@{ Type = 'microsoft.sql/servers/databases'; Weight = 9; ExtraFilter = "name != 'master'"; Gate = $null; Batched = $true }
+        [pscustomobject]@{ Type = 'microsoft.web/sites'; Weight = 2; ExtraFilter = "kind contains 'functionapp'"; Gate = $null; Batched = $false }
+        [pscustomobject]@{ Type = 'microsoft.dbformariadb/servers'; Weight = 3; ExtraFilter = $null; Gate = $null; Batched = $false }
+        [pscustomobject]@{ Type = 'microsoft.dbforpostgresql/servers'; Weight = 3; ExtraFilter = $null; Gate = $null; Batched = $false }
+        [pscustomobject]@{ Type = 'microsoft.dbformysql/servers'; Weight = 3; ExtraFilter = $null; Gate = $null; Batched = $false }
+        [pscustomobject]@{ Type = 'microsoft.dbformysql/flexibleservers'; Weight = 3; ExtraFilter = $null; Gate = $null; Batched = $false }
+        [pscustomobject]@{ Type = 'microsoft.dbforpostgresql/flexibleservers'; Weight = 3; ExtraFilter = $null; Gate = $null; Batched = $false }
+        [pscustomobject]@{ Type = 'microsoft.compute/virtualmachinescalesets'; Weight = 2; ExtraFilter = $null; Gate = $null; Batched = $true }
+        [pscustomobject]@{ Type = 'microsoft.documentdb/databaseaccounts'; Weight = 4; ExtraFilter = $null; Gate = $null; Batched = $true }
+        [pscustomobject]@{ Type = 'microsoft.containerregistry/registries'; Weight = 1; ExtraFilter = $null; Gate = $null; Batched = $false }
+    )
+}
+
+# Build the Resource Graph (KQL) query that returns, per subscription, the total
+# projected metric-query weight (sum of per-resource weights over the metric-
+# eligible resources). Honors the same -SkipDiskMetrics / -SkipStorageMetrics
+# gating the metrics phase uses, so the estimate matches what the real run will
+# query. PURE (returns a string) so it is unit-testable.
+function Get-PlanWeightKql
+{
+    param(
+        [switch]$SkipDiskMetrics,
+        [switch]$SkipStorageMetrics
+    )
+    $Cases = @()
+    $BatchCases = @()
+    foreach ($Entry in (Get-MetricQueryWeightMap))
+    {
+        if ($Entry.Gate -eq 'Disk' -and $SkipDiskMetrics) { continue }
+        if ($Entry.Gate -eq 'Storage' -and $SkipStorageMetrics) { continue }
+        $Pred = "type =~ '{0}'" -f $Entry.Type
+        if ($Entry.ExtraFilter) { $Pred += ' and ' + $Entry.ExtraFilter }
+        $Cases += ('{0}, {1}' -f $Pred, $Entry.Weight)
+        # __bw carries the weight ONLY for types the metrics phase can batch, so
+        # -Plan can apply the batch discount to just those and keep the per-call
+        # cost for the rest (Function Apps, OSS DBs, ACR).
+        if ($Entry.Batched) { $BatchCases += ('{0}, {1}' -f $Pred, $Entry.Weight) }
+    }
+    $CaseBody = $Cases -join ",`n    "
+    $BatchCaseBody = if ($BatchCases.Count -gt 0) { $BatchCases -join ",`n    " } else { "1 == 0, 0" }
+    return @"
+Resources
+| extend __w = case(
+    $CaseBody,
+    0)
+| extend __bw = case(
+    $BatchCaseBody,
+    0)
+| where __w > 0
+| summarize QueryWeight = sum(__w), BatchWeight = sum(__bw) by subscriptionId
+"@
+}
+
+# Deterministic per-subscription hash VALUE (the uint32 assembled from the first
+# four big-endian bytes of SHA-256 over the lowercased id) - the same value
+# Get-ShardKeyForSubscription reduces modulo ShardCount. Exposed separately so
+# the -Plan sizing can bucket subscriptions across many candidate shard counts
+# by computing the hash ONCE per subscription (then reducing % N cheaply) instead
+# of re-hashing for every candidate. Its consistency with
+# Get-ShardKeyForSubscription is locked by a unit test.
+function Get-SubscriptionHashValue
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$SubscriptionId
+    )
+    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($SubscriptionId.ToLowerInvariant())
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $Hash = $Sha.ComputeHash($Bytes) } finally { $Sha.Dispose() }
+    return ([uint32]$Hash[0] -shl 24) -bor ([uint32]$Hash[1] -shl 16) -bor ([uint32]$Hash[2] -shl 8) -bor [uint32]$Hash[3]
+}
+
+# Query the live tenant (native Search-AzGraph) for each subscription's projected
+# metric-query weight. Chunks the subscription list into groups of <=1000 (the
+# ARG per-query subscription cap) and pages each chunk via SkipToken. Returns a
+# hashtable { subscriptionId -> [pscustomobject]@{ Total; Batch } } where Total is
+# the full projected metric-query weight and Batch is the portion the metrics
+# phase can batch. Returns $null ONLY when the query is unusable (Search-AzGraph
+# missing, or the query threw) so the caller falls back to the flat estimate AND
+# warns; a successful query that simply matched no metric-eligible resources
+# returns an EMPTY hashtable (@{}) - a real, usable result the caller must not
+# confuse with failure. Only subscriptions with >0 weight appear as keys.
+function Get-PlanSubscriptionWeights
+{
+    param(
+        [Parameter(Mandatory = $true)][string[]]$SubscriptionIds,
+        [switch]$SkipDiskMetrics,
+        [switch]$SkipStorageMetrics
+    )
+    if (-not (Get-Command Search-AzGraph -ErrorAction SilentlyContinue)) { return $null }
+    $Kql = Get-PlanWeightKql -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:$SkipStorageMetrics
+    $Weights = @{}
+    try
+    {
+        $Ids = @($SubscriptionIds | Where-Object { $_ })
+        for ($Offset = 0; $Offset -lt $Ids.Count; $Offset += 1000)
+        {
+            $Chunk = @($Ids[$Offset..([math]::Min($Offset + 999, $Ids.Count - 1))])
+            $Batch = Search-AzGraph -Query $Kql -Subscription $Chunk -First 1000 -ErrorAction Stop
+            while ($true)
+            {
+                foreach ($Row in $Batch)
+                {
+                    $SubId = [string]$Row.subscriptionId
+                    if ($SubId)
+                    {
+                        $Weights[$SubId] = [pscustomobject]@{
+                            Total = [double]$Row.QueryWeight
+                            Batch = [double]$Row.BatchWeight
+                        }
+                    }
+                }
+                if (-not $Batch.SkipToken) { break }
+                $Batch = Search-AzGraph -Query $Kql -Subscription $Chunk -First 1000 -SkipToken $Batch.SkipToken -ErrorAction Stop
+            }
+        }
+    }
+    catch { return $null }
+    # A successful-but-empty result ($Weights.Count -eq 0) is a USABLE answer (no
+    # metric-eligible resources in scope), NOT a failure - return the empty map so
+    # the caller sizes every subscription at base overhead rather than triggering
+    # the coarse flat fallback + warning.
+    return $Weights
+}
+
+# Composition-aware shard sizing. Given each subscription's ESTIMATED wall-time
+# seconds (base overhead + per-query cost x its metric-query weight), find the
+# smallest shard count whose BUSIEST shard finishes within the ceiling - by
+# simulating the ACTUAL runtime hash partition (Get-SubscriptionHashValue % N),
+# so the recommendation accounts for heavy subscriptions clumping onto one shard
+# rather than assuming a perfectly even split. Within a shard, a shard's wall time
+# is modelled as max(largest single subscription, sum / Streams) to reflect the
+# per-stream parallelism and the hard floor set by the single slowest sub. PURE
+# (no Azure) so it is unit-testable. ShardCount is never recommended above the
+# subscription count (a shard needs >=1 subscription to do work). Returns a plan
+# PSCustomObject; when the busiest shard cannot get under the ceiling,
+# CeilingUnreachable is $true, ShardCount is capped, and CeilingUnreachableReason
+# says why ('single-subscription-exceeds-ceiling' - one sub alone is over the
+# ceiling and sharding cannot help; or 'shard-cap-or-hash-collisions' - the cap
+# (=subscription count) cannot separate clumped mid-weight subscriptions).
+function Get-WeightedInventoryPlan
+{
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$SubSeconds,
+        [int]$Streams = 1,
+        [double]$MaxSingleMachineHours = 2,
+        [int]$MaxShards = 1000
+    )
+    if ($Streams -lt 1) { $Streams = 1 }
+    if ($MaxSingleMachineHours -le 0) { $MaxSingleMachineHours = 2 }
+    if ($MaxShards -lt 1) { $MaxShards = 1 }
+    $CeilingSeconds = $MaxSingleMachineHours * 3600
+    $SubIds = @($SubSeconds.Keys)
+    $SubCount = $SubIds.Count
+
+    if ($SubCount -eq 0)
+    {
+        return [pscustomobject]@{
+            Mode = 'Single'; ShardCount = 1; Streams = $Streams; SubscriptionCount = 0
+            TotalSeconds = 0; BusiestShardSeconds = 0; LargestSingleSubSeconds = 0
+            PerMachineSubscriptions = 0; MaxSingleMachineHours = $MaxSingleMachineHours
+            CeilingUnreachable = $false; CeilingUnreachableReason = $null
+        }
+    }
+
+    # Never recommend more shards than there are subscriptions - a shard needs at
+    # least one subscription to do any work. Also bounds the candidate search.
+    if ($MaxShards -gt $SubCount) { $MaxShards = $SubCount }
+
+    $TotalSeconds = 0.0
+    $LargestSingle = 0.0
+    $HashVal = @{}
+    foreach ($Id in $SubIds)
+    {
+        $Sec = [double]$SubSeconds[$Id]
+        $TotalSeconds += $Sec
+        if ($Sec -gt $LargestSingle) { $LargestSingle = $Sec }
+        $HashVal[$Id] = Get-SubscriptionHashValue -SubscriptionId $Id
+    }
+
+    # Busiest-shard wall time for a candidate shard count N, using the real hash
+    # partition. Local scriptblock so the per-N loop stays a single pass.
+    $BusiestForN = {
+        param([int]$N)
+        $BucketSum = @{}
+        $BucketMax = @{}
+        foreach ($Id in $SubIds)
+        {
+            $K = [int]($HashVal[$Id] % [uint32]$N)
+            $Sec = [double]$SubSeconds[$Id]
+            $BucketSum[$K] = ([double]$BucketSum[$K]) + $Sec
+            if ($Sec -gt ([double]$BucketMax[$K])) { $BucketMax[$K] = $Sec }
+        }
+        $Busiest = 0.0
+        foreach ($K in $BucketSum.Keys)
+        {
+            $Wall = [math]::Max([double]$BucketMax[$K], [math]::Ceiling(([double]$BucketSum[$K]) / $Streams))
+            if ($Wall -gt $Busiest) { $Busiest = $Wall }
+        }
+        return $Busiest
+    }
+
+    $CeilingUnreachable = $false
+    $CeilingUnreachableReason = $null
+    $ChosenN = 0
+    $Busiest = 0.0
+
+    if ($LargestSingle -gt $CeilingSeconds)
+    {
+        # No amount of sharding can help: sharding splits work ACROSS
+        # subscriptions, never within one, so the single slowest subscription is
+        # a hard floor on the busiest shard. Skip the (pointless) search - this
+        # also avoids up to SubCount x MaxShards bucket passes for an estate that
+        # provably cannot fit.
+        $ChosenN = $MaxShards
+        $Busiest = [double](& $BusiestForN $MaxShards)
+        $CeilingUnreachable = $true
+        $CeilingUnreachableReason = 'single-subscription-exceeds-ceiling'
+    }
+    else
+    {
+        # Start the search at the aggregate lower bound (a smaller N provably
+        # cannot fit the total work under the ceiling), then grow until the
+        # busiest shard fits. Bounded by MaxShards (already clamped to the
+        # subscription count), so it is a handful of candidates in practice.
+        $Lower = [long][math]::Ceiling($TotalSeconds / ($Streams * $CeilingSeconds))
+        if ($Lower -lt 1) { $Lower = 1 }
+        if ($Lower -gt $MaxShards) { $Lower = $MaxShards }
+
+        for ($N = $Lower; $N -le $MaxShards; $N++)
+        {
+            $B = [double](& $BusiestForN $N)
+            if ($B -le $CeilingSeconds) { $ChosenN = $N; $Busiest = $B; break }
+        }
+
+        if ($ChosenN -eq 0)
+        {
+            # Every candidate up to the cap still has a shard over the ceiling
+            # even though no single subscription exceeds it: the hash partition
+            # clumps enough mid-weight subscriptions together that the cap
+            # (=subscription count) cannot separate them.
+            $ChosenN = $MaxShards
+            $Busiest = [double](& $BusiestForN $MaxShards)
+            $CeilingUnreachable = $true
+            $CeilingUnreachableReason = 'shard-cap-or-hash-collisions'
+        }
+    }
+
+    return [pscustomobject]@{
+        Mode                    = if ($ChosenN -le 1) { 'Single' } else { 'Sharded' }
+        ShardCount              = $ChosenN
+        Streams                 = $Streams
+        SubscriptionCount       = $SubCount
+        TotalSeconds            = [long]$TotalSeconds
+        BusiestShardSeconds     = [long]$Busiest
+        LargestSingleSubSeconds = [long]$LargestSingle
+        PerMachineSubscriptions = [int][math]::Ceiling($SubCount / $ChosenN)
+        MaxSingleMachineHours   = $MaxSingleMachineHours
+        CeilingUnreachable      = $CeilingUnreachable
+        CeilingUnreachableReason = $CeilingUnreachableReason
+    }
+}
+
 # === Pre-flight checks ===
 #
 # Detect the most common environment problems that make a long run pointless,

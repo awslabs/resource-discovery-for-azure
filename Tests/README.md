@@ -88,10 +88,10 @@ fixture pair available.
 ### What it asserts
 
 - Both bundles unpack to the same number of inner per-sub ZIPs
-- Each inner ZIP contains XLSX, Inventory JSON, Metrics JSON, Consumption CSV
+- Each inner ZIP contains HTML, Inventory JSON, Metrics JSON, Consumption CSV
 - Total resource count matches between modes (no resource dropping)
 - Per-sub set of populated resource types is identical
-- Per-sub XLSX worksheet name set is identical (Overview always present)
+- Per-sub HTML service-section set is identical (one `service-section` per populated resource type)
 - Inventory JSON top-level key set is identical
 - Consumption record count matches exactly (queries are sub-scoped)
 - Metrics record count matches within 5% (time-window queries can drift slightly)

@@ -102,7 +102,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
-- **Az PowerShell module** — only four submodules are needed (install before running — see below)
+- **Az PowerShell module** — only five submodules are needed (install before running — see below)
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
@@ -113,19 +113,19 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the four Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those four submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the four it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
+**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the five Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`, `Az.ResourceGraph`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those five submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the five it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
 
 **Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
 ```powershell
 Get-Module Az* -ListAvailable | Uninstall-Module -Force
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
   
 
@@ -264,7 +264,7 @@ The wrapper prints the count of excluded subscriptions and a per-state breakdown
 
 Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
 
-The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+The check makes one cheap native control-plane call per subscription (an `Invoke-AzRestMethod` ARM resource-groups list) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
 
 By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
 
@@ -507,7 +507,13 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
 | `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = each family's native cadence (15 min VM, 30 min SQL, 60 min OSS-DB). A set value (5/15/30/60) is applied **uniformly** to all three families and honored as-is. Coarser than a family's native cadence cuts that family's data-point volume/memory; finer increases it (your choice — e.g. `30` for finer OSS-DB fidelity than its 60-min default). Does **not** change the API-call count. All values are supported (these series have a 1-minute base grain). Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
 | `UseMetricsBatch` | Switch | Collect VM/disk/storage metrics via the Azure Monitor `metrics:getBatch` data-plane API (one request per ≤50 resources), which lowers the metric-query API-call count. Falls back to the per-call path on any failure. See `docs/metrics-batch-trial.md`. | False | `-UseMetricsBatch` |
-| `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
+| `HeadRoom` | Integer (0–90) | Leave this percentage of the chosen metrics concurrency unused so the run consumes less of the shared Azure API throttle budget (leaving room for the customer's production workloads). `0` = full concurrency. | 0 | `-HeadRoom 20` |
+| `Plan` | Switch | Assess-only sizing: authenticate, size the workload from live metric-query volume, print a single-machine or shard recommendation with ready-to-paste commands, then exit **without** inventorying anything. | False | `-Plan` |
+| `PlanPerQuerySeconds` | Double | `-Plan` only: override the estimated per-metric-query wall-time (seconds) with a figure measured from a prior run's Diagnostics timings, for a tenant-accurate estimate. | 0 (auto) | `-PlanPerQuerySeconds 2.5` |
+| `UploadToBlobContainerUri` | String | Upload each node's finalized report zip to a shared blob container (passwordless, via the run's own identity; requires `Az.Storage`). Omit to keep output node-local. | (none) | `-UploadToBlobContainerUri https://acct.blob.core.windows.net/container` |
+| `StateBlobContainerUri` | String | Mirror the resume/state file to a blob container so a run survives local-disk loss (e.g. an AKS pod reschedule; requires `Az.Storage`). Omit to keep state local-only. | (none) | `-StateBlobContainerUri https://acct.blob.core.windows.net/container` |
+
+> **Inner-script only:** `MetricsLookbackDays` (days of metric history for the trend metrics; lower reduces run time/memory) is a parameter of the inner `ResourceInventory.ps1`, **not** of `Run-AllSubscriptions.ps1` — passing it to the wrapper fails parameter binding. Use it only when calling the inner script directly: `./ResourceInventory.ps1 ... -MetricsLookbackDays 14`.
 
 ### Metrics Lookback Window
 
@@ -613,7 +619,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Tenant-domain-style `-TenantID` (e.g. `contoso.onmicrosoft.com`) is resolved via Microsoft's public OIDC discovery endpoint, no sign-in needed. Pass the tenant GUID directly if discovery fails.
 
 **Subscription returned 0 resources:**
-- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
+- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `Search-AzGraph` acid-test command to confirm.
 - Less commonly, the subscription is genuinely empty.
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
 
@@ -625,7 +631,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
 - The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
-- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
 
 **Cloud Shell session ended mid-run:**
 - Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.

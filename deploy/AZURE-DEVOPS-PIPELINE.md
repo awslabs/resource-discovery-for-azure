@@ -108,7 +108,7 @@ cannot reach the API server. Two options:
   `az aks get-credentials` + `kubectl` lines in the Deploy/Collect stages with:
   ```bash
   az aks command invoke -g $(RG) -n $(CLUSTER) \
-    --command "kubectl apply -f job.rendered.yaml -n $(NS)" --file job.rendered.yaml
+    --command "kubectl apply -f job.rendered.yaml -n $(NS)" --file /tmp/job.rendered.yaml
   ```
   The service connection needs `Microsoft.ContainerService/managedClusters/runcommand/action`
   and `.../commandResults/read` (the **Azure Kubernetes Service Cluster User** +
@@ -286,6 +286,12 @@ stages:
 > `kubectl apply -f` your copies. To add `UPLOAD_BLOB_URI` / `ALLOW_PARTIAL_ACCESS`
 > / `USE_METRICS_BATCH` env vars, either bake them into your `job.yaml` or extend
 > the render step — they map 1:1 to the knobs in `job.yaml`'s comments.
+>
+> **`UPLOAD_BLOB_URI` is required for the Collect stage.** It is what makes each
+> pod upload its zip to the container behind `$(UPLOAD_ACCOUNT)/$(UPLOAD_CONTAINER)`;
+> without it the pods keep their zips node-local and the Collect stage's
+> `az storage blob download-batch` finds nothing to publish. Set it on the Job
+> (or drop the Collect stage and gather the zips from the nodes another way).
 
 ## Notes & gotchas
 

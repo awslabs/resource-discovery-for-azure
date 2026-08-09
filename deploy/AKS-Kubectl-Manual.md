@@ -99,8 +99,10 @@ Edit both shipped manifests so **namespace + SA + federated subject all agree**:
   set the `azure.workload.identity/client-id` annotation to `$CLIENT_ID`.
 - `deploy/k8s/job.yaml` → `metadata.namespace: $NS`, `spec.template.spec.serviceAccountName: $SA`,
   `image:` → `$ACR.azurecr.io/rda:latest`, and `completions` = `parallelism` =
-  `SHARD_COUNT` env (all the same number). Optionally set `UPLOAD_BLOB_URI` and,
-  for a first test without tenant-root Reader, `ALLOW_PARTIAL_ACCESS: "true"`.
+  `SHARD_COUNT` env (all the same number). Optionally set `UPLOAD_BLOB_URI`
+  (per-pod zip upload) and, for AKS pod-reschedule durability, `STATE_BLOB_URI`
+  (blob-mirrored resume state so a rescheduled pod resumes instead of restarting);
+  and, for a first test without tenant-root Reader, `ALLOW_PARTIAL_ACCESS: "true"`.
 
 ```bash
 kubectl apply -f deploy/k8s/serviceaccount.yaml    # into your existing namespace
@@ -148,7 +150,7 @@ With `UPLOAD_BLOB_URI` set, each pod uploads its own zip (`shard-<i>of<n>-<zip>`
 
 ```bash
 az storage blob download-batch --account-name <account> --source <container> \
-  --destination ./collected --pattern "*.zip"
+  --destination ./collected --auth-mode login --pattern "*.zip"
 ```
 
 - **One zip per non-empty shard**; shards are disjoint, so together they cover the tenant once — **ingest each separately, no merge needed**.

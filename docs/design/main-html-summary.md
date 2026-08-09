@@ -2,7 +2,9 @@
 
 Status: IMPLEMENTED. Shipped as the `New-RdaAllSubHtmlSummary` function in
 `Functions/AllSubHtmlSummary.Functions.ps1`, invoked by `Run-AllSubscriptions.ps1`
-behind the `-MainSummary` switch (`-Detailed` for the Tier 2 service charts). The
+on EVERY run (`-Detailed` adds the Tier 2 service charts). The `-MainSummary`
+switch is retained only for backward compatibility and is now a no-op — the
+summary is always produced and folded into the consolidated bundle. The
 shared render helpers (`ConvertTo-HtmlSafe` / `New-DonutChart` / `New-BarChart`)
 were extracted into that same function file and are dot-sourced by BOTH the
 per-subscription report (`Extension/Summary.ps1`) and the aggregate builder, so

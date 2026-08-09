@@ -17,11 +17,13 @@ footprint against the Azure Monitor "metric queries" free tier.
   `Az.ResourceGraph`.
 - Reader (or higher) on the subscription(s) you want to inventory.
 
-## Get the branch
+## Get the code
+
+`-UseMetricsBatch` is now part of mainline — no special branch is needed. Clone
+(or pull) the repository as usual:
 
 ```bash
-git clone -b experiment/metrics-dataplane-batch \
-  https://github.com/pmorgenrood/resource-discovery-for-azure.git
+git clone https://github.com/pmorgenrood/resource-discovery-for-azure.git
 cd resource-discovery-for-azure
 ```
 

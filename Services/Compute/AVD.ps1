@@ -41,15 +41,16 @@ if ($Task -eq 'Processing')
                         # dictionary value when the backing VM was indexed, else the
                         # lossy 'obfuscated' fallback used elsewhere in the codebase.
                         $HostIdValue = if ($ResourceIdDictionary.ContainsKey($Vmsessionhosts.Id)) { $ResourceIdDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
-                        # Deterministic hostname: derive from VM ID hash so same input = same output
-                        $HnPrefix = $HostIdValue.Split('_')[0]
-                        $Sha = [System.Security.Cryptography.SHA256]::Create()
-                        try
-                        {
-                            $HnHash = [System.BitConverter]::ToString($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Vmsessionhosts.Id + '_hostname'))).Replace('-', '').Substring(0, 32).ToLower()
-                        }
-                        finally { $Sha.Dispose() }
-                        $HostnameValue = $HnPrefix + '_' + $HnHash.Substring(0, 8) + '-' + $HnHash.Substring(8, 4) + '-' + $HnHash.Substring(12, 4) + '-' + $HnHash.Substring(16, 4) + '-' + $HnHash.Substring(20, 12)
+                        # In the clear, Hostname is the backing VM's Name (see the else
+                        # branch below), so under obfuscation it must reuse the SAME name
+                        # token that VM's inventory 'Name' receives - otherwise an AVD row
+                        # cannot be joined back to its VM. $Global:ResourceNameDictionary is
+                        # keyed by the VM's real id and is fully populated in the up-front
+                        # obfuscation pass that runs before any collector, so the token is
+                        # available here (same read pattern the consumption phase uses for
+                        # $Global:ResourceIdDictionary). Falls back to 'obfuscated' when the
+                        # VM was not indexed (deleted / out of scope), consistent with HostId.
+                        $HostnameValue = if ($null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($Vmsessionhosts.Id)) { $Global:ResourceNameDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
                     }
                     else
                     {

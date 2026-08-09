@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'SKUFamily'                 = $Sku.family;
                 'Tier'                      = $Sku.tier;
                 'Capacity'                  = $Sku.capacity;
-                'MySQLVersion'              = "=$($Data.version)";
+                'MySQLVersion'              = $Data.version;
                 'BackupRetentionDays'       = $Data.storageProfile.backupRetentionDays;
                 'GeoRedundantBackup'        = $Data.storageProfile.geoRedundantBackup;
                 'AutoGrow'                  = $Data.storageProfile.storageAutogrow;

@@ -19,9 +19,9 @@ if ($Task -eq 'Processing')
             # convert null to type System.DateTime", which previously killed the whole
             # Stream Analytics collector for the subscription. Guard each one and emit $null
             # when the source value is missing.
-            $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { (get-date $Data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") }
-            $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { (get-date $Data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
-            $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { (get-date $Data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
+            $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { try { (get-date $Data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") } catch { $null } }
+            $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { try { (get-date $Data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { $null } }
+            $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { try { (get-date $Data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { $null } }
 
             $Obj = @{
                 'ID'                               = $1.id;

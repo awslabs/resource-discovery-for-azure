@@ -20,8 +20,8 @@ if ($Task -eq 'Processing')
                     'Subscription'                      = $Sub1.Name;
                     'ResourceGroup'                     = $1.RESOURCEGROUP;
                     'Name'                              = $1.NAME;
-                    'SKU'                               = $Data.sku.name;
-                    'SKUTier'                           = $Data.sku.tier;
+                    'SKU'                               = $1.sku.name;
+                    'SKUTier'                           = $1.sku.tier;
                     'Location'                          = $loc.location;
                     'Role'                              = $loc.role;
                     'State'                             = $Data.state;

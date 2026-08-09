@@ -12,9 +12,10 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            $NetAppAccount = $1.Name.split('/')[0]
-            $CapacityPool = $1.Name.split('/')[1]
-            $Volume = $1.Name.split('/')[2]
+            $NameParts = @(([string]$1.Name).Split('/'))
+            $NetAppAccount = $NameParts[0]
+            $CapacityPool = $NameParts[1]
+            $Volume = $NameParts[2]
             $Quota = ((($Data.usageThreshold / 1024) / 1024) / 1024) / 1024
 
             $Obj = @{
@@ -30,11 +31,6 @@ if ($Task -eq 'Processing')
                 'Protocol'                          = [string]$Data.protocolTypes;
                 'MaxThroughputMiBs'                 = [string]$Data.throughputMibps;
                 'LDAP'                              = $Data.ldapEnabled;
-                # Migration phase: encryptionKeySource = 'Microsoft.KeyVault' means the volume
-                # uses a customer-managed key (CMK must be handled before migration);
-                # 'Microsoft.NetApp' is the platform-managed default. Surfaced for AWS
-                # migration planning.
-                'EncryptionKeySource'               = $Data.encryptionKeySource;
             }
 
             $Tmp += $Obj

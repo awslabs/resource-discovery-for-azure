@@ -252,7 +252,8 @@ Describe 'Merge-RecoveryData consumption handling' {
         New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) })
         New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
 
-        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
+        # Return value is unused here; this case asserts on the emitted CSV.
+        $null = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
 
         $OutCsv = Join-Path $C.Output ('Consumption_{0}.csv' -f $script:GapBase)
         Test-Path -Path $OutCsv | Should -BeTrue

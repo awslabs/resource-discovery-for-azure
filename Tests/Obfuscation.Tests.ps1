@@ -547,6 +547,12 @@ Describe "Cross-Reference Field Obfuscation" {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.DatabaseServer))
             {
                 $r.DatabaseServer | Should -Not -Match $script:AzureIdPattern -Because "DatabaseServer should not contain raw Azure resource ID"
+                # ARM-path check alone lets a raw SHORT name (no /subscriptions/ prefix)
+                # pass. Require an obfuscation token unless it is a tolerated sentinel.
+                if ($r.DatabaseServer -notin @('obfuscated', 'None'))
+                {
+                    $r.DatabaseServer | Should -Match $script:ObfuscationPattern -Because "DatabaseServer must be an obfuscation token, not a raw short name"
+                }
                 $Checked++
             }
         }
@@ -577,6 +583,12 @@ Describe "Cross-Reference Field Obfuscation" {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.InstancePoolName))
             {
                 $r.InstancePoolName | Should -Not -Match $script:AzureIdPattern -Because "InstancePoolName should not contain raw Azure resource ID"
+                # ARM-path check alone lets a raw SHORT name pass. Require an
+                # obfuscation token unless it is a tolerated sentinel.
+                if ($r.InstancePoolName -notin @('obfuscated', 'None'))
+                {
+                    $r.InstancePoolName | Should -Match $script:ObfuscationPattern -Because "InstancePoolName must be an obfuscation token, not a raw short name"
+                }
                 $Checked++
             }
         }
@@ -607,6 +619,12 @@ Describe "Cross-Reference Field Obfuscation" {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource) -and $r.AssociatedResource -ne 'None')
             {
                 $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "AssociatedResource should not contain raw Azure resource ID"
+                # ARM-path check alone lets a raw SHORT name pass. Require an
+                # obfuscation token unless it is a tolerated sentinel.
+                if ($r.AssociatedResource -notin @('obfuscated', 'None'))
+                {
+                    $r.AssociatedResource | Should -Match $script:ObfuscationPattern -Because "AssociatedResource must be an obfuscation token, not a raw short name"
+                }
                 $Checked++
             }
         }
@@ -622,6 +640,12 @@ Describe "Cross-Reference Field Obfuscation" {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.AssociatedResource))
             {
                 $r.AssociatedResource | Should -Not -Match $script:AzureIdPattern -Because "Disk AssociatedResource should not contain raw Azure resource ID"
+                # ARM-path check alone lets a raw SHORT name pass. Require an
+                # obfuscation token unless it is a tolerated sentinel.
+                if ($r.AssociatedResource -notin @('obfuscated', 'None'))
+                {
+                    $r.AssociatedResource | Should -Match $script:ObfuscationPattern -Because "Disk AssociatedResource must be an obfuscation token, not a raw short name"
+                }
                 $Checked++
             }
         }
@@ -698,6 +722,12 @@ Describe "Cross-Reference Field Obfuscation" {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.StorageAccount))
             {
                 $r.StorageAccount | Should -Not -Match $script:AzureIdPattern -Because "ML StorageAccount should not contain raw Azure resource ID"
+                # ARM-path check alone lets a raw SHORT name pass. Require an
+                # obfuscation token unless it is a tolerated sentinel.
+                if ($r.StorageAccount -notin @('obfuscated', 'None'))
+                {
+                    $r.StorageAccount | Should -Match $script:ObfuscationPattern -Because "ML StorageAccount must be an obfuscation token, not a raw short name"
+                }
                 $Checked++
             }
         }
@@ -713,6 +743,12 @@ Describe "Cross-Reference Field Obfuscation" {
             if ($null -ne $r -and ![string]::IsNullOrEmpty($r.KeyVault))
             {
                 $r.KeyVault | Should -Not -Match $script:AzureIdPattern -Because "ML KeyVault should not contain raw Azure resource ID"
+                # ARM-path check alone lets a raw SHORT name pass. Require an
+                # obfuscation token unless it is a tolerated sentinel.
+                if ($r.KeyVault -notin @('obfuscated', 'None'))
+                {
+                    $r.KeyVault | Should -Match $script:ObfuscationPattern -Because "ML KeyVault must be an obfuscation token, not a raw short name"
+                }
                 $Checked++
             }
         }

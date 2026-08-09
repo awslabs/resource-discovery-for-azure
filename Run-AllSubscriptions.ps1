@@ -2566,7 +2566,9 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
         $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
         Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
-        Compress-Archive -Path $SubZips.FullName -DestinationPath $OuterZipFile -Force
+        # -LiteralPath (as Reveal.ps1 uses) so a report folder/zip name containing
+        # [ ] is not treated as a wildcard glob and silently dropped.
+        Compress-Archive -LiteralPath $SubZips.FullName -DestinationPath $OuterZipFile -Force
         Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
     }
     else

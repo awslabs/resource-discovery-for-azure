@@ -12,7 +12,11 @@ if ($Task -eq 'Processing')
         foreach ($0 in $Autacc)
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $0.subscriptionId }
-            $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name }
+            # Match on BOTH the account-name (segment 8) and resource-group
+            # (segment 4) of the runbook's ARM id. Name alone would cross-associate
+            # runbooks when two automation accounts share a name in different
+            # resource groups within one subscription.
+            $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name -and $_.id.split('/')[4] -eq $0.RESOURCEGROUP }
 
             $Data0 = $0.properties
             $Timecreated = try { if ($null -ne $Data0.creationTime) { [datetime]($Data0.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }

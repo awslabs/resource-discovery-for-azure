@@ -48,6 +48,12 @@ BeforeAll {
     # prod_/nonprod_ + optional type hint + GUID. Used to prove that a
     # cross-reference / cached metric value is a real token, never a raw id.
     $script:TokenPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+    # Obfuscation signal for mode-gated assertions: in an obfuscated run every
+    # inventory ID is a prod_/nonprod_ token, so a single match proves the run
+    # was obfuscated. Lets the consumption raw-path guard below stay quiet on a
+    # default (non-obfuscated) run where raw ARM ids are expected.
+    $script:IsObfuscated = @($script:AllIds | Where-Object { $_ -match $script:TokenPattern }).Count -gt 0
 }
 
 AfterAll {
@@ -122,17 +128,27 @@ Describe "Obfuscated ID Uniqueness" {
 }
 
 Describe "Consumption to Inventory Cross-Reference" {
-    It "Consumption ResourceIds that exist in inventory should use the same obfuscated value" {
+    It "Consumption ResourceIds are obfuscated (never a raw ARM path)" {
         if ($script:ConsumptionCsv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
-        $InventoryIds = $script:AllIds
+        # Raw ARM paths are expected in a default (non-obfuscated) run, so this
+        # only asserts in obfuscated mode. Skip honestly rather than pass vacuously.
+        if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "consumption ResourceIds are only obfuscated in an obfuscated run"; return }
+        $Seen = 0
         foreach ($row in $script:ConsumptionCsv)
         {
-            if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $InventoryIds)
-            {
-                # If it's in both, the ID should be identical (same dictionary mapping)
-                $row.ResourceId | Should -BeIn $InventoryIds -Because "Consumption ResourceId should match inventory ID"
-            }
+            if ([string]::IsNullOrEmpty($row.ResourceId)) { continue }
+            $Seen++
+            # The old assertion was tautological: it only fired inside an
+            # `if ($row.ResourceId -in $InventoryIds)` guard, so it re-asserted
+            # membership it had just tested. The real invariant is that an
+            # obfuscated consumption ResourceId is NEVER a raw Azure resource
+            # path - the consumption phase must run its ids through the
+            # obfuscator, same as inventory. A leak here would slip past the
+            # membership-only check because a raw path is simply absent from
+            # the obfuscated inventory id set.
+            $row.ResourceId | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "obfuscated consumption ResourceId must not be a raw Azure resource path"
         }
+        if ($Seen -eq 0) { Set-ItResult -Skipped -Because "no consumption row carried a ResourceId in this fixture" }
     }
 }
 
@@ -148,10 +164,19 @@ Describe "ResourceGroup Consistency" {
                 }
             }
         }
-        # Each RG should have at least one resource
+        # Each RG should have at least one resource. (The Count check alone is
+        # trivially >=1 because the key was created by appending an ID; when
+        # obfuscated, also prove the RG key itself is a deterministic pseudonym
+        # rather than a raw name - a raw RG key would mean the RG dictionary
+        # failed to map it. Count-independent, so it holds regardless of how many
+        # RGs the fixture has.)
         foreach ($rg in $RgGroups.Keys)
         {
             $RgGroups[$rg].Count | Should -BeGreaterThan 0 -Because "ResourceGroup '$rg' should have at least one resource"
+            if ($script:IsObfuscated -and -not [string]::IsNullOrEmpty($rg))
+            {
+                $rg | Should -Match '^(prod|nonprod)_' -Because "obfuscated ResourceGroup keys must be deterministic pseudonyms, not raw names"
+            }
         }
     }
 }

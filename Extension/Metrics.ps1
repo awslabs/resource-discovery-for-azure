@@ -167,7 +167,11 @@ if ($Task -eq 'Processing')
 
         $MetricError = $false
         $DataPoints = @()
-        if ($null -ne $MetricResult -and $MetricResult.timeseries)
+        # Also guard against a present-but-null .data: @($null).Count is 1, which
+        # would report MetricTotalCount=1 for an empty series where the per-call
+        # path (@($MetricQuery.Data).Count over an empty array) reports 0. Requiring
+        # .data to be non-null keeps the batch denominator identical to per-call.
+        if ($null -ne $MetricResult -and $MetricResult.timeseries -and $null -ne $MetricResult.timeseries[0].data)
         {
             $DataPoints = @($MetricResult.timeseries[0].data)
         }

@@ -2515,8 +2515,6 @@ if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
     "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }
 
-$JsonWildCard = $DefaultPath + "*.json"
-
 if ($Obfuscate.IsPresent)
 {
     # Shareable diagnostics log for this (obfuscated) run - phase timings +
@@ -2569,6 +2567,14 @@ else
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 
+    # Use the SAME hardened json file list as the obfuscated branch rather than a
+    # broad DefaultPath+'*.json' wildcard. In a default run none of the excluded
+    # names exist as .json (the dictionary is not written; DebugLog_/ErrorLog_ are
+    # .log), so this ships exactly the same files today - but keeps the two
+    # branches symmetric so a future local *.json artifact cannot be swept into
+    # the default zip while being filtered out of the obfuscated one.
+    $JsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+
     # Exclude the PowerShell transcript from the default zip too. It captures
     # the authenticated account UPN, tenant/subscription IDs, and local paths
     # from Start-Transcript onward - data customers don't expect in the shared
@@ -2576,7 +2582,7 @@ else
     # The Diagnostics_*.log (a .log, not swept by the *.json wildcard) is added
     # explicitly via $ShareableExtras so it ships in the default zip too.
     $CompressionOutput = @{
-        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $JsonWildCard) + $ShareableExtras
+        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }

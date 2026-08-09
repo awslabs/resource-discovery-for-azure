@@ -132,7 +132,11 @@ $TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
 # services; if most match the obfuscation signature treat the report as
 # obfuscated, else identifiable (the safe default for an unclear posture).
 $ObfuscationStatus = 'identifiable'
-$ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+# Allow the optional type hint (databricks_/aks_/vmss_) that some collectors
+# prepend to a token, so a fully-obfuscated report whose sampled Names are
+# type-hinted (e.g. AKS/VMSS) is not mislabeled 'identifiable'. Same grammar
+# the obfuscation tests use.
+$ObfPattern = '^(prod_|nonprod_)(databricks_|aks_|vmss_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 $Samples = New-Object System.Collections.Generic.List[string]
 foreach ($svc in $ServiceSummary | Select-Object -First 5)
 {

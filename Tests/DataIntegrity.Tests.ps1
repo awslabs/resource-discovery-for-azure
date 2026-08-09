@@ -173,6 +173,21 @@ Describe "Deterministic Mapping" {
         }
         $UniqueRGs = $Rgs | Select-Object -Unique
         $UniqueRGs.Count | Should -BeLessOrEqual $Rgs.Count -Because "ResourceGroup values should be reused (deterministic)"
+        # The count check above is necessary but trivially true. When obfuscated,
+        # also prove each RG value is a deterministic pseudonym (prod_/nonprod_
+        # token), never a raw name - a raw RG would mean the RG dictionary failed
+        # to map it. This is count-independent so it does not depend on how many
+        # RGs a given subscription happens to have.
+        if ($script:IsObfuscated)
+        {
+            foreach ($rg in $UniqueRGs)
+            {
+                if (-not [string]::IsNullOrEmpty($rg))
+                {
+                    $rg | Should -Match '^(prod|nonprod)_' -Because "obfuscated ResourceGroup values must be deterministic pseudonyms, not raw names"
+                }
+            }
+        }
     }
 }
 

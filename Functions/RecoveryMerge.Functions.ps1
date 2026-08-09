@@ -128,13 +128,16 @@ function Merge-RecoveryData
         }
 
         # Collect the DISTINCT obfuscation tokens present in the inventory text.
-        # The pattern matches only flat per-resource tokens (prod_/nonprod_<guid>),
-        # which are what the inventory ID/Name fields carry and what the dictionary
-        # maps key on. Consumption-style tokens (prod_sub_/prod_rg_...) live in the
-        # CSV, not the inventory JSON, so they never enter this scan.
+        # The pattern matches per-resource tokens the inventory ID/Name fields
+        # carry: flat prod_/nonprod_<guid> plus the optional type hint some
+        # collectors prepend (prod_aks_<guid>, prod_vmss_<guid>,
+        # prod_databricks_<guid>). Including the hinted forms strengthens the
+        # coverage guard (they were previously invisible to it). Consumption-style
+        # tokens (prod_sub_/prod_rg_...) live in the CSV, not the inventory JSON,
+        # so they never enter this scan.
         $InventoryText = Get-Content -Path $InventoryPath -Raw
         $InventoryTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))
+        foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_(?:databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))
         {
             [void]$InventoryTokens.Add($TokenMatch.Value)
         }

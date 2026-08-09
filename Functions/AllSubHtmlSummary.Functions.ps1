@@ -231,7 +231,10 @@ function New-RdaAllSubHtmlSummary
         $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
     }
 
-    $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    # Allow the optional type hint (databricks_/aks_/vmss_) some collectors
+    # prepend to a token, so a fully-obfuscated aggregate is not mislabeled
+    # 'identifiable'. Same grammar the obfuscation tests use.
+    $ObfPattern = '^(prod_|nonprod_)(databricks_|aks_|vmss_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     $Samples = New-Object System.Collections.Generic.List[string]
     $SubReports = @()
     $ServiceAgg = [ordered]@{}

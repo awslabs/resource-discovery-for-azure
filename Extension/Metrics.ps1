@@ -187,7 +187,13 @@ if ($Task -eq 'Processing')
         }
         else
         {
-            $MetricQueryResultsSorted = $MetricQueryResults | Sort-Object
+            # Percentile over NON-null values only. $MetricQueryResults keeps its null
+            # intervals (needed for the Measure/Series below and for MetricCount), but
+            # Sort-Object places nulls first, so including them here both skewed the
+            # index low and could land it in the null region (serializing MetricPercentile
+            # as null) once nulls exceeded ~5% of the window. The count>0 guard above
+            # ensures at least one non-null remains.
+            $MetricQueryResultsSorted = @($MetricQueryResults | Where-Object { $null -ne $_ } | Sort-Object)
             $MetricPercentileIndex = [math]::Ceiling(0.95 * $MetricQueryResultsSorted.Count) - 1
             $MetricPercentile = $MetricQueryResultsSorted[$MetricPercentileIndex]
 
@@ -1106,7 +1112,12 @@ if ($Task -eq 'Processing')
                     }
                     else
                     {
-                        $MetricQueryResultsSorted = $MetricQueryResults | Sort-Object
+                        # Percentile over NON-null values only (see the batch path's note):
+                        # Sort-Object places nulls first, so including them skewed the index
+                        # low and could land it in the null region. The count>0 guard above
+                        # ensures at least one non-null remains; $MetricQueryResults itself
+                        # keeps its nulls for the Measure/Series step below.
+                        $MetricQueryResultsSorted = @($MetricQueryResults | Where-Object { $null -ne $_ } | Sort-Object)
                         $MetricPercentileIndex = [math]::Ceiling(0.95 * $MetricQueryResultsSorted.Count) - 1
                         $MetricPercentile = $MetricQueryResultsSorted[$MetricPercentileIndex]
 

@@ -868,7 +868,16 @@ Function RunInventorySetup()
             if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
             {
                 $ObfuscatedID = $ResourceIdDictionary[$resourceItem.ID]
-                $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
+                # Guard the name-map read: a seeded/hand-edited -ObfuscationDictionary
+                # can contain the ID in the ResourceId map but NOT the ResourceName map,
+                # and the generic Dictionary indexer throws KeyNotFoundException (not
+                # $null) on a miss - which would abort the whole obfuscation pass. On a
+                # normal run both maps are populated together so this is a no-op; on a
+                # sparse seed we keep the freshly-minted $ObfuscatedName instead of throwing.
+                if ($ResourceNameDictionary.ContainsKey($resourceItem.ID))
+                {
+                    $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
+                }
             }
 
             $ResourceIdDictionary[$resourceItem.ID] = $ObfuscatedID
@@ -1698,7 +1707,20 @@ function ExecuteInventoryProcessing()
 
                     for ($Item = 0; $Item -lt $UsageDataExport.Count; $Item++)
                     {
-                        $InstanceInfo = ($UsageDataExport[$Item].InstanceData.tolower() | ConvertFrom-Json)
+                        # Some meters (marketplace purchases, certain reservations,
+                        # tenant-level charges) return a null/empty InstanceData. Calling
+                        # .tolower() on null throws, and because this loop sits inside the
+                        # per-subscription paging try/catch that throw would abort the WHOLE
+                        # subscription's consumption (marking it INCOMPLETE). Such a record
+                        # has no resourceUri to attribute or join anyway, so skip just that
+                        # one record - mirroring the resource-group filter's own 'continue'
+                        # below - and let the rest of the subscription's consumption complete.
+                        $RawInstanceData = $UsageDataExport[$Item].InstanceData
+                        if ([string]::IsNullOrEmpty($RawInstanceData))
+                        {
+                            continue
+                        }
+                        $InstanceInfo = ($RawInstanceData.tolower() | ConvertFrom-Json)
 
                         if (![string]::IsNullOrEmpty($ResourceGroup))
                         {

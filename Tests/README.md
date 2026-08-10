@@ -110,7 +110,7 @@ against a live subscription and runs the applicable Pester tests against each.
 
 | Scenario | Flags | Tests run |
 |---|---|---|
-| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) |
+| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) **+ live tenant reconciliation** |
 | `obfuscate` | `-Obfuscate` (+ metrics + consumption) | structural **+** PII/obfuscation/prefix/dictionary |
 | `skipboth` | `-SkipMetrics -SkipConsumption` | structural |
 | `skipmetrics` | `-SkipMetrics` | structural |
@@ -124,6 +124,30 @@ assume obfuscated input. On a **non-obfuscated** zip the raw subscription paths
 and transcript are present *by design*, so those tests are EXPECTED to fail and
 are therefore not run for non-obfuscated scenarios. Only obfuscated zips are ever
 shared server-side, so this matches real usage.
+
+### Live tenant reconciliation (`default` scenario)
+
+`TenantReconciliation.Tests.ps1` cross-checks the **non-obfuscated** `default`
+zip against the **live tenant** it was generated from, to catch a future change
+that silently drops, duplicates, mangles, or mis-attributes resources. It
+asserts:
+
+- every inventory resource ID resolves to a real resource in the tenant
+  (`Get-AzResource`) — no orphans/phantoms;
+- all inventory IDs (and all consumption `ResourceId`s) belong to the run's
+  subscription — no cross-subscription contamination;
+- per-type **distinct** resource counts match the tenant for one-row-per-resource
+  collectors (VMs, disks, storage accounts, public IPs, key vaults, SQL servers,
+  Service Bus), and SQL user databases match with the system `master` DB excluded;
+- those same sections contain no duplicate IDs.
+
+Expected values are read **live from the tenant at runtime** (never hardcoded),
+so it is tenant-portable. Because it needs a live Az session and real IDs, it is
+the one suite that talks to Azure — and it **skips itself** (never fails) when
+the zip is obfuscated, no live context exists, or the context can't see the
+run's subscription. That keeps it safe inside an offline `Invoke-Pester ./Tests/`
+or CI run; it only actually reconciles inside the `default` scenario (or when you
+point `$env:TEST_ZIP_PATH` at a non-obfuscated zip with a matching live session).
 
 ### Run it
 

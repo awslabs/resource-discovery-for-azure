@@ -119,6 +119,13 @@ $StructuralTests = @(
     'OutputCompleteness.Tests.ps1'
     'Frontdoor.Tests.ps1'
 )
+# Live tenant reconciliation - only meaningful on a NON-obfuscated zip (real ARM
+# IDs) with a live Az session for the run's subscription. The suite self-skips
+# when the zip is obfuscated or no matching live context is available, so it is
+# only attached to the 'default' scenario (which sets TEST_SUBSCRIPTION_ID below).
+$ReconciliationTests = @(
+    'TenantReconciliation.Tests.ps1'
+)
 # Two assertions inside OutputCompleteness.Tests.ps1 are actually PII/obfuscation
 # safety checks, NOT structural ones: a non-obfuscated zip deliberately includes
 # the transcript .txt (see ResourceInventory.ps1 ~line 1514), so these correctly
@@ -138,7 +145,7 @@ $ObfuscationTests = @(
 )
 
 $Catalog = @{
-    'default'         = @{ Args = @{}; Tests = $StructuralTests }
+    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests) }
     'obfuscate'       = @{ Args = @{ Obfuscate = $true }; Tests = ($StructuralTests + $ObfuscationTests) }
     'skipboth'        = @{ Args = @{ SkipMetrics = $true; SkipConsumption = $true }; Tests = $StructuralTests }
     'skipmetrics'     = @{ Args = @{ SkipMetrics = $true }; Tests = $StructuralTests }
@@ -383,6 +390,15 @@ try
             $env:TEST_USER_EMAIL = $Ctx.Account.Id
             $Dict = Get-ChildItem $OutDir -Filter 'ObfuscationDictionary_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($Dict) { $env:TEST_DICT_PATH = $Dict.FullName } else { Remove-Item Env:TEST_DICT_PATH -ErrorAction SilentlyContinue }
+        }
+        elseif ($name -eq 'default')
+        {
+            # Non-obfuscated baseline: TenantReconciliation.Tests.ps1 needs the
+            # run's subscription to cross-check the (real) inventory IDs against
+            # the live tenant. No dictionary/user-email needed (not obfuscated).
+            $env:TEST_SUBSCRIPTION_ID = $SubscriptionID
+            Remove-Item Env:TEST_USER_EMAIL -ErrorAction SilentlyContinue
+            Remove-Item Env:TEST_DICT_PATH  -ErrorAction SilentlyContinue
         }
         else
         {

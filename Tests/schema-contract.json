@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "SERVER INGESTION CONTRACT — identity & cross-dataset join keys.",
+    "This manifest is the authoritative, machine-checkable statement of the fields",
+    "the Azure->AWS server ingestion pipeline binds on, sourced from the server-side C#",
+    "ingestion models (the AzureInventory / AzureInventoryResource / AzureMetricRecord",
+    "classes) and the Consumption CSV header emitted by ResourceInventory.ps1.",
+    "",
+    "SCOPE — this is deliberately NARROW. It pins only the IDENTITY and JOIN-KEY fields",
+    "that make the three datasets (Inventory / Metrics / Consumption) correlatable. It does",
+    "NOT pin the long tail of descriptive fields (SKU/tier/state/etc.), many of which are",
+    "not server-bound yet (see SERVER-SIDE-SCHEMA-GAPS.md) and are free to evolve. The gate",
+    "protects the contract that MATTERS: if these keys drift (renamed/removed/emptied) the",
+    "server silently drops the value (System.Text.Json ignores unmapped members) and the",
+    "datasets stop joining — at which point the data is, per the owner, useless on its own.",
+    "",
+    "This file is DATA only. Tests/SchemaContract.Tests.ps1 reads it and asserts a generated",
+    "output zip honours it. Editing a key here is a server-contract change — treat it under",
+    "the no-json-schema-changes rule (human approval + upstream-match)."
+  ],
+
+  "identityFields": ["ID", "Subscription", "ResourceGroup", "Name", "Location"],
+
+  "joinKeys": {
+    "inventory": "ID",
+    "metrics": "ID",
+    "consumption": "ResourceId"
+  },
+
+  "serverBoundInventorySections": {
+    "VirtualMachines":    { "serverModelKey": "VirtualMachines",    "oneRowPerResource": true },
+    "VMDisk":             { "serverModelKey": "VMDisk",             "oneRowPerResource": true },
+    "Databricks":         { "serverModelKey": "Databricks",         "oneRowPerResource": true },
+    "PostgreSQLflexible": { "serverModelKey": "PostgreSQLflexible", "oneRowPerResource": true },
+    "MySQLflexible":      { "serverModelKey": "MySQLflexible",      "oneRowPerResource": true },
+    "SQLVM":              { "serverModelKey": "SQLVM",              "oneRowPerResource": true },
+    "SQLDB":              { "serverModelKey": "SQLDB",              "oneRowPerResource": true },
+    "SQLPOOL":            { "serverModelKey": "SQLPool",            "oneRowPerResource": true },
+    "SQLMI":              { "serverModelKey": "SQLMI",              "oneRowPerResource": true }
+  },
+
+  "metrics": {
+    "topLevelKey": "Metrics",
+    "requiredFields": ["ID", "Subscription", "ResourceGroup", "Name", "Location", "Service", "Metric"],
+    "joinKey": "ID"
+  },
+
+  "consumption": {
+    "requiredColumns": [
+      "InstanceData", "MeterCategory", "MeterId", "MeterName", "MeterRegion",
+      "MeterSubCategory", "Quantity", "Unit", "UsageStartTime", "UsageEndTime",
+      "ResourceId", "ResourceLocation", "ConsumptionMeter", "ReservationId", "ReservationOrderId"
+    ],
+    "joinKey": "ResourceId"
+  }
+}

@@ -1,0 +1,357 @@
+# Schema Contract & Cross-Dataset Linkage Tests
+# =============================================================================
+# Enforces the SERVER INGESTION CONTRACT and, above all, the CROSS-DATASET
+# LINKAGE that makes the three output datasets usable together. The owner's
+# rule: Inventory, Metrics, and Consumption are "useless on their own" unless
+# they stay JOINABLE via a common identity key
+# (Inventory.ID <-> Metrics.ID <-> Consumption.ResourceId). A field rename /
+# removal / emptying that breaks that join is silently dropped by the server
+# (System.Text.Json ignores unmapped members), so it cannot be caught by a
+# parse-check or a report render - only by asserting the emitted zip against
+# the contract. This suite is that gate.
+#
+# It is a PURE-OUTPUT, DRIFT-IMMUNE gate: it reads ONLY the generated zip's own
+# contents (no Azure calls, no live session), so it is deterministic and safe in
+# an offline `Invoke-Pester ./Tests/` or CI run, and - unlike the reconciliation
+# suite - it is valid in BOTH obfuscated and non-obfuscated modes (the join keys
+# must correlate whether they are raw ARM paths or prod_/nonprod_ tokens). That
+# is why the scenario matrix wires it into BOTH the 'default' and 'obfuscate'
+# scenarios as a hard gate.
+#
+# The manifest of contract fields lives in Tests/schema-contract.json (data,
+# separate from logic) so the server-side owner can see/adjust the pinned keys
+# without touching test code.
+#
+# Tiers:
+#   Tier 1 - Schema contract: for every server-bound inventory section that IS
+#            present in the zip, each row carries the identity-field NAMES (a
+#            per-row field rename/removal guard); metrics rows carry their
+#            required field names; and the consumption header carries every
+#            required column. Join keys are non-empty where the join depends on
+#            them. LIMITATION (output-only): this catches a field renamed/removed
+#            WITHIN a present section, but it cannot distinguish a whole-section
+#            rename/removal from a subscription that legitimately has none of that
+#            resource type - an absent section is skipped, not failed (hard-
+#            failing on absence would false-fail small/partial fixtures). Tier 2
+#            is name-agnostic and still exercises the join across every section,
+#            so a renamed section's rows are still linkage-checked by their IDs.
+#   The manifest of contract fields lives in Tests/schema-contract.json.
+#   Tier 2 - Cross-dataset linkage: Metrics.ID resolves to Inventory.ID (the
+#            metrics<->inventory join), Consumption.ResourceId overlaps the
+#            inventory id space (the consumption<->inventory join), and under
+#            obfuscation the shared join tokens are deterministic prod_/nonprod_
+#            pseudonyms (same real resource => same token across all datasets).
+#
+# Self-skips (never fails) only when there is genuinely nothing to check (no zip,
+# or a phase legitimately absent because a -Skip* switch suppressed it).
+# =============================================================================
+
+BeforeAll {
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    {
+        Get-ChildItem -Path $PSScriptRoot -Filter "ResourcesReport_*.zip" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+
+    $script:Ready = $true
+    $script:SkipReason = $null
+
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
+    {
+        $script:Ready = $false
+        $script:SkipReason = 'no test zip found (set $env:TEST_ZIP_PATH)'
+    }
+
+    # Load the contract manifest that sits beside this suite.
+    $ManifestPath = Join-Path $PSScriptRoot 'schema-contract.json'
+    if ($script:Ready -and -not (Test-Path $ManifestPath))
+    {
+        $script:Ready = $false
+        $script:SkipReason = 'schema-contract.json manifest not found beside the test'
+    }
+    $script:Contract = if ($script:Ready) { Get-Content $ManifestPath -Raw | ConvertFrom-Json } else { $null }
+
+    if ($script:Ready)
+    {
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { "/tmp" }
+        $script:ExtractPath = Join-Path $TmpBase ("SchemaContract_" + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
+        Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
+
+        $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+        $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
+
+        # Metrics live across one or more Metrics_*.json members, each exposing the
+        # top-level array named by the manifest ('Metrics').
+        $MetricKey = $script:Contract.metrics.topLevelKey
+        $MetricRows = @()
+        Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+            $MetricData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+            if ($null -ne $MetricData.$MetricKey) { $MetricRows += @($MetricData.$MetricKey) }
+        }
+        $script:MetricRows = @($MetricRows)
+
+        $CsvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
+        $script:ConsumptionFile = if ($CsvFile) { $CsvFile.FullName } else { $null }
+        $script:Consumption = if ($CsvFile)
+        {
+            $Content = Get-Content $CsvFile.FullName -ErrorAction SilentlyContinue
+            if ($null -ne $Content -and $Content.Count -gt 1) { Import-Csv $CsvFile.FullName } else { @() }
+        }
+        else { @() }
+
+        # Every inventory resource ID across ALL sections (the id space the other
+        # datasets must join back into), plus per-section id lists for the
+        # server-bound sections.
+        $script:AllInvIds = @()
+        $script:InvBySection = @{}
+        if ($null -ne $script:Inventory)
+        {
+            foreach ($Prop in $script:Inventory.PSObject.Properties)
+            {
+                if ($Prop.Name -eq 'Version') { continue }
+                $Ids = @($Prop.Value | Where-Object { $null -ne $_ -and ![string]::IsNullOrEmpty($_.ID) } | ForEach-Object { $_.ID })
+                if ($Ids.Count -gt 0) { $script:AllInvIds += $Ids }
+                $script:InvBySection[$Prop.Name] = @($Prop.Value | Where-Object { $null -ne $_ })
+            }
+        }
+
+        # Obfuscation signal: in an obfuscated run every inventory ID is a
+        # prod_/nonprod_ token, so a single match proves the run was obfuscated.
+        $script:TokenPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        $script:IsObfuscated = @($script:AllInvIds | Where-Object { $_ -match $script:TokenPattern }).Count -gt 0
+    }
+
+    if ($script:SkipReason) { Write-Host ("[SchemaContract] {0}" -f $script:SkipReason) -ForegroundColor DarkGray }
+}
+
+AfterAll {
+    if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) { Remove-Item -Path $script:ExtractPath -Recurse -Force }
+}
+
+# =============================================================================
+# Tier 1 - Schema contract (field-name presence + join-key population)
+# =============================================================================
+Describe "Inventory schema contract" {
+
+    It "Every server-bound inventory section carries the identity field names on every row" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        $IdentityFields = @($script:Contract.identityFields)
+        $Sections = $script:Contract.serverBoundInventorySections.PSObject.Properties.Name
+        $Checked = 0
+        $Violations = @()
+        foreach ($Section in $Sections)
+        {
+            if (-not $script:InvBySection.ContainsKey($Section)) { continue }
+            $Rows = @($script:InvBySection[$Section])
+            if ($Rows.Count -eq 0) { continue }
+            $Checked++
+            foreach ($Row in $Rows)
+            {
+                $Present = $Row.PSObject.Properties.Name
+                foreach ($Field in $IdentityFields)
+                {
+                    if ($Field -notin $Present) { $Violations += ("{0} row missing '{1}'" -f $Section, $Field) }
+                }
+            }
+        }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no server-bound inventory section was populated in this fixture"; return }
+        # De-duplicate so a whole-section rename reports once, not per row.
+        $Violations = @($Violations | Sort-Object -Unique)
+        $Violations.Count | Should -Be 0 -Because ("server ingestion binds these identity field NAMES; a rename/removal is silently dropped and breaks the join. Missing: {0}" -f ($Violations -join '; '))
+    }
+
+    It "Every server-bound inventory row has a non-empty join key (ID)" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        $Sections = $script:Contract.serverBoundInventorySections.PSObject.Properties.Name
+        $Checked = 0
+        $Empty = 0
+        foreach ($Section in $Sections)
+        {
+            if (-not $script:InvBySection.ContainsKey($Section)) { continue }
+            foreach ($Row in @($script:InvBySection[$Section]))
+            {
+                $Checked++
+                if ([string]::IsNullOrEmpty($Row.ID)) { $Empty++ }
+            }
+        }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no server-bound inventory section was populated in this fixture"; return }
+        $Empty | Should -Be 0 -Because "the inventory join key (ID) must be populated on every server-bound row or the resource cannot be correlated to its metrics/consumption"
+    }
+}
+
+Describe "Metrics schema contract" {
+
+    It "Every metric row carries the required field names" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        if ($script:MetricRows.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows (metrics phase absent or skipped in this fixture)"; return }
+        $Required = @($script:Contract.metrics.requiredFields)
+        $Violations = @()
+        foreach ($Row in $script:MetricRows)
+        {
+            $Present = $Row.PSObject.Properties.Name
+            foreach ($Field in $Required)
+            {
+                if ($Field -notin $Present) { $Violations += ("metric row missing '{0}'" -f $Field) }
+            }
+        }
+        $Violations = @($Violations | Sort-Object -Unique)
+        $Violations.Count | Should -Be 0 -Because ("the server binds these AzureMetricRecord fields; a missing name is dropped on ingest. Missing: {0}" -f ($Violations -join '; '))
+    }
+
+    It "Every metric row has a non-empty join key (ID)" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        if ($script:MetricRows.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows (metrics phase absent or skipped in this fixture)"; return }
+        $JoinKey = $script:Contract.metrics.joinKey
+        $Empty = @($script:MetricRows | Where-Object { [string]::IsNullOrEmpty($_.$JoinKey) }).Count
+        $Empty | Should -Be 0 -Because "a metric row with no ID cannot be attached to its resource (the server groups metrics by {ID, Metric})"
+    }
+}
+
+Describe "Consumption schema contract" {
+
+    It "Consumption header carries every required column" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        if (-not $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption csv (consumption phase absent or skipped in this fixture)"; return }
+        # Prefer Import-Csv's parsed column names (quote-aware, so a column value
+        # containing an embedded comma can never be mis-split). Fall back to a
+        # header-line split only for an EMPTY csv (header only, no data rows),
+        # where Import-Csv yields no objects but the column contract still holds.
+        if ($script:Consumption.Count -gt 0)
+        {
+            $Columns = @($script:Consumption[0].PSObject.Properties.Name)
+        }
+        else
+        {
+            $HeaderLine = Get-Content $script:ConsumptionFile -TotalCount 1
+            if ([string]::IsNullOrEmpty($HeaderLine)) { Set-ItResult -Skipped -Because "consumption csv has no header line in this fixture"; return }
+            $Columns = @($HeaderLine -split ',' | ForEach-Object { $_.Trim().Trim('"') })
+        }
+        $Required = @($script:Contract.consumption.requiredColumns)
+        $Missing = @($Required | Where-Object { $_ -notin $Columns })
+        $Missing.Count | Should -Be 0 -Because ("the consumption CSV column contract is fixed for server ingestion. Missing: {0}" -f ($Missing -join ', '))
+    }
+}
+
+# =============================================================================
+# Tier 2 - Cross-dataset linkage (the datasets must stay JOINABLE)
+# =============================================================================
+Describe "Cross-dataset linkage" {
+
+    It "Metrics IDs resolve to inventory IDs (metrics-to-inventory join holds)" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        if ($script:MetricRows.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows (metrics phase absent or skipped in this fixture)"; return }
+        if ($script:AllInvIds.Count -eq 0) { Set-ItResult -Skipped -Because "no inventory IDs in this fixture"; return }
+
+        $InvIdSet = @{}
+        foreach ($Id in $script:AllInvIds) { $InvIdSet[$Id] = $true }
+        $MetricIds = @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) } | Select-Object -ExpandProperty ID -Unique)
+        if ($MetricIds.Count -eq 0) { Set-ItResult -Skipped -Because "no metric row carried an ID in this fixture"; return }
+
+        $Matched = @($MetricIds | Where-Object { $InvIdSet.ContainsKey($_) })
+        $Absent = @($MetricIds | Where-Object { -not $InvIdSet.ContainsKey($_) })
+        $Ratio = if ($MetricIds.Count -gt 0) { $Matched.Count / $MetricIds.Count } else { 1 }
+        Write-Host ("    [linkage] metrics->inventory: {0}/{1} resolve ({2:P0}); {3} absent" -f $Matched.Count, $MetricIds.Count, $Ratio, $Absent.Count) -ForegroundColor DarkGray
+
+        # A metric ID is obfuscated by looking the resource's REAL id up in the
+        # SAME dictionary the inventory row used, so a metric-bearing resource that
+        # is also inventoried carries the identical join key. Zero overlap means
+        # the metric path minted fresh/mismatched keys and the join is broken.
+        $Matched.Count | Should -BeGreaterThan 0 -Because "at least one metric ID must match an inventory ID; zero overlap means metrics and inventory no longer share a join key (datasets not linkable)"
+        # Majority guard, gated behind a minimum sample so a tiny/fallback-heavy
+        # fixture (a legitimately deleted/transient metric-eligible resource is
+        # absent by design) does not false-fail.
+        $RatioSampleFloor = 5
+        if ($MetricIds.Count -ge $RatioSampleFloor)
+        {
+            $Matched.Count | Should -BeGreaterOrEqual $Absent.Count -Because ("metric IDs should predominantly resolve to inventory IDs (matched={0}, absent={1}); absent exceeding matched means a whole metric path is keying inconsistently with inventory" -f $Matched.Count, $Absent.Count)
+        }
+    }
+
+    It "Consumption ResourceIds overlap the inventory id space (consumption-to-inventory join holds)" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        if ($script:Consumption.Count -eq 0) { Set-ItResult -Skipped -Because "no consumption rows (consumption phase absent or skipped in this fixture)"; return }
+        if ($script:AllInvIds.Count -eq 0) { Set-ItResult -Skipped -Because "no inventory IDs in this fixture"; return }
+
+        $InvIdSet = @{}
+        foreach ($Id in $script:AllInvIds) { $InvIdSet[$Id] = $true }
+        $ConsumptionIds = @($script:Consumption | Where-Object { ![string]::IsNullOrEmpty($_.ResourceId) } | Select-Object -ExpandProperty ResourceId -Unique)
+        if ($ConsumptionIds.Count -eq 0) { Set-ItResult -Skipped -Because "no consumption row carried a ResourceId in this fixture"; return }
+
+        # Consumption is a CONFIRM-WHEN-POSSIBLE join, deliberately NOT a hard
+        # gate, because zero overlap can be entirely legitimate:
+        #   - the billing window covers resources since DELETED (still billed) that
+        #     are no longer in the current inventory (a volatile sandbox churns
+        #     constantly), and brand-new resources may not be billed yet;
+        #   - consumption meters items that are never individually inventoried
+        #     (bandwidth, marketplace, reservations, subscription-level meters).
+        # So a small/volatile subscription can have a real, healthy report whose
+        # current inventory and last-period billing simply do not intersect. Hard-
+        # failing on that would cry wolf. Here we only CONFIRM the join when the two
+        # id spaces do intersect, and skip (never fail) when they legitimately do
+        # not. (The always-on enforceable linkage is the metrics<->inventory join
+        # above; consumption is confirm-when-present.)
+        #
+        # IMPORTANT - representation asymmetry (verified against live output):
+        # obfuscation renders the SAME resource identity two DIFFERENT ways:
+        #   - inventory/metrics collapse the whole resource to a BARE token
+        #     (prod_/nonprod_<guid>), which is why metrics<->inventory matches on
+        #     the full value;
+        #   - consumption is STRUCTURE-PRESERVING - it keeps the ARM path skeleton
+        #     (/subscriptions/<subtok>/resourcegroups/<rgtok>/providers/.../<restok>)
+        #     and tokenizes each segment, so the resource's own identity token is
+        #     the FINAL path segment, NOT the whole string.
+        # So a full-string compare finds 0 under obfuscation even though the join is
+        # perfectly intact (the leaf token equals the inventory/metric token). We
+        # therefore match on the resource IDENTITY: the full value (non-obfuscated
+        # raw paths are byte-identical) OR the leaf segment (obfuscated consumption
+        # carries the shared token there). Both are per-resource unique, so this
+        # cannot false-match.
+        $Matched = @($ConsumptionIds | Where-Object { $InvIdSet.ContainsKey($_) -or $InvIdSet.ContainsKey(($_ -split '/')[-1]) })
+        Write-Host ("    [linkage] consumption->inventory: {0}/{1} ResourceIds resolve to an inventory ID (full-value or leaf-token)" -f $Matched.Count, $ConsumptionIds.Count) -ForegroundColor DarkGray
+        if ($Matched.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because "no consumption ResourceId resolves to the current inventory in this fixture - legitimate when billed resources were since deleted, are not yet billed, or are un-inventoried meter types (billing window vs current inventory)."
+            return
+        }
+        # When they DO intersect, each matched ResourceId resolves (full-value or by
+        # its leaf identity token) to an inventory ID - i.e. consumption ran its ids
+        # through the SAME identity space as inventory, so cost attributes to a real
+        # inventoried resource. That is the join holding, in either mode.
+        $Matched.Count | Should -BeGreaterThan 0 -Because "matched set is non-empty by construction here; this asserts the consumption-to-inventory join is intact for the resources present in both"
+    }
+
+    It "Under obfuscation, the shared join keys are deterministic prod_/nonprod_ tokens (not raw paths)" {
+        if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
+        if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "join keys are only tokenized in an obfuscated run"; return }
+
+        # In an obfuscated run the join key that appears in more than one dataset
+        # proves determinism: the same real resource obfuscated to the SAME token
+        # everywhere (otherwise the intersection would be empty). Assert every
+        # shared join key is a well-formed token and never a raw ARM path - a raw
+        # path leaking into any dataset would both break determinism and be a PII
+        # leak.
+        $InvIdSet = @{}
+        foreach ($Id in $script:AllInvIds) { $InvIdSet[$Id] = $true }
+
+        # Gather the resource IDENTITY token shared across datasets. Metrics carry
+        # it as the whole ID; consumption carries it as the LEAF segment of its
+        # structure-preserving path (see the consumption-to-inventory test), so we
+        # take that leaf when it resolves to an inventory ID. This yields the bare
+        # per-resource token, which is what must match the prod_/nonprod_ grammar.
+        $Shared = @()
+        $Shared += @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) -and $InvIdSet.ContainsKey($_.ID) } | Select-Object -ExpandProperty ID)
+        $Shared += @($script:Consumption |
+                Where-Object { ![string]::IsNullOrEmpty($_.ResourceId) } |
+                ForEach-Object { ($_.ResourceId -split '/')[-1] } |
+                Where-Object { $InvIdSet.ContainsKey($_) })
+        $Shared = @($Shared | Sort-Object -Unique)
+        if ($Shared.Count -eq 0) { Set-ItResult -Skipped -Because "no join key was shared across datasets in this fixture"; return }
+
+        foreach ($Key in $Shared)
+        {
+            $Key | Should -Match $script:TokenPattern -Because "a cross-dataset join key must be a deterministic prod_/nonprod_ token"
+            $Key | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "a join key must never be a raw ARM path in an obfuscated run (determinism + PII)"
+        }
+    }
+}

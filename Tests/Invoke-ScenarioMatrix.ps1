@@ -126,6 +126,15 @@ $StructuralTests = @(
 $ReconciliationTests = @(
     'TenantReconciliation.Tests.ps1'
 )
+# Schema-contract + cross-dataset-linkage gate. PURE-OUTPUT (no Azure), drift-
+# immune, and valid in BOTH obfuscated and non-obfuscated modes (the join keys
+# must correlate whether they are raw ARM paths or prod_/nonprod_ tokens), so it
+# is attached to BOTH 'default' and 'obfuscate' as a hard gate. It self-skips
+# when a phase was legitimately suppressed by a -Skip* switch, so it stays inert
+# on the skip* scenarios and is not attached there.
+$SchemaContractTests = @(
+    'SchemaContract.Tests.ps1'
+)
 # Two assertions inside OutputCompleteness.Tests.ps1 are actually PII/obfuscation
 # safety checks, NOT structural ones: a non-obfuscated zip deliberately includes
 # the transcript .txt (see ResourceInventory.ps1 ~line 1514), so these correctly
@@ -145,8 +154,8 @@ $ObfuscationTests = @(
 )
 
 $Catalog = @{
-    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests) }
-    'obfuscate'       = @{ Args = @{ Obfuscate = $true }; Tests = ($StructuralTests + $ObfuscationTests) }
+    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests + $SchemaContractTests) }
+    'obfuscate'       = @{ Args = @{ Obfuscate = $true }; Tests = ($StructuralTests + $ObfuscationTests + $SchemaContractTests) }
     'skipboth'        = @{ Args = @{ SkipMetrics = $true; SkipConsumption = $true }; Tests = $StructuralTests }
     'skipmetrics'     = @{ Args = @{ SkipMetrics = $true }; Tests = $StructuralTests }
     'skipconsumption' = @{ Args = @{ SkipConsumption = $true }; Tests = $StructuralTests }

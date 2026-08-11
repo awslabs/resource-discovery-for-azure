@@ -110,8 +110,8 @@ against a live subscription and runs the applicable Pester tests against each.
 
 | Scenario | Flags | Tests run |
 |---|---|---|
-| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) **+ live tenant reconciliation** |
-| `obfuscate` | `-Obfuscate` (+ metrics + consumption) | structural **+** PII/obfuscation/prefix/dictionary |
+| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) **+ live tenant reconciliation + schema-contract & linkage** |
+| `obfuscate` | `-Obfuscate` (+ metrics + consumption) | structural **+** PII/obfuscation/prefix/dictionary **+ schema-contract & linkage** |
 | `skipboth` | `-SkipMetrics -SkipConsumption` | structural |
 | `skipmetrics` | `-SkipMetrics` | structural |
 | `skipconsumption` | `-SkipConsumption` | structural |
@@ -148,6 +148,46 @@ the zip is obfuscated, no live context exists, or the context can't see the
 run's subscription. That keeps it safe inside an offline `Invoke-Pester ./Tests/`
 or CI run; it only actually reconciles inside the `default` scenario (or when you
 point `$env:TEST_ZIP_PATH` at a non-obfuscated zip with a matching live session).
+
+### Schema contract & cross-dataset linkage (`default` + `obfuscate`)
+
+`SchemaContract.Tests.ps1` is a **pure-output, drift-immune** gate (no Azure
+calls) that protects the **server ingestion contract** and — above all — the
+**cross-dataset linkage** that makes the three datasets usable together. The
+owner's rule: Inventory, Metrics, and Consumption are *useless on their own*
+unless they stay joinable via a common identity key
+(`Inventory.ID` ↔ `Metrics.ID` ↔ `Consumption.ResourceId`). A field
+rename/removal/emptying that breaks that join is silently dropped by the server
+(`System.Text.Json` ignores unmapped members), so a parse-check or report render
+won't catch it — only asserting the emitted zip against the contract does.
+
+The pinned contract lives in `schema-contract.json` (data, separate from logic)
+so the server-side owner can see/adjust the bound keys. It is deliberately
+**narrow**: it pins only the identity/join-key fields of the server-bound
+inventory sections (VirtualMachines, VMDisk, Databricks, PostgreSQLflexible,
+MySQLflexible, SQLVM, SQLDB, SQLPOOL, SQLMI), the `AzureMetricRecord` identity
+fields, and the Consumption CSV columns — **not** the long tail of descriptive
+fields (many aren't server-bound yet), which stay free to evolve.
+
+It asserts:
+
+- **Tier 1 (schema):** every present server-bound inventory section carries the
+  identity field *names* on every row (a per-row rename/removal guard) and a
+  non-empty `ID`; metric rows carry their required field names and a non-empty
+  `ID`; the consumption header carries every required column;
+- **Tier 2 (linkage):** `Metrics.ID` resolves to `Inventory.ID` (the
+  metrics↔inventory join), `Consumption.ResourceId` overlaps the inventory id
+  space (the consumption↔inventory join), and under `-Obfuscate` the shared join
+  keys are deterministic `prod_`/`nonprod_` tokens (same real resource → same
+  token across all three datasets), never a raw ARM path.
+
+Because it needs no Azure and is valid whether IDs are raw paths or tokens, it
+runs as a hard gate in **both** the `default` and `obfuscate` scenarios. It
+self-skips only when there is genuinely nothing to check (no zip, or a phase
+suppressed by a `-Skip*` switch). Output-only limitation: it cannot distinguish
+a *whole-section* rename from a subscription that legitimately has none of that
+type, so an absent section is skipped, not failed — but Tier 2 stays
+name-agnostic and still linkage-checks a renamed section's rows by their IDs.
 
 ### Run it
 

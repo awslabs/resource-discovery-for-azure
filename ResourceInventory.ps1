@@ -1235,9 +1235,29 @@ function ExecuteInventoryProcessing()
             # recipe that re-collects metrics/consumption for a later
             # Merge-RecoveryData -RecoverMetrics/-RecoverConsumption INTENTIONALLY runs
             # -Service WITHOUT the skips - enforcing them would break that flow.
-            if (-not ($SkipMetrics.IsPresent -and $SkipConsumption.IsPresent))
+            # Name ONLY the phases that are actually still subscription-wide, and
+            # suggest ONLY the switch(es) not already supplied - a partially-skipped
+            # run (e.g. -Service X -SkipMetrics, used when re-pulling consumption
+            # for a later -RecoverConsumption merge) must not be told that metrics
+            # still run nor be told to add a switch it already passed.
+            $UnscopedPhases = @()
+            $SuggestedSkips = @()
+
+            if (-not $SkipMetrics.IsPresent)
             {
-                Write-Log -Message ('-Service scopes the INVENTORY phase only; metrics and consumption still run for the WHOLE subscription. For a clean inventory-only run add -SkipMetrics -SkipConsumption. For targeted collection of a workload use -ResourceGroup (single subscription), which also scopes metrics. (Ignore this if you are re-collecting metrics/consumption for a later Merge-RecoveryData.)') -Severity 'Warning'
+                $UnscopedPhases += 'metrics'
+                $SuggestedSkips += '-SkipMetrics'
+            }
+
+            if (-not $SkipConsumption.IsPresent)
+            {
+                $UnscopedPhases += 'consumption'
+                $SuggestedSkips += '-SkipConsumption'
+            }
+
+            if (@($UnscopedPhases).Count -gt 0)
+            {
+                Write-Log -Message ("-Service scopes the INVENTORY phase only; these phases still run for the WHOLE subscription: {0}. For a clean inventory-only run add {1}. For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which also scopes metrics. (Ignore this if you are deliberately re-collecting for a later Merge-RecoveryData.)" -f ($UnscopedPhases -join ', '), ($SuggestedSkips -join ' ')) -Severity 'Warning'
             }
 
             $UnmatchedServices = @($Service | Where-Object { $_ -notin $MatchedNames })

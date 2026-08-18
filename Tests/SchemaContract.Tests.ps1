@@ -1,49 +1,44 @@
 # Schema Contract & Cross-Dataset Linkage Tests
 # =============================================================================
-# Enforces the SERVER INGESTION CONTRACT and, above all, the CROSS-DATASET
-# LINKAGE that makes the three output datasets usable together. The owner's
-# rule: Inventory, Metrics, and Consumption are "useless on their own" unless
-# they stay JOINABLE via a common identity key
-# (Inventory.ID <-> Metrics.ID <-> Consumption.ResourceId). A field rename /
-# removal / emptying that breaks that join is silently dropped by the server
-# (System.Text.Json ignores unmapped members), so it cannot be caught by a
-# parse-check or a report render - only by asserting the emitted zip against
-# the contract. This suite is that gate.
+# The three output files are only useful together: a resource's metrics and its
+# cost have to trace back to the resource itself. That means all three share one
+# identity key - Inventory.ID, Metrics.ID, and Consumption.ResourceId. A rename
+# that breaks the link is dropped silently on ingest, since unmapped JSON members
+# are ignored by default, so nothing else catches it. This suite does.
 #
-# It is a PURE-OUTPUT, DRIFT-IMMUNE gate: it reads ONLY the generated zip's own
-# contents (no Azure calls, no live session), so it is deterministic and safe in
-# an offline `Invoke-Pester ./Tests/` or CI run, and - unlike the reconciliation
-# suite - it is valid in BOTH obfuscated and non-obfuscated modes (the join keys
-# must correlate whether they are raw ARM paths or prod_/nonprod_ tokens). That
-# is why the scenario matrix wires it into BOTH the 'default' and 'obfuscate'
-# scenarios as a hard gate.
+# It reads the generated zip plus the pinned field list in
+# Tests/schema-contract.json, and makes no Azure calls, so it is deterministic
+# and runs offline. It works on obfuscated and plain output alike, so the
+# scenario matrix runs it in both the 'default' and 'obfuscate' scenarios.
 #
-# The manifest of contract fields lives in Tests/schema-contract.json (data,
-# separate from logic) so the server-side owner can see/adjust the pinned keys
-# without touching test code.
+# Tier 1 - the fields exist.
+#   Each server-bound inventory section in the zip has the identity field names
+#   on every row, metric rows have their required fields, the consumption header
+#   has every required column, and join keys are not empty.
+#   Limit: an absent section is skipped, not failed. From output alone a renamed
+#   section looks identical to a resource type the subscription does not have.
+#   Its rows still count toward the Tier 2 join space, but nothing checks their
+#   field names.
 #
-# Tiers:
-#   Tier 1 - Schema contract: for every server-bound inventory section that IS
-#            present in the zip, each row carries the identity-field NAMES (a
-#            per-row field rename/removal guard); metrics rows carry their
-#            required field names; and the consumption header carries every
-#            required column. Join keys are non-empty where the join depends on
-#            them. LIMITATION (output-only): this catches a field renamed/removed
-#            WITHIN a present section, but it cannot distinguish a whole-section
-#            rename/removal from a subscription that legitimately has none of that
-#            resource type - an absent section is skipped, not failed (hard-
-#            failing on absence would false-fail small/partial fixtures). Tier 2
-#            is name-agnostic and still exercises the join across every section,
-#            so a renamed section's rows are still linkage-checked by their IDs.
-#   The manifest of contract fields lives in Tests/schema-contract.json.
-#   Tier 2 - Cross-dataset linkage: Metrics.ID resolves to Inventory.ID (the
-#            metrics<->inventory join), Consumption.ResourceId overlaps the
-#            inventory id space (the consumption<->inventory join), and under
-#            obfuscation the shared join tokens are deterministic prod_/nonprod_
-#            pseudonyms (same real resource => same token across all datasets).
+# Tier 2 - the keys line up. Inventory is the hub, and metrics and consumption
+# each link to it by ID, so there are two links to check, not three.
+#   1. Metrics to inventory. A real check: it fails on zero overlap, plus a
+#      majority check once there are 5 or more metric IDs.
+#   2. Consumption to inventory. Reports the match, and skips when nothing
+#      overlaps because billing and current inventory need not line up, so this
+#      one cannot fail. The consumption check that CAN fail is the raw-path PII
+#      guard in ReferentialIntegrity.Tests.ps1, and only on an obfuscated run.
+#   Plus: under -Obfuscate every ID shared between files must be a prod_/nonprod_
+#   token, never a raw path. Shared IDs only - whole-zip scanning is in
+#   Obfuscation.Tests.ps1 and DataIntegrity.Tests.ps1.
 #
-# Self-skips (never fails) only when there is genuinely nothing to check (no zip,
-# or a phase legitimately absent because a -Skip* switch suppressed it).
+#   No metrics to consumption check. Both are already checked against the hub, so
+#   a direct check adds nothing, and it would fail on sets that are legitimately
+#   disjoint (a metric-bearing resource that is not billed, and vice versa).
+#
+# Tests skip rather than fail when there is nothing to assert on: no zip or
+# manifest, a phase suppressed by a -Skip* switch, an empty dataset or no
+# overlap, or a non-obfuscated run for the tokenization check.
 # =============================================================================
 
 BeforeAll {
@@ -156,7 +151,7 @@ Describe "Inventory schema contract" {
             }
         }
         if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no server-bound inventory section was populated in this fixture"; return }
-        # De-duplicate so a whole-section rename reports once, not per row.
+        # De-duplicate so one bad section reports once, not once per row.
         $Violations = @($Violations | Sort-Object -Unique)
         $Violations.Count | Should -Be 0 -Because ("server ingestion binds these identity field NAMES; a rename/removal is silently dropped and breaks the join. Missing: {0}" -f ($Violations -join '; '))
     }
@@ -253,14 +248,12 @@ Describe "Cross-dataset linkage" {
         $Ratio = if ($MetricIds.Count -gt 0) { $Matched.Count / $MetricIds.Count } else { 1 }
         Write-Host ("    [linkage] metrics->inventory: {0}/{1} resolve ({2:P0}); {3} absent" -f $Matched.Count, $MetricIds.Count, $Ratio, $Absent.Count) -ForegroundColor DarkGray
 
-        # A metric ID is obfuscated by looking the resource's REAL id up in the
-        # SAME dictionary the inventory row used, so a metric-bearing resource that
-        # is also inventoried carries the identical join key. Zero overlap means
-        # the metric path minted fresh/mismatched keys and the join is broken.
+        # Metrics run a resource id through the same dictionary inventory used, so
+        # an inventoried metric-bearing resource carries the identical key. Zero
+        # overlap means metrics minted their own keys and the join is broken.
         $Matched.Count | Should -BeGreaterThan 0 -Because "at least one metric ID must match an inventory ID; zero overlap means metrics and inventory no longer share a join key (datasets not linkable)"
-        # Majority guard, gated behind a minimum sample so a tiny/fallback-heavy
-        # fixture (a legitimately deleted/transient metric-eligible resource is
-        # absent by design) does not false-fail.
+        # Majority check, held back until the sample is big enough that one stale
+        # resource cannot false-fail it.
         $RatioSampleFloor = 5
         if ($MetricIds.Count -ge $RatioSampleFloor)
         {
@@ -278,35 +271,21 @@ Describe "Cross-dataset linkage" {
         $ConsumptionIds = @($script:Consumption | Where-Object { ![string]::IsNullOrEmpty($_.ResourceId) } | Select-Object -ExpandProperty ResourceId -Unique)
         if ($ConsumptionIds.Count -eq 0) { Set-ItResult -Skipped -Because "no consumption row carried a ResourceId in this fixture"; return }
 
-        # Consumption is a CONFIRM-WHEN-POSSIBLE join, deliberately NOT a hard
-        # gate, because zero overlap can be entirely legitimate:
-        #   - the billing window covers resources since DELETED (still billed) that
-        #     are no longer in the current inventory (a volatile sandbox churns
-        #     constantly), and brand-new resources may not be billed yet;
-        #   - consumption meters items that are never individually inventoried
-        #     (bandwidth, marketplace, reservations, subscription-level meters).
-        # So a small/volatile subscription can have a real, healthy report whose
-        # current inventory and last-period billing simply do not intersect. Hard-
-        # failing on that would cry wolf. Here we only CONFIRM the join when the two
-        # id spaces do intersect, and skip (never fail) when they legitimately do
-        # not. (The always-on enforceable linkage is the metrics<->inventory join
-        # above; consumption is confirm-when-present.)
+        # Zero overlap is often legitimate: billing still covers resources since
+        # deleted, brand-new resources are not billed yet, and some meters
+        # (bandwidth, marketplace, reservations) are never inventoried at all. So
+        # this skips rather than fails when nothing matches.
         #
-        # IMPORTANT - representation asymmetry (verified against live output):
-        # obfuscation renders the SAME resource identity two DIFFERENT ways:
-        #   - inventory/metrics collapse the whole resource to a BARE token
-        #     (prod_/nonprod_<guid>), which is why metrics<->inventory matches on
-        #     the full value;
-        #   - consumption is STRUCTURE-PRESERVING - it keeps the ARM path skeleton
-        #     (/subscriptions/<subtok>/resourcegroups/<rgtok>/providers/.../<restok>)
-        #     and tokenizes each segment, so the resource's own identity token is
-        #     the FINAL path segment, NOT the whole string.
-        # So a full-string compare finds 0 under obfuscation even though the join is
-        # perfectly intact (the leaf token equals the inventory/metric token). We
-        # therefore match on the resource IDENTITY: the full value (non-obfuscated
-        # raw paths are byte-identical) OR the leaf segment (obfuscated consumption
-        # carries the shared token there). Both are per-resource unique, so this
-        # cannot false-match.
+        # Match on the identity, not the whole string. Obfuscation writes the same
+        # identity two ways. Inventory and metrics collapse the resource to a bare
+        # token (prod_/nonprod_, an optional type hint, and a guid). Consumption
+        # keeps the ARM path and tokenizes only the identifying segments -
+        # subscription, resource group, and resource names - leaving the provider
+        # and type segments intact so the server can still categorise the row. The
+        # resource's own token therefore sits in the LAST name segment. A
+        # full-string compare would find nothing under obfuscation even though the
+        # join is fine. Both forms are unique per resource, so checking the full
+        # value or the last segment cannot false-match.
         $Matched = @($ConsumptionIds | Where-Object { $InvIdSet.ContainsKey($_) -or $InvIdSet.ContainsKey(($_ -split '/')[-1]) })
         Write-Host ("    [linkage] consumption->inventory: {0}/{1} ResourceIds resolve to an inventory ID (full-value or leaf-token)" -f $Matched.Count, $ConsumptionIds.Count) -ForegroundColor DarkGray
         if ($Matched.Count -eq 0)
@@ -314,31 +293,30 @@ Describe "Cross-dataset linkage" {
             Set-ItResult -Skipped -Because "no consumption ResourceId resolves to the current inventory in this fixture - legitimate when billed resources were since deleted, are not yet billed, or are un-inventoried meter types (billing window vs current inventory)."
             return
         }
-        # When they DO intersect, each matched ResourceId resolves (full-value or by
-        # its leaf identity token) to an inventory ID - i.e. consumption ran its ids
-        # through the SAME identity space as inventory, so cost attributes to a real
-        # inventoried resource. That is the join holding, in either mode.
-        $Matched.Count | Should -BeGreaterThan 0 -Because "matched set is non-empty by construction here; this asserts the consumption-to-inventory join is intact for the resources present in both"
+        # Anything matched here shares inventory's identity space, so its cost
+        # attributes to a real inventoried resource. This records the result; it
+        # cannot fail, because the zero case already returned above.
+        $Matched.Count | Should -BeGreaterThan 0 -Because "records that the consumption-to-inventory join resolved for the resources present in both (cannot fail: the zero-overlap case skipped above)"
     }
 
     It "Under obfuscation, the shared join keys are deterministic prod_/nonprod_ tokens (not raw paths)" {
         if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
         if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "join keys are only tokenized in an obfuscated run"; return }
 
-        # In an obfuscated run the join key that appears in more than one dataset
-        # proves determinism: the same real resource obfuscated to the SAME token
-        # everywhere (otherwise the intersection would be empty). Assert every
-        # shared join key is a well-formed token and never a raw ARM path - a raw
-        # path leaking into any dataset would both break determinism and be a PII
-        # leak.
+        # An ID that shows up in two files proves determinism for that ID: the same
+        # resource got the same token in both, or the sets would not intersect.
+        # Run-wide determinism is Obfuscation.Tests.ps1. Here, each shared ID must
+        # be a well-formed token and never a raw path.
+        #
+        # Shared IDs only - this checks the join, not the whole zip. Whole-zip
+        # scanning is Obfuscation.Tests.ps1 and DataIntegrity.Tests.ps1, and
+        # consumption's raw-path guard is ReferentialIntegrity.Tests.ps1.
         $InvIdSet = @{}
         foreach ($Id in $script:AllInvIds) { $InvIdSet[$Id] = $true }
 
-        # Gather the resource IDENTITY token shared across datasets. Metrics carry
-        # it as the whole ID; consumption carries it as the LEAF segment of its
-        # structure-preserving path (see the consumption-to-inventory test), so we
-        # take that leaf when it resolves to an inventory ID. This yields the bare
-        # per-resource token, which is what must match the prod_/nonprod_ grammar.
+        # Collect the shared identity tokens. Metrics carry it as the whole ID;
+        # consumption carries it as the last path segment, so take the leaf when it
+        # resolves to an inventory ID. Either way this yields the bare token.
         $Shared = @()
         $Shared += @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) -and $InvIdSet.ContainsKey($_.ID) } | Select-Object -ExpandProperty ID)
         $Shared += @($script:Consumption |

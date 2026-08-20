@@ -103,10 +103,16 @@ function New-DonutChart
         $i++
     }
 
-    # Inner cutout to make it a donut
-    [void]$Svg.AppendFormat("<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $Cx, $Cy, $InnerRadius)
-    [void]$Svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $Cx, ($Cy - 6), $Total)
-    [void]$Svg.AppendFormat("<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $Cx, ($Cy + 14))
+    # Inner cutout to make it a donut. These three AppendFormat calls pass
+    # InvariantCulture explicitly because their arguments are not all integers:
+    # an odd -Size makes $Cx/$Cy/$InnerRadius Doubles, and $Total is the
+    # Measure-Object Sum (also a Double). Without a provider, AppendFormat uses
+    # CurrentCulture, so a comma-decimal host would emit cx='120,5' and the SVG
+    # would not render. New-BarChart needs no provider: every argument there is
+    # an Int32, which carries no separator in any culture.
+    [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $Cx, $Cy, $InnerRadius)
+    [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $Cx, ($Cy - 6), $Total)
+    [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $Cx, ($Cy + 14))
 
     [void]$Svg.Append('</svg>')
     return $Svg.ToString()
@@ -304,7 +310,12 @@ function New-RdaAllSubHtmlSummary
     $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
 
     # --- Render --------------------------------------------------------------
-    $Generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
+    # InvariantCulture, not -Format: the ':' in 'HH:mm:ss' and the 'zzz' offset
+    # separator both resolve through the culture's TimeSeparator, and the year
+    # comes from the culture's calendar, so a th-TH / ar-SA host would otherwise
+    # stamp a Buddhist / Hijri year here while the per-subscription reports
+    # (Extension/Summary.ps1) stamp a Gregorian one.
+    $Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
     $TenantSafe = if ($IsObfuscated -or [string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
     $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { ConvertTo-HtmlSafe ([string]$PlatOS) }
@@ -384,7 +395,10 @@ function New-RdaAllSubHtmlSummary
     foreach ($Sr in $SubReports)
     {
         $NameSafe = ConvertTo-HtmlSafe $Sr.Name
-        $CountText = '{0:N0}' -f $Sr.Total
+        # Invariant: this number is rendered into the shared HTML, so its group
+        # separator must not follow the collecting host's culture. Total is
+        # seeded to 0 above, so it can never be null here.
+        $CountText = $Sr.Total.ToString('N0', [cultureinfo]::InvariantCulture)
         $HealthCell = if ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
         $LinkCell = if ($Sr.Link) { ('<a href="{0}">open &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.Link)) } else { '<span class="muted">no report</span>' }
         [void]$Rows.AppendFormat('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td>{3}</td></tr>', $NameSafe, $CountText, $HealthCell, $LinkCell)
@@ -438,7 +452,7 @@ footer{color:var(--muted);font-size:12px;margin-top:20px}
 $PrivacyBanner
 $($Banners.ToString())
 <div class="cards">
-  <div class="card"><div class="n">$('{0:N0}' -f $RunTotalResources)</div><div class="l">Total resources</div></div>
+  <div class="card"><div class="n">$($RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture))</div><div class="l">Total resources</div></div>
   <div class="card"><div class="n">$SubCount</div><div class="l">Subscriptions</div></div>
   <div class="card"><div class="n">$EmptyCount</div><div class="l">Empty (0 resources)</div></div>
   <div class="card"><div class="n">$($FailedList.Count)</div><div class="l">Failed</div></div>
@@ -452,7 +466,7 @@ $ChartsHtml
 
     $Html | Out-File -FilePath $HtmlFile -Encoding utf8
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
-    Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
+    Write-Host ("  {0} subscription(s), {1} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
 }
 
 # =============================================================================

@@ -358,7 +358,7 @@ function New-ServiceTable
     # Render header
     $Sb = New-Object System.Text.StringBuilder
     $SafeServiceName = ConvertTo-HtmlSafe $ServiceName
-    $SectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLower()
+    $SectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
     [void]$Sb.AppendFormat('<details class="service-section" id="svc-{0}">', $SectionId)
     [void]$Sb.AppendFormat('<summary><span class="svc-name">{0}</span><span class="svc-count">{1}</span></summary>', $SafeServiceName, $Count)
     [void]$Sb.Append('<div class="svc-body">')
@@ -444,7 +444,7 @@ foreach ($svc in $ServiceSummary)
     [void]$ServiceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $Records -ObfuscationStatus $ObfuscationStatus))
 }
 
-$Generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
+$Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
 $TitleSafe = ConvertTo-HtmlSafe $Title
 $SubSafe = ConvertTo-HtmlSafe $SubscriptionName
 $TenantSafe = if ([string]::IsNullOrWhiteSpace($TenantId)) { '' } else { (ConvertTo-HtmlSafe $TenantId) }
@@ -456,12 +456,12 @@ $VersionSafe = if (-not [string]::IsNullOrWhiteSpace([string]$Version)) { Conver
 $ExtractTimeText = ''
 if ($ExtractionRunTime -is [TimeSpan])
 {
-    $ExtractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##')) }
+    $ExtractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
 }
 $ReportTimeText = ''
 if ($ReportingRunTime -is [TimeSpan])
 {
-    $ReportTimeText = if ($ReportingRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$ReportingRunTime.TotalSeconds) } else { ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##')) }
+    $ReportTimeText = if ($ReportingRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$ReportingRunTime.TotalSeconds) } else { ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
 }
 $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { (ConvertTo-HtmlSafe ([string]$PlatOS)) }
 
@@ -764,7 +764,7 @@ if ($PhaseTimings)
         $PhaseSpan = $PhaseTimings[$phaseName]
         if ($PhaseSpan -is [TimeSpan])
         {
-            $PhaseDurText = if ($PhaseSpan.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$PhaseSpan.TotalSeconds) } else { ('{0} Minutes' -f $PhaseSpan.TotalMinutes.ToString('#######.##')) }
+            $PhaseDurText = if ($PhaseSpan.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$PhaseSpan.TotalSeconds) } else { ('{0} Minutes' -f $PhaseSpan.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
             $PhaseBlocks += ("<div><b>{0}:</b> {1}</div>" -f (ConvertTo-HtmlSafe ([string]$phaseName)), $PhaseDurText)
         }
     }
@@ -774,7 +774,7 @@ if ($PhaseTimings)
 # fragment building) is done; only the final here-string assembly + file write
 # remain, which are trivially fast.
 $RenderStopwatch.Stop()
-$RenderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##')) }
+$RenderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
 $RenderBlock = "<div><b>Report generation (HTML):</b> $RenderTimeText</div>"
 $PlatBlock = if ([string]::IsNullOrWhiteSpace($PlatSafe)) { '' } else { "<div><b>Environment:</b> $PlatSafe</div>" }
 
@@ -807,7 +807,7 @@ if ($null -ne $VmBilling)
     {
         ''
     }
-    $CoverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct, $IdNote)
+    $CoverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct.ToString([cultureinfo]::InvariantCulture), $IdNote)
 }
 
 $Html = @"
@@ -874,9 +874,9 @@ $Js
 
 Set-Content -Path $HtmlFile -Value $Html -Encoding utf8
 Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
-Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
+Write-Host ("  Total resources: {0} across {1} service type(s)" -f $TotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $ServiceSummary.Count) -ForegroundColor Green
 $FileSize = (Get-Item $HtmlFile).Length
-Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $FileSize, ($FileSize / 1KB)) -ForegroundColor Green
+Write-Host ("  File size: {0} bytes ({1} KB)" -f $FileSize.ToString('N0', [cultureinfo]::InvariantCulture), ($FileSize / 1KB).ToString('N1', [cultureinfo]::InvariantCulture)) -ForegroundColor Green
 if ($ObfuscationStatus -eq 'obfuscated')
 {
     Write-Host "  Privacy posture: obfuscated (safe to share)" -ForegroundColor Green

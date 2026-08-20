@@ -128,6 +128,37 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Match '60%'
     }
 
+    # A whole-number percentage formats identically in every culture, so the
+    # 60% case above cannot detect a culture regression. This case produces a
+    # FRACTIONAL percentage (1 of 3 = 33.3) AND pins the thread to a
+    # comma-decimal culture, so it fails if Summary.ps1 ever stops formatting
+    # GapPct with InvariantCulture. The culture must be pinned explicitly: on a
+    # dot-decimal host the assertion would pass either way and prove nothing.
+    # This path is reachable in production because Merge-RecoveryData invokes
+    # Summary.ps1 with a row-bearing consumption CSV in a session that never
+    # entered GetResourceConsumption(), where the en-US pin was never applied.
+    It 'renders a fractional gap percentage with a dot decimal separator' {
+        $Inv = New-TestInventory -RunningVms 3 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_frac.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 2
+
+        $PriorCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::new('de-DE')
+            # gap 1 of 3 running = 33.3%
+            $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        }
+        finally
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $PriorCulture
+        }
+
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match '33\.3%'
+        $Html | Should -Not -Match '33,3'
+    }
+
     It 'does NOT render the banner when billed matches running' {
         $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 3
         $Csv = Join-Path $script:WorkDir 'con_match.csv'

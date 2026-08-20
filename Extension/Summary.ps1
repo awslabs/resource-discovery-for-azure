@@ -124,8 +124,19 @@ foreach ($prop in $Inventory.PSObject.Properties)
         Count   = $Count
     }
 }
-$ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
-$TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
+# @() around the sort: with exactly ONE populated service type the pipeline
+# returns a bare [pscustomobject] whose own 'Count' property shadows the
+# intrinsic array count, so '$ServiceSummary.Count' reported that service's
+# RESOURCE count as the number of service types (a VM-only subscription with 12
+# VMs rendered 'Service Types: 12'). Same guard the sibling renderer uses
+# (Functions/AllSubHtmlSummary.Functions.ps1 $SubReports).
+$ServiceSummary = @($ServiceSummary | Sort-Object -Property Count -Descending)
+# [int] cast, not the bare .Sum: on a zero-resource subscription every service
+# is filtered out above, so Measure-Object has nothing to sum and returns $null,
+# which rendered the header as 'Total Resources:' with no value at all. The cast
+# makes that case an honest 0. Same shape as the sibling renderer
+# (Functions/AllSubHtmlSummary.Functions.ps1 $RunTotalResources).
+$TotalResources = [int](($ServiceSummary | Measure-Object -Property Count -Sum).Sum)
 
 # Detect obfuscation so the header can carry a privacy-posture banner. Sample
 # resource Names and Subscription values across the first few populated

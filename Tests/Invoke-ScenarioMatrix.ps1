@@ -135,15 +135,25 @@ $ReconciliationTests = @(
 $SchemaContractTests = @(
     'SchemaContract.Tests.ps1'
 )
-# Two assertions inside OutputCompleteness.Tests.ps1 are actually PII/obfuscation
-# safety checks, NOT structural ones: a non-obfuscated zip deliberately includes
-# the transcript .txt (see ResourceInventory.ps1 ~line 1514), so these correctly
-# fail on non-obfuscated output. Exclude them by name for non-obfuscated
-# scenarios; they still run (and must pass) under the obfuscate scenario.
-$NonObfuscatedExcludedTests = @(
-    'Should not contain any unexpected file types'
-    'Should not contain dictionary or transcript files'
-)
+# Assertions in OutputCompleteness.Tests.ps1 that must be reclassified as
+# expected-skips for NON-obfuscated scenarios.
+#
+# This list is now EMPTY, deliberately. It previously held both of the
+# assertions below on the grounds that a non-obfuscated zip shipped the
+# transcript .txt - which is no longer true (ResourceInventory.ps1 excludes the
+# transcript from BOTH branches), so the justification was stale and the
+# exclusion was silently disarming two real gates on every non-obfuscated
+# scenario. Both assertions are now MODE-AWARE inside the test itself
+# ($script:IsObfuscatedBundle, derived from the Diagnostics_*.log header), so
+# they express the correct rule per mode and must PASS in every scenario:
+#   'Should not contain any unexpected file types'    - permits DebugLog_*.log
+#       only in a non-obfuscated bundle; Diagnostics_*.log only when obfuscated.
+#   'Should not contain dictionary or transcript files' - true in both modes.
+#
+# Keep the reclassification MACHINERY (below) rather than deleting it: it is the
+# documented seam for a genuinely obfuscate-only assertion. Add a name here only
+# with a justification that is verified against the CURRENT packaging code.
+$NonObfuscatedExcludedTests = @()
 # PII / obfuscation tests only valid for -Obfuscate runs.
 $ObfuscationTests = @(
     'DataIntegrity.Tests.ps1'

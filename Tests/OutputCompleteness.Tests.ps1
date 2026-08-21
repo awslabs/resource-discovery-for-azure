@@ -20,6 +20,19 @@ BeforeAll {
     $script:AllFiles = Get-ChildItem -Path $script:ExtractPath -File
     $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
     $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
+
+    # Determine obfuscation state FROM THE BUNDLE rather than from an env var, so
+    # the rule holds for any zip a human points the suite at. Every run - both
+    # branches - ships a Diagnostics_*.log whose first line states which mode
+    # produced it (Write-RdaShareableDiagnosticsLog). Absent that header the
+    # bundle is treated as OBFUSCATED, i.e. fail closed to the stricter rule.
+    $DiagFile = Get-ChildItem -Path $script:ExtractPath -Filter "Diagnostics_*.log" | Select-Object -First 1
+    $script:IsObfuscatedBundle = $true
+    if ($DiagFile)
+    {
+        $DiagHead = Get-Content -LiteralPath $DiagFile.FullName -TotalCount 5 -ErrorAction SilentlyContinue
+        if (($DiagHead -join ' ') -match 'non-obfuscated') { $script:IsObfuscatedBundle = $false }
+    }
 }
 
 AfterAll {
@@ -48,25 +61,54 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
-        # The report members are .html / .json / .csv. The ONLY .log permitted in
-        # the shared bundle is the curated, dictionary-scrubbed Diagnostics_*.log
-        # (a human-readable troubleshooting artifact deliberately kept as .log so
-        # the ingestion pipeline does not table-ingest it). Every OTHER .log
-        # (DebugLog_*, ErrorLog_*, Heartbeat_*) and the transcript .txt are
-        # LOCAL-only and must NEVER ship - so a .log with any other name, or any
-        # other unexpected extension, still fails this assertion.
+        # The report members are .html / .json / .csv. Permitted .log files depend
+        # on whether the bundle is obfuscated:
+        #
+        #   Diagnostics_*.log - ALWAYS allowed. Curated + dictionary-scrubbed, and
+        #     deliberately kept as .log so the ingestion pipeline does not
+        #     table-ingest it.
+        #   DebugLog_*.log    - allowed ONLY in a NON-obfuscated bundle. It carries
+        #     real service/resource names and raw exception text, which adds no new
+        #     class of identifier to a bundle whose report is already
+        #     non-obfuscated, and it is what makes a thin report diagnosable
+        #     without a second Collect-SupportLogs round-trip. In an OBFUSCATED
+        #     bundle it must NEVER appear - that bundle's whole guarantee is that it
+        #     carries no real identifiers, and the debug log is not scrubbed.
+        #
+        # Every other .log (ErrorLog_*, Heartbeat_*) and the transcript .txt stay
+        # LOCAL-only in both modes.
         $AllowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles)
         {
             if ($file.Extension -eq '.log')
             {
-                $file.Name | Should -BeLike 'Diagnostics_*.log' -Because "the only .log allowed in the shared bundle is Diagnostics_*.log; '$($file.Name)' is a local-only log that must not ship"
+                if ($script:IsObfuscatedBundle)
+                {
+                    $file.Name | Should -BeLike 'Diagnostics_*.log' -Because "the only .log allowed in an OBFUSCATED bundle is Diagnostics_*.log; '$($file.Name)' is not dictionary-scrubbed and must not ship"
+                }
+                else
+                {
+                    ($file.Name -like 'Diagnostics_*.log' -or $file.Name -like 'DebugLog_*.log') | Should -BeTrue -Because "a non-obfuscated bundle may ship Diagnostics_*.log and DebugLog_*.log only; '$($file.Name)' is a local-only log that must not ship"
+                }
             }
             else
             {
                 $file.Extension | Should -BeIn $AllowedExtensions -Because "File '$($file.Name)' has unexpected extension"
             }
         }
+    }
+
+    It "Should never ship the debug log in an obfuscated bundle" {
+        # Dedicated assertion so the security-relevant half of the rule above
+        # fails with an unmistakable message rather than as a generic
+        # unexpected-file-type failure.
+        if (-not $script:IsObfuscatedBundle)
+        {
+            Set-ItResult -Skipped -Because 'this bundle is not obfuscated; the debug log is permitted here by design'
+            return
+        }
+        $LeakedDebug = $script:AllFiles | Where-Object { $_.Name -like 'DebugLog_*' }
+        $LeakedDebug | Should -BeNullOrEmpty -Because 'the debug log is not dictionary-scrubbed and must never ship in an obfuscated bundle'
     }
 
     It "Should not contain dictionary or transcript files" {

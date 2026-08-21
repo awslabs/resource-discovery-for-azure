@@ -933,13 +933,23 @@ function ExecuteInventoryProcessing()
         # the error log so it is findable and never collides across a parallel
         # multi-sub run.
         #
-        # IMPORTANT: like the transcript and error log this is a LOCAL debug
-        # artifact and is NEVER added to the shared zip - the metrics
-        # diagnostics interpolate REAL service/resource names (the obfuscation
-        # layer does not touch them) and heartbeat FAIL lines can carry raw
-        # $_.Exception.Message text. The DebugLog_* name is excluded by the
-        # Compress-Archive filter's -notlike guard. Do NOT add it to the zip
-        # Path array without scrubbing its contents first.
+        # IMPORTANT - contents are UNSCRUBBED: the metrics diagnostics
+        # interpolate REAL service/resource names (the obfuscation layer does not
+        # touch them) and heartbeat FAIL lines can carry raw
+        # $_.Exception.Message text, which may include a signed URL or token
+        # fragment. Treat this file as sensitive.
+        #
+        # Zipping posture is MODE-DEPENDENT (see the packaging section near the
+        # end of this script):
+        #   -Obfuscate run : LOCAL-only. NEVER add it to that branch's zip Path
+        #                    array - that bundle's guarantee is that it carries
+        #                    no real identifiers, and this file is not scrubbed.
+        #   default run    : INCLUDED in the zip by explicit path, because that
+        #                    bundle's report already carries real names, so this
+        #                    adds no new class of identifier. The operator is
+        #                    warned that it is in the bundle.
+        # The DebugLog_* -notlike guard on the *.json sweep remains in BOTH
+        # branches, so only the deliberate explicit add can ever ship it.
         if ($RunAllSubs.IsPresent)
         {
             $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
@@ -1109,8 +1119,10 @@ function ExecuteInventoryProcessing()
         if (!$SkipMetrics.IsPresent)
         {
             # Managed-heap + process working-set snapshot around the post-metrics GC.
-            # Routed to the consolidated LOCAL debug log ONLY (-NoConsole so it never
-            # touches the terminal, -ToDebugLog so it is never zipped): under the
+            # Routed to the consolidated debug log ONLY (-NoConsole so it never
+            # touches the terminal, -ToDebugLog so it is kept out of the shared
+            # report data; note the debug log itself ships in a default run's zip
+            # and is LOCAL-only under -Obfuscate): under the
             # wrapper each subscription runs in the SAME long-lived stream process
             # (ResourceInventory.ps1 is invoked via '&'), so comparing these lines
             # across subscriptions shows whether the process footprint is a stable
@@ -1916,10 +1928,13 @@ function ExecuteInventoryProcessing()
                                     # InstanceData .tolower() upstream). Child/sub-resource
                                     # rows ($LeafNameIndex >= 4) legitimately miss and would
                                     # flood, so only the top-level case is surfaced. Routed to
-                                    # the LOCAL debug log ONLY (-NoConsole so it never touches
-                                    # the terminal, -ToDebugLog so it is never zipped) because
-                                    # $RawUri is a real resource id; a no-op before the debug
-                                    # log path is set, so it never adds run noise or risk.
+                                    # the debug log ONLY (-NoConsole so it never touches the
+                                    # terminal, -ToDebugLog so it stays out of the shared report
+                                    # DATA) because $RawUri is a real resource id. NOTE: the debug
+                                    # log itself ships in a default run's zip and is LOCAL-only
+                                    # under -Obfuscate, so this real id is only ever bundled
+                                    # alongside a report that already carries real ids. A no-op
+                                    # before the debug log path is set.
                                     if ($LeafNameIndex -eq 2 -and $null -eq $InventoryLeafToken)
                                     {
                                         Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; if unexpected, verify resourceUri lowercasing vs the case-sensitive dictionary): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
@@ -2483,7 +2498,9 @@ if ($Obfuscate.IsPresent)
     }
     # The consolidated debug log (per-collector heartbeat + metrics diagnostics)
     # holds real service/resource names and can carry raw exception text, so it
-    # is local-only (never zipped) and flagged here alongside the transcript.
+    # is local-only in THIS (-Obfuscate) branch and flagged here alongside the
+    # transcript. On a default run it DOES ship in the zip - see the packaging
+    # section - which is why this notice is emitted only for obfuscated runs.
     if (![string]::IsNullOrEmpty($Global:DebugLogFile) -and (Test-Path -LiteralPath $Global:DebugLogFile))
     {
         Write-Log -Message ("  - Debug log:  {0}" -f $Global:DebugLogFile) -Severity 'Warning'
@@ -2596,6 +2613,30 @@ else
     $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested (-not $SkipConsumption.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
+
+    # Include the consolidated DEBUG log in the DEFAULT (non-obfuscated) zip only.
+    # Rationale: this bundle already carries real subscription, resource-group and
+    # resource names throughout the report itself, so the debug log's real service
+    # and resource names add no new class of identifier - while the per-collector
+    # START/DONE/FAIL heartbeat and the metrics-phase diagnostics it holds are
+    # exactly what is needed to explain a thin or partial report without asking
+    # the operator for a second Collect-SupportLogs run.
+    #
+    # This is deliberately NOT done in the -Obfuscate branch above: there the
+    # whole point is that the bundle carries no real identifiers, and the debug
+    # log is not dictionary-scrubbed. The DebugLog_* -notlike guard on the JSON
+    # sweep in BOTH branches stays as-is; this adds the file by explicit path, so
+    # an obfuscated run still cannot pick it up.
+    #
+    # Caveat the operator is told about below: heartbeat FAIL lines can carry raw
+    # $_.Exception.Message text, which in rare cases can include a signed URL or
+    # token fragment. That is why this stays out of the obfuscated bundle.
+    if (-not [string]::IsNullOrEmpty($Global:DebugLogFile) -and (Test-Path -LiteralPath $Global:DebugLogFile))
+    {
+        $ShareableExtras += $Global:DebugLogFile
+        Write-Log -Message ('Debug log INCLUDED in zip (non-obfuscated run): {0}' -f (Split-Path -Path $Global:DebugLogFile -Leaf)) -Severity 'Warning'
+        Write-Log -Message ('  It carries real service/resource names and raw exception text. The report in this bundle is already non-obfuscated. Re-run with -Obfuscate to keep the debug log LOCAL.') -Severity 'Warning'
+    }
 
     # Use the SAME hardened json file list as the obfuscated branch rather than a
     # broad DefaultPath+'*.json' wildcard. In a default run none of the excluded

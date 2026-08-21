@@ -164,9 +164,15 @@ function Write-RdaProgress
 #   -NoConsole   suppress the console line (for high-volume diagnostics that
 #                must NOT flood the terminal - metrics phase, per-collector
 #                heartbeat). The line still goes to any file sink selected.
-#   -ToDebugLog  also append the line to the consolidated LOCAL debug log
+#   -ToDebugLog  also append the line to the consolidated debug log
 #                ($Global:DebugLogFile) - the one file the heartbeat and metrics
-#                diagnostics share. Local-only, never zipped.
+#                diagnostics share. Its contents are UNSCRUBBED (real
+#                service/resource names, raw exception text), and its zipping
+#                posture is MODE-DEPENDENT: LOCAL-only under -Obfuscate, but
+#                INCLUDED in the zip on a default (non-obfuscated) run, whose
+#                report already carries real names. So treat anything written
+#                here as potentially shipping to a report consumer, and never
+#                write a credential or token to it.
 #
 # NOTE on scope: the per-line '[<8-char sub>]' tag is read via Get-Variable so it
 # resolves the caller's script-scope $SubscriptionID without throwing when none
@@ -233,10 +239,11 @@ Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
     }
 
-    # Consolidated LOCAL debug log sink (opt-in via -ToDebugLog): the single file
-    # the per-collector heartbeat and the metrics-phase diagnostics share
-    # ($Global:DebugLogFile). Local-only, never zipped - it carries real
-    # service/resource names and, for FAIL lines, raw exception text. Silent
+    # Consolidated debug log sink (opt-in via -ToDebugLog): the single file the
+    # per-collector heartbeat and the metrics-phase diagnostics share
+    # ($Global:DebugLogFile). UNSCRUBBED - it carries real service/resource names
+    # and, for FAIL lines, raw exception text. Zipping posture is MODE-DEPENDENT:
+    # LOCAL-only under -Obfuscate, INCLUDED in the zip on a default run. Silent
     # best-effort like the error sink; nothing is written until the global path
     # exists, so callers before setup (or a standalone extension run) are
     # unaffected.

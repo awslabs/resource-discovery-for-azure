@@ -2778,9 +2778,52 @@ if ($EmptySubs.Count -gt 0)
 # loud here so it's caught before the report is shared.
 $ConsumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $ConsumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
-if ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
+# Report the record count UNCONDITIONALLY when consumption was requested. The
+# previous '-gt 0 -or failures' condition printed NOTHING in the one case this
+# block exists to make loud: zero records AND zero reported failures. That is
+# the silent-failure signature - the billing API answered successfully but
+# returned no rows - and it is exactly what ships an empty Consumption CSV with
+# a clean-looking summary. Zero is only legitimate for a genuinely idle
+# subscription, so state it in yellow and explain the likely causes rather than
+# staying quiet.
+if (-not $SkipConsumption)
+{
+    $ConsumptionRecordColor = if ($ConsumptionRecords -gt 0) { 'Green' } else { 'Yellow' }
+    Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor $ConsumptionRecordColor
+}
+elseif ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
 {
     Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor Green
+}
+
+# Consumption was requested, the phase reported no per-subscription failure, and
+# yet not a single usage record came back. The up-front gate cannot catch this:
+# it classifies the billing probe's EXCEPTION text, and an empty-but-successful
+# response raises no exception (see Test-ConsumptionAccess). Call it out here
+# with the causes that actually produce it, because the operator otherwise has
+# no signal at all that the billing data they asked for is missing.
+# Gate matches the one in Get-RunSummaryLogContent's Health block so the console
+# and the SHIPPED RunSummary.log never disagree about whether to warn. Both
+# require that at least one subscription actually completed a consumption phase
+# in THIS invocation: $SubResourceCounts is appended only on the inner script's
+# successful return, and $Processed (passed to the summary builder) is derived
+# from the same eligible-minus-skipped arithmetic.
+if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
+{
+    Write-Host ""
+    Write-Host "WARNING: Consumption data was requested (no -SkipConsumption) but ZERO usage records were collected," -ForegroundColor Yellow
+    Write-Host "         and no subscription reported a billing error. The billing API answered successfully with no rows." -ForegroundColor Yellow
+    Write-Host "         The consumption CSV in the report will contain only its header row." -ForegroundColor Yellow
+    Write-Host "         This is expected ONLY if the subscriptions genuinely have no usage in the queried window" -ForegroundColor Yellow
+    Write-Host "         (the 30 days ending at midnight yesterday, host local time)." -ForegroundColor Yellow
+    Write-Host "         Otherwise the most common causes are:" -ForegroundColor Yellow
+    Write-Host "           - CSP / Partner-managed subscription: the partner's cost visibility policy is OFF by default." -ForegroundColor Yellow
+    Write-Host "             Billing scope on CSP subscriptions is not governed by Azure RBAC, so granting Cost Management" -ForegroundColor Yellow
+    Write-Host "             Reader does NOT help. The partner must enable cost visibility for the customer in Partner Center." -ForegroundColor Yellow
+    Write-Host "           - The subscription has not been transitioned to the Azure plan (required for CSP billing APIs)." -ForegroundColor Yellow
+    Write-Host "           - A subscription offer the legacy usage API does not serve (e.g. sponsored/sandbox offers)." -ForegroundColor Yellow
+    Write-Host "         Confirm in the Azure portal under Cost Management + Billing before sharing this report." -ForegroundColor Yellow
+    Write-Host ""
 }
 if ($ConsumptionFailures.Count -gt 0)
 {

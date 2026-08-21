@@ -2036,6 +2036,16 @@ function ExecuteInventoryProcessing()
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
             $Global:ConsumptionRecordCount += $ConsumptionRecordsThisSub
+            # Per-INVOCATION total, separate from the run-wide global above. The
+            # wrapper invokes this script via '&' once per subscription in the
+            # SAME process, so $Global:ConsumptionRecordCount is a cumulative
+            # running total across subscriptions. The per-subscription
+            # Diagnostics_*.log must report only THIS subscription's count, and
+            # its zero-record warning must be able to fire for a subscription
+            # that collected nothing even after an earlier one collected plenty.
+            # Script-scoped (not a new global) so it resets naturally per invocation.
+            if ($null -eq $script:ConsumptionRecordsThisRun) { $script:ConsumptionRecordsThisRun = 0 }
+            $script:ConsumptionRecordsThisRun += $ConsumptionRecordsThisSub
             if ($ConsumptionFailedThisSub)
             {
                 $Global:ConsumptionFailedSubs += [pscustomobject]@{
@@ -2544,7 +2554,7 @@ if ($Obfuscate.IsPresent)
     # the obfuscated and default packaging branches. Returns $null on any
     # build/write failure (downgraded to a warning inside), so the guard below
     # cannot inject a missing path into the archive list and break packaging.
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested (-not $SkipConsumption.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     # Exclude the obfuscation dictionary and transcript from the obfuscated zip.
     # The dictionary maps obfuscated values back to REAL identifiers, and the
@@ -2583,7 +2593,7 @@ else
     # by Protect-DiagnosticText; the surrounding report already carries real
     # names, so shipping the log here adds no new exposure. Guarded like the
     # obfuscate path so a build/write failure cannot break packaging.
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested (-not $SkipConsumption.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 

@@ -401,6 +401,12 @@ function Write-RdaShareableDiagnosticsLog
         [string]$RunDateTime,
         [string]$Version,
         $PhaseTimings,
+        # Consumption outcome for THIS run. Passed in (rather than read from the
+        # global) so the builder stays self-contained and unit-testable offline.
+        # $ConsumptionRequested is $false when -SkipConsumption was passed, which
+        # makes a zero record count expected rather than a problem.
+        [int]$ConsumptionRecordCount = 0,
+        [bool]$ConsumptionRequested = $true,
         [switch]$Obfuscated
     )
 
@@ -520,6 +526,42 @@ function Write-RdaShareableDiagnosticsLog
         foreach ($csItem in $ConsumpSkips)
         {
             $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$csItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$csItem.Message) $DiagScrubMap)))
+        }
+
+        # Consumption OUTCOME, not just its failures. A header-only Consumption CSV
+        # was previously invisible here: the failure count read 0 (no exception was
+        # raised) and the record count was not reported at all, so the shareable
+        # log looked healthy while the billing data the operator asked for was
+        # missing. The record count is a plain integer - no identifier - so it is
+        # safe in an obfuscated bundle, which is the bundle we normally receive.
+        $DiagLines.Add('')
+        if ($ConsumptionRequested)
+        {
+            $DiagLines.Add(('Consumption records collected: {0}' -f $ConsumptionRecordCount))
+        }
+        else
+        {
+            $DiagLines.Add('Consumption records collected: n/a (-SkipConsumption was passed)')
+        }
+
+        # The silent-failure signature: requested, no per-subscription failure
+        # recorded, and yet nothing came back. The up-front access gate cannot
+        # catch this - Test-ConsumptionAccess classifies the billing probe's
+        # EXCEPTION text and an empty-but-successful response raises none - so
+        # this is the only place the shared bundle can carry the signal.
+        if ($ConsumptionRequested -and $ConsumptionRecordCount -eq 0 -and $ConsumpSkips.Count -eq 0)
+        {
+            $DiagLines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')
+            $DiagLines.Add('  and no subscription reported a billing error. The billing API answered')
+            $DiagLines.Add('  successfully with no rows, so the Consumption CSV holds only its header.')
+            $DiagLines.Add('  Expected ONLY if there is genuinely no usage in the queried window (the 30')
+            $DiagLines.Add('  days ending at midnight yesterday, host local time). Otherwise the usual causes are:')
+            $DiagLines.Add('    - CSP / Partner-managed subscription with the partner cost visibility')
+            $DiagLines.Add('      policy OFF (the default). Billing scope on CSP subscriptions is not')
+            $DiagLines.Add('      governed by Azure RBAC, so granting Cost Management Reader does not')
+            $DiagLines.Add('      help - the partner must enable it in Partner Center.')
+            $DiagLines.Add('    - Subscription not transitioned to the Azure plan.')
+            $DiagLines.Add('    - A subscription offer the legacy usage API does not serve.')
         }
 
         $DiagnosticsFile = ($DefaultPath + "Diagnostics_" + $ReportName + "_" + $RunDateTime + ".log")

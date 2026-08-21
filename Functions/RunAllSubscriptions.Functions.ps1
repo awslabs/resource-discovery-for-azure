@@ -1856,6 +1856,36 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
     $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))
 
+    # Consumption was requested, at least one subscription actually ran, no
+    # subscription reported a billing error, and yet zero usage records came
+    # back. The up-front access gate cannot catch this case: Test-ConsumptionAccess
+    # classifies the billing probe's EXCEPTION text, and an empty-but-successful
+    # response raises no exception. Without this block the only trace in the
+    # SHIPPED bundle is a bare "Consumption records collected : 0", which reads
+    # like an idle tenant rather than a missing-data problem. The text carries no
+    # identifiers, so it is emitted for obfuscated runs too.
+    $SkipConsumptionRequested = $false
+    if ($null -ne $InvocationParameters -and $InvocationParameters.ContainsKey('SkipConsumption'))
+    {
+        $SkipConsumptionValue = $InvocationParameters['SkipConsumption']
+        $SkipConsumptionRequested = if ($SkipConsumptionValue -is [switch]) { $SkipConsumptionValue.IsPresent } else { [bool]$SkipConsumptionValue }
+    }
+    if ((-not $SkipConsumptionRequested) -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0))
+    {
+        $Lines.Add('')
+        $Lines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')
+        $Lines.Add('  and no subscription reported a billing error. The billing API answered')
+        $Lines.Add('  successfully with no rows, so the Consumption CSV holds only its header.')
+        $Lines.Add('  Expected ONLY if there is genuinely no usage in the queried window (the 30')
+        $Lines.Add('  days ending at midnight yesterday, host local time). Otherwise the usual causes are:')
+        $Lines.Add('    - CSP / Partner-managed subscription with the partner cost visibility')
+        $Lines.Add('      policy OFF (the default). Billing scope on CSP subscriptions is not')
+        $Lines.Add('      governed by Azure RBAC, so granting Cost Management Reader does not')
+        $Lines.Add('      help - the partner must enable it in Partner Center.')
+        $Lines.Add('    - Subscription not transitioned to the Azure plan.')
+        $Lines.Add('    - A subscription offer the legacy usage API does not serve.')
+    }
+
     # Per-subscription detail is emitted ONLY for a non-obfuscated bundle, where
     # real names already appear throughout the report. An obfuscated bundle stops
     # at the counts above.

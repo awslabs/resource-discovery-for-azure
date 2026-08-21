@@ -35,6 +35,51 @@ param ($TenantID,
     $OutputDirectory)
 
 # ---------------------------------------------------------------------------
+# Reject unrecognized arguments.
+#
+# This script deliberately does NOT use [CmdletBinding()]: it declares its own
+# -Debug switch, which is a CmdletBinding common-parameter name, and both
+# wrappers forward -Debug explicitly. Without [CmdletBinding()] - and with no
+# [Parameter()] attribute either, since [ValidatePattern]/[ValidateSet] do not
+# promote a script to advanced - PowerShell treats this as a SIMPLE script and
+# silently collects unrecognized arguments into $args instead of failing.
+#
+# A silently dropped flag is worse than an error: a mistyped -Obfusacte would
+# run the whole inventory UNOBFUSCATED while the operator believes the output
+# was masked. The other entry points (Run-AllSubscriptions.ps1,
+# Run-AllSubscriptions.Stream.ps1, Reveal.ps1 and Build-MainSummaryFromZip.ps1)
+# already reject unknown args for free because they are advanced scripts. This
+# restores the same guarantee here.
+#
+# Fails the same way as the dot-source guards below (Write-Host + exit 1) so a
+# direct interactive run sets a non-zero exit code, and so a wrapper-driven run
+# is caught by the callers' existing $LASTEXITCODE check and marked as a failed
+# subscription.
+if ($args.Count -gt 0)
+{
+    # Help is the one universal flag and must always pass. A simple script does
+    # not get -? handled by the binder, so it arrives here in $args. Only treat
+    # the run as a help request when EVERY unbound token is a help flag, so a
+    # mixed '-Obfusacte -?' still names the typo instead of hiding it behind a
+    # successful help screen. $PSCommandPath is wildcard-escaped because
+    # Get-Help -Name treats its value as a pattern, and a repo path containing
+    # '[' or ']' would otherwise resolve nothing and exit 0 showing no help.
+    $HelpFlags = @('-?', '-h', '-help', '--help')
+    $NonHelpArgs = @($args | Where-Object { $_ -notin $HelpFlags })
+    if ($NonHelpArgs.Count -eq 0)
+    {
+        Get-Help -Name ([System.Management.Automation.WildcardPattern]::Escape($PSCommandPath))
+        exit 0
+    }
+
+    Write-Host ("ERROR: Unrecognized argument(s): {0}" -f ($NonHelpArgs -join ', ')) -ForegroundColor Red
+    Write-Host "Check for a typo. A mistyped switch would otherwise be ignored and the run would continue with that option OFF - for example producing an UNOBFUSCATED report." -ForegroundColor Yellow
+    Write-Host "Note: this script is not an advanced function, so PowerShell common parameters (-Verbose, -ErrorAction and similar) are not accepted either. Use -Debug for verbose diagnostics." -ForegroundColor Yellow
+    Write-Host "Run this script with -? to list the valid parameters." -ForegroundColor Yellow
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
 # into this script's scope. Fail loud if the file is missing rather than
 # breaking later with a confusing "command not found".

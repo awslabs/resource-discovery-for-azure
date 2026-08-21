@@ -946,9 +946,13 @@ if ($Task -eq 'Processing')
                 $MetricName = $_.MetricName
                 $MetricService = $_.Service
 
-                # Per-call diagnostics: outcome is one of Success / Timeout /
-                # Throttled / Error and is reported back to the parent so the
-                # metrics phase can show exactly which calls stalled.
+                # Per-call diagnostics, reported back to the parent so the metrics
+                # phase can show exactly which calls stalled. Outcome is one of:
+                #   Success                      - data returned
+                #   Timeout / Throttled / Error  - retried up to $CallMaxRetries
+                #   NotFound / BadRequest        - permanent, abandoned after 1 attempt
+                # This list is the outcome contract the phase summary counts on; keep
+                # it in step with the classification in the retry loop below.
                 $CallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
                 $CallOutcome = 'Success'
                 $CallAttempts = 0
@@ -987,9 +991,19 @@ if ($Task -eq 'Processing')
                     while (-not $Succeeded -and $Attempt -le $CallMaxRetries)
                     {
                         $CallAttempts = $Attempt + 1
-                        $AttemptStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
                         $TimedOut = $false
                         $Throttled = $false
+                        # A PERMANENT failure can never succeed on a retry, so retrying
+                        # one only burns wall-clock and Azure Monitor metric-query quota.
+                        # Two are seen routinely on real runs: a 404 for a resource that
+                        # was deleted between the Resource Graph snapshot and this call
+                        # (common with short-lived container / scale-set disks), and a 400
+                        # for a metric that is not valid for the resource. $PermanentOutcome
+                        # carries the observed HTTP status forward as the recorded Outcome,
+                        # so the phase summary reports the status as fact and names the
+                        # likely cause as likely - see the reporting block at the end.
+                        $Permanent = $false
+                        $PermanentOutcome = $null
 
                         $Job = Start-ThreadJob -ScriptBlock {
                             param($MArgs)
@@ -1006,7 +1020,31 @@ if ($Task -eq 'Processing')
                             catch
                             {
                                 $LastError = $_.Exception.Message
-                                if ($LastError -match '429|throttl|TooManyRequests|rate limit')
+
+                                # Order matters, and the permanent check MUST stay first.
+                                # The throttle pattern below is a loose substring match, and
+                                # the exception message echoes the full ARM resource id - a
+                                # GUID containing '429' would otherwise be read as throttling
+                                # and drag a terminal failure back onto the 4-attempt path
+                                # (with the doubled throttle backoff) that this block exists
+                                # to avoid. The permanent pattern is anchored on the quoted
+                                # status phrase, so it cannot match a genuine
+                                # TooManyRequests message; checking it first is strictly safer.
+                                #
+                                # Anchoring is also why a bare '404' / 'ResourceNotFound'
+                                # substring is NOT matched: a resource group may legally
+                                # contain parentheses, so a looser pattern could match the
+                                # id itself. $PermanentOutcome is taken FROM the match so the
+                                # recorded outcome cannot drift from the branch that set it.
+                                # An unmatched permanent failure just falls through to the
+                                # retry path - slower, never wrong - which is the correct
+                                # way for this classifier to fail.
+                                if ($LastError -match "invalid status code '(?<Status>NotFound|BadRequest)'")
+                                {
+                                    $Permanent = $true
+                                    $PermanentOutcome = $Matches['Status']
+                                }
+                                elseif ($LastError -match '429|throttl|TooManyRequests|rate limit')
                                 {
                                     $Throttled = $true
                                 }
@@ -1024,8 +1062,6 @@ if ($Task -eq 'Processing')
                             Stop-Job -Job $Job -ErrorAction SilentlyContinue
                             Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
                         }
-
-                        $AttemptStopwatch.Stop()
 
                         if ($Succeeded)
                         {
@@ -1045,7 +1081,7 @@ if ($Task -eq 'Processing')
                         # Error are recorded in the diagnostics bag below and
                         # surfaced in the end-of-phase summary (written to the
                         # debug log), so nothing diagnostic is lost.
-                        if ($Attempt -lt $CallMaxRetries)
+                        if (-not $Permanent -and $Attempt -lt $CallMaxRetries)
                         {
                             # Exponential backoff: 2^attempt seconds, capped, plus
                             # jitter so a wave of throttled calls does not retry in
@@ -1058,7 +1094,13 @@ if ($Task -eq 'Processing')
                         }
                         else
                         {
-                            $CallOutcome = if ($TimedOut) { 'Timeout' } elseif ($Throttled) { 'Throttled' } else { 'Error' }
+                            $CallOutcome = if ($Permanent) { $PermanentOutcome } elseif ($TimedOut) { 'Timeout' } elseif ($Throttled) { 'Throttled' } else { 'Error' }
+
+                            # Give up NOW on a permanent failure rather than spending the
+                            # remaining attempts (and their backoff) on a call that cannot
+                            # succeed. The throw below still runs, so the metric is still
+                            # recorded as having no data - only the futile retries are cut.
+                            if ($Permanent) { break }
                         }
 
                         $Attempt++
@@ -1167,6 +1209,11 @@ if ($Task -eq 'Processing')
                         Name        = $_.Name
                         Metric      = $MetricName
                         Interval    = $_.Interval
+                        # Diagnostics only (this record never reaches Metrics_*.json).
+                        # Carried so the BadRequest reporting below can show BOTH halves
+                        # of a request Azure Monitor may have rejected on our side - a
+                        # wrong interval and a wrong aggregation fail identically.
+                        Aggregation = $_.Aggregation
                         Outcome     = $CallOutcome
                         Attempts    = $CallAttempts
                         ElapsedSec  = [math]::Round($CallStopwatch.Elapsed.TotalSeconds, 2)
@@ -1238,9 +1285,16 @@ if ($Task -eq 'Processing')
     $TimeoutCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Timeout' }).Count
     $ThrottledCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Throttled' }).Count
     $ErrorCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Error' }).Count
+    # Permanent, non-retried outcomes. Counted and reported SEPARATELY from
+    # Timeout/Throttled/Error because they are not a run health problem and not a
+    # place the run "got stuck": NotFound means the resource was deleted between
+    # the Resource Graph snapshot and the metric call, BadRequest means Azure
+    # Monitor rejected the request for that resource. Neither is retried.
+    $NotFoundCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'NotFound' }).Count
+    $BadRequestCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'BadRequest' }).Count
 
     Write-MetricsDiag ("===== Metrics phase summary =====")
-    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | Elapsed: {5}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
+    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
 
     # Self-reported metric-query API-call impact for THIS subscription. The per-call
     # path issues one Get-AzMetric HTTP call per attempt (retries included), so sum
@@ -1264,9 +1318,37 @@ if ($Task -eq 'Processing')
     if (($TimeoutCount + $ThrottledCount + $ErrorCount) -gt 0)
     {
         Write-MetricsDiag ("Non-success calls (where it got stuck):")
-        foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -ne 'Success' } | Sort-Object ElapsedSec -Descending))
+        foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -in @('Timeout', 'Throttled', 'Error') } | Sort-Object ElapsedSec -Descending))
         {
             Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error)
+        }
+    }
+
+    # Rejected outright by Azure Monitor and abandoned after ONE attempt, so these
+    # cost almost no time. Reported separately from the stuck/failed calls above,
+    # but NOT silently: a 404 is nearly always the resource (deleted after discovery),
+    # whereas a 400 may equally be OUR request being wrong - a TimeGrain or an
+    # aggregation this resource does not support, or a metric definition aimed at the
+    # wrong resource type. Since the status alone cannot separate those, what makes a
+    # tool-side 400 diagnosable is printing the metric, interval and aggregation we
+    # actually asked for. The first line of the Azure message is appended too in case
+    # the SDK carried extra detail; for a CloudException it often adds nothing beyond
+    # the status, so it is a bonus rather than the evidence.
+    if (($NotFoundCount + $BadRequestCount) -gt 0)
+    {
+        Write-MetricsDiag ("Metrics not collected for these resources (permanent, not retried - no data was available to collect):")
+        foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -in @('NotFound', 'BadRequest') } | Sort-Object Service, Name))
+        {
+            $FirstLine = if ([string]::IsNullOrWhiteSpace($rec.Error)) { '(no error text captured)' } else { (([string]$rec.Error) -split "`r?`n")[0].Trim() }
+
+            if ($rec.Outcome -eq 'NotFound')
+            {
+                Write-MetricsDiag ("  NotFound idx={0} {1}/{2}/{3} interval={4} aggregation={5} - Azure Monitor has no such resource; usually it was deleted between discovery and this call: {6}" -f $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Aggregation, $FirstLine)
+            }
+            else
+            {
+                Write-MetricsDiag ("  BadRequest idx={0} {1}/{2}/{3} interval={4} aggregation={5} - Azure Monitor rejected this request; usually the metric is not valid for this resource, but check the interval and aggregation above are ones it supports: {6}" -f $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Aggregation, $FirstLine)
+            }
         }
     }
 

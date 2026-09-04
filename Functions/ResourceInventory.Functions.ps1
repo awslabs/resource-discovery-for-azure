@@ -271,6 +271,184 @@ function Get-RetryWaitSeconds
 # (collectors compare against lowercase type strings and self-join on lowercased
 # ids). Native cmdlet = portable across Windows/Linux/macOS with no az.cmd shell
 # boundary; see .kiro/steering/cross-platform-powershell.md.
+# Sentinel prefix marking "Azure refused this response as too large". Matched by
+# the window splitter below, which is the only caller that can do anything about
+# it. Tagging the message keeps this free of a custom exception type, which would
+# be more machinery than a single internal signal needs.
+$script:RdaPayloadTooLargeTag = 'RDA_PAYLOAD_TOO_LARGE'
+
+# ONE Resource Graph request, with the project's bounded retry around it.
+#
+# Loop control is deliberately NOT expressed with `throw`. In a normal (non-Debug)
+# run ResourceInventory.ps1 sets $ErrorActionPreference = 'SilentlyContinue', and
+# under that preference an UNCAUGHT throw does not terminate - execution simply
+# continues at the next statement. The previous shape used `for (;;)` whose only
+# exits were `break` on success and a `throw` in the failure branch, so on a
+# permanent failure the throw fell through, the backoff ran, and the loop went
+# round again FOREVER. The retry ceiling looked like a bound but was inert, and a
+# subscription with an unfetchable page hung indefinitely instead of failing.
+# Every exit here is now an explicit `break`; the throw happens after the loop,
+# where it is the function's return path rather than its control flow.
+function Invoke-AzGraphRequest
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Query,
+        [string[]]$Subscription,
+        [int]$First = 1000,
+        [int]$Skip = 0
+    )
+
+    $GraphParams = @{ Query = $Query; First = $First; ErrorAction = 'Stop' }
+    if ($Subscription) { $GraphParams['Subscription'] = $Subscription }
+    if ($Skip -gt 0) { $GraphParams['Skip'] = $Skip }
+
+    # Up to 30 retries (31 attempts) with exponential backoff + jitter, longer when
+    # throttled, honouring a server Retry-After directive when one is present. The
+    # high ceiling lets a shard ride out SUSTAINED tenant-wide ARG throttling rather
+    # than failing a whole subscription on it; per-attempt backoff is still capped
+    # (30s, 60s throttled, 120s server-directed) so the worst case is long but
+    # bounded. Stable internal - deliberately not a script parameter.
+    $GraphMaxRetries = 30
+    $Rows = $null
+    $FailureMessage = $null
+    $AttemptsMade = 0
+
+    for ($Attempt = 0; ; $Attempt++)
+    {
+        $AttemptsMade = $Attempt + 1
+        try
+        {
+            $Rows = @(Search-AzGraph @GraphParams)
+            $FailureMessage = $null
+            break
+        }
+        catch
+        {
+            $Message = $_.Exception.Message
+
+            # Checked FIRST, because Azure returns it AS a BadRequest and the
+            # permanent-failure test below would otherwise swallow it. This one is
+            # not "give up" and not "retry the same thing" - it means the window is
+            # too big, which only the splitter can act on, so hand it straight up.
+            if ($Message -match 'ResponsePayloadTooLarge|Response payload size is \d+, exceeded the limit')
+            {
+                $FailureMessage = ('{0}: {1}' -f $script:RdaPayloadTooLargeTag, $Message)
+                break
+            }
+
+            # Clearly-permanent failures: a retry cannot help, so stop now rather
+            # than burning the whole backoff budget on an error retrying cannot fix.
+            $Permanent = $Message -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid'
+
+            if ($Permanent -or $Attempt -ge $GraphMaxRetries)
+            {
+                $FailureMessage = ("Resource Graph query failed after {0} attempt(s): {1}`nQuery: {2}" -f $AttemptsMade, $Message, $Query)
+                break
+            }
+
+            # Transient: exponential backoff (2^attempt, capped) plus jitter so a
+            # wave of throttled calls does not retry in lockstep. Throttled calls
+            # wait a bit longer.
+            $Throttled = $Message -match 'TooManyRequests|\b429\b|throttl'
+            $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
+            if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
+            # Honor the service's own retry directive when the throttling response
+            # exposed one (Retry-After / x-ms-user-quota-resets-after); otherwise
+            # keep the exponential backoff just computed. Clamped to 120s so a
+            # pathological header cannot wedge the shard.
+            $Backoff = Get-RetryWaitSeconds -Exception $_.Exception -FallbackSeconds $Backoff -MaxSeconds 120
+            $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
+            Start-Sleep -Seconds ([math]::Round($Backoff + $Jitter, 2))
+        }
+    }
+
+    if ($null -ne $FailureMessage) { throw $FailureMessage }
+    return $Rows
+}
+
+# Fetch the rows for ONE caller-requested window, splitting it if Azure refuses the
+# response as too large.
+#
+# Resource Graph caps a single response at 16 MB. A full page normally sits far
+# below that, but a resource type whose payload is hundreds of KB each -
+# microsoft.resources/templatespecs/versions is the case that surfaced this, at up
+# to ~794 KB per resource - can push one page over the cap. Because the discovery
+# query is `order by id asc`, those resources are contiguous, so the oversize lands
+# entirely in one page. That page can NEVER succeed: it is not transient, and
+# retrying the identical request is futile.
+#
+# The caller's paging contract must not change - it advances its offset by the page
+# size it asked for - so a smaller page here would silently skip resources. This
+# therefore always returns the FULL requested window, fetched as however many
+# smaller sub-windows it takes. Halving down to a floor of one row is enough for any
+# realistic type; only a SINGLE resource larger than the cap is genuinely
+# unfetchable, and that fails loudly rather than being dropped.
+#
+# Splitting is only sound because the query is ordered (`order by id asc` at every
+# paged call site): sub-windows of an ordered result are disjoint and their
+# concatenation is the whole window. An UNORDERED query must not be split, because
+# Azure gives no stability guarantee across requests - hence the guard below.
+function Get-AzGraphRowWindow
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Query,
+        [string[]]$Subscription,
+        [int]$First = 1000,
+        [int]$Skip = 0
+    )
+
+    # Work stack of windows still to fetch. Pushing the RIGHT half before the LEFT
+    # means the left is popped first, so rows accumulate in ascending order - the
+    # same order a single successful request would have returned.
+    $Pending = New-Object System.Collections.Stack
+    $Pending.Push([pscustomobject]@{ Skip = $Skip; First = $First })
+    $Rows = @()
+    $SplitCount = 0
+
+    while ($Pending.Count -gt 0)
+    {
+        $Window = $Pending.Pop()
+        try
+        {
+            $Rows += @(Invoke-AzGraphRequest -Query $Query -Subscription $Subscription -First $Window.First -Skip $Window.Skip)
+        }
+        catch
+        {
+            $Message = $_.Exception.Message
+            if ($Message -notlike ('{0}*' -f $script:RdaPayloadTooLargeTag))
+            {
+                # Anything else is this function's caller's problem, unchanged.
+                throw
+            }
+
+            # Only an ordered query may be split - see the note above.
+            if ($Query -notmatch 'order\s+by')
+            {
+                throw ("Resource Graph refused the response as too large and the query is not ordered, so it cannot be split safely. Add an 'order by' clause to page it.`n{0}`nQuery: {1}" -f $Message, $Query)
+            }
+
+            if ($Window.First -le 1)
+            {
+                throw ("Resource Graph refused a SINGLE resource as too large (offset {0}); it exceeds the 16 MB response cap and cannot be retrieved. Exclude this resource type from the discovery query to complete the run.`n{1}" -f $Window.Skip, $Message)
+            }
+
+            $LeftCount = [math]::Floor($Window.First / 2)
+            $RightCount = $Window.First - $LeftCount
+            $Pending.Push([pscustomobject]@{ Skip = ($Window.Skip + $LeftCount); First = $RightCount })
+            $Pending.Push([pscustomobject]@{ Skip = $Window.Skip; First = $LeftCount })
+            $SplitCount++
+            Write-Log -Message ("Resource Graph response too large at offset {0} for {1} rows; retrying as {2} + {3}." -f $Window.Skip, $Window.First, $LeftCount, $RightCount) -Severity 'Warning'
+        }
+    }
+
+    if ($SplitCount -gt 0)
+    {
+        Write-Log -Message ("Fetched offset {0}..{1} in smaller sub-pages after {2} split(s); {3} row(s) collected. This subscription holds at least one unusually large resource type." -f $Skip, ($Skip + $First - 1), $SplitCount, $Rows.Count) -Severity 'Warning'
+    }
+
+    return $Rows
+}
+
 function Invoke-AzGraphQuerySafe
 {
     param(
@@ -291,9 +469,9 @@ function Invoke-AzGraphQuerySafe
     # caller-driven via -First (max 1000) / -Skip offset, mirroring the previous
     # --first/--skip. -Subscription scopes the query (mirrors --subscriptions);
     # omitting it queries the whole accessible tenant, as before.
-    $GraphParams = @{ Query = $Query; First = $First; ErrorAction = 'Stop' }
-    if ($Subscription) { $GraphParams['Subscription'] = $Subscription }
-    if ($Skip -gt 0) { $GraphParams['Skip'] = $Skip }
+    # The window fetch below builds the per-request parameter set itself, because a
+    # window that Azure refuses as too large is re-fetched as smaller sub-windows
+    # with different First/Skip values.
 
     # Bounded retry for TRANSIENT Resource Graph failures (dropped/changed
     # network mid-run, VPN switch, ARM throttling, 5xx). Without this a single
@@ -318,43 +496,7 @@ function Invoke-AzGraphQuerySafe
     # of backoff on an error a retry cannot fix. On the final failed attempt the
     # throw is identical to the pre-retry behavior, so the per-subscription
     # catch -> FailedAttempts -> -Resume path is unchanged (see #22).
-    $GraphMaxRetries = 30
-    $Rows = $null
-
-    for ($Attempt = 0; ; $Attempt++)
-    {
-        try
-        {
-            $Rows = @(Search-AzGraph @GraphParams)
-            break
-        }
-        catch
-        {
-            $Message = $_.Exception.Message
-
-            # Clearly-permanent failures: a retry cannot help, so surface immediately.
-            $Permanent = $Message -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid'
-
-            if ($Permanent -or $Attempt -ge $GraphMaxRetries)
-            {
-                throw ("Resource Graph query failed after {0} attempt(s): {1}`nQuery: {2}" -f ($Attempt + 1), $Message, $Query)
-            }
-
-            # Transient: exponential backoff (2^attempt, capped) plus jitter so a
-            # wave of throttled calls does not retry in lockstep. Throttled calls
-            # wait a bit longer.
-            $Throttled = $Message -match 'TooManyRequests|\b429\b|throttl'
-            $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
-            if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
-            # Honor the service's own retry directive when the throttling response
-            # exposed one (Retry-After / x-ms-user-quota-resets-after); otherwise
-            # keep the exponential backoff just computed. Clamped to 120s so a
-            # pathological header cannot wedge the shard.
-            $Backoff = Get-RetryWaitSeconds -Exception $_.Exception -FallbackSeconds $Backoff -MaxSeconds 120
-            $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
-            Start-Sleep -Seconds ([math]::Round($Backoff + $Jitter, 2))
-        }
-    }
+    $Rows = @(Get-AzGraphRowWindow -Query $Query -Subscription $Subscription -First $First -Skip $Skip)
 
     # Reproduce the former whole-payload .ToLower() (keys AND values) when asked.
     # Search-AzGraph returns typed objects with ORIGINAL casing; every data-fetch

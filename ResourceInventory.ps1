@@ -776,8 +776,35 @@ Function RunInventorySetup()
     CheckCliRequirements
     CheckPowerShell
     GetSubscriptionsData
-    ResourceInventoryLoop
-    ResourceInventoryAvd
+
+    # Resource discovery is wrapped because a failed discovery page must NOT be
+    # survivable. Both loops page through Resource Graph as
+    #   $Resource = Invoke-AzGraphQuerySafe ...; $Global:Resources += $Resource.data
+    # with no local guard. In a normal run $ErrorActionPreference is
+    # 'SilentlyContinue', and under that preference a terminating error with NO
+    # catch anywhere up the stack does not stop anything - every frame simply
+    # continues at its next statement. So a page that failed left $Resource holding
+    # the PREVIOUS page's object, appended it a second time, and the run went on to
+    # produce a report that was missing ~1000 real resources while double-counting
+    # another page, with the total looking plausible and nothing reported.
+    #
+    # ONE catch here covers every discovery call site, because a terminating error
+    # propagates up until something catches it - verified for this exact nesting.
+    # exit 1 (not throw) is this script's hard-fail signal at script scope, and the
+    # wrapper turns a non-zero inner exit into "this subscription failed", so
+    # -Resume can retry it rather than shipping a quietly incomplete inventory.
+    try
+    {
+        ResourceInventoryLoop
+        ResourceInventoryAvd
+    }
+    catch
+    {
+        Write-Log -Message ("FAILED to complete resource discovery: {0}" -f $_.Exception.Message) -Severity 'Error'
+        Write-Log -Message ('  The inventory for this subscription would be INCOMPLETE, so it is reported as failed rather than written to a report. Re-run with -Resume to retry it.') -Severity 'Error'
+        Write-Log -Message ('  If this is a Resource Graph response-size failure on one specific resource type, exclude that type from the discovery query to let the rest of the subscription complete.') -Severity 'Error'
+        exit 1
+    }
 
     if ($Obfuscate.IsPresent)
     {

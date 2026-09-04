@@ -33,13 +33,29 @@ BeforeAll {
     if (-not (Test-Path $FunctionsFile)) { throw "ResourceInventory.Functions.ps1 not found at $FunctionsFile" }
     . $FunctionsFile
 
+    # Write-Log lives in Common.Functions.ps1 and is a real dependency of the
+    # oversized-window path, which warns the operator when it has to split a page.
+    # ResourceInventory.ps1 dot-sources Common before any of this runs, so loading
+    # it here matches production rather than papering over a missing command.
+    $CommonFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'
+    if (-not (Test-Path $CommonFile)) { throw "Common.Functions.ps1 not found at $CommonFile" }
+    . $CommonFile
+
     # Offline-portability shim: Pester's `Mock -CommandName Search-AzGraph`
     # resolves the command at mock-setup time. On a clean box / CI without the
     # Az.ResourceGraph module installed that would throw CommandNotFoundException
     # before any test runs. Declaring a no-op `Search-AzGraph` function here gives
     # Mock something to intercept, so the suite is a genuine offline unit test
     # that does not depend on Az.ResourceGraph being installed.
-    function Search-AzGraph { }
+    # [CmdletBinding()] so the shim accepts the common parameters the function under
+    # test passes (-ErrorAction Stop); a simple function would reject them. The
+    # named parameters are declared so a Mock body can assert on the WINDOW being
+    # requested (First/Skip), which the oversized-response tests below rely on.
+    function Search-AzGraph
+    {
+        [CmdletBinding()]
+        param($Query, $Subscription, $First, $Skip, $ManagementGroup)
+    }
 }
 
 Describe 'Invoke-AzGraphQuerySafe retry behavior' {
@@ -260,5 +276,205 @@ Describe 'Get-RetryWaitSeconds header honoring' {
     It 'ignores a non-positive Retry-After and falls back' {
         $Ex = New-FakeThrottleException -Headers @{ 'Retry-After' = @('0') }
         Get-RetryWaitSeconds -Exception $Ex -FallbackSeconds 25 | Should -Be 25
+    }
+}
+
+# =============================================================================
+# Oversized-response handling, and the retry bound under the PRODUCTION
+# error preference.
+#
+# WHY THESE EXIST
+# ---------------
+# The tests above validate the retry ceiling, and they passed - while the ceiling
+# was inert in production. Pester runs at the default $ErrorActionPreference of
+# 'Continue', and every assertion above reaches the function through
+# `{ ... } | Should -Throw` or a `try { } catch { }`. Under either of those a
+# `throw` is terminating, so the ceiling appeared to work.
+#
+# A normal run is different: ResourceInventory.ps1 sets
+# $ErrorActionPreference = 'SilentlyContinue', and the discovery loops call the
+# wrapper with no local guard. Under that preference a terminating error with no
+# catch anywhere up the stack does NOT stop anything - execution continues at the
+# next statement. The retry loop used to be `for (;;)` whose only exits were
+# `break` on success and a `throw` on failure, so on a permanent failure the
+# throw fell through, the backoff ran, and the loop went round again forever. A
+# subscription holding an unfetchable page hung indefinitely.
+#
+# So the first Context below pins the bound at the preference production actually
+# uses, with no caller guard - the condition the old tests never reproduced.
+#
+# The rest cover Resource Graph's 16 MB response cap. A full page normally sits
+# well under it, but a type whose payload is hundreds of KB each
+# (microsoft.resources/templatespecs/versions, up to ~794 KB) can push one page
+# over. `order by id asc` makes those resources contiguous, so the whole
+# oversize lands in a single page that can never succeed. The wrapper now
+# re-fetches that window as smaller sub-windows and still returns the FULL window,
+# because the callers advance their offset by the page size they asked for - a
+# short page would silently skip resources.
+# =============================================================================
+
+Describe 'Retry bound under the production error preference' {
+
+    It 'bounds the loop with an explicit break, not with a throw' {
+        # The regression this pins: loop control expressed as `throw` is inert under
+        # 'SilentlyContinue', so the ceiling has to be enforced by a real `break`.
+        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/ResourceInventory.Functions.ps1') -Raw
+        $Body = [regex]::Match($Src, '(?s)function Invoke-AzGraphRequest.*?\n\}').Value
+        $Body | Should -Not -BeNullOrEmpty -Because 'the single-request retry helper must exist to be checked'
+        $Body | Should -Match '\$Attempt -ge \$GraphMaxRetries[\s\S]{0,200}?break' -Because 'the ceiling must exit via break'
+        # The only throw in the helper is the post-loop return path, never inside the
+        # loop body where it would be control flow.
+        $LoopBody = [regex]::Match($Body, '(?s)for \(\$Attempt = 0; ; \$Attempt\+\+\).*?\n    \}').Value
+        $LoopBody | Should -Not -BeNullOrEmpty
+        $LoopBody | Should -Not -Match '\bthrow\b' -Because 'a throw inside the loop is exactly what made the ceiling inert'
+    }
+
+    It 'stops at 31 attempts in a real process at SilentlyContinue with no caller catch' {
+        # Pester always catches, so the production condition - a terminating error
+        # with NOTHING catching it anywhere up the stack - cannot be reproduced
+        # in-process. Run it in a child pwsh instead, which is the only faithful way.
+        # The mock has a hard ceiling so an unbounded loop ends the child rather than
+        # hanging this suite; a bounded implementation never reaches it.
+        $Repo = Split-Path $PSScriptRoot -Parent
+        $Script = @'
+$ErrorActionPreference = 'SilentlyContinue'
+. (Join-Path $args[0] 'Functions/Common.Functions.ps1')
+. (Join-Path $args[0] 'Functions/ResourceInventory.Functions.ps1')
+$global:Calls = 0
+function Search-AzGraph { [CmdletBinding()] param($Query,$Subscription,$First,$Skip,$ManagementGroup)
+    $global:Calls++
+    if ($global:Calls -gt 200) { return @([pscustomobject]@{ id = 'ceiling' }) }
+    throw 'ServiceUnavailable (503) - transient'
+}
+function Start-Sleep { param([int]$Seconds, [switch]$Milliseconds) }
+# NO try/catch - production parity.
+$null = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000
+"CALLS=$($global:Calls)"
+'@
+        $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("argbound-{0}.ps1" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        try
+        {
+            Set-Content -LiteralPath $Tmp -Value $Script -Encoding utf8
+            $Out = & pwsh -NoProfile -File $Tmp $Repo 2>&1
+            $Line = @($Out | Where-Object { $_ -match '^CALLS=\d+$' }) | Select-Object -Last 1
+            $Line | Should -Not -BeNullOrEmpty -Because 'the child process must reach the end, which an unbounded loop never would'
+            [int]($Line -replace '^CALLS=', '') | Should -Be 31 -Because 'the ceiling is 30 retries plus the initial attempt, and it must hold with nothing catching the throw'
+        }
+        finally
+        {
+            Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Oversized Resource Graph response (16 MB cap)' {
+
+    BeforeAll {
+        Mock -CommandName Start-Sleep -MockWith { }
+        $script:PayloadError = 'BadRequest : ResponsePayloadTooLarge : Response payload size is 33455366, exceeded the limit of 16777216'
+    }
+
+    Context 'A window Azure refuses as too large is re-fetched in smaller pieces' {
+
+        BeforeAll {
+            # Refuse anything wider than 250 rows; otherwise return exactly the rows
+            # for the requested window so the caller's window can be reassembled.
+            $script:Requests = [System.Collections.ArrayList]::new()
+            Mock -CommandName Search-AzGraph -MockWith {
+                # $First / $Skip bind from the shim's param block. The wrapper omits
+                # -Skip when the offset is 0, so treat an unbound $Skip as 0.
+                $Offset = if ($null -eq $Skip) { 0 } else { [int]$Skip }
+                $Count = [int]$First
+                [void]$script:Requests.Add([pscustomobject]@{ Skip = $Offset; First = $Count })
+                if ($Count -gt 250) { throw $script:PayloadError }
+                return @(0..($Count - 1) | ForEach-Object { [pscustomobject]@{ id = "/r/$($Offset + $_)" } })
+            }
+        }
+
+        It 'returns the FULL requested window, not a short page' {
+            $script:Requests.Clear()
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 116000
+            @($Result.data).Count | Should -Be 1000 -Because 'the caller advances its offset by the page size it asked for, so a short page would silently skip resources'
+        }
+
+        It 'covers the window exactly once, with no gap and no overlap' {
+            $script:Requests.Clear()
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 116000
+            $Ids = @($Result.data | ForEach-Object { $_.id })
+            @($Ids | Select-Object -Unique).Count | Should -Be 1000 -Because 'overlapping sub-windows would duplicate rows'
+            $Ids[0] | Should -Be '/r/116000'
+            $Ids[-1] | Should -Be '/r/116999'
+        }
+
+        It 'returns rows in ascending order, as a single successful request would' {
+            $script:Requests.Clear()
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 0
+            $Offsets = @($Result.data | ForEach-Object { [int]($_.id -replace '^/r/', '') })
+            ($Offsets -join ',') | Should -Be (($Offsets | Sort-Object) -join ',')
+        }
+
+        It 'does not burn the transient-retry budget on the oversized attempts' {
+            # An oversized response is not transient; retrying it unchanged is futile.
+            # Each refused window must be attempted once, then split.
+            # 1000 is refused and splits to 500+500; each 500 is refused and splits
+            # to 250+250. So exactly 3 refused attempts (1000, 500, 500) and 4
+            # accepted (four 250s) - 7 requests in total. Each refused window is
+            # attempted ONCE; retrying an oversized response unchanged is futile.
+            $script:Requests.Clear()
+            $null = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 0
+            @($script:Requests | Where-Object { $_.First -gt 250 }).Count | Should -Be 3
+            @($script:Requests).Count | Should -Be 7
+            Should -Invoke -CommandName Start-Sleep -Times 0 -Because 'no backoff should be incurred for an oversized response'
+        }
+    }
+
+    Context 'A single resource larger than the cap fails loudly' {
+
+        BeforeAll {
+            Mock -CommandName Search-AzGraph -MockWith { throw $script:PayloadError }
+        }
+
+        It 'throws naming the offset, rather than dropping the resource' {
+            $Msg = $null
+            try { Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1 -Skip 500 | Out-Null }
+            catch { $Msg = $_.Exception.Message }
+            $Msg | Should -Not -BeNullOrEmpty -Because 'an unfetchable resource must never be silently skipped'
+            $Msg | Should -Match 'SINGLE resource'
+            $Msg | Should -Match '500'
+        }
+    }
+
+    Context 'An unordered query is not split' {
+
+        BeforeAll {
+            Mock -CommandName Search-AzGraph -MockWith { throw $script:PayloadError }
+        }
+
+        It 'refuses to split, because sub-windows of an unordered result are not stable' {
+            $Msg = $null
+            try { Invoke-AzGraphQuerySafe -Query 'resources | project id' -First 1000 | Out-Null }
+            catch { $Msg = $_.Exception.Message }
+            $Msg | Should -Not -BeNullOrEmpty
+            $Msg | Should -Match 'not ordered'
+        }
+    }
+}
+
+Describe 'Discovery failure is not survivable (source guard)' {
+
+    # The behaviour under test is in ResourceInventory.ps1's orchestration, which
+    # cannot be dot-sourced (its body authenticates and runs a whole inventory).
+    # These assert the guard is present in the source, because its absence is what
+    # allowed a failed page to produce a quietly incomplete report.
+    BeforeAll {
+        $script:InvSrc = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1') -Raw
+    }
+
+    It 'wraps the discovery loops in a try/catch that hard-fails' {
+        $script:InvSrc | Should -Match '(?s)try\s*\{\s*ResourceInventoryLoop\s*ResourceInventoryAvd\s*\}\s*catch'
+    }
+
+    It 'exits non-zero on a discovery failure rather than continuing to report' {
+        $script:InvSrc | Should -Match '(?s)FAILED to complete resource discovery.*?exit 1'
     }
 }

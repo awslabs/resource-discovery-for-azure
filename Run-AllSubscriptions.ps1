@@ -1,5 +1,16 @@
 param (
-    [Parameter(Mandatory = $true)]
+    # NOT Mandatory, deliberately - see the -TenantID guard immediately after this
+    # param block. Mandatory made PowerShell PROMPT for a missing value, which any
+    # non-interactive caller (CI, a scheduled task, the AKS entrypoint, a run whose
+    # output is redirected) experiences as a silent indefinite hang with no output.
+    # The guard below fails loudly with a non-zero exit instead.
+    #
+    # The bare [Parameter()] MUST stay: it is the only [Parameter()] attribute in
+    # this file and there is no [CmdletBinding()], so it is what makes this an
+    # ADVANCED script. Dropping it would silently turn unrecognized arguments into
+    # $args instead of an error - the same class of failure the equivalent guard in
+    # ResourceInventory.ps1 exists to prevent.
+    [Parameter()]
     [string]$TenantID,
     [switch]$DeviceLogin,
     [switch]$Obfuscate,
@@ -229,6 +240,33 @@ param (
     # Diagnostics phase timings (metrics seconds / metric-query count).
     [double]$PlanPerQuerySeconds = 0
 )
+
+# ---------------------------------------------------------------------------
+# -TenantID guard: fail loudly instead of prompting.
+#
+# -TenantID used to be Mandatory, so PowerShell prompted when it was missing. A
+# prompt is invisible to a non-interactive caller - CI, a scheduled task, the AKS
+# entrypoint, or any run whose output is redirected - so the run simply hung with
+# no output and no exit code, indistinguishable from work in progress. Failing
+# here turns that into an immediate, diagnosable error.
+#
+# Placed BEFORE the PowerShell 7 bootstrap below on purpose: there is no point
+# re-launching (or offering to INSTALL) PowerShell 7 for an invocation that cannot
+# succeed either way. For the same reason this block stays inside the 5.1 + 7
+# common language subset the bootstrap documents - no ternary, no ?? / ??=, no
+# && / ||, no -Parallel - so Windows PowerShell 5.1 reaches it and reports the
+# same error rather than choking at parse time.
+#
+# exit 1 (not throw) matches how the other entry points reject bad input, so a
+# wrapper-driven or CI-driven run sees a non-zero exit code it can act on.
+if ([string]::IsNullOrWhiteSpace($TenantID))
+{
+    Write-Host "ERROR: -TenantID is required." -ForegroundColor Red
+    Write-Host "Supply the tenant to inventory, either its GUID or its domain name:" -ForegroundColor Yellow
+    Write-Host "    ./Run-AllSubscriptions.ps1 -TenantID contoso.onmicrosoft.com" -ForegroundColor Yellow
+    Write-Host "To read it from an existing signed-in session: (Get-AzContext).Tenant.Id" -ForegroundColor Yellow
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # PowerShell 7 bootstrap. This MUST run before the dot-source below: the helper

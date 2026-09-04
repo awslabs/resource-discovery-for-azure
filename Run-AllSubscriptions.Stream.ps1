@@ -242,6 +242,10 @@ $ResourceCounts = @()
 # overload resolution against an empty PowerShell array argument.
 $Completed = @($CompletedIds)
 $FailedSubs = @()
+# Subs in this slice whose report archive could not be written (inner exit 2).
+# Relayed in the summary so the parent wrapper's exit code can reflect a MISSING
+# report, not just a failed subscription.
+$ArchiveWriteFailures = @()
 
 # The inner script's $Global:ConsumptionRecordCount / $Global:ConsumptionFailedSubs
 # are *running totals*: ResourceInventory.ps1 only nil-initializes them once and
@@ -289,19 +293,47 @@ for ($i = 0; $i -lt $PairCount; $i++)
 
     try
     {
+        # Clear $LASTEXITCODE first. It is a SHARED, STICKY variable and the inner
+        # script runs with `&` in this worker's runspace, so a completion path that
+        # does not call `exit` leaves the PREVIOUS subscription's value in place.
+        # Without this reset, one subscription in this stream's slice exiting
+        # non-zero would make every later subscription in the slice look like it
+        # failed too, even though their reports were written correctly.
+        #
+        # $Global:ZipOutputFile is sticky the same way: the inner script has early
+        # gates that leave with a BARE `Exit` (code 0) before an archive path
+        # exists, and without this reset that subscription would be recorded as
+        # successful carrying the PREVIOUS subscription's archive path, then pass
+        # the parent's output verification "by exact path" against another
+        # subscription's file.
+        $global:LASTEXITCODE = 0
+        $Global:ZipOutputFile = $null
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
         # Only treat as failure if the inner script set a non-zero exit code.
         # Some completion paths in ResourceInventory.ps1 leave $LASTEXITCODE
         # unset ($null), and PowerShell's `-ne 0` returns $true against $null,
         # which would spuriously fail every successful sub.
-        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
+        {
+            # Inner code 2 == the report archive could not be written, so a report
+            # is MISSING rather than merely uncollected. Relayed to the parent
+            # wrapper in this stream's summary so the run's exit code can reflect
+            # it. Recorded before the throw because the catch cannot read
+            # $LASTEXITCODE reliably once other commands have run.
+            if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $SubName, $SubId) }
+            throw "Script exited with code $LASTEXITCODE"
+        }
 
         # Capture inner-script globals while we are still in the same scope.
         # ResourceInventory.ps1 is invoked via `&` so its $Global:Resources lives
         # in this stream worker's scope. The inner script resets $Global:Resources
         # to @() at the start of every invocation.
         $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount }
+        # Zip is the exact archive the inner script wrote, relayed to the parent
+        # wrapper through this stream's summary JSON so its per-subscription output
+        # verification can name a subscription whose report went missing rather
+        # than only reporting a count gap.
+        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount; Zip = $Global:ZipOutputFile }
 
         if ($ResCount -eq 0)
         {
@@ -402,6 +434,7 @@ $Summary = [pscustomobject]@{
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     CollectorFailures      = @($CollectorFailures)
+    ArchiveWriteFailures   = @($ArchiveWriteFailures)
 }
 try
 {

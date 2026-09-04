@@ -259,3 +259,40 @@ Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
     }
 }
+
+# Return $true only if $Path is a real, NON-EMPTY file - the single definition of
+# "this subscription's report archive is actually on disk".
+#
+# Presence alone is not enough. A 0-byte file is not a report, and it is exactly
+# what a truncating antivirus/DLP quarantine, or a write cut off mid-flush by an
+# out-of-space or ephemeral-storage eviction, leaves behind.
+#
+# -PathType Leaf matters independently: a DIRECTORY sitting at the archive path is
+# not an archive either, and it also blocks the write outright.
+#
+# This lives in Common.Functions.ps1 because BOTH sides of the packaging seam must
+# apply the SAME standard, and both dot-source this file:
+#   - ResourceInventory.ps1 checks its own archive before it reports success, and
+#   - Run-AllSubscriptions.ps1's per-subscription output verification re-checks it
+#     at the end of the run (a quarantine can strike in between).
+# Two separate definitions would drift, and the failure mode of that drift is the
+# wrapper consolidating an archive the inner script would have rejected.
+#
+# Pure and side-effect free, so it is unit-testable without a live run. Any error
+# reading the item returns $false: an archive we cannot confirm is not one we
+# should claim.
+function Test-ReportArchiveUsable
+{
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try
+    {
+        return ((Get-Item -LiteralPath $Path -ErrorAction Stop).Length -gt 0)
+    }
+    catch
+    {
+        return $false
+    }
+}

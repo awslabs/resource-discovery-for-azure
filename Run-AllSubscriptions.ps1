@@ -527,6 +527,17 @@ Disable-ConsoleQuickEdit
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
+# Subscriptions whose inner script could not write its report archive
+# (ResourceInventory.ps1 exit code 2). Tracked separately from
+# $FailedSubscriptions because it is the one failure class that means "a report
+# is MISSING from the bundle" rather than "this subscription did not collect",
+# and that is exactly what the wrapper's exit code 2 already signals. Without
+# this the run would exit 0: the sub is correctly excluded from the expected
+# archive count, so the per-subscription output verification gate has nothing to
+# compare and stays silent, leaving a human-visible failure that automation
+# checking only the exit code would read as success.
+$ArchiveWriteFailures = @()
+
 # Per-subscription metrics-phase auth health, aggregated across the whole run.
 # This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
 # same way: a list of { Name, Id, Message } objects, one per subscription whose
@@ -1782,12 +1793,39 @@ if ($ParallelStreams -le 1)
 
         try
         {
+            # Clear $LASTEXITCODE first. It is a SHARED, STICKY variable: the inner
+            # script is invoked with `&` in this same runspace, and a completion
+            # path that does not call `exit` leaves whatever the PREVIOUS
+            # subscription set still in place. Without this reset, one subscription
+            # exiting non-zero makes every LATER subscription in the loop look like
+            # it exited non-zero too - they get reported as failures even though
+            # their reports were written correctly. Resetting per iteration means
+            # the check below reflects only the invocation that just returned.
+            #
+            # $Global:ZipOutputFile is sticky in exactly the same way, and must be
+            # cleared for the same reason: the inner script has early gates that
+            # leave with a BARE `Exit` (exit code 0) before it ever computes an
+            # archive path, so without this reset such a subscription would be
+            # recorded as successful carrying the PREVIOUS subscription's archive
+            # path - and would then pass output verification "by exact path"
+            # against a file that belongs to a different subscription. Cleared to
+            # $null so the row is classed unverifiable rather than falsely verified.
+            $global:LASTEXITCODE = 0
+            $Global:ZipOutputFile = $null
             & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
             # Only treat as failure if the inner script set a non-zero exit code.
             # Some completion paths leave $LASTEXITCODE unset ($null), and
             # PowerShell's `-ne 0` returns $true against $null - which would
             # spuriously fail every successful sub.
-            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
+            {
+                # Inner code 2 == the report archive could not be written, so a
+                # report is missing rather than merely uncollected. Recorded before
+                # the throw because the catch below cannot see $LASTEXITCODE
+                # reliably once other commands have run.
+                if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
+                throw "Script exited with code $LASTEXITCODE"
+            }
 
             # Capture the per-subscription resource count from the inner script.
             # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
@@ -1795,10 +1833,16 @@ if ($ParallelStreams -le 1)
             # to @() at the start of every invocation, so the count after return
             # accurately reflects the subscription that just finished.
             $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+            # Capture the exact archive the inner script wrote, for the same
+            # same-scope reason as $Global:Resources above. The output verification
+            # gate further down tests THIS path so it can name the subscription
+            # that lost its report, instead of only reporting a count gap the
+            # operator then has to track down by hand.
             $SubResourceCounts += [pscustomobject]@{
                 Name  = $Sub.Name
                 Id    = $Sub.Id
                 Count = $ResCount
+                Zip   = $Global:ZipOutputFile
             }
 
             if ($ResCount -eq 0)
@@ -1984,11 +2028,20 @@ else
             Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
             try
             {
+                # Same sticky-$LASTEXITCODE / $Global:ZipOutputFile resets as the
+                # sequential branch above.
+                $global:LASTEXITCODE = 0
+                $Global:ZipOutputFile = $null
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
-                # Same null-guard as the sequential branch above.
-                if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
+                # Same null-guard and archive-failure capture as the sequential
+                # branch above.
+                if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
+                {
+                    if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
+                    throw "Script exited with code $LASTEXITCODE"
+                }
                 $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-                $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount }
+                $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount; Zip = $Global:ZipOutputFile }
                 if ($ResCount -eq 0)
                 {
                     Write-Host ("WARNING: '{0}' returned 0 resources." -f $Sub.Name) -ForegroundColor Yellow
@@ -2244,10 +2297,15 @@ else
                     foreach ($rc in $StreamSummary.ResourceCounts)
                     {
                         if ($null -eq $rc) { continue }
+                        # Zip may be absent from a summary written by an older
+                        # build; the output verification gate treats an empty path
+                        # as unverifiable rather than missing, and falls back to
+                        # the count comparison for those rows.
                         $SubResourceCounts += [pscustomobject]@{
                             Name  = $rc.Name
                             Id    = $rc.Id
                             Count = [int]$rc.Count
+                            Zip   = $rc.Zip
                         }
                     }
                 }
@@ -2287,6 +2345,13 @@ else
                 {
                     if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
                     $Global:CollectorFailures += @($StreamSummary.CollectorFailures)
+                }
+                # Absent from a summary written by an older build, in which case a
+                # lost archive still surfaces as a failed subscription - just not in
+                # the exit code.
+                if ($StreamSummary.ArchiveWriteFailures -and $StreamSummary.ArchiveWriteFailures.Count -gt 0)
+                {
+                    $ArchiveWriteFailures += @($StreamSummary.ArchiveWriteFailures)
                 }
 
                 # If a stream wrote a failures log, add it to the wrapper's diag-file
@@ -2531,9 +2596,16 @@ Write-Host "All subscriptions processed!" -ForegroundColor Green
 
 # === Per-subscription output verification (hard-stop) ========================
 #
-# Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if the
-# number of per-subscription zip files written by this invocation is lower
-# than the number of subscriptions that ran to completion this invocation.
+# Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if any
+# subscription that ran to completion this invocation did not leave a report
+# archive on disk.
+#
+# This checks IDENTITY first and count second. Every successful sub records the
+# exact archive path the inner script wrote (its $Global:ZipOutputFile), so a
+# missing report is reported BY SUBSCRIPTION - which is the thing the operator
+# actually needs. The count comparison is kept as a second, independent test: it
+# catches a sub whose recorded path is absent (a stream summary from an older
+# build) and an archive that was replaced rather than simply deleted.
 #
 # Why this matters. The consolidation step below globs `*.zip` under
 # $InventoryRoot. If a per-sub zip is missing for any reason - antivirus
@@ -2558,15 +2630,91 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
 {
     $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     $ActualZipCount = $ActualSubZips.Count
-    if ($ActualZipCount -lt $ExpectedZipCount)
+
+    # A row with a recorded path that is no longer a usable archive on disk is a
+    # NAMED missing report. "Usable" deliberately means present AND non-empty, the
+    # same standard ResourceInventory.ps1 applies to its own archive before it
+    # reports success: a 0-byte file is not a report, and a truncating quarantine
+    # or an eviction mid-flush leaves exactly that. Testing only for presence
+    # would let the two halves disagree - the inner script rejecting an archive
+    # the wrapper would happily consolidate.
+    #
+    # A row with no recorded path cannot be checked this way; it is counted as
+    # unverifiable rather than missing, so an older stream summary can never
+    # produce a false accusation against a specific subscription - the count
+    # comparison below still covers it.
+    $MissingSubs = @($SubResourceCounts | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Zip) -and -not (Test-ReportArchiveUsable -Path $_.Zip) })
+    $UnverifiableSubs = @($SubResourceCounts | Where-Object { [string]::IsNullOrWhiteSpace($_.Zip) })
+
+    if ($MissingSubs.Count -gt 0 -or $ActualZipCount -lt $ExpectedZipCount)
     {
         $MissingCount = $ExpectedZipCount - $ActualZipCount
         Write-Host ""
         Write-Host "ERROR: Per-subscription output verification failed." -ForegroundColor Red
         Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $ExpectedZipCount) -ForegroundColor Red
         Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $ActualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
-        Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
+        if ($MissingCount -gt 0)
+        {
+            Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
+        }
         Write-Host ""
+        if ($MissingSubs.Count -gt 0)
+        {
+            Write-Host ("Subscription(s) whose report archive is MISSING ({0}):" -f $MissingSubs.Count) -ForegroundColor Red
+            foreach ($M in $MissingSubs)
+            {
+                Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $M.Name, $M.Id, $M.Count) -ForegroundColor Red
+                # Absent and present-but-empty are different faults with different
+                # first suspects, so name which one it is rather than making the
+                # operator go and look.
+                if (Test-Path -LiteralPath $M.Zip -PathType Leaf)
+                {
+                    Write-Host ("      archive is present but EMPTY (0 bytes): {0}" -f $M.Zip) -ForegroundColor Red
+                    Write-Host  "      -> a truncating quarantine or a write cut off mid-flush; it is not a usable report." -ForegroundColor Red
+                }
+                else
+                {
+                    Write-Host ("      expected archive: {0}" -f $M.Zip) -ForegroundColor Red
+                }
+                # The uncompressed report files are the salvage path, so name the
+                # folder explicitly rather than making the operator derive it.
+                #
+                # [IO.Path]::GetDirectoryName rather than Split-Path: Split-Path's
+                # -Parent switch only pairs with -Path, never -LiteralPath (they are
+                # different parameter sets), so there is no literal-path form of it
+                # to reach for. The .NET call is literal by construction, which takes
+                # wildcard interpretation off the table entirely for a path that can
+                # contain '[' or ']'. Verified equivalent to Split-Path -Parent on
+                # both Windows and macOS for plain, bracketed and spaced paths.
+                $MissingDir = try { [System.IO.Path]::GetDirectoryName($M.Zip) } catch { $null }
+                if (-not [string]::IsNullOrWhiteSpace($MissingDir))
+                {
+                    if (Test-Path -LiteralPath $MissingDir -PathType Container)
+                    {
+                        # Deliberately neutral about the archive here: the line above
+                        # already said whether it is absent or empty, and saying "only
+                        # the archive is gone" contradicted the empty case.
+                        Write-Host ("      report folder IS present: {0}" -f $MissingDir) -ForegroundColor Yellow
+                        Write-Host  "      -> the uncompressed report files in it can be zipped by hand instead of re-collecting." -ForegroundColor Yellow
+                    }
+                    else
+                    {
+                        Write-Host ("      report folder is ALSO gone: {0}" -f $MissingDir) -ForegroundColor Red
+                        Write-Host  "      -> the whole folder was removed after the run wrote it; re-collect this subscription." -ForegroundColor Red
+                    }
+                }
+            }
+            Write-Host ""
+        }
+        if ($UnverifiableSubs.Count -gt 0)
+        {
+            Write-Host ("Subscription(s) with no recorded archive path - cannot be checked individually ({0}):" -f $UnverifiableSubs.Count) -ForegroundColor Yellow
+            foreach ($U in $UnverifiableSubs)
+            {
+                Write-Host ("  - {0} ({1})" -f $U.Name, $U.Id) -ForegroundColor Yellow
+            }
+            Write-Host ""
+        }
         Write-Host "Subscriptions whose inner script reported success this run:" -ForegroundColor Yellow
         foreach ($S in $SubResourceCounts)
         {
@@ -2581,15 +2729,31 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         Write-Host ""
         Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
         Write-Host "Recover by either:" -ForegroundColor Yellow
-        Write-Host "  - Locating the missing per-sub directory under the inventory root and inspecting why its zip is absent, OR" -ForegroundColor Yellow
+        Write-Host "  - Inspecting the report folder named above and zipping its files by hand if they are still present, OR" -ForegroundColor Yellow
         Write-Host "  - Re-running with -Resume to re-collect any unprocessed/missing subscription." -ForegroundColor Yellow
+        Write-Host "    NOTE: a subscription listed above is already recorded as complete in the resume state, so plain" -ForegroundColor Yellow
+        Write-Host "    -Resume will SKIP it. To force a re-collect, either remove its id from the resume-state file" -ForegroundColor Yellow
+        Write-Host "    above, or collect just that one directly with:" -ForegroundColor Yellow
+        Write-Host "      ./ResourceInventory.ps1 -TenantID <tenant> -SubscriptionID <the id listed above>" -ForegroundColor Yellow
         if ($WrapperTranscriptStarted)
         {
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
         }
         Exit-Wrapper -Code 2
     }
-    Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
+    # Report both numbers separately, and state how many subs were checked by
+    # path versus only by count. The previous message used {0} twice against a
+    # single argument, so it echoed the found count as if it were also the
+    # expected count and could never have shown a discrepancy. Naming the
+    # per-path total matters for the same reason: "no missing archives" is a
+    # much weaker statement when nothing could be checked individually, and the
+    # message must not read like a full pass in that case.
+    $VerifiedByPathCount = $ExpectedZipCount - $UnverifiableSubs.Count
+    Write-Host ("Per-subscription output verification: OK ({0} archive(s) on disk for {1} successful sub(s); {2} verified by exact path)" -f $ActualZipCount, $ExpectedZipCount, $VerifiedByPathCount) -ForegroundColor Green
+    if ($UnverifiableSubs.Count -gt 0)
+    {
+        Write-Host ("  Note: {0} sub(s) recorded no archive path and were covered by the count check only." -f $UnverifiableSubs.Count) -ForegroundColor Yellow
+    }
 }
 
 # Consolidate per-subscription ZIPs into a single outer ZIP
@@ -2607,7 +2771,15 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         # -LiteralPath (as Reveal.ps1 uses) so a report folder/zip name containing
         # [ ] is not treated as a wildcard glob and silently dropped.
         Compress-Archive -LiteralPath $SubZips.FullName -DestinationPath $OuterZipFile -Force
-        Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
+        # Deliberately NOT labelled "Reporting Data File" - the inner
+        # per-subscription script prints that same label once PER SUBSCRIPTION for
+        # its own zip, so on a large tenant the operator saw the identical label N+1
+        # times naming N+1 different files and could not tell which one to send.
+        # This label names the bundle unambiguously. It is "created", not finished:
+        # stages 2 and 3 further below still fold in RunSummary.log, MainSummary.html,
+        # the VM placement CSV and the per-subscription HTML. The "What to send"
+        # block after stage 3 is what declares it the deliverable.
+        Write-Host ("Consolidated bundle created: {0}" -f $OuterZipFile) -ForegroundColor Green
     }
     else
     {
@@ -2668,6 +2840,90 @@ if ($null -ne $OuterZipFile)
     {
         Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
     }
+}
+
+# ---------------------------------------------------------------------------
+# Tenant-wide VM placement CSV, written next to MainSummary.
+#
+# Each per-subscription run writes a VMPlacementPart_*.csv into InventoryRoot
+# (see the placement block in ResourceInventory.ps1). Concatenating them here -
+# rather than having every run append to one shared file - is what keeps parallel
+# streams from interleaving writes into a single CSV.
+#
+# Deliberately NOT an Inventory_*.json change: the zone identity this file exists
+# to carry would otherwise have to be added to the VM collector's output object,
+# which is the server-ingestion contract. See Extension/VMPlacement.ps1.
+#
+# Only parts from THIS run are consumed. $RunStartTime is the same filter the main
+# summary uses, so a crashed previous run's leftover parts cannot be folded in.
+#
+# The file is TIMESTAMPED, matching its sibling MainSummary_<stamp>.html in this
+# same directory, and that is load-bearing rather than cosmetic. A fixed
+# VMPlacement.csv would be overwritten in place, and on a -Resume run that is
+# actively misleading: the subscriptions being skipped write no new part (and
+# their parts from the earlier attempt were already consumed and deleted), so a
+# fixed name would silently replace a COMPLETE tenant-wide file with one covering
+# only the subscriptions this invocation happened to process. Timestamping makes
+# each run's coverage its own artifact, and the count reported below tells the
+# operator how many subscriptions actually contributed.
+#
+# Best-effort by design: the per-subscription reports and the consolidated zip are
+# already written by this point, so any failure here is a warning, never fatal.
+#
+# Nil-initialised so stage 3 below always has a defined variable to test. The
+# assignment lives inside the row-count branch, and this block is best-effort, so
+# a run with no VM rows - or a throw before the export - otherwise leaves it
+# never assigned. Defensive rather than required (this script sets no StrictMode,
+# so an unassigned read would already yield $null); it makes the contract with
+# stage 3 explicit instead of relying on that default.
+$VmPlacementFile = $null
+try
+{
+    # -LiteralPath on the container: $InventoryRoot is a user-supplied-ish path and
+    # a '[' or ']' in it would otherwise be treated as a wildcard and match nothing.
+    $PlacementParts = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter 'VMPlacementPart_*.csv' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } | Sort-Object Name)
+
+    $PlacementRows = @()
+    foreach ($Part in $PlacementParts)
+    {
+        $PlacementRows += @(Import-Csv -LiteralPath $Part.FullName)
+    }
+
+    if ($PlacementRows.Count -gt 0)
+    {
+        $VmPlacementFile = Join-Path $InventoryRoot ("VMPlacement_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        $PlacementRows | Export-Csv -LiteralPath $VmPlacementFile -Encoding utf8 -NoTypeInformation
+
+        $ZonalRows = @($PlacementRows | Where-Object { $_.Zone -ne 'Regional' -and $_.Zone -ne 'Unknown' }).Count
+        Write-Host ("VM placement CSV: {0} VM(s) across {1} subscription(s) written to {2} ({3} zonal)." -f `
+                $PlacementRows.Count, $PlacementParts.Count, (Split-Path -Path $VmPlacementFile -Leaf), $ZonalRows) -ForegroundColor Green
+    }
+    else
+    {
+        # State the zero rather than saying nothing, and name its scope, so the
+        # operator does not have to guess whether the phase ran. A tenant with no
+        # VMs at all is a legitimate outcome; so is every subscription being
+        # skipped on a -Resume run.
+        Write-Host ("VM placement CSV: not written - no VM rows were produced by this run (parts found: {0}). A tenant with no virtual machines, or a -Resume run whose remaining subscriptions have none, both land here." -f $PlacementParts.Count) -ForegroundColor Yellow
+    }
+
+    # Remove the parts unconditionally once read: they are an implementation detail
+    # of the aggregation, and skipping the delete when the merge produced no rows
+    # would leave orphans accumulating in InventoryRoot run after run.
+    foreach ($Part in $PlacementParts)
+    {
+        Remove-Item -LiteralPath $Part.FullName -Force -ErrorAction SilentlyContinue
+    }
+
+    # Deliberately NOT an error when parts are fewer than subscriptions processed:
+    # a subscription with no VMs legitimately writes none, and the inner run
+    # already logs loudly when a VM collector failed. The subscription count in the
+    # line above is what lets the operator judge coverage; claiming completeness we
+    # have not verified would be the actual mistake.
+}
+catch
+{
+    Write-Host ("WARNING: Could not build the tenant-wide VM placement CSV: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
 }
 
 # Clean up resume state on a fully successful run (all subs processed, no failures
@@ -2970,6 +3226,10 @@ elseif ($FailedAttempts.Count -gt 0)
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)
 {
+    # Location only. The authoritative "this is the file to send" instruction is
+    # emitted AFTER stage 3 below, because that is the first point at which the
+    # bundle's membership is final and verified - stating its contents here would
+    # describe folds that have not happened yet.
     Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
 }
 if ($WrapperTranscriptStarted)
@@ -2989,10 +3249,14 @@ Write-Host "=========================================" -ForegroundColor Green
 #   2. Fold RunSummary.log into the consolidated zip as its OWN operation, then
 #      verify it actually persisted (a silent Compress-Archive -Update failure
 #      previously dropped it); the on-disk copy from stage 1 is the fallback.
-#   3. Fold the unified MainSummary.html + a copy of each per-subscription HTML
-#      (drill-down targets) into the zip. Only additive members and NO loose
-#      *.json, so the ingestion contract (inner-zip *.json members) is unchanged
-#      and nothing is double-ingested.
+#   3. Fold the unified MainSummary.html, the tenant-wide VMPlacement.csv, and a
+#      copy of each per-subscription HTML (drill-down targets) into the zip. Only
+#      additive members and NO loose *.json, so the ingestion contract (inner-zip
+#      *.json members) is unchanged and nothing is double-ingested. VMPlacement.csv
+#      is the one sanctioned loose data file at the outer root - see the NOTE on
+#      bundle membership at the stage 3 block itself.
+# Then: report the deliverable, with every claim derived from one read of the
+# finished archive rather than from what was staged.
 
 # Version is display-only. Prefer Version.json (in parallel mode the wrapper's
 # $Global:Version is never set - child processes set it), fall back to
@@ -3078,9 +3342,31 @@ if ($null -ne $RunSummaryLocalFile -and (Test-Path -LiteralPath $RunSummaryLocal
     }
 }
 
-# --- Stage 3: fold MainSummary.html + per-sub HTML into the bundle -----------
+# --- Stage 3: fold MainSummary.html + VMPlacement.csv + per-sub HTML in ------
 # Best-effort: any failure here is a warning and can no longer take the run
 # summary (already folded in stage 2) down with it.
+#
+# The bundle is the ONE artifact an operator sends. Anything tenant-wide that a
+# consumer needs therefore has to be INSIDE it: a deliverable left loose in
+# InventoryRoot is a second thing to remember, and the observed operator response
+# to "collect several files" is to zip the whole InventoryReports folder - which
+# ships the obfuscation dictionary (the de-obfuscation key) and the transcripts.
+# That is why the tenant-wide VMPlacement CSV is folded in here rather than being
+# left beside MainSummary_<stamp>.html on disk.
+#
+# NOTE on bundle membership: VMPlacement.csv is the first loose DATA file at this
+# outer root - previously the root held only per-subscription .zip archives plus
+# presentation/summary files (MainSummary.html, RunSummary.log). The per-subscription
+# ingestible members (Inventory_*.json, Metrics_*.json, Consumption_*.csv) all live
+# INSIDE the inner zips, and the shareable Diagnostics log is deliberately a .log so
+# it is not table-ingested. A consumer that discovers ingestible files by extension
+# at the outer root would therefore see this CSV where it previously saw none.
+# Its obfuscation posture is safe either way: Extension/VMPlacement.ps1 sources every
+# identifier column from $Global:SmaResources, which CreateResourceJobs has already
+# obfuscated, so an -Obfuscate run's CSV carries tokens and no new identifier class.
+# Leaf names staged for the fold, captured for the post-fold reconciliation below.
+# Declared out here so it survives a throw inside the try.
+$StagedLeafNames = @()
 if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 {
     $BundleStage = $null
@@ -3124,23 +3410,128 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
         }
 
+        # 3. The tenant-wide VM placement CSV at the bundle root, de-timestamped to
+        #    VMPlacement.csv for the same reason MainSummary_<stamp>.html becomes
+        #    MainSummary.html: inside the bundle the run is already identified by
+        #    the archive's own name, so a consumer can bind to a fixed member name
+        #    instead of globbing. The on-disk copy KEEPS its timestamp - that is
+        #    load-bearing for -Resume coverage (see the aggregation block above)
+        #    and is deliberately not changed here.
+        #    Guarded on both the variable and the file: a run with no VM rows never
+        #    assigns it, and the aggregation block is best-effort so it can fail
+        #    before the export.
+        if (-not [string]::IsNullOrEmpty($VmPlacementFile) -and (Test-Path -LiteralPath $VmPlacementFile))
+        {
+            Copy-Item -LiteralPath $VmPlacementFile -Destination (Join-Path $BundleStage 'VMPlacement.csv') -Force
+        }
+
         # Fold the staged extras into the existing outer zip (additive; the
         # inner per-sub zips already inside it are preserved by -Update).
         $StageItems = @(Get-ChildItem -Path $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
         if ($StageItems.Count -gt 0)
         {
-            Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
-            Write-Host ("Bundle finalized: MainSummary.html + per-subscription HTML folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+            # -LiteralPath, matching the outer compress: $BundleStage derives from
+            # $InventoryRoot, and a '[' or ']' anywhere in that path would otherwise
+            # be read as a wildcard and silently fold nothing.
+            Compress-Archive -LiteralPath $StageItems -DestinationPath $OuterZipFile -Update
+
+            # Record only WHAT WAS STAGED here. Every claim about what the bundle
+            # actually contains is derived from the finished archive below, in one
+            # place, so no message can assert a member it has not confirmed.
+            $StagedLeafNames = @($StageItems | ForEach-Object { Split-Path -Path $_ -Leaf })
         }
     }
     catch
     {
-        Write-Host ("WARNING: Could not fold main-summary / per-subscription HTML into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Write-Host ("WARNING: Could not fold main-summary / VM placement CSV / per-subscription HTML into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
     }
     finally
     {
         if ($null -ne $BundleStage) { Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue }
     }
+}
+
+# --- The deliverable instruction --------------------------------------------
+# Emitted HERE, after stages 2 and 3, because this is the first point at which
+# the bundle's membership is final. The run summary above names the path; this
+# states what to DO with it.
+#
+# Why this exists at all: the previous output named the bundle ("Consolidated
+# Report: <path>") but never said to send it, while the inner per-subscription
+# script printed "safe to share" once PER SUBSCRIPTION about its own zip. On a
+# large tenant the operator saw that sharing language many times, always attached
+# to a per-subscription file, and never once attached to the bundle. The observed
+# result is operators zipping the whole InventoryReports folder instead - which
+# ships the obfuscation dictionary (the key that reverses the masking) and the
+# transcripts, defeating the point of -Obfuscate. So: name the single file, and
+# state the negative explicitly.
+#
+# EVERY factual claim below is derived from ONE read of the finished archive.
+# Earlier revisions of this block hand-wrote the contents in prose and were wrong
+# three separate ways (they named the placement CSV on a tenant with no VMs, named
+# the summary HTML when its best-effort build had failed, and said "every
+# subscription" on a sharded or resumed run). Enumerating the real members removes
+# that whole class rather than correcting each sentence.
+if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
+{
+    $BundleMembers = @()
+    try
+    {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $FinalArchive = [System.IO.Compression.ZipFile]::OpenRead($OuterZipFile)
+        try { $BundleMembers = @($FinalArchive.Entries | ForEach-Object { $_.FullName }) }
+        finally { $FinalArchive.Dispose() }
+    }
+    catch
+    {
+        # Unreadable archive: say so rather than describing contents we cannot see.
+        Write-Host ("WARNING: could not read {0} to confirm its contents: {1}" -f (Split-Path -Path $OuterZipFile -Leaf), $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    $SubZipCount = @($BundleMembers | Where-Object { $_ -notmatch '[\\/]' -and $_ -like 'ResourcesReport_*.zip' }).Count
+    $HtmlFolderCount = @($BundleMembers | Where-Object { $_ -like 'HTML*/*' } | ForEach-Object { ($_ -split '[\\/]')[0] } | Select-Object -Unique).Count
+    $HasMainSummary = @($BundleMembers | Where-Object { $_ -ieq 'MainSummary.html' }).Count -gt 0
+    $HasPlacementCsv = @($BundleMembers | Where-Object { $_ -ieq 'VMPlacement.csv' }).Count -gt 0
+    $HasRunSummary = @($BundleMembers | Where-Object { $_ -ieq 'RunSummary.log' }).Count -gt 0
+
+    Write-Host ""
+    Write-Host "================ What to send ================" -ForegroundColor Green
+    Write-Host ("SEND THIS ONE FILE:  {0}" -f $OuterZipFile) -ForegroundColor Green
+    if ($ShardCount -gt 1)
+    {
+        # Under sharding each node holds a disjoint slice, so "one file" is one file
+        # PER NODE. Saying otherwise would imply this bundle covers the tenant.
+        Write-Host ("  This is shard {0} of {1} - it covers only this node's subscriptions. Send one such file from EVERY shard; together they cover the tenant once." -f $ShardIndex, $ShardCount) -ForegroundColor Yellow
+    }
+    Write-Host "  Confirmed contents:" -ForegroundColor Green
+    Write-Host ("    - {0} per-subscription data archive(s) (the subscriptions this run processed)" -f $SubZipCount) -ForegroundColor Green
+    if ($HasMainSummary) { Write-Host "    - MainSummary.html (tenant-wide summary)" -ForegroundColor Green }
+    if ($HtmlFolderCount -gt 0) { Write-Host ("    - {0} per-subscription HTML report folder(s)" -f $HtmlFolderCount) -ForegroundColor Green }
+    if ($HasPlacementCsv) { Write-Host "    - VMPlacement.csv (tenant-wide VM placement)" -ForegroundColor Green }
+    if ($HasRunSummary) { Write-Host "    - RunSummary.log (run health, needed to triage the bundle)" -ForegroundColor Green }
+
+    # Anything staged in stage 3 but absent from the finished archive is named
+    # explicitly. Silence here is the failure mode this reconciliation exists for.
+    $MissingMembers = @($StagedLeafNames | Where-Object { $Leaf = $_; @($BundleMembers | Where-Object { $_ -ieq $Leaf -or $_ -like ($Leaf + '/*') }).Count -eq 0 })
+    if ($MissingMembers.Count -gt 0)
+    {
+        Write-Host ("  WARNING: staged but NOT found inside the bundle: {0}. Their on-disk copies remain under {1}." -f (($MissingMembers | Select-Object -Unique) -join ', '), $InventoryRoot) -ForegroundColor Yellow
+    }
+
+    # The "do not send the folder" list is MODE-DEPENDENT. An obfuscated run leaves
+    # the dictionary on disk and keeps the debug log local; a default run writes no
+    # dictionary at all and deliberately ships the debug log INSIDE the bundle (see
+    # the packaging branches in ResourceInventory.ps1), so calling it local-only
+    # there would be wrong.
+    if ($Obfuscate.IsPresent)
+    {
+        Write-Host ("  Do NOT zip or send the {0} folder itself. It also holds files that must stay local: the obfuscation dictionary (which reverses the masking), the transcripts, and the debug logs." -f (Split-Path -Path $InventoryRoot -Leaf)) -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host ("  Do NOT zip or send the {0} folder itself. It also holds the PowerShell transcripts, which carry your signed-in account and tenant id." -f (Split-Path -Path $InventoryRoot -Leaf)) -ForegroundColor Yellow
+    }
+    Write-Host "=============================================" -ForegroundColor Green
 }
 
 # Per-node blob upload. When -UploadToBlobContainerUri is set, ship THIS
@@ -3230,7 +3621,7 @@ elseif ($UploadToBlobContainerUri)
     # feature silently - say so, so the operator knows nothing was uploaded and
     # can check why the AllSubscriptions_*.zip was not produced.
     $NoZipDetail = if ($OuterZipFile) { "expected zip not found at: $OuterZipFile" } else { 'no consolidated zip was produced' }
-    Write-Host ("WARNING: Blob upload was requested (-UploadToBlobContainerUri) but nothing was uploaded - {0}. Check that the run produced an AllSubscriptions_*.zip (look for the earlier 'Reporting Data File:' line)." -f $NoZipDetail) -ForegroundColor Yellow
+    Write-Host ("WARNING: Blob upload was requested (-UploadToBlobContainerUri) but nothing was uploaded - {0}. Check that the run produced an AllSubscriptions_*.zip (look for the earlier 'Consolidated bundle created:' line)." -f $NoZipDetail) -ForegroundColor Yellow
 }
 
 # Final, last-thing-the-user-sees banner when a requested data phase could not
@@ -3277,6 +3668,25 @@ if (@($Global:CollectorFailures).Count -gt 0)
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
+# A subscription that finished collecting but could not write its report archive.
+# Printed HERE, alongside the other failure banners and BEFORE Stop-Transcript, so
+# it is captured in the wrapper transcript and the support-log bundle rather than
+# only appearing on a console nobody kept.
+if (@($ArchiveWriteFailures).Count -gt 0)
+{
+    Write-Host ""
+    Write-Host "=================== FAILED (report archive) ===================" -ForegroundColor Red
+    Write-Host ("{0} subscription(s) completed collection but could NOT write a report archive:" -f @($ArchiveWriteFailures).Count) -ForegroundColor Red
+    foreach ($A in @($ArchiveWriteFailures))
+    {
+        Write-Host ("  - {0}" -f $A) -ForegroundColor Red
+    }
+    Write-Host "Their reports are NOT in the consolidated bundle. The per-subscription log above gives the reason" -ForegroundColor Red
+    Write-Host "(free disk space is the usual one). The uncompressed report files are still in each subscription's" -ForegroundColor Red
+    Write-Host "report folder under the inventory root and can be zipped by hand instead of re-collecting." -ForegroundColor Red
+    Write-Host "==============================================================" -ForegroundColor Red
+}
+
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted)
@@ -3310,6 +3720,24 @@ if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainer
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+
+# A subscription whose report archive could not be written is a MISSING REPORT,
+# which is what exit code 2 already means (the per-subscription output gap). The
+# verification gate cannot catch this case on its own: the failed sub is correctly
+# excluded from the expected archive count, so the counts agree and the gate stays
+# silent.
+#
+# Code 2 takes PRECEDENCE over 3/4/5 rather than deferring to them. Those codes
+# all mean "the report was produced but is incomplete in a diagnosable way" (see
+# the exit-code table in README.md), whereas this means a subscription's report is
+# NOT IN THE BUNDLE AT ALL - the strictly worse outcome, and the one a consumer
+# must not miss. Letting an auth skip mask it would be the same "sweep it under
+# the rug" failure the 3-vs-4 split exists to prevent. The banner above prints
+# every condition independently, so nothing is hidden from a human either way.
+if (@($ArchiveWriteFailures).Count -gt 0)
+{
+    $WrapperExitCode = 2
+}
 # Always exit with the computed wrapper code (0 on a fully clean run). An explicit
 # exit makes $LASTEXITCODE deterministic for callers and CI. In particular the
 # Azure DevOps AzurePowerShell@5 task runs this script via a dot-sourced wrapper

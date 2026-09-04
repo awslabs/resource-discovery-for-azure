@@ -53,6 +53,34 @@ $env:TEST_ZIP_PATH = "./Tests/ResourcesReport_skip.zip"
 pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
 
+## Outer Bundle Membership Tests
+
+`OuterBundleMembership.Tests.ps1` pins the member set of the consolidated
+`AllSubscriptions_ResourcesReport_<timestamp>.zip` - the one file an operator sends.
+Every other suite inspects an INNER per-subscription zip, so nothing else asserts
+what the outer bundle may and may not contain.
+
+Its most important assertions are the negative ones. The bundle must NEVER contain
+the obfuscation dictionary (the de-obfuscation key), a transcript, a debug/error
+log, resume state, a support-log bundle, or a nested `AllSubscriptions_*` bundle.
+Those are the tell-tales of a hand-zipped `InventoryReports` folder, which is what
+arrives when an operator cannot tell which file to send.
+
+This is a **human/wrapper-run-only** suite: it is not part of
+`Invoke-ScenarioMatrix.ps1`, because the matrix generates per-subscription zips via
+`ResourceInventory.ps1` rather than full wrapper bundles.
+
+```powershell
+pwsh ./Run-AllSubscriptions.ps1 -TenantID <tenant> -Obfuscate
+$env:TEST_ALLSUB_BUNDLE = "~/InventoryReports/AllSubscriptions_<timestamp>.zip"
+pwsh -Command "Invoke-Pester ./Tests/OuterBundleMembership.Tests.ps1 -Output Detailed"
+```
+
+If `TEST_ALLSUB_BUNDLE` is unset the whole suite is **skipped** (not failed), so it
+is safe inside a bare `Invoke-Pester ./Tests/` run. The VM-placement assertions
+additionally skip when the tenant has no virtual machines, since no CSV is produced
+in that case.
+
 ## Parallel-Streams Aggregation Tests
 
 `ParallelStreamsAggregation.Tests.ps1` proves a parallel run produces structurally
@@ -133,9 +161,9 @@ that silently drops, duplicates, mangles, or mis-attributes resources. It
 asserts:
 
 - every inventory resource ID resolves to a real resource in the tenant
-  (`Get-AzResource`) — no orphans/phantoms;
+  (`Get-AzResource`) - no orphans/phantoms;
 - all inventory IDs (and all consumption `ResourceId`s) belong to the run's
-  subscription — no cross-subscription contamination;
+  subscription - no cross-subscription contamination;
 - per-type **distinct** resource counts match the tenant for one-row-per-resource
   collectors (VMs, disks, storage accounts, public IPs, key vaults, SQL servers,
   Service Bus), and SQL user databases match with the system `master` DB excluded;
@@ -143,7 +171,7 @@ asserts:
 
 Expected values are read **live from the tenant at runtime** (never hardcoded),
 so it is tenant-portable. Because it needs a live Az session and real IDs, it is
-the one suite that talks to Azure — and it **skips itself** (never fails) when
+the one suite that talks to Azure - and it **skips itself** (never fails) when
 the zip is obfuscated, no live context exists, or the context can't see the
 run's subscription. That keeps it safe inside an offline `Invoke-Pester ./Tests/`
 or CI run; it only actually reconciles inside the `default` scenario (or when you
@@ -152,21 +180,21 @@ point `$env:TEST_ZIP_PATH` at a non-obfuscated zip with a matching live session)
 ### Schema contract & cross-dataset linkage (`default` + `obfuscate`)
 
 `SchemaContract.Tests.ps1` is a **pure-output, drift-immune** gate (no Azure
-calls) that protects the **server ingestion contract** and — above all — the
+calls) that protects the **server ingestion contract** and - above all - the
 **cross-dataset linkage** that makes the three datasets usable together. The
 owner's rule: Inventory, Metrics, and Consumption are *useless on their own*
 unless they stay joinable via a common identity key
 (`Inventory.ID` ↔ `Metrics.ID` ↔ `Consumption.ResourceId`). A field
 rename/removal/emptying that breaks that join is silently dropped by the server
 (`System.Text.Json` ignores unmapped members), so a parse-check or report render
-won't catch it — only asserting the emitted zip against the contract does.
+won't catch it - only asserting the emitted zip against the contract does.
 
 The pinned contract lives in `schema-contract.json` (data, separate from logic)
 so the server-side owner can see/adjust the bound keys. It is deliberately
 **narrow**: it pins only the identity/join-key fields of the server-bound
 inventory sections (VirtualMachines, VMDisk, Databricks, PostgreSQLflexible,
 MySQLflexible, SQLVM, SQLDB, SQLPOOL, SQLMI), the `AzureMetricRecord` identity
-fields, and the Consumption CSV columns — **not** the long tail of descriptive
+fields, and the Consumption CSV columns - **not** the long tail of descriptive
 fields (many aren't server-bound yet), which stay free to evolve.
 
 It asserts:
@@ -186,7 +214,7 @@ runs as a hard gate in **both** the `default` and `obfuscate` scenarios. It
 self-skips only when there is genuinely nothing to check (no zip, or a phase
 suppressed by a `-Skip*` switch). Output-only limitation: it cannot distinguish
 a *whole-section* rename from a subscription that legitimately has none of that
-type, so an absent section is skipped, not failed — but Tier 2 stays
+type, so an absent section is skipped, not failed - but Tier 2 stays
 name-agnostic and still linkage-checks a renamed section's rows by their IDs.
 
 ### Run it

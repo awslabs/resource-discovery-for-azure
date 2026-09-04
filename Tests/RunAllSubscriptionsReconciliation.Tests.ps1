@@ -39,15 +39,26 @@ BeforeAll {
     }
     . $script:FunctionsPath
 
+    # Test-ReportArchiveUsable lives in Common.Functions.ps1 (the cross-cutting
+    # helper file BOTH entry points dot-source), not in the wrapper's own functions
+    # file, because ResourceInventory.ps1 has to apply the identical standard to its
+    # own archive. Dot-source it here for the same reason.
+    $script:CommonFunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'
+    if (-not (Test-Path $script:CommonFunctionsPath))
+    {
+        throw "Could not find shared common functions file at $script:CommonFunctionsPath"
+    }
+    . $script:CommonFunctionsPath
+
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
         {
-            throw "Expected function '$Fn' to be defined by $script:FunctionsPath, but it was not. Has it been renamed or removed?"
+            throw "Expected function '$Fn' to be defined by $script:FunctionsPath or $script:CommonFunctionsPath, but it was not. Has it been renamed or removed?"
         }
     }
 
@@ -627,5 +638,392 @@ Describe 'FailedAttempts null-serialization regression' {
         $Read = @(Get-FailedAttempts -Path $script:StatePath -Tenant 't')
         $Read.Count | Should -Be 0
         @($Read | Where-Object { $null -eq $_ }).Count | Should -Be 0
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Report-archive loss detection
+#
+# Covers the packaging/verification seam that previously let a whole
+# subscription's report vanish while the run reported success:
+# ResourceInventory.ps1 swallowed a Compress-Archive failure (the run-wide
+# 'SilentlyContinue' discarded non-terminating errors, the catch used
+# Write-Error which neither rethrows nor sets an exit code) and then logged
+# 'Reporting Data File' unconditionally, so the wrapper counted the sub
+# complete and consolidated a bundle one report short.
+#
+# Two of the three regressions in this area were invisible to parse, review and
+# pure-helper unit tests, and only a live run caught them - so the guards below
+# assert against the wrapper/inner SOURCE as well as the behaviour:
+#
+#   1. $LASTEXITCODE is SHARED and STICKY. Adding a real `exit` to the inner
+#      script's tail meant one failing subscription made every LATER
+#      subscription in the same runspace look like it exited non-zero, failing
+#      subs whose reports were written correctly. Each `&` invocation must reset
+#      it first.
+#   2. A failed sub is correctly EXCLUDED from the expected-archive count, so
+#      the per-subscription output verification gate has nothing to compare and
+#      stays silent. Without the exit-code override the run would exit 0 with a
+#      report missing from the bundle - visible to a human, invisible to
+#      automation.
+# ---------------------------------------------------------------------------
+
+Describe 'Report-archive loss detection: source guards' {
+    BeforeAll {
+        $script:RepoRoot = Split-Path $PSScriptRoot -Parent
+        $script:WrapperSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1')
+        $script:StreamSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1')
+        $script:InnerSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'ResourceInventory.ps1')
+
+        # Index of every line that invokes the inner script with the call
+        # operator, in both files that do so.
+        function script:Get-InnerInvocationIndexes
+        {
+            param([string[]]$Lines)
+            $Result = @()
+            for ($i = 0; $i -lt $Lines.Count; $i++)
+            {
+                if ($Lines[$i] -match '^\s*&\s*\(Join-Path\s+\$\w+\s+[''"]ResourceInventory\.ps1[''"]\)')
+                {
+                    $Result += $i
+                }
+            }
+            return $Result
+        }
+
+        # Lines matching $Pattern, EXCLUDING comments. The explanatory comments
+        # around this change quote the very constructs being asserted on, so a
+        # naive match would count them and pass for the wrong reason.
+        function script:Select-CodeLines
+        {
+            param([string[]]$Lines, [string]$Pattern)
+            return @($Lines | Where-Object { -not $_.Trim().StartsWith('#') -and $_.Trim() -match $Pattern })
+        }
+
+        # The $Count nearest preceding lines that are neither blank nor comments,
+        # nearest first.
+        function script:Get-PrecedingCodeLines
+        {
+            param([string[]]$Lines, [int]$Index, [int]$Count = 2)
+            $Found = @()
+            for ($j = $Index - 1; $j -ge 0 -and $Found.Count -lt $Count; $j--)
+            {
+                $Text = $Lines[$j].Trim()
+                if ($Text -eq '' -or $Text.StartsWith('#')) { continue }
+                $Found += $Text
+            }
+            return $Found
+        }
+    }
+
+    It 'the wrapper invokes the inner script in exactly the two places this suite knows about' {
+        # If a third call site appears, the reset guard below must cover it too -
+        # fail here rather than silently leaving a new site unguarded.
+        @(script:Get-InnerInvocationIndexes -Lines $script:WrapperSrc).Count | Should -Be 2
+        @(script:Get-InnerInvocationIndexes -Lines $script:StreamSrc).Count | Should -Be 1
+    }
+
+    It 'every inner-script invocation resets both sticky globals immediately before it' {
+        # THE regression guard. $LASTEXITCODE: without the reset, one subscription
+        # exiting non-zero poisons the exit-code check for every later subscription
+        # in the same runspace. $Global:ZipOutputFile: without the reset, a sub that
+        # left via a bare `Exit` records the previous sub's archive path.
+        foreach ($Pair in @(
+                @{ Name = 'Run-AllSubscriptions.ps1'; Lines = $script:WrapperSrc },
+                @{ Name = 'Run-AllSubscriptions.Stream.ps1'; Lines = $script:StreamSrc }))
+        {
+            foreach ($Idx in @(script:Get-InnerInvocationIndexes -Lines $Pair.Lines))
+            {
+                $Preceding = @(script:Get-PrecedingCodeLines -Lines $Pair.Lines -Index $Idx -Count 2)
+                $Where = ("{0} line {1}" -f $Pair.Name, ($Idx + 1))
+                @($Preceding | Where-Object { $_ -match '^\$global:LASTEXITCODE\s*=\s*0$' }).Count |
+                    Should -Be 1 -Because ("the invocation at $Where must reset the sticky " + '$LASTEXITCODE' + ' first')
+                @($Preceding | Where-Object { $_ -match '^\$Global:ZipOutputFile\s*=\s*\$null$' }).Count |
+                    Should -Be 1 -Because ("the invocation at $Where must reset the sticky " + '$Global:ZipOutputFile' + ' first')
+            }
+        }
+    }
+
+    It 'both callers map inner exit code 2 to an archive-write failure record' {
+        # Count CODE lines only - the explanatory comments in both files also
+        # mention exit code 2, which would make these counts pass for the wrong
+        # reason.
+        @(script:Select-CodeLines -Lines $script:WrapperSrc -Pattern '\$LASTEXITCODE\s+-eq\s+2').Count | Should -Be 2
+        @(script:Select-CodeLines -Lines $script:StreamSrc -Pattern '\$LASTEXITCODE\s+-eq\s+2').Count | Should -Be 1
+    }
+
+    It 'every inner-script invocation also clears the sticky $Global:ZipOutputFile' {
+        # Without this the archive path recorded for a sub that left via a bare
+        # `Exit` (code 0, before any archive path exists) is the PREVIOUS sub's,
+        # which then passes verification "by exact path" against another
+        # subscription's file.
+        @(script:Select-CodeLines -Lines $script:WrapperSrc -Pattern '^\$Global:ZipOutputFile = \$null$').Count | Should -Be 2
+        @(script:Select-CodeLines -Lines $script:StreamSrc -Pattern '^\$Global:ZipOutputFile = \$null$').Count | Should -Be 1
+    }
+
+    It 'the stream worker relays archive-write failures in its summary' {
+        # Cross-process contract: the parent cannot set its exit code from a
+        # failure it never hears about.
+        @(script:Select-CodeLines -Lines $script:StreamSrc -Pattern 'ArchiveWriteFailures\s+=\s+@\(\$ArchiveWriteFailures\)').Count | Should -Be 1
+        @(script:Select-CodeLines -Lines $script:WrapperSrc -Pattern '\$StreamSummary\.ArchiveWriteFailures').Count | Should -BeGreaterThan 0
+    }
+
+    It 'the inner script forces the packaging compress to be terminating' {
+        # Without -ErrorAction Stop a NON-terminating Compress-Archive error is
+        # discarded by the run-wide SilentlyContinue and the catch never fires.
+        @(script:Select-CodeLines -Lines $script:InnerSrc -Pattern 'Compress-Archive\s+@CompressionOutput').Count | Should -Be 1
+        ($script:InnerSrc -join "`n") | Should -Match 'Compress-Archive\s+@CompressionOutput\s+-ErrorAction\s+Stop'
+    }
+
+    It 'the inner script removes an unusable archive before it leaves' {
+        # The wrapper consolidates by globbing *.zip and does not consult the
+        # inner script's verdict, so a truncated archive left behind would ship as
+        # a corrupt bundle member AND inflate the wrapper's archive count.
+        ($script:InnerSrc -join "`n") | Should -Match '(?s)if \(-not \$ZipVerified\).*?Remove-Item -LiteralPath \$Global:ZipOutputFile.*?exit 2'
+    }
+
+    It 'both sides of the seam use the one shared usable-archive predicate' {
+        # Two definitions of "usable archive" would drift, and the failure mode of
+        # that drift is the wrapper consolidating an archive the inner script
+        # would have rejected.
+        @(script:Select-CodeLines -Lines $script:InnerSrc -Pattern 'Test-ReportArchiveUsable').Count | Should -BeGreaterThan 0
+        @(script:Select-CodeLines -Lines $script:WrapperSrc -Pattern 'Test-ReportArchiveUsable').Count | Should -BeGreaterThan 0
+        $CommonSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Functions/Common.Functions.ps1')
+        @(script:Select-CodeLines -Lines $CommonSrc -Pattern '^function Test-ReportArchiveUsable$').Count | Should -Be 1
+        # And nowhere else, so the definition stays single-owner.
+        @(script:Select-CodeLines -Lines (Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1')) -Pattern 'function Test-ReportArchiveUsable').Count | Should -Be 0
+    }
+
+    It 'the inner script no longer uses the Write-Error swallow handler for packaging' {
+        # Write-Error under 'SilentlyContinue' prints nothing, does not rethrow,
+        # and leaves the exit code at 0.
+        ($script:InnerSrc -join "`n") | Should -Not -Match 'Write-Error\s*\(\s*"Error Compressing Output File'
+    }
+
+    It 'the inner script logs the archive as a Success only AFTER verifying it' {
+        # Match the STATEMENT, not the string: the explanatory comment above the
+        # packaging block also mentions 'Reporting Data File'.
+        $CodeLineNumber = {
+            param([string]$Pattern)
+            for ($i = 0; $i -lt $script:InnerSrc.Count; $i++)
+            {
+                $Text = $script:InnerSrc[$i].Trim()
+                if ($Text.StartsWith('#')) { continue }
+                if ($Text -match $Pattern) { return $i + 1 }
+            }
+            return $null
+        }
+        $VerifyIdx = & $CodeLineNumber '^if \(-not \$ZipVerified\)'
+        $SuccessIdx = & $CodeLineNumber 'Write-Log\s+-Message\s+\("Reporting Data File'
+        $VerifyIdx | Should -Not -BeNullOrEmpty
+        $SuccessIdx | Should -Not -BeNullOrEmpty
+        $SuccessIdx | Should -BeGreaterThan $VerifyIdx -Because 'the success line claimed an archive that was never written when it ran unconditionally'
+        # Exactly one Success claim in code, and the failure branch leaves before it.
+        @($script:InnerSrc | Where-Object { -not $_.Trim().StartsWith('#') -and $_ -match 'Reporting Data File' }).Count | Should -Be 1
+        ($script:InnerSrc -join "`n") | Should -Match '(?s)if \(-not \$ZipVerified\).*?exit 2'
+    }
+}
+
+Describe 'Report-archive loss detection: verification classification' {
+    # Faithful copy of the gate's two classification expressions from
+    # Run-AllSubscriptions.ps1. The gate is inline in the wrapper body (which
+    # cannot be dot-sourced), so this mirrors the production expressions the same
+    # way Tests/ResumeCycle.Tests.ps1 mirrors the wrapper's resume expressions,
+    # with the source guard above covering drift in the real file.
+    BeforeAll {
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+        $script:ZipRoot = Join-Path $TmpBase ("ArchiveVerifyTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:ZipRoot -Force | Out-Null
+        $script:PresentZip = Join-Path $script:ZipRoot 'ResourcesReport_present.zip'
+        Set-Content -LiteralPath $script:PresentZip -Value 'x' -Encoding utf8
+        $script:AbsentZip = Join-Path $script:ZipRoot 'ResourcesReport_absent.zip'
+
+        # Calls the REAL shared predicate (Test-ReportArchiveUsable, dot-sourced by
+        # the BeforeAll at the top of this file and by both the wrapper and the
+        # stream worker at runtime); only the two Where-Object shapes around it are
+        # mirrored from the wrapper body, which cannot be dot-sourced.
+        function script:Split-VerificationRows
+        {
+            param($Rows)
+            $Missing = @($Rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Zip) -and -not (Test-ReportArchiveUsable -Path $_.Zip) })
+            $Unverifiable = @($Rows | Where-Object { [string]::IsNullOrWhiteSpace($_.Zip) })
+            return @{ Missing = $Missing; Unverifiable = $Unverifiable }
+        }
+    }
+    AfterAll {
+        if ($script:ZipRoot -and (Test-Path $script:ZipRoot)) { Remove-Item -Path $script:ZipRoot -Recurse -Force }
+    }
+
+    It 'classifies a recorded-but-absent archive as missing, and names the subscription' {
+        $Rows = @(
+            [pscustomobject]@{ Name = 'Good'; Id = 'g1'; Count = 3; Zip = $script:PresentZip },
+            [pscustomobject]@{ Name = 'Lost'; Id = 'l1'; Count = 7; Zip = $script:AbsentZip }
+        )
+        $Split = script:Split-VerificationRows -Rows $Rows
+        $Split.Missing.Count | Should -Be 1
+        $Split.Missing[0].Name | Should -Be 'Lost'
+        $Split.Missing[0].Id | Should -Be 'l1'
+        $Split.Unverifiable.Count | Should -Be 0
+    }
+
+    It 'treats a row with no recorded path as unverifiable, never as missing' {
+        # A per-stream summary written by an older build carries no Zip. It must
+        # not produce a false accusation against a specific subscription.
+        foreach ($Empty in @($null, '', '   '))
+        {
+            $Rows = @([pscustomobject]@{ Name = 'OldBuild'; Id = 'o1'; Count = 1; Zip = $Empty })
+            $Split = script:Split-VerificationRows -Rows $Rows
+            $Split.Missing.Count | Should -Be 0
+            $Split.Unverifiable.Count | Should -Be 1
+        }
+    }
+
+    It 'reports neither when every recorded archive is present' {
+        $Rows = @(
+            [pscustomobject]@{ Name = 'A'; Id = 'a1'; Count = 1; Zip = $script:PresentZip },
+            [pscustomobject]@{ Name = 'B'; Id = 'b1'; Count = 2; Zip = $script:PresentZip }
+        )
+        $Split = script:Split-VerificationRows -Rows $Rows
+        $Split.Missing.Count | Should -Be 0
+        $Split.Unverifiable.Count | Should -Be 0
+        # The OK line's "verified by exact path" total must not overstate what was
+        # actually checked.
+        (@($Rows).Count - $Split.Unverifiable.Count) | Should -Be 2
+    }
+
+    It 'does not count an unverifiable row as verified by path' {
+        $Rows = @(
+            [pscustomobject]@{ Name = 'A'; Id = 'a1'; Count = 1; Zip = $script:PresentZip },
+            [pscustomobject]@{ Name = 'Old'; Id = 'o1'; Count = 1; Zip = $null }
+        )
+        $Split = script:Split-VerificationRows -Rows $Rows
+        (@($Rows).Count - $Split.Unverifiable.Count) | Should -Be 1
+    }
+
+    It 'a directory at the archive path does not satisfy the check' {
+        # -PathType Leaf matters: the forced-failure reproduction occupies the
+        # destination with a directory, and Compress-Archive then cannot write a
+        # file there.
+        $DirAtZipPath = Join-Path $script:ZipRoot 'ResourcesReport_dir.zip'
+        New-Item -ItemType Directory -Path $DirAtZipPath -Force | Out-Null
+        $Rows = @([pscustomobject]@{ Name = 'DirNotFile'; Id = 'd1'; Count = 1; Zip = $DirAtZipPath })
+        $Split = script:Split-VerificationRows -Rows $Rows
+        $Split.Missing.Count | Should -Be 1
+    }
+
+    It 'a present-but-EMPTY archive counts as missing, not as present' {
+        # A 0-byte file is what a truncating quarantine or a write cut off
+        # mid-flush leaves. The inner script already rejects it before reporting
+        # success, so the wrapper must apply the same standard or the two halves
+        # disagree about what a usable report is.
+        $EmptyZip = Join-Path $script:ZipRoot 'ResourcesReport_empty.zip'
+        New-Item -ItemType File -Path $EmptyZip -Force | Out-Null
+        (Get-Item -LiteralPath $EmptyZip).Length | Should -Be 0
+        $Rows = @([pscustomobject]@{ Name = 'Truncated'; Id = 't1'; Count = 4; Zip = $EmptyZip })
+        $Split = script:Split-VerificationRows -Rows $Rows
+        $Split.Missing.Count | Should -Be 1
+        $Split.Missing[0].Name | Should -Be 'Truncated'
+    }
+}
+
+Describe 'Test-ReportArchiveUsable' {
+    BeforeAll {
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+        $script:UsableRoot = Join-Path $TmpBase ("ArchiveUsableTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:UsableRoot -Force | Out-Null
+    }
+    AfterAll {
+        if ($script:UsableRoot -and (Test-Path $script:UsableRoot)) { Remove-Item -Path $script:UsableRoot -Recurse -Force }
+    }
+
+    It 'accepts a non-empty file' {
+        $P = Join-Path $script:UsableRoot 'real.zip'
+        Set-Content -LiteralPath $P -Value 'content' -Encoding utf8
+        Test-ReportArchiveUsable -Path $P | Should -BeTrue
+    }
+    It 'rejects a 0-byte file' {
+        $P = Join-Path $script:UsableRoot 'empty.zip'
+        New-Item -ItemType File -Path $P -Force | Out-Null
+        Test-ReportArchiveUsable -Path $P | Should -BeFalse
+    }
+    It 'rejects a path that does not exist' {
+        Test-ReportArchiveUsable -Path (Join-Path $script:UsableRoot 'nope.zip') | Should -BeFalse
+    }
+    It 'rejects a directory' {
+        $P = Join-Path $script:UsableRoot 'dir.zip'
+        New-Item -ItemType Directory -Path $P -Force | Out-Null
+        Test-ReportArchiveUsable -Path $P | Should -BeFalse
+    }
+    It 'rejects null, empty and whitespace without throwing' {
+        foreach ($Bad in @($null, '', '   '))
+        {
+            Test-ReportArchiveUsable -Path $Bad | Should -BeFalse
+        }
+    }
+    It 'handles a path containing square brackets (not treated as a wildcard)' {
+        # -LiteralPath throughout: a report folder name with [ ] would otherwise be
+        # read as a glob and silently match nothing, reporting a present archive as
+        # missing.
+        $P = Join-Path $script:UsableRoot 'Resources[1].zip'
+        Set-Content -LiteralPath $P -Value 'content' -Encoding utf8
+        Test-ReportArchiveUsable -Path $P | Should -BeTrue
+    }
+}
+
+Describe 'Report-archive loss detection: exit code' {
+    # Mirrors the wrapper's override: an archive-write failure means a report is
+    # MISSING, which is what exit code 2 already signals, and it must not mask a
+    # higher-signal code from Get-WrapperExitCode.
+    BeforeAll {
+        function script:Resolve-ExitCode
+        {
+            param([bool]$AuthSkipped, [bool]$CollectorsFailed, [int]$ArchiveFailureCount)
+            $Code = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+            if ($ArchiveFailureCount -gt 0) { $Code = 2 }
+            return $Code
+        }
+    }
+
+    It 'an otherwise-clean run with a lost archive exits 2, not 0' {
+        script:Resolve-ExitCode -AuthSkipped $false -CollectorsFailed $false -ArchiveFailureCount 1 | Should -Be 2
+    }
+
+    It 'a clean run with no lost archive still exits 0' {
+        script:Resolve-ExitCode -AuthSkipped $false -CollectorsFailed $false -ArchiveFailureCount 0 | Should -Be 0
+    }
+
+    It 'a lost archive takes precedence over an auth skip and a collector failure' {
+        # 3/4/5 all mean "the report was produced but is incomplete". A lost
+        # archive means a subscription's report is NOT IN THE BUNDLE - strictly
+        # worse - so it must not be masked. All conditions still print their own
+        # banner, so nothing is hidden from a human either.
+        script:Resolve-ExitCode -AuthSkipped $true -CollectorsFailed $false -ArchiveFailureCount 1 | Should -Be 2
+        script:Resolve-ExitCode -AuthSkipped $false -CollectorsFailed $true -ArchiveFailureCount 1 | Should -Be 2
+        script:Resolve-ExitCode -AuthSkipped $true -CollectorsFailed $true -ArchiveFailureCount 1 | Should -Be 2
+    }
+
+    It 'without a lost archive the 3/4/5 precedence is untouched' {
+        script:Resolve-ExitCode -AuthSkipped $true -CollectorsFailed $false -ArchiveFailureCount 0 | Should -Be 3
+        script:Resolve-ExitCode -AuthSkipped $false -CollectorsFailed $true -ArchiveFailureCount 0 | Should -Be 4
+        script:Resolve-ExitCode -AuthSkipped $true -CollectorsFailed $true -ArchiveFailureCount 0 | Should -Be 5
+    }
+
+    It 'the wrapper sets code 2 unconditionally on an archive failure' {
+        # Source guard on the precedence rule, since the behavioural tests above
+        # run a copy of it. A reintroduced `-eq 0` guard would let 3/4/5 mask a
+        # missing report.
+        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+        $Src | Should -Match '(?s)if \(@\(\$ArchiveWriteFailures\)\.Count -gt 0\)\s*\{\s*\$WrapperExitCode = 2\s*\}'
+        $Src | Should -Not -Match 'if \(\$WrapperExitCode -eq 0\)\s*\{\s*\$WrapperExitCode = 2\s*\}'
+    }
+
+    It 'the archive-failure banner prints before Stop-Transcript so it is persisted' {
+        # A banner emitted after the transcript stops exists only on the console.
+        $Lines = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1')
+        $BannerIdx = ($Lines | Select-String -SimpleMatch 'FAILED (report archive)' | Select-Object -First 1).LineNumber
+        $StopIdx = ($Lines | Select-String -SimpleMatch 'Stop-Transcript on normal completion failed' | Select-Object -First 1).LineNumber
+        $BannerIdx | Should -Not -BeNullOrEmpty
+        $StopIdx | Should -Not -BeNullOrEmpty
+        $BannerIdx | Should -BeLessThan $StopIdx
     }
 }

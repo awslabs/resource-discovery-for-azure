@@ -39,7 +39,11 @@ This:
 
 The script tracks progress automatically as it goes. You don't need `-Resume` on the first run. Only if a run is interrupted (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added — it skips the subscriptions that already finished and picks up the rest. See [Resuming an interrupted run](#resuming-an-interrupted-run) for details.
 
-You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details — see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
+**Send one file: `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`.** That single ZIP is the complete deliverable. At its root it holds one `ResourcesReport_<id>.zip` per subscription (each containing that subscription's inventory, metrics and consumption data), plus `MainSummary.html`, a browsable copy of each subscription's HTML report, and `RunSummary.log`. A tenant-wide `VMPlacement.csv` is included too when the run found any virtual machines. The run ends with a `What to send` block that prints the path and lists the bundle's confirmed contents, so you never have to guess which file to attach.
+
+**Do not zip or send the `InventoryReports` folder itself.** The folder also holds files that are deliberately kept local: the obfuscation dictionary (`ObfuscationDictionary_*.json`, which reverses the masking and undoes the whole point of `-Obfuscate`), PowerShell transcripts containing your signed-in account and tenant ID, and debug logs carrying real resource names. Sending the folder hands over all of it. It also accumulates every previous run's output, so a recipient cannot tell which report is current.
+
+This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details - see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
 
 For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) for sizing guidance. For all available options, see the [Run-AllSubscriptions Wrapper Parameters](#run-allsubscriptions-wrapper-parameters).
 
@@ -384,6 +388,7 @@ How it works:
 
 - **Recommended — upload the shard zips separately.** The ingestion server accepts each shard zip exactly like any normal run's output, so the N uploads together cover the whole tenant once (the shards are disjoint), with no duplicates and no gaps. This spreads ingestion load across N smaller uploads and needs no local merge step.
 - **Optional — merge locally into one MainSummary.** Only needed if you want a single combined `MainSummary.html` on your own machine. `Build-MainSummaryFromZip.ps1` rebuilds the summary from **one** already-consolidated outer zip (`-InputZip`); it does not combine multiple. To merge: extract the inner per-subscription `ResourcesReport_*.zip` out of every shard's outer zip into one folder, re-zip them into a single `AllSubscriptions_ResourcesReport_*.zip`, then run `Build-MainSummaryFromZip.ps1 -InputZip` on that. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md) for the full command sequence.
+  Note that this merge keeps only the inner per-subscription zips, so it drops each shard's root `VMPlacement.csv`, and each shard's copy covers only its own subscriptions anyway. If you need a tenant-wide placement view, concatenate the shards' `VMPlacement.csv` files yourself (identical headers, so appending the data rows is sufficient).
 
 Rough sizing: splitting a very large tenant across N machines gives each machine roughly *(total ÷ N)* subscriptions; each machine at `-ParallelStreams 6` then does the same workload as a single-machine run of that smaller slice. Add machines to cut wall-clock roughly linearly (until you approach the tenant-wide ARM/Resource Graph quotas shared across all shards).
 
@@ -668,12 +673,14 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 |---|---|
 | `0` | Clean run — no failures of any kind. |
 | `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
+| `2` | Per-subscription output gap - at least one subscription's report archive is **not in the bundle**. Either a subscription reported success but its zip is missing or empty, or a subscription finished collecting and then failed to write its archive (see the "FAILED (report archive)" banner). Takes precedence over `3`–`5`, because a missing report is worse than an incomplete one. |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
 
-Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
+Codes `3`–`5` still mean the report was produced - they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result. Code `2` is stronger: a subscription's report is absent from the bundle entirely, so it is reported even when `3`, `4` or `5` also applies.
+
+`ResourceInventory.ps1` (the per-subscription inner script) sets its own exit code, which the wrapper reads: `0` = success, `1` = a hard pre-flight/setup failure, `2` = collection finished but the report archive could not be written. The wrapper treats any non-zero as "this subscription failed" and maps an inner `2` to its own `2`.
 
 ### Important Notes
 

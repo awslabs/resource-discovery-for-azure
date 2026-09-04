@@ -2183,6 +2183,53 @@ function ExecuteInventoryProcessing()
     ProcessMetricsResult
     ProcessResourceResult
 
+    # VM placement CSV for capacity planning. Deliberately a SEPARATE file rather
+    # than new fields on the VM collector, so Inventory_*.json and the server
+    # ingestion contract it feeds are untouched (see Extension/VMPlacement.ps1).
+    #
+    # Runs after ProcessResourceResult so $Global:SmaResources is fully populated,
+    # and needs no Azure calls of its own - it joins the collector output already
+    # in memory to the Resource Graph payload for the zone.
+    #
+    # Placement mirrors $Global:ErrorLogFile rather than the report files: under the
+    # wrapper this is a per-subscription PART that Run-AllSubscriptions.ps1
+    # concatenates into one tenant-wide VMPlacement.csv, so it is written to the
+    # PARENT InventoryRoot (tagged with the SubscriptionID so parallel streams
+    # cannot collide) and NOT into the report folder, where it would be swept into
+    # the per-subscription zip and silently add a member to that bundle. A
+    # standalone run has nothing to aggregate, so it keeps the file alongside its
+    # own report.
+    #
+    # A failure here must never fail the run: the inventory, metrics and report are
+    # already written by this point, so it is downgraded to a warning.
+    try
+    {
+        $PlacementScript = Join-Path $PSScriptRoot 'Extension/VMPlacement.ps1'
+        if (Test-Path -LiteralPath $PlacementScript -PathType Leaf)
+        {
+            if ($RunAllSubs.IsPresent)
+            {
+                $PlacementDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+                $PlacementTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+                $PlacementCsv = Join-Path $PlacementDir ("VMPlacementPart_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $PlacementTag + ".csv")
+            }
+            else
+            {
+                $PlacementCsv = ($DefaultPath + "VMPlacement_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+            }
+
+            & $PlacementScript -CsvFile $PlacementCsv
+        }
+        else
+        {
+            Write-Log -Message ("VM placement CSV skipped: {0} not found." -f $PlacementScript) -Severity 'Error'
+        }
+    }
+    catch
+    {
+        Write-Log -Message ("VM placement CSV failed: {0}. The rest of the run is unaffected." -f $_.Exception.Message) -Severity 'Error'
+    }
+
     if (!$SkipMetrics.IsPresent)
     {
         $script:PhaseTimings['Metrics collection (Azure Monitor)'] = $MetricsPhaseTimer.Elapsed
@@ -2589,7 +2636,21 @@ if ($Obfuscate.IsPresent)
         Write-Log -Message ("  - Debug log:  {0}" -f $Global:DebugLogFile) -Severity 'Warning'
     }
     Write-Log -Message ("") -Severity 'Info'
-    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    # Scope the sharing claim to the artifact it is actually about. Under the
+    # wrapper this block runs once PER SUBSCRIPTION, so an unqualified "the ZIP
+    # file is safe to share" told the operator N times that a zip was sendable
+    # while only ever naming a per-subscription one - and the consolidated bundle
+    # they should actually send was never described that way. Operators resolved
+    # it by sending the whole folder, dictionary included.
+    if ($RunAllSubs.IsPresent)
+    {
+        Write-Log -Message ("This subscription's ZIP is obfuscated and is one COMPONENT of the run's bundle - it is not the file to send on its own.") -Severity 'Success'
+        Write-Log -Message ("Send the single AllSubscriptions_*.zip named at the end of the run ('SEND THIS ONE FILE'); it already contains this zip.") -Severity 'Success'
+    }
+    else
+    {
+        Write-Log -Message ("The ZIP file is safe to share with AWS or partners. Send that ZIP only - not the folder it sits in.") -Severity 'Success'
+    }
     Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
     Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
 }
@@ -2743,17 +2804,98 @@ else
     Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
+# Packaging is the LAST place a subscription's whole report can be lost without
+# anyone noticing, so it fails loudly and is verified on disk before anything
+# claims success. Three things previously conspired to hide a failure here:
+#
+#   1. The run-wide $ErrorActionPreference = 'SilentlyContinue' (line 109)
+#      discarded a NON-terminating Compress-Archive error outright, so the catch
+#      below never even fired.
+#   2. When it did fire, the handler used Write-Error - which under that same
+#      preference prints nothing, does not rethrow, and does not set an exit
+#      code.
+#   3. The 'Reporting Data File' line was unconditional, so the log reported
+#      Success naming an archive that was never written.
+#
+# The wrapper (Run-AllSubscriptions.ps1) only fails a subscription on a thrown
+# exception or a non-zero exit code, so it recorded the sub as complete and
+# consolidated a bundle that was quietly one report short.
+#
+# -ErrorAction Stop forces the compress terminating so the catch always fires,
+# and the archive is then confirmed present and non-empty. exit 1 (not throw) is
+# this script's established hard-fail signal: a bare throw at script scope is
+# swallowed by 'SilentlyContinue' - same reason as the -Service and
+# -ObfuscationDictionary gates above.
+$ZipWriteError = $null
 try
 {
-    Compress-Archive @CompressionOutput
+    Compress-Archive @CompressionOutput -ErrorAction Stop
 }
 catch
 {
-    $_ | Format-List -Force
-    Write-Error ("Error Compressing Output File: {0}." -f $Global:ZipOutputFile)
-    Write-Error ("Please zip the output files manually.")
+    $ZipWriteError = $_.Exception.Message
+}
+
+# Test-ReportArchiveUsable (Functions/Common.Functions.ps1) is the SINGLE
+# definition of "the archive is really there": present, a file, and non-empty.
+# The wrapper's per-subscription output verification calls the same predicate, so
+# the two sides of this seam cannot drift into disagreeing about what counts as a
+# usable report. The absent-vs-empty distinction below is only for the operator
+# message - the verdict itself comes from the shared predicate.
+$ZipVerified = $false
+if ($null -eq $ZipWriteError)
+{
+    $ZipVerified = Test-ReportArchiveUsable -Path $Global:ZipOutputFile
+    if (-not $ZipVerified)
+    {
+        $ZipWriteError = if (Test-Path -LiteralPath $Global:ZipOutputFile -PathType Leaf)
+        {
+            'the archive was created but is 0 bytes'
+        }
+        else
+        {
+            'the archive is absent from disk even though Compress-Archive reported no error'
+        }
+    }
 }
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
+
+if (-not $ZipVerified)
+{
+    Write-Log -Message ("FAILED to write the report archive: {0}" -f $Global:ZipOutputFile) -Severity 'Error'
+    Write-Log -Message ("  Reason: {0}" -f $ZipWriteError) -Severity 'Error'
+    Write-Log -Message ("  The uncompressed report files are still in {0} - check free disk space first, then an antivirus/DLP quarantine, then write permissions on that folder." -f $DefaultPath) -Severity 'Error'
+    Write-Log -Message ('  Reporting this subscription as FAILED so the wrapper does not consolidate a bundle that is missing it. Re-run with -Resume to retry.') -Severity 'Error'
+
+    # Delete whatever IS at the archive path before leaving. The wrapper
+    # consolidates by globbing *.zip under the inventory root filtered on write
+    # time - it does not consult this script's verdict - so a truncated or
+    # half-written archive left here would be swept into the shared bundle as a
+    # corrupt member AND would inflate the wrapper's archive count, hiding the very
+    # gap this exit is reporting. Best-effort: if the remove fails there is nothing
+    # further to do, and it must not mask the original failure.
+    if (Test-Path -LiteralPath $Global:ZipOutputFile -PathType Leaf)
+    {
+        try
+        {
+            Remove-Item -LiteralPath $Global:ZipOutputFile -Force -ErrorAction Stop
+            Write-Log -Message ('  Removed the unusable archive so it cannot be folded into the consolidated bundle.') -Severity 'Error'
+        }
+        catch
+        {
+            Write-Log -Message ('  WARNING: could not remove the unusable archive at {0} ({1}). Delete it by hand before consolidating, or it will ship as a corrupt member.' -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
+        }
+    }
+
+    # Exit code 2 specifically means "the report archive is missing", as distinct
+    # from this script's generic hard-fail (exit 1, used by the pre-flight gates
+    # above). Run-AllSubscriptions.ps1 still treats ANY non-zero as "this
+    # subscription failed", but it reads the 2 to also set its OWN exit code 2 -
+    # the code that already means "per-subscription output gap" - so a lost report
+    # is visible to automation and not just in the console summary.
+    exit 2
+}
+
 Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'

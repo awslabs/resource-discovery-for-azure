@@ -20,8 +20,14 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'       = $1.RESOURCEGROUP;
                 'Name'                = $1.NAME;
                 'Location'            = $1.LOCATION;
-                'SKU'                 = $Data.sku.name;
-                'Capacity'            = $Data.sku.capacity;
+                # sku is a TOP-LEVEL Resource Graph column for this type, not a
+                # member of properties: the ARM contract for
+                # Microsoft.Purview/accounts declares sku (name = Free|Standard,
+                # capacity) as a sibling of properties. Reading $Data.sku
+                # (= properties.sku) therefore always yielded null for BOTH fields.
+                # Same correction as IOTHubs.
+                'SKU'                 = $1.sku.name;
+                'Capacity'            = $1.sku.capacity;
                 'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.createdBy } else { $Data.createdBy };
                 'FriendlyName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.friendlyName } else { $Data.friendlyName };
                 'CreatedTime'         = $Timecreated;

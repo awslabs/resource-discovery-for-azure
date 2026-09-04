@@ -315,18 +315,26 @@ Describe 'Get-RetryWaitSeconds header honoring' {
 
 Describe 'Retry bound under the production error preference' {
 
-    It 'bounds the loop with an explicit break, not with a throw' {
-        # The regression this pins: loop control expressed as `throw` is inert under
-        # 'SilentlyContinue', so the ceiling has to be enforced by a real `break`.
+    It 'never uses throw as loop control in either Graph loop' {
+        # The regression this pins: a `throw` is not a reliable exit under
+        # 'SilentlyContinue', so neither the retry ceiling nor the window splitter
+        # may depend on one. A throw inside either loop body lets execution fall
+        # through and keep looping - unbounded, which is the whole bug.
         $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/ResourceInventory.Functions.ps1') -Raw
-        $Body = [regex]::Match($Src, '(?s)function Invoke-AzGraphRequest.*?\n\}').Value
-        $Body | Should -Not -BeNullOrEmpty -Because 'the single-request retry helper must exist to be checked'
-        $Body | Should -Match '\$Attempt -ge \$GraphMaxRetries[\s\S]{0,200}?break' -Because 'the ceiling must exit via break'
-        # The only throw in the helper is the post-loop return path, never inside the
-        # loop body where it would be control flow.
-        $LoopBody = [regex]::Match($Body, '(?s)for \(\$Attempt = 0; ; \$Attempt\+\+\).*?\n    \}').Value
-        $LoopBody | Should -Not -BeNullOrEmpty
-        $LoopBody | Should -Not -Match '\bthrow\b' -Because 'a throw inside the loop is exactly what made the ceiling inert'
+
+        $RequestFn = [regex]::Match($Src, '(?s)function Invoke-AzGraphRequest\r?\n\{.*?\r?\n\}').Value
+        $RequestFn | Should -Not -BeNullOrEmpty -Because 'the single-request retry helper must exist to be checked'
+        $RequestFn | Should -Match '\$Attempt -ge \$GraphMaxRetries' -Because 'the ceiling condition must still be there'
+        $RetryLoop = [regex]::Match($RequestFn, '(?s)for \(\$Attempt = 0; ; \$Attempt\+\+\)\r?\n    \{.*?\r?\n    \}').Value
+        $RetryLoop | Should -Not -BeNullOrEmpty
+        $RetryLoop | Should -Not -Match '\bthrow\b' -Because 'a throw inside the retry loop is what made the ceiling inert'
+
+        $WindowFn = [regex]::Match($Src, '(?s)function Get-AzGraphRowWindow\r?\n\{.*?\r?\n\}').Value
+        $WindowFn | Should -Not -BeNullOrEmpty
+        $SplitLoop = [regex]::Match($WindowFn, '(?s)while \(\$Pending\.Count -gt 0\)\r?\n    \{.*?\r?\n    \}').Value
+        $SplitLoop | Should -Not -BeNullOrEmpty
+        $SplitLoop | Should -Not -Match '\bthrow\b' -Because 'a throw inside the split loop lets a non-payload failure fall through into the split branch and loop forever'
+        $WindowFn | Should -Match '\$FatalMessage' -Because 'fatal paths must record and break, then throw after the loop'
     }
 
     It 'stops at 31 attempts in a real process at SilentlyContinue with no caller catch' {
@@ -476,5 +484,122 @@ Describe 'Discovery failure is not survivable (source guard)' {
 
     It 'exits non-zero on a discovery failure rather than continuing to report' {
         $script:InvSrc | Should -Match '(?s)FAILED to complete resource discovery.*?exit 1'
+    }
+}
+
+# =============================================================================
+# Structured error classification (Get-AzGraphErrorInfo)
+#
+# WHY THIS EXISTS
+# ---------------
+# The native cmdlet's exception .Message carries NO detail. Verified against live
+# Azure: a malformed query, a denied subscription and an oversized response all
+# produce the same line -
+#     Operation returned an invalid status code 'BadRequest'
+# The reason is only in the typed body:
+#     $Exception.Body.Error.Code            -> 'BadRequest'
+#     $Exception.Body.Error.Details[].Code  -> 'ResponsePayloadTooLarge', 'InvalidQuery', ...
+#     $Exception.Response.StatusCode        -> 400
+# So a message-text match for 'ResponsePayloadTooLarge' would NEVER fire on the
+# native path, and the page-splitting fix would never engage. These tests pin the
+# classification to codes and HTTP status.
+#
+# The exceptions here are duck-typed stand-ins carrying the same property shape,
+# because constructing a real ErrorResponseException offline is not possible. The
+# shape itself was confirmed against a live Search-AzGraph failure.
+# =============================================================================
+
+Describe 'Get-AzGraphErrorInfo' {
+
+    BeforeAll {
+        function script:New-GraphError
+        {
+            param([string]$Message = "Operation returned an invalid status code 'BadRequest'",
+                [string]$Code, [string[]]$DetailCodes = @(), $Status)
+            $Err = $null
+            if ($Code -or $DetailCodes.Count -gt 0)
+            {
+                $Err = [pscustomobject]@{
+                    Code    = $Code
+                    Message = 'Please provide below info when asking for support: timestamp = ..., correlationId = ...'
+                    Details = @($DetailCodes | ForEach-Object { [pscustomobject]@{ Code = $_; Message = $_ } })
+                }
+            }
+            return [pscustomobject]@{
+                Message        = $Message
+                Body           = if ($null -ne $Err) { [pscustomobject]@{ Error = $Err } } else { $null }
+                Response       = if ($null -ne $Status) { [pscustomobject]@{ StatusCode = $Status } } else { $null }
+                InnerException = $null
+            }
+        }
+    }
+
+    It 'detects an oversized response from the structured detail, despite a generic message' {
+        # THE case that message matching cannot see.
+        $Ex = script:New-GraphError -Code 'BadRequest' -DetailCodes @('ResponsePayloadTooLarge') -Status 400
+        $Ex.Message | Should -Not -Match 'ResponsePayloadTooLarge' -Because 'the native message genuinely carries no detail'
+        $Info = Get-AzGraphErrorInfo -Exception $Ex
+        $Info.IsPayloadTooLarge | Should -BeTrue
+        $Info.IsPermanent | Should -BeFalse -Because 'it arrives as a 400 but a SMALLER request can satisfy it, so it must not be given up on'
+        $Info.Codes | Should -Contain 'ResponsePayloadTooLarge'
+        $Info.HttpStatus | Should -Be 400
+    }
+
+    It 'classifies a malformed query as permanent' {
+        $Info = Get-AzGraphErrorInfo -Exception (script:New-GraphError -Code 'BadRequest' -DetailCodes @('InvalidQuery', 'ParserFailure') -Status 400)
+        $Info.IsPermanent | Should -BeTrue
+        $Info.IsPayloadTooLarge | Should -BeFalse
+        $Info.IsThrottled | Should -BeFalse
+    }
+
+    It 'classifies authorization failure as permanent' {
+        $Info = Get-AzGraphErrorInfo -Exception (script:New-GraphError -Code 'AuthorizationFailed' -Status 403)
+        $Info.IsPermanent | Should -BeTrue
+    }
+
+    It 'classifies 429 as throttled, never as permanent' {
+        $Info = Get-AzGraphErrorInfo -Exception (script:New-GraphError -Code 'TooManyRequests' -Status 429)
+        $Info.IsThrottled | Should -BeTrue
+        $Info.IsPermanent | Should -BeFalse -Because 'a 429 is a wait-and-retry signal, not a give-up'
+    }
+
+    It 'treats a 5xx as transient (neither permanent nor throttled)' {
+        $Info = Get-AzGraphErrorInfo -Exception (script:New-GraphError -Message 'Operation returned an invalid status code ServiceUnavailable' -Code 'ServiceUnavailable' -Status 503)
+        $Info.IsPermanent | Should -BeFalse
+        $Info.IsThrottled | Should -BeFalse
+        $Info.IsPayloadTooLarge | Should -BeFalse
+    }
+
+    It 'treats a 408 request timeout as retryable, not permanent' {
+        $Info = Get-AzGraphErrorInfo -Exception (script:New-GraphError -Status 408)
+        $Info.IsPermanent | Should -BeFalse
+    }
+
+    It 'falls back to message text when there is no structured body at all' {
+        # A socket/DNS/TLS failure is a plain exception with no Body and no Response.
+        $Ex = script:New-GraphError -Message 'The remote name could not be resolved: management.azure.com'
+        $Info = Get-AzGraphErrorInfo -Exception $Ex
+        $Info.HasStructuredBody | Should -BeFalse
+        $Info.HttpStatus | Should -Be 0
+        $Info.IsPermanent | Should -BeFalse -Because 'an unrecognised network-level failure is worth retrying'
+    }
+
+    It 'uses the text fallback for a payload error that carries no structured body' {
+        $Info = Get-AzGraphErrorInfo -Exception (script:New-GraphError -Message 'ResponsePayloadTooLarge : Response payload size is 33455366, exceeded the limit of 16777216')
+        $Info.IsPayloadTooLarge | Should -BeTrue
+    }
+
+    It 'never throws on a null or shapeless exception' {
+        { Get-AzGraphErrorInfo -Exception $null } | Should -Not -Throw
+        (Get-AzGraphErrorInfo -Exception $null).IsPermanent | Should -BeFalse
+        { Get-AzGraphErrorInfo -Exception ([pscustomobject]@{ Message = 'x' }) } | Should -Not -Throw
+    }
+
+    It 'reads codes and status through an InnerException wrapper' {
+        $Inner = script:New-GraphError -Code 'BadRequest' -DetailCodes @('ResponsePayloadTooLarge') -Status 400
+        $Outer = [pscustomobject]@{ Message = 'wrapped'; Body = $null; Response = $null; InnerException = $Inner }
+        $Info = Get-AzGraphErrorInfo -Exception $Outer
+        $Info.IsPayloadTooLarge | Should -BeTrue
+        $Info.HttpStatus | Should -Be 400
     }
 }

@@ -271,11 +271,115 @@ function Get-RetryWaitSeconds
 # (collectors compare against lowercase type strings and self-join on lowercased
 # ids). Native cmdlet = portable across Windows/Linux/macOS with no az.cmd shell
 # boundary; see .kiro/steering/cross-platform-powershell.md.
-# Sentinel prefix marking "Azure refused this response as too large". Matched by
-# the window splitter below, which is the only caller that can do anything about
-# it. Tagging the message keeps this free of a custom exception type, which would
-# be more machinery than a single internal signal needs.
-$script:RdaPayloadTooLargeTag = 'RDA_PAYLOAD_TOO_LARGE'
+# Classify a Resource Graph failure from the exception's STRUCTURED surface rather
+# than by matching its message text.
+#
+# This matters because the native cmdlet's .Message carries no detail at all - a
+# malformed query, a denied subscription and an oversized response all surface as
+# the same generic line:
+#     Operation returned an invalid status code 'BadRequest'
+# The actual reason lives in the typed body
+# (Microsoft.Azure.Management.ResourceGraph.Models.ErrorResponse):
+#     $Exception.Body.Error.Code            -> 'BadRequest'
+#     $Exception.Body.Error.Details[].Code  -> 'ResponsePayloadTooLarge', 'InvalidQuery', ...
+#     $Exception.Response.StatusCode        -> 400
+# so keying on codes and HTTP status is both precise and stable across service
+# message wording, SDK versions and locales.
+#
+# Text matching is kept ONLY as a last-resort fallback, for failures that carry no
+# structured body at all (a socket/DNS/TLS error is a plain exception, not an
+# ErrorResponseException). Never throws: a classifier that fails cannot be allowed
+# to mask the failure it was asked to describe.
+function Get-AzGraphErrorInfo
+{
+    param($Exception)
+
+    $Info = [pscustomobject]@{
+        Codes             = @()
+        HttpStatus        = 0
+        Message           = ''
+        HasStructuredBody = $false
+        IsPayloadTooLarge = $false
+        IsThrottled       = $false
+        IsPermanent       = $false
+    }
+    if ($null -eq $Exception) { return $Info }
+
+    try { $Info.Message = [string]$Exception.Message } catch { $Info.Message = '' }
+
+    # Walk the exception chain: the SDK sometimes wraps the typed exception.
+    $Codes = New-Object System.Collections.Generic.List[string]
+    $Node = $Exception
+    $Depth = 0
+    while ($null -ne $Node -and $Depth -lt 5)
+    {
+        try
+        {
+            $Err = $Node.Body.Error
+            if ($null -ne $Err)
+            {
+                $Info.HasStructuredBody = $true
+                if ($Err.Code) { $Codes.Add([string]$Err.Code) }
+                foreach ($Detail in @($Err.Details))
+                {
+                    if ($Detail -and $Detail.Code) { $Codes.Add([string]$Detail.Code) }
+                }
+            }
+        }
+        catch { }
+        if ($Info.HttpStatus -eq 0)
+        {
+            try
+            {
+                if ($null -ne $Node.Response -and $null -ne $Node.Response.StatusCode)
+                {
+                    $Info.HttpStatus = [int]$Node.Response.StatusCode
+                }
+            }
+            catch { }
+        }
+        try { $Node = $Node.InnerException } catch { $Node = $null }
+        $Depth++
+    }
+    $Info.Codes = @($Codes | Select-Object -Unique)
+
+    $HasCode = {
+        param([string]$Name)
+        foreach ($C in $Info.Codes) { if ($C -and $C.Equals($Name, [System.StringComparison]::OrdinalIgnoreCase)) { return $true } }
+        return $false
+    }
+
+    # Oversized response. Checked first and independently of the 400 status it
+    # arrives with, because it is the one 400 that a smaller request CAN satisfy.
+    $Info.IsPayloadTooLarge = (& $HasCode 'ResponsePayloadTooLarge')
+
+    # Throttling: HTTP 429, or the service's own code.
+    $Info.IsThrottled = ($Info.HttpStatus -eq 429) -or (& $HasCode 'TooManyRequests') -or (& $HasCode 'ThrottledRequest')
+
+    # Permanent: a 4xx that retrying cannot fix. 408 (timeout) and 429 are
+    # deliberately excluded - both are worth another attempt.
+    if (-not $Info.IsPayloadTooLarge -and -not $Info.IsThrottled)
+    {
+        $Permanent4xx = ($Info.HttpStatus -ge 400 -and $Info.HttpStatus -lt 500 -and $Info.HttpStatus -ne 408 -and $Info.HttpStatus -ne 429)
+        $PermanentCode = (& $HasCode 'AuthorizationFailed') -or (& $HasCode 'Forbidden') -or (& $HasCode 'InvalidQuery') -or
+        (& $HasCode 'SemanticError') -or (& $HasCode 'SyntaxError') -or (& $HasCode 'ParserFailure') -or
+        (& $HasCode 'BadRequest') -or (& $HasCode 'InvalidAuthenticationToken')
+        $Info.IsPermanent = ($Permanent4xx -or $PermanentCode)
+    }
+
+    # Fallback for failures with no structured body (network-level errors), and for
+    # any SDK shape this does not recognise. Only consulted when the structured
+    # surface yielded nothing, so normal service errors never depend on wording.
+    if (-not $Info.HasStructuredBody -and $Info.HttpStatus -eq 0)
+    {
+        $Text = $Info.Message
+        if ($Text -match 'ResponsePayloadTooLarge|Response payload size is \d+, exceeded the limit') { $Info.IsPayloadTooLarge = $true }
+        elseif ($Text -match 'TooManyRequests|\b429\b|throttl') { $Info.IsThrottled = $true }
+        elseif ($Text -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid') { $Info.IsPermanent = $true }
+    }
+
+    return $Info
+}
 
 # ONE Resource Graph request, with the project's bounded retry around it.
 #
@@ -311,6 +415,7 @@ function Invoke-AzGraphRequest
     $GraphMaxRetries = 30
     $Rows = $null
     $FailureMessage = $null
+    $Failure = $null
     $AttemptsMade = 0
 
     for ($Attempt = 0; ; $Attempt++)
@@ -320,36 +425,40 @@ function Invoke-AzGraphRequest
         {
             $Rows = @(Search-AzGraph @GraphParams)
             $FailureMessage = $null
+            $Failure = $null
             break
         }
         catch
         {
-            $Message = $_.Exception.Message
+            # Classify from the exception's structured body / HTTP status, not from
+            # its message text - the native cmdlet's message is the same generic
+            # line for every 400. See Get-AzGraphErrorInfo.
+            $ErrorInfo = Get-AzGraphErrorInfo -Exception $_.Exception
+            $Message = $ErrorInfo.Message
+            $CodeText = if ($ErrorInfo.Codes.Count -gt 0) { ' [' + ($ErrorInfo.Codes -join ', ') + ']' } else { '' }
 
-            # Checked FIRST, because Azure returns it AS a BadRequest and the
-            # permanent-failure test below would otherwise swallow it. This one is
-            # not "give up" and not "retry the same thing" - it means the window is
-            # too big, which only the splitter can act on, so hand it straight up.
-            if ($Message -match 'ResponsePayloadTooLarge|Response payload size is \d+, exceeded the limit')
+            # An oversized response is neither "give up" nor "retry the same thing":
+            # a SMALLER request can satisfy it, and only the window splitter can act
+            # on that. Hand it straight up, still classified.
+            if ($ErrorInfo.IsPayloadTooLarge)
             {
-                $FailureMessage = ('{0}: {1}' -f $script:RdaPayloadTooLargeTag, $Message)
+                $Failure = $ErrorInfo
                 break
             }
 
             # Clearly-permanent failures: a retry cannot help, so stop now rather
             # than burning the whole backoff budget on an error retrying cannot fix.
-            $Permanent = $Message -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid'
-
-            if ($Permanent -or $Attempt -ge $GraphMaxRetries)
+            if ($ErrorInfo.IsPermanent -or $Attempt -ge $GraphMaxRetries)
             {
-                $FailureMessage = ("Resource Graph query failed after {0} attempt(s): {1}`nQuery: {2}" -f $AttemptsMade, $Message, $Query)
+                $Failure = $ErrorInfo
+                $FailureMessage = ("Resource Graph query failed after {0} attempt(s): {1}{2}`nQuery: {3}" -f $AttemptsMade, $Message, $CodeText, $Query)
                 break
             }
 
             # Transient: exponential backoff (2^attempt, capped) plus jitter so a
             # wave of throttled calls does not retry in lockstep. Throttled calls
             # wait a bit longer.
-            $Throttled = $Message -match 'TooManyRequests|\b429\b|throttl'
+            $Throttled = $ErrorInfo.IsThrottled
             $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
             if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
             # Honor the service's own retry directive when the throttling response
@@ -362,8 +471,15 @@ function Invoke-AzGraphRequest
         }
     }
 
-    if ($null -ne $FailureMessage) { throw $FailureMessage }
-    return $Rows
+    # A structured result rather than a throw, so the window splitter can read the
+    # CLASSIFICATION (IsPayloadTooLarge) directly instead of re-deriving it from a
+    # message. Rows is $null exactly when Failure is set.
+    return [pscustomobject]@{
+        Rows           = $Rows
+        Failure        = $Failure
+        FailureMessage = $FailureMessage
+        Attempts       = $AttemptsMade
+    }
 }
 
 # Fetch the rows for ONE caller-requested window, splitting it if Azure refuses the
@@ -405,41 +521,57 @@ function Get-AzGraphRowWindow
     $Rows = @()
     $SplitCount = 0
 
+    # Loop control here is explicit for the SAME reason as in Invoke-AzGraphRequest:
+    # a `throw` is not a reliable exit under 'SilentlyContinue'. Using one here would
+    # let execution fall through into the split branch on a NON-payload failure,
+    # splitting forever - which is exactly the unbounded behaviour this whole change
+    # exists to remove. Every fatal path sets $FatalMessage and breaks; the throw
+    # happens once, after the loop.
+    $FatalMessage = $null
+
     while ($Pending.Count -gt 0)
     {
         $Window = $Pending.Pop()
-        try
+        $Result = Invoke-AzGraphRequest -Query $Query -Subscription $Subscription -First $Window.First -Skip $Window.Skip
+
+        if ($null -eq $Result.Failure)
         {
-            $Rows += @(Invoke-AzGraphRequest -Query $Query -Subscription $Subscription -First $Window.First -Skip $Window.Skip)
+            $Rows += @($Result.Rows)
+            continue
         }
-        catch
+
+        $Message = $Result.Failure.Message
+
+        if (-not $Result.Failure.IsPayloadTooLarge)
         {
-            $Message = $_.Exception.Message
-            if ($Message -notlike ('{0}*' -f $script:RdaPayloadTooLargeTag))
-            {
-                # Anything else is this function's caller's problem, unchanged.
-                throw
-            }
-
-            # Only an ordered query may be split - see the note above.
-            if ($Query -notmatch 'order\s+by')
-            {
-                throw ("Resource Graph refused the response as too large and the query is not ordered, so it cannot be split safely. Add an 'order by' clause to page it.`n{0}`nQuery: {1}" -f $Message, $Query)
-            }
-
-            if ($Window.First -le 1)
-            {
-                throw ("Resource Graph refused a SINGLE resource as too large (offset {0}); it exceeds the 16 MB response cap and cannot be retrieved. Exclude this resource type from the discovery query to complete the run.`n{1}" -f $Window.Skip, $Message)
-            }
-
-            $LeftCount = [math]::Floor($Window.First / 2)
-            $RightCount = $Window.First - $LeftCount
-            $Pending.Push([pscustomobject]@{ Skip = ($Window.Skip + $LeftCount); First = $RightCount })
-            $Pending.Push([pscustomobject]@{ Skip = $Window.Skip; First = $LeftCount })
-            $SplitCount++
-            Write-Log -Message ("Resource Graph response too large at offset {0} for {1} rows; retrying as {2} + {3}." -f $Window.Skip, $Window.First, $LeftCount, $RightCount) -Severity 'Warning'
+            # Anything else is the caller's problem, with the request helper's own
+            # message (which already carries the attempt count and the codes).
+            $FatalMessage = $Result.FailureMessage
+            break
         }
+
+        # Only an ordered query may be split - see the note above.
+        if ($Query -notmatch 'order\s+by')
+        {
+            $FatalMessage = ("Resource Graph refused the response as too large and the query is not ordered, so it cannot be split safely. Add an 'order by' clause to page it.`n{0}`nQuery: {1}" -f $Message, $Query)
+            break
+        }
+
+        if ($Window.First -le 1)
+        {
+            $FatalMessage = ("Resource Graph refused a SINGLE resource as too large (offset {0}); it exceeds the 16 MB response cap and cannot be retrieved. Exclude this resource type from the discovery query to complete the run.`n{1}" -f $Window.Skip, $Message)
+            break
+        }
+
+        $LeftCount = [math]::Floor($Window.First / 2)
+        $RightCount = $Window.First - $LeftCount
+        $Pending.Push([pscustomobject]@{ Skip = ($Window.Skip + $LeftCount); First = $RightCount })
+        $Pending.Push([pscustomobject]@{ Skip = $Window.Skip; First = $LeftCount })
+        $SplitCount++
+        Write-Log -Message ("Resource Graph response too large at offset {0} for {1} rows; retrying as {2} + {3}." -f $Window.Skip, $Window.First, $LeftCount, $RightCount) -Severity 'Warning'
     }
+
+    if ($null -ne $FatalMessage) { throw $FatalMessage }
 
     if ($SplitCount -gt 0)
     {

@@ -1711,6 +1711,17 @@ function ExecuteInventoryProcessing()
             # the row count. Incremented once per distinct page attempted.
             $ConsumptionPageIndex = 0
 
+            # Cleared per subscription. $UsageData holds the LAST page fetched, and
+            # the paging token below is read from it. It is not scoped to this
+            # subscription's loop, so without this reset a subscription that failed
+            # part-way through its pages left its live ContinuationToken in place -
+            # and the NEXT subscription's very first billing request was issued with
+            # a token belonging to a different subscription. That either fails or,
+            # worse, resumes another subscription's page sequence, attributing its
+            # billing rows here. A fresh start per subscription is the only correct
+            # first request.
+            $UsageData = $null
+
             try
             {
                 do
@@ -1723,7 +1734,7 @@ function ExecuteInventoryProcessing()
                         ShowDetails            = $true
                     }
 
-                    $Params.ContinuationToken = $UsageData.ContinuationToken
+                    $Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }
 
                     # Bounded retry with exponential backoff + jitter around the billing
                     # pull. On a very large tenant this loop pages through millions of

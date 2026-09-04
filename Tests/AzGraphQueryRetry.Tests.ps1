@@ -603,3 +603,41 @@ Describe 'Get-AzGraphErrorInfo' {
         $Info.HttpStatus | Should -Be 400
     }
 }
+
+# =============================================================================
+# Consumption paging token isolation (source guard)
+#
+# $UsageData holds the LAST page fetched and is the source of the paging token for
+# the next request. It is not scoped to a single subscription's paging loop, so a
+# subscription that failed part-way through its pages used to leave its live
+# ContinuationToken in place - and the NEXT subscription's first billing request
+# went out carrying a token belonging to a different subscription. That either
+# fails outright or, worse, resumes another subscription's page sequence and
+# attributes its billing rows to the wrong subscription.
+#
+# The behaviour lives in ResourceInventory.ps1's orchestration, which cannot be
+# dot-sourced (its body authenticates and runs a whole inventory), so this is a
+# source guard - the same approach the discovery-failure guard above uses.
+# =============================================================================
+
+Describe 'Consumption paging token does not leak between subscriptions' {
+
+    BeforeAll {
+        $script:InvSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1') -Raw
+    }
+
+    It 'clears $UsageData before each subscription paging loop' {
+        $script:InvSource | Should -Match '(?s)\$UsageData = \$null\s*\r?\n\s*try\s*\r?\n\s*\{\s*\r?\n\s*do' -Because 'the reset must sit immediately before the paging loop it protects'
+    }
+
+    It 'guards the token read so a null previous page cannot be dereferenced' {
+        $script:InvSource | Should -Match '\$Params\.ContinuationToken = if \(\$null -ne \$UsageData\)' -Because 'the first request of a subscription must send no token'
+    }
+
+    It 'never reads the token from an unguarded previous page' {
+        $Unguarded = @($script:InvSource -split "`n" | Where-Object {
+                $_ -match '\$Params\.ContinuationToken\s*=\s*\$UsageData\.ContinuationToken'
+            })
+        $Unguarded.Count | Should -Be 0 -Because 'that exact form is the leak: it carries the previous subscription token into the next subscription'
+    }
+}

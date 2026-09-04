@@ -204,33 +204,94 @@ anything**:
 ./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -Plan
 ```
 
-It counts the eligible subscriptions, reads this machine's CPU and RAM, and
-recommends one of two things:
+`-Plan` authenticates, enumerates the tenant's eligible subscriptions, reads this
+machine's CPU and RAM (to pick `-ParallelStreams` / `-ConcurrencyLimit`), and then
+sizes the run from **live metric-query volume** - because the metrics phase is what
+dominates wall time, not the raw resource count. One aggregate Resource Graph query
+per chunk of subscriptions (Resource Graph caps how many a single query may name)
+sums each subscription's projected
+metric-query weight (attached disks x4, VMs x2, SQL databases x8, storage accounts
+x1, scale sets x2, Cosmos x4, and so on), honouring the same metric gating the real
+run uses, and returns the batchable share separately so `-UseMetricsBatch` only
+discounts the types that can genuinely be batched. That weight becomes seconds via
+a fixed per-subscription base overhead plus `per-query cost x weight`, times a
+safety margin. [Plan.md](Plan.md) records the measurements behind the model.
 
-- **Single machine** — if the whole tenant fits comfortably under a ~2-hour
-  wall-clock ceiling, it prints one ready-to-run command with tuned
-  `-ParallelStreams` / `-ConcurrencyLimit`.
-- **Shard across N machines** — otherwise it prints the recommended shard count,
-  the approximate subscriptions-per-machine and per-machine time, and the
-  ready-to-paste per-node commands (same command, distinct `-ShardIndex`). It
-  also emits a machine-readable `PLAN_SHARDCOUNT=<n>` line and an explicit
-  "run ALL indices `0..N-1`" reminder, so an automating wrapper doesn't have to
-  scrape the prose.
+It then **simulates the real hash partition** - the same `hash(id) mod ShardCount`
+every machine computes - across candidate shard counts, and picks the smallest
+count whose *busiest* shard finishes under a ~2-hour wall-clock ceiling. Sizing
+against the real partition means heavy subscriptions clumping onto one shard is
+accounted for rather than assumed away. It never recommends more shards than there
+are subscriptions. One of three verdicts comes out:
 
-Pass the same phase switches you intend to use for the real run (`-SkipMetrics` /
-`-SkipConsumption`) so the per-subscription estimate matches — inventory-only is
-much faster than inventory + metrics + consumption. The output is guidance, not a
-guarantee: actual time varies with resource density. Treat the shard count as a
-sensible starting point, and keep the rate-limit ceiling above in mind — past the
-point where Resource Graph discovery dominates, adding machines gives diminishing
-returns.
+- **Single machine** - the whole tenant fits under the ceiling. Prints one
+  ready-to-run command with the tuned `-ParallelStreams` / `-ConcurrencyLimit`.
+- **Shard across N machines** - prints the recommended shard count, the
+  approximate subscriptions-per-machine, the busiest-shard estimate, and the
+  ready-to-paste per-node commands (same command, distinct `-ShardIndex`).
+- **Ceiling unreachable** - no shard count gets under the ceiling. It leads with
+  the warning (never with a recommendation it then contradicts), names the reason,
+  and does not claim the fallback fits:
+  - **One subscription alone exceeds the ceiling.** Sharding splits work *across*
+    subscriptions and cannot speed up *one*, so no shard count fixes this. Cut
+    that subscription's metrics load instead: `-SkipDiskMetrics` (disk queries
+    dominate volume), `-UseMetricsBatch` (cuts per-query cost),
+    `-MetricsIntervalMinutes 60` (shrinks each response).
+  - **Even one shard per subscription is not enough** - the maximum useful count,
+    and the hash partition still clumps enough mid-weight subscriptions onto one
+    shard. Same remedy: reduce metrics load.
+
+Every verdict ends with a machine-readable `PLAN_SHARDCOUNT=<n>` line (`n=1` for
+the single-machine case), so an automating wrapper doesn't have to scrape the prose
+- which matters because the printed per-node command list is capped at 10. When the
+count is above 1 that is followed by an explicit "run ALL indices `0..N-1`, one per
+machine" directive, since any index you don't run is silently omitted from the
+combined result.
+
+**Pass the same flags you intend to use for the real run**, because they change the
+estimate: `-SkipMetrics` / `-SkipConsumption`, the metric-scope switches
+`-SkipDiskMetrics` / `-SkipStorageMetrics`, and `-UseMetricsBatch`. Explicit
+`-ParallelStreams` / `-ConcurrencyLimit` are honoured exactly as the real run
+honours them (auto-tuned values fill in only what you don't pass), and the output
+labels each one `explicit` or `auto`.
+
+### Calibrating the estimate
+
+The default per-metric-query costs (~9.5 s for a throttled per-call query, ~0.5 s
+for batched types) are deliberately rough and round up. For a tenant-accurate
+figure, measure it from a prior run - metrics-phase seconds divided by
+metric-query count, both in that run's `Diagnostics_*.log` - and pass it:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -Plan -UseMetricsBatch -PlanPerQuerySeconds 0.4
+```
+
+Two fallbacks to watch for in the output:
+
+- With `-SkipMetrics`, or when Resource Graph is unusable (no `Az.ResourceGraph`
+  module, or the weight query failed), `-Plan` falls back to a **coarse flat
+  per-subscription** estimate that ignores metric composition. When the cause is a
+  Resource Graph failure it says so explicitly, because that estimate can under- or
+  over-size a tenant with uneven metric load.
+- Subscriptions that matched no metric-eligible resources are sized at base
+  overhead only, and how many did so is printed. If you expected metrics there, the
+  signed-in identity most likely lacks Resource Graph visibility into those
+  subscriptions.
+
+The output is guidance, not a guarantee: it is a conservative lower bound with a
+built-in safety margin, and throttling adds run-to-run variance that no static
+count model captures. Treat the shard count as a sensible starting point, and keep
+the rate-limit ceiling above in mind - past the point where Resource Graph
+discovery dominates, adding machines gives diminishing returns.
 
 ## Parameters reference
 
-| Parameter      | Meaning                                                        | Default |
-|----------------|----------------------------------------------------------------|---------|
-| `-ShardCount`  | Total number of machines (buckets) splitting the tenant        | `1` (no sharding) |
-| `-ShardIndex`  | Which bucket *this* machine handles, from `0` to `ShardCount-1` | `0`     |
+| Parameter               | Meaning                                                         | Default |
+|-------------------------|-----------------------------------------------------------------|---------|
+| `-ShardCount`           | Total number of machines (buckets) splitting the tenant         | `1` (no sharding) |
+| `-ShardIndex`           | Which bucket *this* machine handles, from `0` to `ShardCount-1`  | `0`     |
+| `-Plan`                 | Assess only: size the run, print a recommended shard count and the per-node commands, then exit without inventorying anything | off |
+| `-PlanPerQuerySeconds`  | `-Plan` only: wall-time cost of one Azure Monitor metric query, overriding the rough auto-picked default | `0` (auto) |
 
 Notes:
 

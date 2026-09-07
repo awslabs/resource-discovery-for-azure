@@ -78,6 +78,11 @@ if ("$($env:ALLOW_PARTIAL_ACCESS)" -eq 'true') { $WrapperArgs.AllowPartialAccess
 # wrapper's -UseMetricsBatch (VM/disk/storage/SQL/scale-set/Cosmos, with per-call
 # fallback). Cuts the metrics phase's Azure Monitor call volume on large tenants.
 if ("$($env:USE_METRICS_BATCH)" -eq 'true') { $WrapperArgs.UseMetricsBatch = $true }
+# Storage Account 'UsedCapacity' metric. It is OPT-IN (one metric-query call per
+# storage account, which dominates the metrics phase on a large storage estate),
+# so without this the shard collects no storage capacity figure. Forwards to the
+# wrapper's -IncludeStorageMetrics.
+if ("$($env:INCLUDE_STORAGE_METRICS)" -eq 'true') { $WrapperArgs.IncludeStorageMetrics = $true }
 # Per-pod parallelism (streams across THIS pod's cores; distinct from sharding
 # across pods). Omit / 0 / non-numeric = let the wrapper auto-tune from the pod's
 # CPU/RAM (capped at ~6 by the tenant ARG rate limit). A positive integer overrides.

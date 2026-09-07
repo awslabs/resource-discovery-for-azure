@@ -54,6 +54,11 @@ spec:
         #                           # fallback). Cuts the metrics phase's API-call volume on
         #                           # large tenants. Needs Microsoft.Insights registered (the
         #                           # tool attempts this) + Reader/Monitoring Reader.
+        # - name: INCLUDE_STORAGE_METRICS # "true" = also collect the Storage Account
+        #   value: "true"           # 'UsedCapacity' metric. OPT-IN: it costs one metric-query
+        #                           # call per storage account, so it is OFF by default and a
+        #                           # large storage estate would otherwise spend much of the
+        #                           # metrics phase on it. Set this when capacity is wanted.
         # - name: PARALLEL_STREAMS  # per-pod concurrency ACROSS this pod's cores (distinct
         #   value: "6"              # from sharding ACROSS pods). Omit to auto-tune from CPU/RAM;
         #                           # capped ~6 by the tenant ARG rate limit. Ensure the node has

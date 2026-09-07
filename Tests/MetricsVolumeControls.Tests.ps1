@@ -1,8 +1,12 @@
 # Metrics Volume Controls Tests
 # =============================================================================
-# Output-level proof of the opt-in metric-volume controls on Metrics.ps1
+# Output-level proof of the metric-volume controls on Metrics.ps1
 # (threaded through ResourceInventory.ps1 / the wrappers):
-#   -SkipStorageMetrics      : no Storage Account metric records are emitted.
+#   -IncludeStorageMetrics   : Storage Account UsedCapacity records ARE emitted.
+#                              The metric is OPT-IN, so the default emits none and
+#                              this is the assertion that proves the gate opens.
+#   -SkipStorageMetrics      : no Storage Account metric records are emitted (also
+#                              the default, since the metric is opt-in).
 #   -SkipDiskMetrics         : no Managed Disk metric records are emitted.
 #   -MetricsIntervalMinutes N: the high-frequency SAMPLED utilization series - VM
 #                              (Percentage CPU / Available Memory Bytes), Azure SQL
@@ -13,6 +17,7 @@
 # Driven by environment variables (same pattern as the other suites):
 #   $env:TEST_ZIP_PATH                    - the output zip to validate (required)
 #   $env:TEST_EXPECT_NO_STORAGE_METRICS   - '1' => assert 0 'Storage Account' records
+#   $env:TEST_EXPECT_STORAGE_METRICS      - '1' => assert >0 UsedCapacity records
 #   $env:TEST_EXPECT_NO_DISK_METRICS      - '1' => assert 0 'Managed Disk' records
 #   $env:TEST_EXPECT_METRIC_GRAIN_MINUTES - e.g. '60' => assert the VM/SQL sampled
 #                                           series carry that grain (hh:mm:ss)
@@ -58,8 +63,8 @@ BeforeAll {
     $ZipPath = $env:TEST_ZIP_PATH
     # Only extract/parse when a zip is present AND at least one expectation is set
     # (mirrors ServiceScope.Tests.ps1). Avoids parsing every Metrics_*.json just to
-    # Skip all three Its when this suite is inert for the current scenario.
-    $script:AnyExpectation = ($env:TEST_EXPECT_NO_STORAGE_METRICS -eq '1') -or ($env:TEST_EXPECT_NO_DISK_METRICS -eq '1') -or (-not [string]::IsNullOrEmpty($env:TEST_EXPECT_METRIC_GRAIN_MINUTES))
+    # Skip every It when this suite is inert for the current scenario.
+    $script:AnyExpectation = ($env:TEST_EXPECT_NO_STORAGE_METRICS -eq '1') -or ($env:TEST_EXPECT_STORAGE_METRICS -eq '1') -or ($env:TEST_EXPECT_NO_DISK_METRICS -eq '1') -or (-not [string]::IsNullOrEmpty($env:TEST_EXPECT_METRIC_GRAIN_MINUTES))
     $script:Active = (-not [string]::IsNullOrEmpty($ZipPath)) -and (Test-Path $ZipPath) -and $script:AnyExpectation
 
     $script:Metrics = @()
@@ -77,6 +82,20 @@ BeforeAll {
             $Doc = Get-Content $MetricsFile.FullName -Raw | ConvertFrom-Json
             if ($null -ne $Doc.Metrics) { $script:Metrics += @($Doc.Metrics) }
         }
+
+        # How many storage accounts this subscription actually HAS, read from the
+        # same bundle. Both storage assertions need it:
+        #   - the positive one must not hard-fail on a tenant that simply owns no
+        #     storage account (there is then nothing to collect, and demanding a
+        #     record would be asserting against the tenant, not the code);
+        #   - the absence one is only meaningful when there WAS something to skip,
+        #     so this is what stops it passing vacuously.
+        $script:StorageAccountCount = 0
+        foreach ($InvFile in @(Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -Recurse))
+        {
+            $Inv = Get-Content $InvFile.FullName -Raw | ConvertFrom-Json
+            if ($null -ne $Inv.StorageAcc) { $script:StorageAccountCount += @($Inv.StorageAcc).Count }
+        }
     }
 }
 
@@ -85,11 +104,29 @@ AfterAll {
 }
 
 Describe 'Metrics Volume Controls' {
-    It 'emits no Storage Account metrics when -SkipStorageMetrics was set' {
+    It 'emits no Storage Account metrics when the capacity metric was not opted into' {
         if ($env:TEST_EXPECT_NO_STORAGE_METRICS -ne '1') { Set-ItResult -Skipped -Because 'TEST_EXPECT_NO_STORAGE_METRICS not set'; return }
         if (-not $script:Active) { Set-ItResult -Skipped -Because 'TEST_ZIP_PATH not set / missing'; return }
+        if ($script:StorageAccountCount -eq 0) { Set-ItResult -Skipped -Because 'this subscription owns no storage account, so an absence of storage metrics would prove nothing'; return }
         $Storage = @($script:Metrics | Where-Object { $_.Service -eq 'Storage Account' })
-        $Storage.Count | Should -Be 0 -Because '-SkipStorageMetrics must drop the UsedCapacity def entirely'
+        $Storage.Count | Should -Be 0 -Because 'the UsedCapacity def must be absent both by DEFAULT (it is opt-in) and when -SkipStorageMetrics is passed'
+    }
+
+    # The counterpart to the assertion above. Without this, that absence test would
+    # pass TRIVIALLY now that the metric is opt-in: a zip with no storage metrics
+    # proves nothing unless something also proves the opt-in turns them ON. This is
+    # the assertion that makes -IncludeStorageMetrics meaningful.
+    It 'emits Storage Account UsedCapacity metrics when -IncludeStorageMetrics was set' {
+        if ($env:TEST_EXPECT_STORAGE_METRICS -ne '1') { Set-ItResult -Skipped -Because 'TEST_EXPECT_STORAGE_METRICS not set'; return }
+        if (-not $script:Active) { Set-ItResult -Skipped -Because 'TEST_ZIP_PATH not set / missing'; return }
+        if ($script:StorageAccountCount -eq 0) { Set-ItResult -Skipped -Because 'this subscription owns no storage account, so there is no capacity metric to collect'; return }
+        $Storage = @($script:Metrics | Where-Object { $_.Service -eq 'Storage Account' })
+        $Storage.Count | Should -BeGreaterThan 0 -Because '-IncludeStorageMetrics must add the UsedCapacity def back'
+        # The emitted record names the metric in 'Metric'. ('MetricName' is the field
+        # on the internal $MetricDefs definition inside Extension/Metrics.ps1, not on
+        # the record that reaches Metrics_*.json - asserting that name silently
+        # matches nothing.)
+        @($Storage | Where-Object { $_.Metric -eq 'UsedCapacity' }).Count | Should -BeGreaterThan 0 -Because 'the opted-in storage metric is specifically UsedCapacity'
     }
 
     It 'emits no Managed Disk metrics when -SkipDiskMetrics was set' {

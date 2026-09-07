@@ -14,11 +14,15 @@
 #   5. skipconsumption  - -SkipConsumption only
 #   6. service          - -Service VirtualMachines (collector scoping): asserts the
 #                         inventory contains ONLY the requested service(s)
-#   7. skipstorage      - -SkipStorageMetrics: asserts no Storage Account metrics
-#   8. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
-#   9. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
+#   7. includestorage   - -IncludeStorageMetrics: asserts Storage Account
+#                         UsedCapacity metrics ARE emitted (the metric is opt-in,
+#                         so this proves the gate opens; 'default' proves it is
+#                         absent when not asked for)
+#   8. skipstorage      - -SkipStorageMetrics: asserts no Storage Account metrics
+#   9. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
+#  10. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
 #                         series carry the 60-min grain
-#  10. recovery         - LIVE end-to-end recovery workflow: generate an obfuscated
+#  11. recovery         - LIVE end-to-end recovery workflow: generate an obfuscated
 #                         scoped "gap" bundle, re-collect one populated service
 #                         seeded with the gap dictionary, splice with
 #                         Merge-RecoveryData, then run the structural + obfuscation
@@ -50,7 +54,7 @@
 param(
     [string]   $SubscriptionID,
     [string]   $TenantID,
-    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'skipstorage', 'skipdisk', 'metricinterval', 'recovery'),
+    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'includestorage', 'skipstorage', 'skipdisk', 'metricinterval', 'recovery'),
     [int]      $MetricsLookbackDays = 2,
     [int]      $ConcurrencyLimit = 6,
     [switch]   $KeepOutput
@@ -164,7 +168,10 @@ $ObfuscationTests = @(
 )
 
 $Catalog = @{
-    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests + $SchemaContractTests) }
+    # MetricsVolumeControls is attached here too: 'default' passes no metric flags,
+    # so it is the scenario that proves the Storage Account UsedCapacity metric is
+    # genuinely opt-in (see TEST_EXPECT_NO_STORAGE_METRICS below).
+    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests + $SchemaContractTests + @('MetricsVolumeControls.Tests.ps1')) }
     'obfuscate'       = @{ Args = @{ Obfuscate = $true }; Tests = ($StructuralTests + $ObfuscationTests + $SchemaContractTests) }
     'skipboth'        = @{ Args = @{ SkipMetrics = $true; SkipConsumption = $true }; Tests = $StructuralTests }
     'skipmetrics'     = @{ Args = @{ SkipMetrics = $true }; Tests = $StructuralTests }
@@ -179,6 +186,10 @@ $Catalog = @{
     # which reads the per-scenario TEST_EXPECT_* env vars set below to assert the
     # flag's specific effect (no Storage Account / no Managed Disk metrics, or the
     # VM/SQL sampled series at the requested grain).
+    # The Storage Account UsedCapacity metric is OPT-IN, so 'includestorage' is the
+    # scenario that proves the gate OPENS. Without it, 'skipstorage' would pass
+    # trivially (the metric is absent by default) and prove nothing.
+    'includestorage'  = @{ Args = @{ IncludeStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'skipstorage'     = @{ Args = @{ SkipStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'skipdisk'        = @{ Args = @{ SkipDiskMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'metricinterval'  = @{ Args = @{ MetricsIntervalMinutes = 60 }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
@@ -340,6 +351,7 @@ try
             # Recovery does not run MetricsVolumeControls, but clear its expectation
             # env vars anyway so no value left over from a prior scenario leaks in.
             Remove-Item Env:TEST_EXPECT_NO_STORAGE_METRICS   -ErrorAction SilentlyContinue
+            Remove-Item Env:TEST_EXPECT_STORAGE_METRICS      -ErrorAction SilentlyContinue
             Remove-Item Env:TEST_EXPECT_NO_DISK_METRICS      -ErrorAction SilentlyContinue
             Remove-Item Env:TEST_EXPECT_METRIC_GRAIN_MINUTES -ErrorAction SilentlyContinue
 
@@ -441,10 +453,15 @@ try
         # Cleared first, then set only for the scenario that exercises each flag, so
         # the suite stays inert (all Skipped) for every other scenario.
         Remove-Item Env:TEST_EXPECT_NO_STORAGE_METRICS   -ErrorAction SilentlyContinue
+        Remove-Item Env:TEST_EXPECT_STORAGE_METRICS      -ErrorAction SilentlyContinue
         Remove-Item Env:TEST_EXPECT_NO_DISK_METRICS      -ErrorAction SilentlyContinue
         Remove-Item Env:TEST_EXPECT_METRIC_GRAIN_MINUTES -ErrorAction SilentlyContinue
         switch ($name)
         {
+            # 'default' passes no metric flags, so it is what proves the storage
+            # capacity metric is genuinely OPT-IN (absent unless asked for).
+            'default' { $env:TEST_EXPECT_NO_STORAGE_METRICS = '1' }
+            'includestorage' { $env:TEST_EXPECT_STORAGE_METRICS = '1' }
             'skipstorage' { $env:TEST_EXPECT_NO_STORAGE_METRICS = '1' }
             'skipdisk' { $env:TEST_EXPECT_NO_DISK_METRICS = '1' }
             'metricinterval' { $env:TEST_EXPECT_METRIC_GRAIN_MINUTES = [string]$Scenario.Args.MetricsIntervalMinutes }
@@ -527,6 +544,7 @@ finally
     Remove-Item Env:TEST_DICT_PATH           -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_EXPECTED_SERVICES   -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_EXPECT_NO_STORAGE_METRICS   -ErrorAction SilentlyContinue
+    Remove-Item Env:TEST_EXPECT_STORAGE_METRICS      -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_EXPECT_NO_DISK_METRICS      -ErrorAction SilentlyContinue
     Remove-Item Env:TEST_EXPECT_METRIC_GRAIN_MINUTES -ErrorAction SilentlyContinue
 

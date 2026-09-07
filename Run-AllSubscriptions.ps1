@@ -28,11 +28,19 @@ param (
     # lost). See the -UseMetricsBatch notes in Extension/Metrics.ps1.
     [switch]$UseMetricsBatch,
 
-    # OPT-IN metric-volume controls for very large tenants (default OFF / native
-    # cadence, so a run that omits them is unchanged). Forwarded to every
-    # subscription in both the sequential and parallel-streams paths.
-    #   -SkipStorageMetrics : skip the Storage Account 'UsedCapacity' metric
-    #                         (1 Azure Monitor call per storage account).
+    # Metric-volume controls for very large tenants. Forwarded to every
+    # subscription in both the sequential and parallel-streams paths, and honoured
+    # by -Plan when it sizes the run.
+    #   -IncludeStorageMetrics : OPT-IN to the Storage Account 'UsedCapacity'
+    #                         metric (1 Azure Monitor call per storage account).
+    #                         NOT collected by default: on a tenant with a very
+    #                         large storage estate that one capacity figure can
+    #                         dominate the metrics phase. Pass it when storage
+    #                         capacity is actually wanted.
+    #   -SkipStorageMetrics : retained and still honoured; redundant now that the
+    #                         storage metric is opt-in, but kept so existing
+    #                         callers and pipelines do not fail on an unknown
+    #                         parameter. WINS over -IncludeStorageMetrics.
     #   -SkipDiskMetrics    : skip the four Managed Disk composite I/O metrics
     #                         (4 calls per attached disk - the biggest call source).
     #   -MetricsIntervalMinutes : override the sampling grain of the high-frequency
@@ -42,6 +50,7 @@ param (
     #                         data-point volume / memory / JSON size; does NOT reduce
     #                         API-call count. Limited to Azure Monitor's supported
     #                         sub-hourly grains. See the notes in Extension/Metrics.ps1.
+    [switch]$IncludeStorageMetrics,
     [switch]$SkipStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
@@ -240,6 +249,16 @@ param (
     # Diagnostics phase timings (metrics seconds / metric-query count).
     [double]$PlanPerQuerySeconds = 0
 )
+
+# Contradictory storage-metric flags. Warned ONCE here, up front, rather than in
+# the per-subscription metrics phase: the contradiction is knowable from the
+# arguments alone, so warning per subscription would repeat it N times on a large
+# tenant and stay silent on a tenant that happens to own no storage account. The
+# per-subscription debug log still records the decision either way.
+if ($IncludeStorageMetrics -and $SkipStorageMetrics)
+{
+    Write-Warning "Both -IncludeStorageMetrics and -SkipStorageMetrics were passed. -SkipStorageMetrics WINS, so the Storage Account 'UsedCapacity' metric will NOT be collected. Drop -SkipStorageMetrics to collect it."
+}
 
 # ---------------------------------------------------------------------------
 # -TenantID guard: fail loudly instead of prompting.
@@ -976,6 +995,7 @@ if ($Plan)
     if ($SkipMetrics) { $ExtraFlags += '-SkipMetrics' }
     if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
+    if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipStorageMetrics) { $ExtraFlags += '-SkipStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
@@ -998,7 +1018,13 @@ if ($Plan)
     $PlanBatchPerQuery = 0.0
     if (-not $SkipMetrics -and $Subscriptions.Count -gt 0)
     {
-        $PlanSubWeights = Get-PlanSubscriptionWeights -SubscriptionIds @($Subscriptions | ForEach-Object { [string]$_.Id }) -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:$SkipStorageMetrics
+        # The storage capacity metric is OPT-IN, so the plan must drop its weight
+        # term unless this run would actually collect it. Sizing with a term the
+        # run will not spend would over-estimate the tenant and recommend more
+        # shards than needed. This mirrors the runtime gate in Extension/Metrics.ps1
+        # exactly, including -SkipStorageMetrics winning over -IncludeStorageMetrics.
+        $PlanSkipStorage = (-not $IncludeStorageMetrics) -or $SkipStorageMetrics
+        $PlanSubWeights = Get-PlanSubscriptionWeights -SubscriptionIds @($Subscriptions | ForEach-Object { [string]$_.Id }) -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:$PlanSkipStorage
         # $null == the query was UNUSABLE (Search-AzGraph missing or it threw);
         # an EMPTY hashtable is a usable "no metric-eligible resources" answer.
         if ($null -ne $PlanSubWeights)
@@ -1734,6 +1760,7 @@ if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
+if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipStorageMetrics) { $InventoryPassthrough['SkipStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
@@ -2196,6 +2223,7 @@ else
                 if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
                 if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
+                if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipStorageMetrics) { $WorkerArgs.SkipStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
                 if ($MetricsIntervalMinutes -gt 0) { $WorkerArgs.MetricsIntervalMinutes = $MetricsIntervalMinutes }

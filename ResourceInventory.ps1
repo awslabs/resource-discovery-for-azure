@@ -20,12 +20,15 @@ param ($TenantID,
     # Falls back to the per-call path on any batch failure (no data lost). See
     # the -UseMetricsBatch notes in Extension/Metrics.ps1.
     [switch]$UseMetricsBatch,
-    # OPT-IN metric-volume controls forwarded to Extension/Metrics.ps1 (default
-    # OFF / native cadence, so behaviour is unchanged unless explicitly set).
-    # -SkipStorageMetrics / -SkipDiskMetrics drop the Storage Account UsedCapacity
-    # / Managed Disk composite I/O metrics (reduces API-call count + memory).
+    # Metric-volume controls forwarded to Extension/Metrics.ps1.
+    # -IncludeStorageMetrics OPTS IN to the Storage Account UsedCapacity metric,
+    # which is NOT collected by default (one metric-query call per storage account
+    # makes it the dominant cost on a large storage estate).
+    # -SkipStorageMetrics is retained and still wins over -IncludeStorageMetrics.
+    # -SkipDiskMetrics drops the Managed Disk composite I/O metrics.
     # -MetricsIntervalMinutes overrides the VM / SQL / OSS-DB utilization sampling
     # grain (0 = native 15 min VM / 30 min SQL / 60 min OSS-DB). See Extension/Metrics.ps1.
+    [switch]$IncludeStorageMetrics,
     [switch]$SkipStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
@@ -77,6 +80,14 @@ if ($args.Count -gt 0)
     Write-Host "Note: this script is not an advanced function, so PowerShell common parameters (-Verbose, -ErrorAction and similar) are not accepted either. Use -Debug for verbose diagnostics." -ForegroundColor Yellow
     Write-Host "Run this script with -? to list the valid parameters." -ForegroundColor Yellow
     exit 1
+}
+
+# Contradictory storage-metric flags, warned once for a STANDALONE run. Suppressed
+# under -RunAllSubs because the wrapper already warns once up front and this script
+# is invoked per subscription there, so warning here too would repeat it N times.
+if ($IncludeStorageMetrics -and $SkipStorageMetrics -and -not $RunAllSubs.IsPresent)
+{
+    Write-Warning "Both -IncludeStorageMetrics and -SkipStorageMetrics were passed. -SkipStorageMetrics WINS, so the Storage Account 'UsedCapacity' metric will NOT be collected. Drop -SkipStorageMetrics to collect it."
 }
 
 # ---------------------------------------------------------------------------
@@ -1182,7 +1193,7 @@ function ExecuteInventoryProcessing()
 
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -SkipStorageMetrics:$SkipStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsIntervalMinutes $MetricsIntervalMinutes
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -IncludeStorageMetrics:$IncludeStorageMetrics -SkipStorageMetrics:$SkipStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsIntervalMinutes $MetricsIntervalMinutes
         }
     }
 

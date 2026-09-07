@@ -19,12 +19,15 @@ correlations by Azure service type, drawn from a representative run.
   **number of Azure Monitor metric queries** the subscription triggers (one per
   resource-metric the tool requests).
 - Metric query volume is dominated by **Managed Disks and Virtual Machines**
-  (together ~85–90% of all metric queries in a representative sample).
+  (together ~85–90% of all metric queries in a representative sample, measured
+  against the storage-inclusive load; the storage capacity metric is now opt-in, so
+  a default run's share is higher still).
 - Therefore a good time estimate is
   `per_query_cost × (metric queries)`, where the query count is derivable up
   front from a Resource Graph count of the metric-eligible resource types.
 - The single biggest runtime levers are, in order: **`-SkipDiskMetrics`**
-  (disks are ~two-thirds of all metric queries), **`-UseMetricsBatch`**
+  (disks are ~two-thirds of the storage-inclusive metric queries, and ~74% of what
+  a default run issues now that storage capacity is opt-in), **`-UseMetricsBatch`**
   (collapses the per-query cost), and **`-MetricsIntervalMinutes 60`**
   (shrinks each response).
 
@@ -125,6 +128,9 @@ Notes for using this:
 
 - Drop the terms for any metric type disabled by a `-Skip*` switch (e.g. with
   `-SkipDiskMetrics` the `4·#Disks` term — the largest one — disappears).
+- The `w_storage·#StorageAccounts` term applies **only** when the run passes
+  `-IncludeStorageMetrics`. That metric is opt-in, so it is absent from a default
+  run without any switch being passed; include the term only if you opted in.
 - `per_query_cost` is **config- and tenant-specific**. The ~9.5 s above is a
   near-worst-case (throttled, per-call). Measure it from a bundle produced with
   the **same flags you will run in production** (batch on, 60-minute grain)
@@ -138,8 +144,11 @@ and exits without inventorying anything). Concretely it:
 1. **Counts weight live.** It sends one aggregate Resource Graph query per chunk
    of subscriptions (chunked to the ARG per-query cap of 1,000) that sums,
    per subscription, the projected metric-query weight over the metric-eligible
-   types — honoring the same `-SkipDiskMetrics` / `-SkipStorageMetrics` gating
-   the real run uses. It also returns the batchable portion of that weight
+   types - honoring the same `-SkipDiskMetrics` / `-IncludeStorageMetrics` /
+   `-SkipStorageMetrics` gating the real run uses. Because the Storage Account
+   capacity metric is opt-in, the storage term is dropped unless the run would
+   actually collect it, so the estimate never includes a cost the run will not
+   pay. It also returns the batchable portion of that weight
    separately, so under `-UseMetricsBatch` only the batchable types get the
    cheaper batched per-query cost.
 2. **Converts weight to seconds** with a deliberately conservative model: a
@@ -166,14 +175,20 @@ production-config bundle.
 
 ## Runtime levers, in order of impact
 
+Percentages below are shares of the sample's *storage-inclusive* query load, so
+they stay comparable to each other. Note the baseline has moved: because the
+storage capacity metric is now opt-in, a default run already excludes that ~10%,
+which makes disks a correspondingly larger share (~74%) of what a default run
+actually issues.
+
 | Lever | Effect on the sample's query load | Mechanism |
 |---|---|---|
 | `-SkipDiskMetrics` | removes **~67%** of metric queries | disks are ~4 queries each and by far the most numerous |
-| `-SkipStorageMetrics` | removes **~10%** | |
+| storage capacity metric (opt-in) | adds **~10%** when `-IncludeStorageMetrics` is passed | one query per storage account; omitted by default, so the default run never pays this |
 | `-UseMetricsBatch` | collapses the **per-query cost** | many resources per `metrics:getBatch` HTTP call instead of one call each; falls back to per-call on batch failure |
 | `-MetricsIntervalMinutes 60` | shrinks each response ~4× vs 15-min grain | fewer datapoints per series |
 
-With disks and storage metrics skipped, the remaining query load is dominated by
+With disk metrics skipped (and storage capacity not opted into), the remaining query load is dominated by
 **Virtual Machines** (~2 queries each), so on VM-dense tenants VM count becomes
 the driver — and it is worth confirming that `-UseMetricsBatch` is actually
 batching (not silently falling back to per-call), because that determines the

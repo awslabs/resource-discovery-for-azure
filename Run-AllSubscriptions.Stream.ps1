@@ -65,11 +65,13 @@ param (
     # per-call path on any failure). See the -UseMetricsBatch notes in
     # Extension/Metrics.ps1.
     [switch] $UseMetricsBatch,
-    # OPT-IN metric-volume controls forwarded by the parent wrapper on to
-    # ResourceInventory.ps1 (default OFF / native cadence). -SkipStorageMetrics /
-    # -SkipDiskMetrics drop the Storage Account UsedCapacity / Managed Disk I/O
+    # Metric-volume controls forwarded by the parent wrapper on to
+    # ResourceInventory.ps1. -IncludeStorageMetrics OPTS IN to the Storage Account
+    # UsedCapacity metric, which is NOT collected by default; -SkipStorageMetrics is
+    # retained and still wins over it. -SkipDiskMetrics drops the Managed Disk I/O
     # metrics; -MetricsIntervalMinutes overrides the VM / SQL / OSS-DB utilization
     # grain (0 = native). See the notes in Extension/Metrics.ps1.
+    [switch] $IncludeStorageMetrics,
     [switch] $SkipStorageMetrics,
     [switch] $SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
@@ -224,6 +226,7 @@ if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
+if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipStorageMetrics) { $InventoryPassthrough['SkipStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }

@@ -11,12 +11,22 @@ param(
     [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, # Map dictionary to obfuscate resource group names
     $Obfuscate, # Boolean flag toggle indicating whether sensitive infrastructure details should be masked
     $MetricsLookbackDays = 31, # Default tracking duration window determining how far back to ask Azure for data
-    # OPT-IN scale controls for very large tenants. All default to OFF / native
-    # cadence, so a run that does not pass them is byte-identical to before.
-    #   -SkipStorageMetrics : skip the Storage Account 'UsedCapacity' metric.
-    #   -SkipDiskMetrics    : skip the four Managed Disk composite I/O metrics.
-    # Both reduce Azure Monitor API-call COUNT (1 call per storage account, 4 per
-    # attached disk) and per-subscription metric memory.
+    # Scale controls for very large tenants, reducing Azure Monitor API-call COUNT
+    # and per-subscription metric memory.
+    #
+    #   -IncludeStorageMetrics : OPT-IN. Collect the Storage Account 'UsedCapacity'
+    #       metric. DEFAULT IS OFF, because it costs one metric-query call per
+    #       storage account and a tenant with a very large storage estate spends a
+    #       large share of the metrics phase on a single capacity figure. Pass it
+    #       when storage capacity is actually wanted.
+    #   -SkipStorageMetrics : retained and still honoured. Now that the storage
+    #       metric is opt-in it is redundant, but it remains accurate ("skip the
+    #       storage metric") so existing callers and pipelines keep working rather
+    #       than failing on an unknown parameter. It WINS over
+    #       -IncludeStorageMetrics, so an explicit skip is never silently overridden.
+    #   -SkipDiskMetrics : opt-out. Skip the four Managed Disk composite I/O
+    #       metrics (4 calls per attached disk).
+    [switch]$IncludeStorageMetrics,
     [switch]$SkipStorageMetrics,
     [switch]$SkipDiskMetrics,
     # Override the sampling grain (TimeGrain) of the high-frequency utilization
@@ -535,7 +545,29 @@ if ($Task -eq 'Processing')
 
     $StorageAccounts = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
 
-    if ($StorageAccounts -and -not $SkipStorageMetrics)
+    # OPT-IN: the capacity metric is collected only when explicitly asked for. An
+    # explicit -SkipStorageMetrics still wins, so a caller that already passes it
+    # keeps the same behaviour even if it also passes -IncludeStorageMetrics.
+    $CollectStorageCapacity = ($IncludeStorageMetrics -and -not $SkipStorageMetrics)
+    if ($StorageAccounts)
+    {
+        # State the decision, so a report with no storage capacity figure is
+        # explainable from the log instead of looking like a collection failure.
+        if ($CollectStorageCapacity)
+        {
+            Write-MetricsDiag ("Storage Account 'UsedCapacity': COLLECTING for {0} account(s) (-IncludeStorageMetrics was passed)." -f @($StorageAccounts).Count)
+        }
+        elseif ($SkipStorageMetrics)
+        {
+            $SkipReason = if ($IncludeStorageMetrics) { '-SkipStorageMetrics was passed and WINS over -IncludeStorageMetrics' } else { '-SkipStorageMetrics was passed' }
+            Write-MetricsDiag ("Storage Account 'UsedCapacity': skipped for {0} account(s) ({1})." -f @($StorageAccounts).Count, $SkipReason)
+        }
+        else
+        {
+            Write-MetricsDiag ("Storage Account 'UsedCapacity': skipped for {0} account(s) (opt-in; pass -IncludeStorageMetrics to collect it)." -f @($StorageAccounts).Count)
+        }
+    }
+    if ($StorageAccounts -and $CollectStorageCapacity)
     {
         foreach ($storageAccount in $StorageAccounts)
         {

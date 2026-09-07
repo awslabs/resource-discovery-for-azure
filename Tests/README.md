@@ -138,11 +138,17 @@ against a live subscription and runs the applicable Pester tests against each.
 
 | Scenario | Flags | Tests run |
 |---|---|---|
-| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) **+ live tenant reconciliation + schema-contract & linkage** |
+| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) **+ live tenant reconciliation + schema-contract & linkage + metric-volume controls** (proves the storage capacity metric is absent unless opted into) |
 | `obfuscate` | `-Obfuscate` (+ metrics + consumption) | structural **+** PII/obfuscation/prefix/dictionary **+ schema-contract & linkage** |
 | `skipboth` | `-SkipMetrics -SkipConsumption` | structural |
 | `skipmetrics` | `-SkipMetrics` | structural |
 | `skipconsumption` | `-SkipConsumption` | structural |
+| `service` | `-Service VirtualMachines -SkipMetrics -SkipConsumption` | collector scoping |
+| `includestorage` | `-IncludeStorageMetrics` | structural **+** metric-volume controls (proves the opt-in turns the storage capacity metric ON) |
+| `skipstorage` | `-SkipStorageMetrics` | structural **+** metric-volume controls |
+| `skipdisk` | `-SkipDiskMetrics` | structural **+** metric-volume controls |
+| `metricinterval` | `-MetricsIntervalMinutes 60` | structural **+** metric-volume controls |
+| `recovery` | live recovery workflow (gap bundle, re-collect, `Merge-RecoveryData` splice) | structural **+** obfuscation **+** recovery-merge |
 
 ### Why PII tests only run on `obfuscate`
 

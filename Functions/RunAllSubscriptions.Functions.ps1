@@ -687,8 +687,10 @@ function Get-PlanShardDirective
 # Extension/Metrics.ps1 (keep the two in sync if metric names are added/removed
 # there). ExtraFilter is the additional KQL predicate that scopes the type to the
 # resources actually queried (attached disks only; non-master SQL databases;
-# function apps only). Gate marks the types dropped by -SkipDiskMetrics /
-# -SkipStorageMetrics. Batched marks the types the metrics phase can fetch via
+# function apps only). Gate marks the types whose weight is conditional: 'Disk' is
+# dropped by -SkipDiskMetrics, and 'Storage' is dropped unless the run OPTS IN with
+# -IncludeStorageMetrics (the caller passes the effective decision, so an explicit
+# -SkipStorageMetrics still drops it). Batched marks the types the metrics phase can fetch via
 # the Azure Monitor metrics:getBatch API (VMs, managed disks, storage accounts,
 # SQL databases, VM scale sets, Cosmos DB - see $BatchNamespaceMap in
 # Extension/Metrics.ps1); every other type stays on the slower per-call path.
@@ -718,9 +720,12 @@ function Get-MetricQueryWeightMap
 
 # Build the Resource Graph (KQL) query that returns, per subscription, the total
 # projected metric-query weight (sum of per-resource weights over the metric-
-# eligible resources). Honors the same -SkipDiskMetrics / -SkipStorageMetrics
-# gating the metrics phase uses, so the estimate matches what the real run will
-# query. PURE (returns a string) so it is unit-testable.
+# eligible resources). Honors the same gating the metrics phase uses, so the
+# estimate matches what the real run will query. -SkipStorageMetrics here means
+# "the run will not collect the storage capacity metric" - because that metric is
+# OPT-IN, the caller passes the EFFECTIVE decision
+# ((-not IncludeStorageMetrics) -or SkipStorageMetrics), not the raw switch.
+# PURE (returns a string) so it is unit-testable.
 function Get-PlanWeightKql
 {
     param(

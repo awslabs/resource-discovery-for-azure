@@ -206,6 +206,11 @@ Optional Job env knobs (uncomment in `job.yaml`):
   scale sets, Cosmos DB; anything else stays per-call, and any batch failure falls
   back to per-call). Cuts the metrics phase's Azure Monitor call volume on large
   tenants. The tool attempts to register the `Microsoft.Insights` provider.
+- `INCLUDE_STORAGE_METRICS` = `"true"` - also collect the Storage Account
+  `UsedCapacity` metric. This is opt-in: it costs one metric-query call per storage
+  account, so it is off by default and a tenant with a large storage estate would
+  otherwise spend much of its metrics phase on that one capacity figure. Set it when
+  storage capacity is actually wanted.
 - `PARALLEL_STREAMS` — per-pod concurrency across this pod's cores (distinct from
   sharding across pods). Omit to auto-tune from the pod's CPU/RAM; capped at ~6 by
   the tenant-wide Resource Graph limit (~15 req/sec). Give the node ~0.7 GB RAM

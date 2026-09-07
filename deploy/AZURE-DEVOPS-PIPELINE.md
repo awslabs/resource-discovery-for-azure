@@ -284,7 +284,8 @@ stages:
 > `<acr>`, `<UAMI-client-id>`, `namespace: rda`, `SHARD_COUNT "10"`). If you'd
 > rather keep pre-edited manifests in your own repo, drop the `sed` and just
 > `kubectl apply -f` your copies. To add `UPLOAD_BLOB_URI` / `ALLOW_PARTIAL_ACCESS`
-> / `USE_METRICS_BATCH` env vars, either bake them into your `job.yaml` or extend
+> / `USE_METRICS_BATCH` / `INCLUDE_STORAGE_METRICS` env vars, either bake them into
+> your `job.yaml` or extend
 > the render step — they map 1:1 to the knobs in `job.yaml`'s comments.
 >
 > **`UPLOAD_BLOB_URI` is required for the Collect stage.** It is what makes each

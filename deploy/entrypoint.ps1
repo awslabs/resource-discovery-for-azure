@@ -48,9 +48,47 @@ if ([string]::IsNullOrWhiteSpace($ClientId) -or [string]::IsNullOrWhiteSpace($Te
 Write-Host ("[entrypoint] shard {0} of {1}; HeadRoom {2}%; signing in via workload identity." -f $ShardIndex, $ShardCount, $HeadRoom)
 
 Import-Module Az.Accounts -ErrorAction Stop
+
+# KNOWN LIMITATION - long-running shards and the projected token lifetime.
+#
+# The federated token is read ONCE here. Kubernetes projects it into the pod with
+# a bounded lifetime and REWRITES the file on rotation, so the value captured in
+# $Federated goes stale even though the file on disk is fresh. Az.Accounts holds
+# the assertion it was handed, so a shard whose wall time exceeds that lifetime can
+# fail on refresh partway through - surfacing as an authentication error mid-run
+# rather than at sign-in, which is what makes it look like a permissions problem.
+#
+# The two token lifetimes are NOT correlated, and this is the part worth knowing:
+# the Entra access token obtained below lasts 24 hours, while the Kubernetes
+# service-account token defaults to 3600 seconds (1 hour). It is the Kubernetes one
+# that governs whether a refresh can succeed, so 1 hour is the practical boundary.
+#
+# This sign-in matches Microsoft's official workload-identity sample, so the
+# pattern itself is correct; the gap is that the sample assumes a short-lived
+# process. Empirical verification past the token lifetime is still OUTSTANDING and
+# needs a real AKS run of that length - it has NOT been measured here, so treat
+# 1 hour as the configured default rather than an observed failure point.
+#
+# Operator mitigations, in order of preference:
+#   1. Keep each shard's wall time under the token lifetime by raising the shard
+#      count (-ShardCount / SHARD_COUNT) so each node owns fewer subscriptions.
+#      Use Run-AllSubscriptions.ps1 -Plan to size this before running.
+#   2. Raise the projected token expiry via the annotation
+#      azure.workload.identity/service-account-token-expiration on the
+#      ServiceAccount or pod template (default 3600, max 86400 = 24h). The webhook
+#      injects the projected volume, so this is an annotation, NOT an
+#      expirationSeconds edit in job.yaml. See deploy/AKS-WorkloadIdentity-Setup.md
+#      section 10.
+#   3. Re-run the affected shard with -Resume; completed subscriptions are
+#      skipped, so a token expiry costs only the unfinished remainder.
+#
+# A code fix (re-reading $TokenFile and re-authenticating on token expiry) is a
+# change to the auth flow and is deliberately NOT made here without a run past the
+# token lifetime to verify it - see the review-board finding for this file.
 $Federated = (Get-Content -Raw $TokenFile).Trim()
 Connect-AzAccount -ServicePrincipal -ApplicationId $ClientId -Tenant $TenantId -FederatedToken $Federated -ErrorAction Stop | Out-Null
 Write-Host ("[entrypoint] signed in as: {0}" -f (Get-AzContext).Account.Id)
+Write-Host "[entrypoint] NOTE: the federated token is read once at sign-in. If this shard runs longer than the projected Kubernetes token lifetime (default 1h) it can fail on refresh mid-run. Mitigations: raise SHARD_COUNT, set the azure.workload.identity/service-account-token-expiration annotation (max 86400), or re-run with RESUME=true. See deploy/AKS-WorkloadIdentity-Setup.md section 10."
 
 # Build the wrapper arguments. The skip switches are env-driven so the Job
 # manifest controls collection scope without rebuilding the image; the default

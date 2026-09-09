@@ -312,6 +312,51 @@ if you scoped them outside the resource group (e.g. at a management group).
 | Pod throws "SHARD_COUNT is N but JOB_COMPLETION_INDEX is not set" | Job is not `completionMode: Indexed` | use the shipped `job.yaml` (Indexed); the guard prevents silent shard collapse |
 | Upload fails | UAMI lacks Storage Blob Data Contributor | grant it on the storage account/container — note the pod still succeeds and the zip stays node-local |
 | `az acr build` can't find the Dockerfile | wrong path/context | run from the repo root with `--file deploy/Dockerfile .` |
+| Shard signs in fine, then fails with an auth error PARTWAY through a long run | projected federated token expired mid-run (see the section below) | raise `SHARD_COUNT` so each shard is shorter, raise the SA token `expirationSeconds`, or re-run that shard with `RESUME=true` |
+
+---
+
+## 10. Known limitation: token lifetime on long shards
+
+`deploy/entrypoint.ps1` reads the projected federated token **once**, at sign-in.
+Kubernetes gives that token a bounded lifetime (commonly about one hour) and rewrites the file when it rotates, so the value the process captured goes stale even though the file on disk is fresh.
+A shard whose wall time exceeds the token lifetime can therefore fail on refresh partway through the run.
+
+The confusing part is *where* it surfaces: sign-in succeeds, the run gets going, and the failure appears later as an authentication error in the middle of a subscription.
+That looks like a permissions problem and is not one.
+
+This sign-in follows Microsoft's official workload-identity sample, so the pattern is correct - the gap is that the sample assumes a short-lived process.
+
+**Not yet measured.** The one-hour figure is the projected default, not an observed failure point.
+Confirming the real boundary needs a deliberate AKS run longer than the token lifetime, which has not been done.
+
+### Mitigations, in order of preference
+
+1. **Keep each shard shorter than the token lifetime.**
+   Raise `SHARD_COUNT` so each node owns fewer subscriptions.
+   Size it first with `Run-AllSubscriptions.ps1 -Plan`, which reports the projected busiest-shard wall time.
+2. **Raise the projected token expiry, up to 24 hours.**
+   The webhook injects the projected volume, so this is set with an annotation rather than by editing a volume block in `job.yaml`.
+   Add it to `deploy/k8s/serviceaccount.yaml` alongside the existing `client-id` annotation:
+
+   ```yaml
+   metadata:
+     annotations:
+       azure.workload.identity/client-id: <UAMI-client-id>
+       azure.workload.identity/service-account-token-expiration: "86400"
+   ```
+
+   The default is 3600 seconds and the accepted range is 3600 to 86400, so 86400 buys a 24 hour ceiling.
+   The same annotation can go on the pod template instead, where it takes precedence over the ServiceAccount.
+   Per the [Azure Workload Identity annotation reference](https://azure.github.io/azure-workload-identity/docs/topics/service-account-labels-and-annotations.html). Content was rephrased for compliance with licensing restrictions.
+
+   Worth knowing which token is which: the Kubernetes service-account token expiry is **not** tied to the Entra token expiry.
+   The Entra access token `Connect-AzAccount` obtains lasts 24 hours, and it is the Kubernetes token - 1 hour by default - that governs whether a refresh can succeed.
+   That is why raising this annotation is the lever that matters for a long shard.
+3. **Re-run the affected shard with `RESUME=true`.**
+   Completed subscriptions are skipped, so an expiry costs only the unfinished remainder rather than the whole slice.
+
+A code mitigation - re-reading the token file and re-authenticating when it expires - would change the auth flow and is deliberately not in place without that longer-than-an-hour verification run behind it.
 
 ---
 

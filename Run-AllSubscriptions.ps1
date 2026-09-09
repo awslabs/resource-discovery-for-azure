@@ -1754,6 +1754,41 @@ if ($Service.Count -gt 0)
         Exit-Wrapper -Code 1
     }
     Write-Host ("Service filter active: collecting ONLY [{0}] across all in-scope subscriptions." -f ($Service -join ', ')) -ForegroundColor Cyan
+
+    # -Service scopes the INVENTORY phase only; metrics and consumption still run
+    # for the WHOLE subscription. ResourceInventory.ps1 warns about this too, but
+    # suppresses it under -RunAllSubs because it is invoked once PER SUBSCRIPTION
+    # and the identical warning would repeat N times. This is the once-up-front
+    # copy, emitted here where the argument set is already known.
+    #
+    # Per-phase accurate for the same reason as the inner one: a run that already
+    # passed a skip must not be told that phase still runs, nor be told to add a
+    # switch it supplied. No -ResourceGroup tip here - this wrapper has no such
+    # parameter, so suggesting it would point at a switch this entry point cannot
+    # accept (the inner script offers it only on a standalone run).
+    #
+    # Advisory only. The skips are NOT enforced, because the recovery recipe that
+    # re-collects for a later Merge-RecoveryData -RecoverMetrics/-RecoverConsumption
+    # intentionally runs -Service WITHOUT them.
+    $UnscopedPhases = @()
+    $SuggestedSkips = @()
+
+    if (-not $SkipMetrics.IsPresent)
+    {
+        $UnscopedPhases += 'metrics'
+        $SuggestedSkips += '-SkipMetrics'
+    }
+
+    if (-not $SkipConsumption.IsPresent)
+    {
+        $UnscopedPhases += 'consumption'
+        $SuggestedSkips += '-SkipConsumption'
+    }
+
+    if (@($UnscopedPhases).Count -gt 0)
+    {
+        Write-Warning ("-Service scopes the INVENTORY phase only; these phases still run for the WHOLE subscription, for every subscription in scope: {0}. For a clean inventory-only run add {1}. (Ignore this if you are deliberately re-collecting for a later Merge-RecoveryData.)" -f ($UnscopedPhases -join ', '), ($SuggestedSkips -join ' '))
+    }
 }
 
 # Build passthrough hashtable for optional switches

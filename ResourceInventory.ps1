@@ -1393,9 +1393,49 @@ function ExecuteInventoryProcessing()
                 $SuggestedSkips += '-SkipConsumption'
             }
 
-            if (@($UnscopedPhases).Count -gt 0)
+            # The -ResourceGroup tip is STATE-DERIVED for the same reason the two
+            # lists above are. It used to be a hardcoded clause that always claimed
+            # -ResourceGroup "also scopes metrics", which is the same
+            # wrong-for-this-state defect the per-phase wording exists to prevent:
+            #
+            #   - Offering it to a -SkipMetrics run advertises the one benefit that
+            #     run has already declined. Scoping metrics is the ONLY thing
+            #     -ResourceGroup does for the problem this warning describes.
+            #   - Offering it to a run that already passed -ResourceGroup tells the
+            #     operator to add a switch they supplied. -Service and
+            #     -ResourceGroup are independent parameters with no mutual
+            #     exclusion, so that combination is legal and reachable.
+            #
+            # It is also honest about the limit now. -ResourceGroup narrows the
+            # Resource Graph query itself, so it scopes inventory AND metrics (the
+            # metrics phase filters the same narrowed $Global:Resources and issues
+            # no Graph query of its own). It does NOT scope consumption:
+            # Get-UsageAggregates is whole-subscription billing with no
+            # resource-group or resource-type filter. Since this warning names
+            # consumption as part of the problem, presenting -ResourceGroup as the
+            # remedy without that caveat overstates it - see
+            # docs/recovery-and-diagnostics.md, which already documents the
+            # exception.
+            $RgTip = ''
+            if (-not $SkipMetrics.IsPresent -and [string]::IsNullOrEmpty($ResourceGroup))
             {
-                Write-Log -Message ("-Service scopes the INVENTORY phase only; these phases still run for the WHOLE subscription: {0}. For a clean inventory-only run add {1}. For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which also scopes metrics. (Ignore this if you are deliberately re-collecting for a later Merge-RecoveryData.)" -f ($UnscopedPhases -join ', '), ($SuggestedSkips -join ' ')) -Severity 'Warning'
+                $RgTip = ' For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which scopes inventory and metrics - but NOT consumption, which stays whole-subscription.'
+            }
+
+            # Suppressed under -RunAllSubs. The wrapper invokes this script via & once
+            # PER SUBSCRIPTION in the same process and forwards -Service on every one,
+            # so an ungated warning repeats identically N times on a large tenant. It
+            # is also wrong there: Run-AllSubscriptions.ps1 has no -ResourceGroup
+            # parameter, so recommending it under the wrapper points at a switch that
+            # entry point does not accept. The wrapper carries its own once-up-front
+            # equivalent instead, so the advice is not lost - only de-duplicated.
+            # Deliberately NOT gated on $Global:RdaSessionInitialized: that flag is
+            # already $true by the time this runs (RunInventorySetup sets it at its
+            # end, before ExecuteInventoryProcessing), so it would suppress the
+            # warning on every run including a standalone one.
+            if (@($UnscopedPhases).Count -gt 0 -and -not $RunAllSubs.IsPresent)
+            {
+                Write-Log -Message ("-Service scopes the INVENTORY phase only; these phases still run for the WHOLE subscription: {0}. For a clean inventory-only run add {1}.{2} (Ignore this if you are deliberately re-collecting for a later Merge-RecoveryData.)" -f ($UnscopedPhases -join ', '), ($SuggestedSkips -join ' '), $RgTip) -Severity 'Warning'
             }
 
             $UnmatchedServices = @($Service | Where-Object { $_ -notin $MatchedNames })

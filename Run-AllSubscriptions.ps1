@@ -529,6 +529,19 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 Disable-ConsoleQuickEdit
 
 $RunStartTime = Get-Date
+
+# -MainSummary is accepted for backward compatibility and has NO effect: the
+# aggregate MainSummary.html is now produced on every run and folded into the
+# consolidated bundle regardless. Say so when it is actually passed, rather than
+# only documenting it at the param block - an operator who passes a flag and sees
+# nothing acknowledge it has no way to tell "retained no-op" from "silently
+# ignored because I typo'd the intent". The operator still gets what they asked
+# for, so this is Info, not a warning.
+if ($PSBoundParameters.ContainsKey('MainSummary'))
+{
+    Write-Host "Note: -MainSummary is a retained no-op. The aggregate MainSummary.html is produced on EVERY run and folded into the consolidated bundle, so you already get it without this flag." -ForegroundColor DarkGray
+}
+
 $FailedSubscriptions = @()
 
 # Subscriptions whose inner script could not write its report archive

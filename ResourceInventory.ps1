@@ -533,6 +533,20 @@ Function RunInventorySetup()
                 Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
             }
 
+            # Suppress Az's own debug chatter across the interactive sign-in, then RESTORE
+            # WHAT WAS THERE - not a hardcoded 'Continue'.
+            #
+            # The restore below used to assign the literal "Continue", which turned debug
+            # output ON for the remaining ~100 lines of this function even when the caller
+            # had passed -Debug:$false (or no -Debug at all, where the preference is
+            # 'SilentlyContinue'). That is the same opt-out-read-as-opt-in defect the
+            # $DebugMode assignment at the top of this script fixes, so the two now agree.
+            # Saving the incoming value is also what makes -Debug still work: under -Debug
+            # the binder has set 'Continue', and that is exactly what gets put back.
+            #
+            # Function-scoped, so it never leaked to script scope - the damage was bounded
+            # to the rest of this function, which is why it was easy to miss.
+            $SavedDebugPref = $DebugPreference
             $DebugPreference = "SilentlyContinue"
 
             if (!$RunAllSubs.IsPresent)
@@ -550,7 +564,7 @@ Function RunInventorySetup()
                 }
             }
 
-            $DebugPreference = "Continue"
+            $DebugPreference = $SavedDebugPref
 
             $Tenants = (Get-AzSubscription -WarningAction SilentlyContinue).HomeTenantId | Sort-Object -Unique
 
@@ -2237,7 +2251,14 @@ function ExecuteInventoryProcessing()
             }
         }
 
-        $DebugPreference = "Continue"
+        # No $DebugPreference restore here on purpose. The suppression above is
+        # FUNCTION-SCOPED (verified: assigning a preference variable inside a function
+        # creates a local copy and does not leak to script scope), so it ends when this
+        # function returns. A trailing assignment was previously the LAST statement of
+        # this function, which meant it could never affect anything - dead code that read
+        # like a safeguard. Worse, it assigned the literal 'Continue', so had it ever been
+        # moved somewhere reachable it would have forced debug output on for a caller who
+        # passed -Debug:$false.
     }
 
     InitializeInventoryProcessing

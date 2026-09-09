@@ -83,6 +83,48 @@ $script:DateCases = @(
     @{ Name = 'Purview'; Path = 'Data/Purview.ps1'; Type = 'microsoft.purview/accounts'; Field = 'createdAt'; Key = 'CreatedTime'; Extra = @{} }
 )
 
+# The malformed case covers an UNPARSEABLE timestamp. These cover the three
+# present-but-BLANK shapes, which were reported as an unguarded gap on the grounds
+# that the guard's 'if ($null -ne ...)' check only handles null.
+#
+# It is not a gap, but the mechanism differs by shape, and the difference is worth
+# stating precisely because this is the durable record of why that report was wrong:
+#
+#   - $null            reaches the else branch and never reaches the cast at all.
+#                      For this shape the null check IS the guard. The report already
+#                      conceded this one; it is pinned here only for completeness.
+#   - '' and '   '     pass the null check, throw on the [datetime] cast, and are
+#                      caught. These two are what actually rebut the report.
+#
+# Coverage honesty: '' and '   ' traverse the same catch branch the malformed case
+# already exercises, so their value is documentary - they pin the specific disputed
+# inputs. Only $null exercises a branch (else) that no other It reaches.
+#
+# Shape note: 12 of the 13 collectors below write the guard as a single-line
+# try { if (...) { cast } else { 'Unknown' } } catch { 'Unknown' }. AppInsights uses
+# a statement form instead ($Timecreated = 'Unknown'; if (...) { try { ... } catch
+# { ... } }). Behaviour is identical; the shape is not uniform, so do not "verify"
+# this note by grepping for one spelling.
+#
+# One input does NOT produce the sentinel: a NUMBER. [datetime]0 casts via ticks to
+# '0001-01-01 00:00'. Deliberately unguarded and deliberately untested - ARM sends a
+# string or omits the field, so a guard would defend an impossible input and a test
+# would pin current behaviour on one, making its own deletion the only way to fix it.
+#
+# Built as a discovery-time cross-product rather than a loop inside one It: Pester's
+# Should throws, so a loop would abort on the first failing shape and never evaluate
+# the other two, and the failure would not name which shape broke.
+$script:BlankCases = foreach ($Case in $script:DateCases)
+{
+    foreach ($Blank in @(
+            @{ Label = 'null'; Value = $null }
+            @{ Label = 'empty-string'; Value = '' }
+            @{ Label = 'whitespace-only'; Value = '   ' }))
+    {
+        $Case + @{ BlankLabel = $Blank.Label; BlankValue = $Blank.Value }
+    }
+}
+
 Describe 'Collector creation-time [datetime] cast guard' {
 
     BeforeAll {
@@ -98,6 +140,15 @@ Describe 'Collector creation-time [datetime] cast guard' {
         $Rec = @($script:Emitted)[0]
         $Rec | Should -Not -BeNullOrEmpty -Because 'the synthetic resource type must match so a record is emitted'
         $Rec[$Key] | Should -Be 'Unknown'
+    }
+
+    It '<Name>: a <BlankLabel> <Field> yields the Unknown sentinel and does not throw' -ForEach $script:BlankCases {
+        $Res = New-Res -Type $Type -Props (@{ $Field = $BlankValue } + $Extra)
+        $script:Emitted = $null
+        { $script:Emitted = Invoke-Collector -RelPath $Path -Resources @($Res) } | Should -Not -Throw -Because "a $BlankLabel $Field must not abort the $Name collector"
+        $Rec = @($script:Emitted)[0]
+        $Rec | Should -Not -BeNullOrEmpty -Because "the $Name record must still be emitted with a $BlankLabel $Field"
+        $Rec[$Key] | Should -Be 'Unknown' -Because "a $BlankLabel timestamp must degrade to the sentinel, not a bogus date"
     }
 
     It '<Name>: a valid <Field> is formatted (not the Unknown sentinel)' -ForEach $script:DateCases {
@@ -123,6 +174,29 @@ Describe 'AutomationAcc dual creation-time / lastModifiedTime guards' {
         $Rec | Should -Not -BeNullOrEmpty
         $Rec['AutomationAccountCreatedTime'] | Should -Be 'Unknown'
         $Rec['LastModifiedTime'] | Should -Be 'Unknown'
+    }
+
+    It 'a <BlankLabel> creationTime and lastModifiedTime both yield Unknown and do not throw' -ForEach @(
+        @{ BlankLabel = 'null'; BlankValue = $null }
+        @{ BlankLabel = 'empty-string'; BlankValue = '' }
+        @{ BlankLabel = 'whitespace-only'; BlankValue = '   ' }
+    ) {
+        # AutomationAcc is the only collector carrying the creation-time guard TWICE
+        # (creationTime on the account, lastModifiedTime on the runbook), and it is
+        # excluded from $script:DateCases because its record depends on nested-id
+        # linking. Without these cases its blank shapes would be the one gap in the
+        # coverage that answers finding #155.
+        $Acct = New-Res -Type 'microsoft.automation/automationaccounts' -Name 'acct1' -Props @{ creationTime = $BlankValue; State = 'Ok'; sku = @{ name = 'Basic' } }
+        $Rb = New-Res -Type 'microsoft.automation/automationaccounts/runbooks' -Name 'rb1' `
+            -Id '/subscriptions/sub1/resourceGroups/rg1/providers/microsoft.automation/automationAccounts/acct1/runbooks/rb1' `
+            -Props @{ lastModifiedTime = $BlankValue; state = 'Published'; runbookType = 'PowerShell'; description = 'd' }
+
+        $script:Emitted = $null
+        { $script:Emitted = Invoke-Collector -RelPath 'Infrastructure/AutomationAcc.ps1' -Resources @($Acct, $Rb) } | Should -Not -Throw -Because "a $BlankLabel timestamp must not abort the collector"
+        $Rec = @($script:Emitted)[0]
+        $Rec | Should -Not -BeNullOrEmpty -Because "the record must still be emitted with a $BlankLabel timestamp"
+        $Rec['AutomationAccountCreatedTime'] | Should -Be 'Unknown' -Because "a $BlankLabel creationTime must degrade to the sentinel"
+        $Rec['LastModifiedTime'] | Should -Be 'Unknown' -Because "a $BlankLabel lastModifiedTime must degrade to the sentinel"
     }
 
     It 'valid creationTime and lastModifiedTime are formatted (not Unknown)' {

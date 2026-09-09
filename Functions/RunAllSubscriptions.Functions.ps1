@@ -335,7 +335,9 @@ public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 # (so 0 resources == genuinely empty), 403/401 means no role, and 404 means ARM
 # is hiding a subscription the identity cannot see. Using the module cmdlet (not
 # the `az` CLI) keeps this portable across Windows/Linux/macOS with no per-OS
-# shell quoting - see .kiro/steering/cross-platform-powershell.md.
+# shell quoting. Prefer a module cmdlet over an external CLI for any new call: an
+# external tool is invoked through a per-OS shell whose quoting rules differ, which
+# is how a portable-looking command ends up being silently non-portable.
 #
 # Returns one of: 'NoAccess', 'Empty', 'Unknown'. Only called for subs that
 # returned 0 resources, so it adds no cost to the normal (non-empty) path.

@@ -270,7 +270,8 @@ function Get-RetryWaitSeconds
 # `.tolower()` behavior the original data-fetching call sites relied on
 # (collectors compare against lowercase type strings and self-join on lowercased
 # ids). Native cmdlet = portable across Windows/Linux/macOS with no az.cmd shell
-# boundary; see .kiro/steering/cross-platform-powershell.md.
+# boundary, which is why a module cmdlet is preferred over an external CLI for any
+# new call on this path.
 # Classify a Resource Graph failure from the exception's STRUCTURED surface rather
 # than by matching its message text.
 #
@@ -682,12 +683,12 @@ function Invoke-AzGraphQuerySafe
     # call site passes -Lowercase and downstream collectors/report tests depend on
     # lowercased type/location/value strings (and on both sides of intra-collector
     # self-joins being lowercased), so round-trip through JSON to lowercase both.
-    if ($Lowercase -and $Rows.Count -gt 0)
     #
     # ToLowerInvariant(), NOT ToLower(): ToLower() is culture-sensitive, so on a
     # tr-TR / az-AZ host it maps 'I' to the dotless 'i' and would corrupt JSON KEYS
     # as well as values - 'subscriptionId' becomes unreadable to every collector.
     # This file already uses invariant casing elsewhere for the same reason.
+    if ($Lowercase -and $Rows.Count -gt 0)
     {
         $Rows = @(($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant() | ConvertFrom-Json)
     }

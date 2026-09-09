@@ -2315,13 +2315,11 @@ else
             Write-Host ("Note: per-stream tags only prefix the wrapper's narration. The inner script's") -ForegroundColor DarkGray
             Write-Host ("Write-Host/Write-Log output is unprefixed and will interleave across streams.") -ForegroundColor DarkGray
             Write-Host ""
-            # Initial drain handles the case where every stream crashes immediately
-            # (jobs reach Completed state in <1500 ms, so the loop predicate would
-            # otherwise be false on first check and we'd skip output streaming).
-            # Drain output once before the polling loop, in case all streams
-            # finished synchronously between Start-Job and our first poll
-            # (jobs reach Completed state in <1500 ms, so the loop predicate would
-            # otherwise be false on first check and we'd skip output streaming).
+            # Drain output once before the polling loop, in case every stream
+            # finished (or crashed) synchronously between Start-Job and our first
+            # poll: jobs reach Completed state in <1500 ms, so the loop predicate
+            # would otherwise be false on first check and we would skip output
+            # streaming entirely.
             $Jobs | Receive-Job
             # Explicit count check is safer than truthiness on the Where-Object
             # result: when zero jobs match, Where-Object returns $null which is

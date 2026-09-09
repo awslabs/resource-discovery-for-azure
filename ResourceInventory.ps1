@@ -266,7 +266,8 @@ Function RunInventorySetup()
         # Resource discovery uses the native Az.ResourceGraph cmdlet
         # (Search-AzGraph), so the Azure CLI and its resource-graph extension are
         # no longer prerequisites - only the Az PowerShell modules below are
-        # checked/loaded. See .kiro/steering/cross-platform-powershell.md.
+        # checked/loaded. A module cmdlet is also portable by construction, with no
+        # per-OS shell layer between us and the call.
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
         # This tool only calls cmdlets from five Az submodules (see the import
@@ -479,7 +480,7 @@ Function RunInventorySetup()
         # display banner and the already-authenticated check. Using the native Az
         # context (not `az account show`) means there is a single source of truth
         # for auth state - the tool no longer has to reconcile a separate az CLI
-        # login with the Az PS context. See .kiro/steering/cross-platform-powershell.md.
+        # login with the Az PS context.
         $ExistingContext = Get-AzContext -ErrorAction SilentlyContinue
 
         # Display-only banner: the active Azure cloud environment does not change
@@ -1277,51 +1278,6 @@ function ExecuteInventoryProcessing()
                 Write-Log -Message ('[Memory] Post-metrics memory snapshot unavailable: {0}' -f $_.Exception.Message) -Severity 'Info' -NoConsole -ToDebugLog
             }
         }
-    }
-
-    function GetServiceName($moduleUrl)
-    {
-        if ($moduleUrl -like '*Services/Analytics*')
-        {
-            $DirectoryService = 'Analytics'
-        }
-
-        if ($moduleUrl -like '*Services/Compute*')
-        {
-            $DirectoryService = 'Compute'
-        }
-
-        if ($moduleUrl -like '*Services/Containers*')
-        {
-            $DirectoryService = 'Containers'
-        }
-
-        if ($moduleUrl -like '*Services/Data*')
-        {
-            $DirectoryService = 'Data'
-        }
-
-        if ($moduleUrl -like '*Services/Infrastructure*')
-        {
-            $DirectoryService = 'Infrastructure'
-        }
-
-        if ($moduleUrl -like '*Services/Integration*')
-        {
-            $DirectoryService = 'Integration'
-        }
-
-        if ($moduleUrl -like '*Services/Networking*')
-        {
-            $DirectoryService = 'Networking'
-        }
-
-        if ($moduleUrl -like '*Services/Storage*')
-        {
-            $DirectoryService = 'Storage'
-        }
-
-        return $DirectoryService
     }
 
     function CreateResourceJobs()

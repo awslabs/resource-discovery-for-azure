@@ -87,7 +87,6 @@ run already omits it), and the remaining switches trim further from the default.
 - The Storage Account `UsedCapacity` metric (one metric-query call per storage
   account) is **opt-in**: it is NOT collected unless `-IncludeStorageMetrics` is
   passed, so passing that switch *adds* its calls back rather than removing them.
-  `-SkipStorageMetrics` is retained, still skips it, and wins over the opt-in.
 - `-SkipDiskMetrics` skips the four Managed Disk composite I/O metrics
   (four calls per attached disk, usually the single largest metric source). It is
   OFF by default, so the default run does collect them.
@@ -105,9 +104,7 @@ Two different levers, two different effects:
 
 - **API-call count** (what the Azure Monitor "metric queries" meter counts, and
   what the per-subscription read ceiling limits) is reduced by `-UseMetricsBatch`
-  and by `-SkipDiskMetrics`. `-SkipStorageMetrics` only changes anything if the run
-  also opts in with `-IncludeStorageMetrics`, since the storage capacity metric is
-  otherwise already absent. This is the lever that matters most for the read
+  and by `-SkipDiskMetrics`. This is the lever that matters most for the read
   ceiling.
 - **Data-point volume** (report memory, JSON size, post-processing time) is
   reduced by `-MetricsIntervalMinutes`. It does **not** change the number of API

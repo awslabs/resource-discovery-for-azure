@@ -250,7 +250,7 @@ combined result.
 
 **Pass the same flags you intend to use for the real run**, because they change the
 estimate: `-SkipMetrics` / `-SkipConsumption`, the metric-scope switches
-`-SkipDiskMetrics` / `-IncludeStorageMetrics` / `-SkipStorageMetrics`, and
+`-SkipDiskMetrics` / `-IncludeStorageMetrics`, and
 `-UseMetricsBatch`. Explicit
 `-ParallelStreams` / `-ConcurrencyLimit` are honoured exactly as the real run
 honours them (auto-tuned values fill in only what you don't pass), and the output

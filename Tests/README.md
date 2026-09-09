@@ -145,7 +145,6 @@ against a live subscription and runs the applicable Pester tests against each.
 | `skipconsumption` | `-SkipConsumption` | structural |
 | `service` | `-Service VirtualMachines -SkipMetrics -SkipConsumption` | collector scoping |
 | `includestorage` | `-IncludeStorageMetrics` | structural **+** metric-volume controls (proves the opt-in turns the storage capacity metric ON) |
-| `skipstorage` | `-SkipStorageMetrics` | structural **+** metric-volume controls |
 | `skipdisk` | `-SkipDiskMetrics` | structural **+** metric-volume controls |
 | `metricinterval` | `-MetricsIntervalMinutes 60` | structural **+** metric-volume controls |
 | `recovery` | live recovery workflow (gap bundle, re-collect, `Merge-RecoveryData` splice) | structural **+** obfuscation **+** recovery-merge |

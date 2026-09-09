@@ -144,8 +144,8 @@ and exits without inventorying anything). Concretely it:
 1. **Counts weight live.** It sends one aggregate Resource Graph query per chunk
    of subscriptions (chunked to the ARG per-query cap of 1,000) that sums,
    per subscription, the projected metric-query weight over the metric-eligible
-   types - honoring the same `-SkipDiskMetrics` / `-IncludeStorageMetrics` /
-   `-SkipStorageMetrics` gating the real run uses. Because the Storage Account
+   types - honoring the same `-SkipDiskMetrics` / `-IncludeStorageMetrics`
+   gating the real run uses. Because the Storage Account
    capacity metric is opt-in, the storage term is dropped unless the run would
    actually collect it, so the estimate never includes a cost the run will not
    pay. It also returns the batchable portion of that weight

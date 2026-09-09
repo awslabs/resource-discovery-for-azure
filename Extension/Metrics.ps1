@@ -265,6 +265,17 @@ if ($Task -eq 'Processing')
                 'Sum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Sum).Sum }
                 'Minimum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Minimum).Minimum }
                 'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
+                default
+                {
+                    # Kept in step with the per-call path's Measure switch deliberately.
+                    # This function's contract is that batch output is computed IDENTICALLY
+                    # to the inline per-call path, so a guard added there and omitted here
+                    # would leave the same silent-wrong-value seam open on the batch route
+                    # while the comment above claimed parity. An unhandled Measure would
+                    # otherwise put the RAW per-interval ARRAY into the scalar MetricValue
+                    # field. Note $_ is the switched-on Measure value, not a pipeline item.
+                    throw ("Unhandled Measure '{0}' for metric '{1}' - the per-interval values could not be collapsed to a single figure." -f $_, $Def.MetricName)
+                }
             }
         }
 
@@ -666,6 +677,13 @@ if ($Task -eq 'Processing')
         {
             $Subscription = $SubLookup[$app.subscriptionId]
 
+            # Do NOT narrow this on 'kind'. It was measured in the sandbox that a
+            # Flex Consumption app and a working Linux Dedicated app share the
+            # IDENTICAL kind ('functionapp,linux') and reserved ('true') values, yet
+            # need OPPOSITE answers - the Flex app publishes neither old execution
+            # metric while the Dedicated one returns real data. So '-notmatch linux'
+            # would silently drop valid Linux metrics. The real discriminator is the
+            # hosting plan SKU (FC1 / FlexConsumption), not kind.
             if ($app.kind -match 'functionapp')
             {
                 $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'FunctionExecutionCount'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
@@ -1031,6 +1049,158 @@ if ($Task -eq 'Processing')
                 $CallOutcome = 'Success'
                 $CallAttempts = 0
                 $CallErrorMsg = $null
+                # Azure's own response body for a failed call. DIAGNOSTICS ONLY - it
+                # is never read to make a retry or skip decision, and it never reaches
+                # Metrics_*.json. See Get-RdaMetricErrorBody below for why it matters.
+                $CallErrorBody = $null
+
+                # Pull Azure Monitor's response body out of a failed call.
+                #
+                # WHY. $_.Exception.Message for a rejected metric call is a generic
+                # line ("Operation returned an invalid status code 'BadRequest'") that
+                # says the request was refused but not WHY. The body underneath does:
+                # it distinguishes a metric that does not exist for this resource type
+                # from an unsupported time grain (which -MetricsIntervalMinutes can
+                # cause, making it OUR bug) from a resource deleted after discovery.
+                # Without it, a tool-side 400 is indistinguishable from a benign
+                # resource-side one, which is exactly how 219 Linux function apps
+                # burned ~2.5 hours before anyone could see the cause.
+                #
+                # Defined INSIDE the -Parallel scriptblock deliberately: a function
+                # declared at file scope is not visible in these runspaces, so this has
+                # to be per-runspace rather than shared.
+                #
+                # CONTRACT: never throws, and returns $null when it finds nothing. A
+                # diagnostic aid must not be able to break the phase it is describing,
+                # so every step is wrapped and failure degrades to $null rather than
+                # propagating.
+                function Get-RdaMetricErrorBody
+                {
+                    param($ErrorRecord)
+
+                    try
+                    {
+                        if ($null -eq $ErrorRecord) { return $null }
+
+                        $Found = $null
+
+                        # ErrorDetails often carries the raw body verbatim and is the
+                        # cheapest place to look, so try it before walking the chain.
+                        try
+                        {
+                            $Details = $ErrorRecord.ErrorDetails.Message
+                            if (-not [string]::IsNullOrWhiteSpace($Details)) { $Found = [string]$Details }
+                        }
+                        catch { }
+
+                        # Walk the exception chain. Depth-bounded AND visited-tracked:
+                        # a bound alone is not enough because a cyclic InnerException
+                        # would still be re-inspected at every level, and some SDK
+                        # wrappers do self-reference.
+                        if ([string]::IsNullOrWhiteSpace($Found))
+                        {
+                            $Visited = [System.Collections.Generic.HashSet[int]]::new()
+                            $Current = $ErrorRecord.Exception
+                            $Depth = 0
+
+                            while ($null -ne $Current -and $Depth -lt 10)
+                            {
+                                # Reference identity, so two distinct exceptions with
+                                # equal messages are still both inspected.
+                                $Key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Current)
+                                if (-not $Visited.Add($Key)) { break }
+
+                                # Only text-bearing members. A '.Response.ContentStream'
+                                # probe used to sit here and was DEAD: the guard below
+                                # rejects anything that is a [System.IO.Stream], which is
+                                # exactly what that member returns, so it could never
+                                # contribute. Reading it for real would also be wrong here
+                                # - the SDK has usually already consumed the stream by the
+                                # time the exception surfaces, so it would be at EOF, and
+                                # draining a live one inside a diagnostic helper could
+                                # disturb the very error being described.
+                                foreach ($Probe in @(
+                                        { $Current.Response.Content },
+                                        { $Current.Body }
+                                    ))
+                                {
+                                    try
+                                    {
+                                        $Value = & $Probe
+                                        if ($null -ne $Value -and -not ($Value -is [System.IO.Stream]))
+                                        {
+                                            $Text = [string]$Value
+                                            if (-not [string]::IsNullOrWhiteSpace($Text)) { $Found = $Text; break }
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                if (-not [string]::IsNullOrWhiteSpace($Found)) { break }
+
+                                $Current = $Current.InnerException
+                                $Depth++
+                            }
+                        }
+
+                        if ([string]::IsNullOrWhiteSpace($Found)) { return $null }
+
+                        # Prefer the structured code/message pair when the body is JSON -
+                        # that is the part a human reads - and fall back to the raw text
+                        # when it is not JSON or the shape is unfamiliar.
+                        $Rendered = $Found
+                        try
+                        {
+                            $Parsed = $Found | ConvertFrom-Json -ErrorAction Stop
+                            $Node = if ($null -ne $Parsed.error) { $Parsed.error } else { $Parsed }
+                            $Code = [string]$Node.code
+                            $Msg = [string]$Node.message
+                            if (-not [string]::IsNullOrWhiteSpace($Code) -or -not [string]::IsNullOrWhiteSpace($Msg))
+                            {
+                                $Rendered = (@($Code, $Msg) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ': '
+                            }
+                        }
+                        catch { }
+
+                        # Collapse newlines so one record stays one log line, then cap.
+                        $Rendered = ([string]$Rendered) -replace '\s+', ' '
+                        $Rendered = $Rendered.Trim()
+
+                        # Keep the HEAD and the TAIL when capping, not just the head. The
+                        # actionable part of Azure Monitor's rejection is frequently at the
+                        # END: "Failed to find metric configuration for provider:
+                        # Microsoft.Web, resource Type: sites, metric: X, Valid metrics:
+                        # a,b,c,..." puts the list of metrics the resource DOES publish
+                        # last, and that list is the whole answer to "what should we have
+                        # asked for". A head-only cap at 500 chars discarded precisely that
+                        # and left a line that restated the status. The budget is also
+                        # raised, because these bodies routinely run past 500 characters and
+                        # this text goes to the local debug log, not to the report.
+                        # Only truncate when doing so actually SAVES bytes. head + tail +
+                        # marker is ~26 characters longer than the cap, so a body just past
+                        # the cap (2001-2026 chars) would come out LONGER than it went in -
+                        # a truncation that costs bytes instead of saving them, and loses
+                        # the middle for nothing.
+                        $BodyCap = 2000
+                        $TruncationMarkerBudget = 32
+                        if ($Rendered.Length -gt ($BodyCap + $TruncationMarkerBudget))
+                        {
+                            $HeadLen = [int]($BodyCap * 0.6)
+                            $TailLen = $BodyCap - $HeadLen
+                            $Rendered = $Rendered.Substring(0, $HeadLen) +
+                            ('...[{0} chars omitted]...' -f ($Rendered.Length - $BodyCap)) +
+                            $Rendered.Substring($Rendered.Length - $TailLen)
+                        }
+                        if ([string]::IsNullOrWhiteSpace($Rendered)) { return $null }
+                        return $Rendered
+                    }
+                    catch
+                    {
+                        # Deliberately swallowed: this is a diagnostic aid, and a
+                        # failure to describe an error must never become an error.
+                        return $null
+                    }
+                }
 
                 # Common args for every attempt. -DefaultProfile forces the call
                 # to use the parent's captured Az context instead of relying on
@@ -1067,6 +1237,16 @@ if ($Task -eq 'Processing')
                         $CallAttempts = $Attempt + 1
                         $TimedOut = $false
                         $Throttled = $false
+                        # Reset the captured body PER ATTEMPT, exactly like $TimedOut and
+                        # $Throttled above. Without this it was write-once-and-linger: a
+                        # body captured on a failed attempt 1 survived into a SUCCESSFUL
+                        # attempt 2, so the diagnostics record came out as
+                        # Outcome='Success' with a non-null ErrorBody describing an error
+                        # that no longer applied. Anyone reading the log would be chasing
+                        # a failure that had already recovered. Resetting here also means
+                        # the retained body always belongs to the FINAL attempt, which is
+                        # the one whose outcome is being reported.
+                        $CallErrorBody = $null
                         # A PERMANENT failure can never succeed on a retry, so retrying
                         # one only burns wall-clock and Azure Monitor metric-query quota.
                         # Two are seen routinely on real runs: a 404 for a resource that
@@ -1094,6 +1274,15 @@ if ($Task -eq 'Processing')
                             catch
                             {
                                 $LastError = $_.Exception.Message
+
+                                # Azure's response body, for the diagnostics log only.
+                                # Captured BEFORE the classification below purely for
+                                # readability - it is deliberately NOT used by any branch
+                                # of that classification. The permanent-vs-throttle
+                                # decision stays a function of $LastError alone, so this
+                                # capture cannot change retry behaviour even if the body
+                                # is missing, malformed or unexpected.
+                                $CallErrorBody = Get-RdaMetricErrorBody -ErrorRecord $_
 
                                 # Order matters, and the permanent check MUST stay first.
                                 # The throttle pattern below is a loose substring match, and
@@ -1219,9 +1408,47 @@ if ($Task -eq 'Processing')
                         {
                             $MetricQueryResults = $MetricQuery.Data.Minimum
                         }
+                        default
+                        {
+                            # An aggregation this switch does not know silently left
+                            # $MetricQueryResults at its 0 initialiser, so the metric
+                            # shipped as a REAL-LOOKING ZERO after a SUCCESSFUL call -
+                            # the worst failure shape available, because a zero for CPU
+                            # or storage reads as "idle" rather than "not measured".
+                            # Today the five Azure Monitor aggregations are all covered,
+                            # so this is unreachable; it exists so that ADDING a metric
+                            # definition with an unhandled or misspelled Aggregation
+                            # fails visibly instead of fabricating data.
+                            #
+                            # THROW rather than setting the outcome inline. Three reasons,
+                            # all of them found by measurement:
+                            #   1. The catch below is already the canonical failure shape
+                            #      (MetricValue 0, MetricError true, CallOutcome promoted
+                            #      only if still 'Success', CallErrorMsg from the
+                            #      exception), so reusing it cannot drift from it.
+                            #   2. Nulling the value did NOT fail visibly. $null.Where()
+                            #      yields Count 0, which falls into the count-eq-0 branch
+                            #      that RESETS the value to 0 with MetricError false -
+                            #      reproducing the exact silent zero this branch exists to
+                            #      prevent.
+                            #   3. It keeps MetricValue numeric. A $null there would be a
+                            #      value-type change on the Metrics_*.json contract that
+                            #      server ingestion binds on, which needs owner approval.
+                            #
+                            # $_ is the SWITCHED-ON VALUE inside a switch action block, not
+                            # the outer pipeline item - verified - so $_ is the aggregation
+                            # string and $_.Aggregation would render empty. $MetricName is
+                            # the outer capture from the top of this block.
+                            throw ("Unhandled Aggregation '{0}' for metric '{1}' - no value could be read from the response." -f $_, $MetricName)
+                        }
                     }
 
-                    $MetricQueryResultsCount = ($MetricQueryResults.Where({ $_ -ne $null }).Count)
+                    # $null -ne $_ , not '$_ -ne $null'. The reversed form is an array
+                    # FILTER in PowerShell rather than a scalar comparison, so an element
+                    # that is itself a collection yields a filtered array whose
+                    # truthiness depends on its length. Matches the canonical order used
+                    # a few lines below.
+                    $MetricQueryResultsCount = ($MetricQueryResults.Where({ $null -ne $_ }).Count)
 
                     if ($MetricQueryResultsCount -eq 0)
                     {
@@ -1243,7 +1470,7 @@ if ($Task -eq 'Processing')
 
                         if ($_.Series -eq 'true')
                         {
-                            $MetricTimeSeries = $MetricQueryResults.Where({ $_ -ne $null })
+                            $MetricTimeSeries = $MetricQueryResults.Where({ $null -ne $_ })
                         }
 
                         switch ($_.Measure)
@@ -1253,6 +1480,18 @@ if ($Task -eq 'Processing')
                             'Sum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Sum).Sum }
                             'Minimum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Minimum).Minimum }
                             'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
+                            default
+                            {
+                                # Same silent-wrong-value seam as the Aggregation switch
+                                # above: an unhandled Measure left $MetricQueryResults as
+                                # the RAW ARRAY of per-interval values instead of the
+                                # intended scalar, which then reached the output field as a
+                                # collection. Throw for the same three reasons given there
+                                # (canonical catch, nulling does not fail visibly, and
+                                # MetricValue must stay numeric). $_ is the switched-on
+                                # Measure value here, not the pipeline item.
+                                throw ("Unhandled Measure '{0}' for metric '{1}' - the per-interval values could not be collapsed to a single figure." -f $_, $MetricName)
+                            }
                         }
                     }
                 }
@@ -1292,6 +1531,11 @@ if ($Task -eq 'Processing')
                         Attempts    = $CallAttempts
                         ElapsedSec  = [math]::Round($CallStopwatch.Elapsed.TotalSeconds, 2)
                         Error       = $CallErrorMsg
+                        # Azure's own response body, capped and newline-collapsed.
+                        # Diagnostics only - like every other field here it never
+                        # reaches Metrics_*.json, and nothing reads it to make a
+                        # decision. $null when the call succeeded or no body was found.
+                        ErrorBody   = $CallErrorBody
                     })
 
 
@@ -1394,7 +1638,13 @@ if ($Task -eq 'Processing')
         Write-MetricsDiag ("Non-success calls (where it got stuck):")
         foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -in @('Timeout', 'Throttled', 'Error') } | Sort-Object ElapsedSec -Descending))
         {
-            Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error)
+            # Azure's response body is appended here too, not only on the permanent
+            # NotFound/BadRequest path. These are the calls that burned the FULL retry
+            # budget, so they are the most expensive failures in the phase and the ones
+            # where knowing the cause matters most. Omitting it here was an oversight
+            # that left the costly failures the least explained.
+            $StuckBodyNote = if ([string]::IsNullOrWhiteSpace($rec.ErrorBody)) { '' } else { (' | azure: ' + $rec.ErrorBody) }
+            Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}{9}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error, $StuckBodyNote)
         }
     }
 
@@ -1415,13 +1665,20 @@ if ($Task -eq 'Processing')
         {
             $FirstLine = if ([string]::IsNullOrWhiteSpace($rec.Error)) { '(no error text captured)' } else { (([string]$rec.Error) -split "`r?`n")[0].Trim() }
 
+            # Azure's own response body is what actually separates the causes the
+            # status cannot: "metric not defined for this resource type" vs
+            # "unsupported time grain" (a TOOL-side fault, reachable via
+            # -MetricsIntervalMinutes) vs "resource not found". Appended when
+            # present, and silently omitted when Azure gave us nothing to show.
+            $BodyNote = if ([string]::IsNullOrWhiteSpace($rec.ErrorBody)) { '' } else { (' | azure: ' + $rec.ErrorBody) }
+
             if ($rec.Outcome -eq 'NotFound')
             {
-                Write-MetricsDiag ("  NotFound idx={0} {1}/{2}/{3} interval={4} aggregation={5} - Azure Monitor has no such resource; usually it was deleted between discovery and this call: {6}" -f $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Aggregation, $FirstLine)
+                Write-MetricsDiag ("  NotFound idx={0} {1}/{2}/{3} interval={4} aggregation={5} - Azure Monitor has no such resource; usually it was deleted between discovery and this call: {6}{7}" -f $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Aggregation, $FirstLine, $BodyNote)
             }
             else
             {
-                Write-MetricsDiag ("  BadRequest idx={0} {1}/{2}/{3} interval={4} aggregation={5} - Azure Monitor rejected this request; usually the metric is not valid for this resource, but check the interval and aggregation above are ones it supports: {6}" -f $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Aggregation, $FirstLine)
+                Write-MetricsDiag ("  BadRequest idx={0} {1}/{2}/{3} interval={4} aggregation={5} - Azure Monitor rejected this request; usually the metric is not valid for this resource, but check the interval and aggregation above are ones it supports: {6}{7}" -f $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Aggregation, $FirstLine, $BodyNote)
             }
         }
     }

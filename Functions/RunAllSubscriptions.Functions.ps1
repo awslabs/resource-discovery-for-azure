@@ -2306,7 +2306,9 @@ function New-RdaSupportLogBundle
 # keyed by tenant + stream index only (NOT shard) - safe on local disk because
 # each shard pod has its own disk, but in a SHARED blob container two shard pods
 # would collide on it. So EVERY state blob name is additionally namespaced by
-# shard (see Get-StateBlobName / Get-StateBlobNames).
+# shard, by Get-StateBlobShardSegment - the single owner of that segment, used by
+# both the write path (Get-StateBlobName) and the discovery path
+# (Get-StateBlobNames, via Get-StateBlobStreamPrefix).
 #
 # These identifiers (subscription GUIDs) live only in the LOCAL/blob resume
 # state, which is never part of the zipped report, so - like the existing
@@ -2333,13 +2335,54 @@ function Split-BlobContainerUri
     }
 }
 
+# Single owner of the shard namespace segment used by every state-blob path.
+# Applied whenever ShardCount > 1 because the blob container is shared across
+# shard pods (see region header). Pure.
+function Get-StateBlobShardSegment
+{
+    param(
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1
+    )
+    if ($ShardCount -gt 1) { return ('shard-{0}of{1}/' -f $ShardIndex, $ShardCount) }
+    return ''
+}
+
+# Single owner of the per-stream state-blob name PREFIX. Pure.
+#
+# This exists because the WRITE path and the DISCOVERY path have to agree
+# exactly: Get-StateBlobName appends "<streamId>.json" to this prefix when it
+# names a per-stream blob, and Get-StateBlobNames lists on this same prefix to
+# find those blobs again after a pod reschedule. Both used to build the string
+# from their own inline copy of the shard segment and the
+# '_state/...resume-state-<tenant>-stream-' layout, kept in step only by a
+# comment. If they had drifted, a rescheduled pod would silently discover no
+# per-stream state and redo finished work - a failure with no error message.
+# Deriving both from here makes that divergence impossible rather than merely
+# discouraged, and gives the test one thing to assert against instead of a
+# fourth hand-copy.
+function Get-StateBlobStreamPrefix
+{
+    param(
+        # Empty string is a valid prefix (the container root, when the container
+        # URL carries no path segment), so it must be allowed past the mandatory
+        # non-empty default that [string] parameters enforce.
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$Tenant,
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1
+    )
+    $ShardSeg = Get-StateBlobShardSegment -ShardIndex $ShardIndex -ShardCount $ShardCount
+    return ('{0}_state/{1}.resume-state-{2}-stream-' -f $Prefix, $ShardSeg, $Tenant)
+}
+
 # Build the shard-namespaced blob NAME for a state file, under the container's
 # optional path prefix plus a dedicated _state/ area (kept separate from the
 # report zips so the *.zip consolidation glob never trips over it). Pure.
 #   - StreamId < 0  -> the shard's unified file (.resume-state-<tenant>.json)
 #   - StreamId >= 0 -> a per-stream file (.resume-state-<tenant>-stream-<n>.json)
-# Shard namespacing (shard-<i>of<n>/) is applied whenever ShardCount > 1 because
-# the blob container is shared across shard pods (see region header).
+# The per-stream branch is built from Get-StateBlobStreamPrefix so it cannot
+# drift from the prefix Get-StateBlobNames lists on.
 function Get-StateBlobName
 {
     param(
@@ -2352,16 +2395,14 @@ function Get-StateBlobName
         [int]$ShardCount = 1,
         [int]$StreamId = -1
     )
-    $ShardSeg = if ($ShardCount -gt 1) { 'shard-{0}of{1}/' -f $ShardIndex, $ShardCount } else { '' }
-    $Leaf = if ($StreamId -ge 0)
+    if ($StreamId -ge 0)
     {
-        '.resume-state-{0}-stream-{1}.json' -f $Tenant, $StreamId
+        $StreamPrefix = Get-StateBlobStreamPrefix -Prefix $Prefix -Tenant $Tenant -ShardIndex $ShardIndex -ShardCount $ShardCount
+        return ('{0}{1}.json' -f $StreamPrefix, $StreamId)
     }
-    else
-    {
-        '.resume-state-{0}.json' -f $Tenant
-    }
-    return ('{0}_state/{1}{2}' -f $Prefix, $ShardSeg, $Leaf)
+
+    $ShardSeg = Get-StateBlobShardSegment -ShardIndex $ShardIndex -ShardCount $ShardCount
+    return ('{0}_state/{1}.resume-state-{2}.json' -f $Prefix, $ShardSeg, $Tenant)
 }
 
 # Classify how the subscription universe moved between the START-of-run snapshot
@@ -2564,8 +2605,9 @@ function Get-StateBlobNames
         [int]$ShardIndex = 0,
         [int]$ShardCount = 1
     )
-    $ShardSeg = if ($ShardCount -gt 1) { 'shard-{0}of{1}/' -f $ShardIndex, $ShardCount } else { '' }
-    $ListPrefix = '{0}_state/{1}.resume-state-{2}-stream-' -f $Prefix, $ShardSeg, $Tenant
+    # Shared with Get-StateBlobName's per-stream branch, so what is listed here is
+    # by construction what was written there.
+    $ListPrefix = Get-StateBlobStreamPrefix -Prefix $Prefix -Tenant $Tenant -ShardIndex $ShardIndex -ShardCount $ShardCount
     try
     {
         $Blobs = Get-AzStorageBlob -Container $Container -Prefix $ListPrefix -Context $Context -ErrorAction Stop

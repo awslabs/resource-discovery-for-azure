@@ -389,26 +389,75 @@ on your own machine (rather than one summary per shard). Note the tooling here:
   combine multiple outer zips, and there is currently no single built-in command
   that merges the per-machine shard zips into one.
 
-Merging is still straightforward, because each outer zip is just a flat
-container holding one inner zip per subscription, and the shard slices are
-disjoint (no two machines produce a zip for the same subscription, so there are
-no name collisions). Gather the shard zips into a folder and run:
+Merging is straightforward for the **inner per-subscription zips**, because the
+shard slices are disjoint: no two machines produce a zip for the same
+subscription, so those names cannot collide.
+
+The **root members do collide**, and that is the part to get right. Every shard's
+outer zip carries the same three fixed names at its root - `VMPlacement.csv`,
+`MainSummary.html` and `RunSummary.log`. Extracting all shards into one shared
+folder therefore has each shard overwrite the previous one's copies, leaving only
+the last-enumerated shard's. For `VMPlacement.csv` that is silent data loss: the
+tenant-wide AZ capacity view is exactly what a sharded run is for, and a naive
+merge keeps one shard's slice of it while looking like it worked.
+
+So extract each shard into its **own** subfolder, and concatenate the placement
+CSVs explicitly. Gather the shard zips into a folder and run:
 
 ```powershell
-# 1. Extract the inner per-subscription zips out of every shard's outer zip
-#    into one staging folder.
+# 1. Extract each shard into its OWN subfolder. Shards share fixed root member
+#    names (VMPlacement.csv / MainSummary.html / RunSummary.log), so a shared
+#    destination would silently overwrite all but the last.
 $staging = New-Item -ItemType Directory -Path ./tenant-merge -Force
-Get-ChildItem ./shard-zips -Filter 'AllSubscriptions_ResourcesReport_*.zip' |
-    ForEach-Object { Expand-Archive -Path $_.FullName -DestinationPath $staging -Force }
+$placementParts = @()
+foreach ($shard in Get-ChildItem ./shard-zips -Filter 'AllSubscriptions_ResourcesReport_*.zip')
+{
+    $shardDir = Join-Path $staging $shard.BaseName
+    Expand-Archive -Path $shard.FullName -DestinationPath $shardDir -Force
 
-# 2. Re-zip the collected per-subscription zips into one tenant-wide outer zip
-#    (the same shape a single run produces).
+    $csv = Join-Path $shardDir 'VMPlacement.csv'
+    if (Test-Path -LiteralPath $csv) { $placementParts += $csv }
+}
+
+# 2. Collect the inner per-subscription zips up into the staging root. Disjoint
+#    slices, so these names are unique across shards.
+Get-ChildItem -Path $staging -Recurse -Filter 'ResourcesReport_*.zip' |
+    ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $staging $_.Name) -Force }
+
+# 3. Concatenate the shards' placement CSVs into ONE tenant-wide file.
+#    Import-Csv/Export-Csv rather than a text append, so the identical header is
+#    written exactly once instead of reappearing as a data row per shard.
+if ($placementParts.Count -gt 0)
+{
+    $rows = @()
+    foreach ($part in $placementParts) { $rows += @(Import-Csv -LiteralPath $part) }
+    if ($rows.Count -gt 0)
+    {
+        $rows | Export-Csv -LiteralPath (Join-Path $staging 'VMPlacement.csv') -Encoding utf8 -NoTypeInformation
+        Write-Host ("Merged {0} shard placement CSV(s) into {1} row(s)." -f $placementParts.Count, $rows.Count)
+    }
+}
+
+# 4. Re-zip the per-subscription zips PLUS the merged placement CSV into one
+#    tenant-wide outer zip (the same shape a single non-sharded run produces).
 $merged = './AllSubscriptions_ResourcesReport_tenant.zip'
-Compress-Archive -Path (Join-Path $staging '*.zip') -DestinationPath $merged -Force
+$members = @(Get-ChildItem -Path $staging -File | Where-Object { $_.Extension -in @('.zip', '.csv') })
+Compress-Archive -LiteralPath $members.FullName -DestinationPath $merged -Force
 
-# 3. Build the aggregate MainSummary from the merged zip.
+# 5. Build the aggregate MainSummary from the merged zip.
 ./Build-MainSummaryFromZip.ps1 -InputZip $merged
 ```
+
+Note that `Build-MainSummaryFromZip.ps1` reads only `Inventory_*.json` and the
+report HTML, so it neither consumes nor rewrites `VMPlacement.csv`. Step 4 is what
+puts the merged CSV in the bundle; if you run `Build-MainSummaryFromZip.ps1` with
+`-PackageZip`, its output archive will **not** carry the placement CSV, so keep the
+step-4 zip as the deliverable.
+
+The per-shard `MainSummary.html` and `RunSummary.log` copies stay in their shard
+subfolders under `$staging`. That is deliberate - each describes only its own
+shard's subscriptions, so there is no meaningful way to merge them, and step 5
+regenerates the tenant-wide summary from the data instead.
 
 ## Running the shards on AKS (containers / CI-CD)
 

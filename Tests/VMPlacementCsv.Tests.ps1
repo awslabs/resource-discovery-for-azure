@@ -39,10 +39,16 @@ BeforeAll {
 
     # The extension calls Write-Log. Define a silent stand-in in THIS scope so the
     # tests exercise the real logic without needing the orchestrator's logging.
+    # Captures into a GLOBAL, not $script:. This function is defined global: so the
+    # extension can see it, and '$script:' inside a global function does NOT resolve to
+    # the Pester test scope that reads it - so the capture silently collected nothing.
+    # It went unnoticed because no test asserted on the log until the Flexible-warning
+    # test below. -NoConsole is accepted too: the real Write-Log takes it, and an
+    # unbound parameter would make the extension's call fail rather than log.
     function global:Write-Log
     {
-        param([string]$Message, [string]$Severity, [switch]$ToDebugLog)
-        $script:LogLines += ('[{0}] {1}' -f $Severity, $Message)
+        param([string]$Message, [string]$Severity, [switch]$ToDebugLog, [switch]$NoConsole)
+        $Global:PlacementLogLines += ('[{0}] {1}' -f $Severity, $Message)
     }
 
     # Runs the extension against the supplied synthetic state and returns the parsed
@@ -52,7 +58,7 @@ BeforeAll {
     {
         param($Vms, $ScaleSets, $GraphRows, $Dictionary)
 
-        $script:LogLines = @()
+        $Global:PlacementLogLines = @()
         $Csv = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8) + '.csv')
 
         $Payload = @{}
@@ -354,5 +360,79 @@ Describe 'VM placement CSV' {
             $Rows = script:Invoke-Placement -Vms @() -ScaleSets @() -GraphRows @() -Dictionary $null
             $Rows | Should -BeNullOrEmpty
         }
+    }
+}
+
+Describe 'The Flexible-orchestration double-counting guard' {
+
+    # This guard protects the ONE number the file exists to produce. A Flexible scale
+    # set's members are first-class microsoft.compute/virtualmachines resources, so they
+    # are ALREADY emitted as individual VirtualMachine rows. Counting the set's
+    # Instances as well would count the same capacity twice and overstate a Flexible
+    # estate by up to 2x - silently, inside SUM(CPU * Instances).
+    #
+    # It had no test at all, which is also how the warning below went missing: the
+    # code's own comment promised "the count is named in a Warning below" and no such
+    # warning existed, so the operator was never told that some rows contribute nothing.
+
+    It 'leaves Instances EMPTY on a Flexible scale set, so it adds nothing to the total' {
+        $Rows = script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/flex'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'flexset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 3; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @([PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/flex'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Flexible'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } })
+
+        $Flex = @($Rows | Where-Object { $_.ResourceKind -eq 'VirtualMachineScaleSet' })
+        $Flex.Count | Should -Be 1 -Because 'the row must stay VISIBLE so a planner still sees the SKU and zone'
+        $Flex[0].Instances | Should -BeNullOrEmpty -Because 'its member VMs are counted separately, so counting instances too would double-count'
+        $Flex[0].OrchestrationMode | Should -Be 'Flexible'
+        $Flex[0].CPU | Should -Be '4' -Because 'CPU stays per-instance and is still reported'
+    }
+
+    It 'KEEPS Instances on a Uniform scale set, whose members are never emitted separately' {
+        $Rows = script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/uni'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'uniset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 3; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @([PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/uni'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Uniform'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } })
+
+        $Uni = @($Rows | Where-Object { $_.ResourceKind -eq 'VirtualMachineScaleSet' })[0]
+        $Uni.Instances | Should -Be '3' -Because 'a Uniform set member is a CHILD ARM type, never matched by the VM filter, so Instances is the only place its capacity appears'
+    }
+
+    It 'names the excluded count in a WARNING rather than leaving it to be inferred' {
+        # The warning the guard's own comment promises. Without it, an operator
+        # reconciling the CSV against the portal sees a shortfall and cannot tell the
+        # guard working correctly apart from a failed SKU lookup.
+        script:Invoke-Placement `
+            -ScaleSets @(
+            [PSCustomObject]@{ ID = '/ss/f1'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'f1'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 2; vCPUs = 4; RAM = 16 }
+            [PSCustomObject]@{ ID = '/ss/f2'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'f2'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 5; vCPUs = 4; RAM = 16 }
+        ) `
+            -GraphRows @(
+            [PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/f1'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Flexible'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } }
+            [PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/f2'; zones = @('2'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Flexible'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } }
+        ) | Out-Null
+
+        $Warned = @($Global:PlacementLogLines | Where-Object { $_ -match '^\[Warning\]' -and $_ -match 'Flexible' })
+        $Warned.Count | Should -BeGreaterThan 0 -Because 'the guard silently removing capacity from the total must be reported'
+        # The COUNT must be right - it was previously incremented on an undeclared
+        # variable, where $null++ yields 1 regardless of how many sets qualified.
+        ($Warned -join ' ') | Should -Match '\b2\b' -Because 'two Flexible sets were present, so the count must read 2 and not 1'
+    }
+
+    It 'says nothing about Flexible when there are none, so the message is not noise' {
+        script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/uni'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'uniset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 3; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @([PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/uni'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Uniform'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } }) | Out-Null
+
+        @($Global:PlacementLogLines | Where-Object { $_ -match 'Flexible' }).Count | Should -Be 0
+    }
+
+    It 'the counter is initialised, not incremented from undeclared' {
+        # Source guard. '$null++' silently becomes 1 with no StrictMode, so the bug this
+        # replaces was invisible at runtime: the count was always 1 and never reported.
+        $Src = Get-Content -LiteralPath $script:Extension -Raw
+        $Src | Should -Match '\$FlexibleCount = 0' -Because 'an undeclared counter reads as 1 for any number of Flexible sets'
+        $InitIdx = $Src.IndexOf('$FlexibleCount = 0')
+        $IncIdx = $Src.IndexOf('$FlexibleCount++')
+        $InitIdx | Should -BeGreaterThan -1
+        $IncIdx | Should -BeGreaterThan $InitIdx -Because 'the initialiser must precede the increment'
     }
 }

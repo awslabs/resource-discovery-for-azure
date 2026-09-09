@@ -3449,6 +3449,18 @@ if ($null -ne $RunSummaryLocalFile -and (Test-Path -LiteralPath $RunSummaryLocal
 # INSIDE the inner zips, and the shareable Diagnostics log is deliberately a .log so
 # it is not table-ingested. A consumer that discovers ingestible files by extension
 # at the outer root would therefore see this CSV where it previously saw none.
+#
+# CONFIRMED by the repository owner: the root placement is INTENTIONAL and is the
+# point of the file. It is a capacity-planning input, read directly by a human or a
+# planner to size how many nodes are needed per availability zone, so it must be
+# reachable without unpacking an inner per-subscription archive first. It is
+# deliberately NOT part of the Inventory_*.json server-ingestion contract - keeping
+# the zone identity out of the VM collector's output object is exactly why this file
+# exists as a separate CSV. Do not move it inside the inner zips and do not add its
+# columns to Inventory_*.json.
+# The fixed root name is also why a multi-shard merge must extract each shard into
+# its OWN folder: all shards use this same name, so a shared destination overwrites
+# every copy but the last. See the merge sequence in docs/horizontal-sharding.md.
 # Its obfuscation posture is safe either way: Extension/VMPlacement.ps1 sources every
 # identifier column from $Global:SmaResources, which CreateResourceJobs has already
 # obfuscated, so an -Obfuscate run's CSV carries tokens and no new identifier class.

@@ -240,6 +240,11 @@ foreach ($Vm in @($Global:Resources | Where-Object { $_.TYPE -eq 'microsoft.comp
 
 $Rows = @()
 $Unmatched = 0
+# Flexible-orchestration scale sets whose Instances cell is deliberately left EMPTY
+# by the double-counting guard below. Initialised HERE, with the other counters,
+# because it was previously incremented without ever being declared: under no
+# StrictMode '$null++' silently becomes 1, so the count was wrong AND unreported.
+$FlexibleCount = 0
 
 foreach ($Vm in $Vms)
 {
@@ -395,4 +400,15 @@ if ($Unmatched -gt 0)
     # Loud, not silent: an unmatched row means the placement map and the collector
     # output disagreed, which is a real defect rather than a property of the estate.
     Write-Log -Message ("VM placement CSV: {0} row(s) (VM or scale set) could not be matched to the Resource Graph payload; their Zone reads 'Unknown' and their data-disk cells are EMPTY." -f $Unmatched) -Severity 'Error' -ToDebugLog
+}
+
+# The warning the double-counting guard's comment promises. It was missing, so the
+# ONE thing a capacity planner must know about this file - that some scale-set rows
+# contribute nothing to SUM(CPU * Instances) on purpose - was left to be inferred
+# from an empty cell. Without it, an operator reconciling the CSV against the portal
+# sees a shortfall and cannot tell whether it is the guard working correctly or the
+# SKU lookup having failed (which the warning above reports separately).
+if ($FlexibleCount -gt 0)
+{
+    Write-Log -Message ("VM placement CSV: {0} Flexible-orchestration scale set(s) have an EMPTY Instances cell BY DESIGN - their member VMs are first-class resources and are already counted as individual VirtualMachine rows, so counting the set's instances too would double-count that capacity. The rows remain visible for SKU and zone, and their ParentScaleSet column links the member VMs back to them." -f $FlexibleCount) -Severity 'Warning' -ToDebugLog
 }

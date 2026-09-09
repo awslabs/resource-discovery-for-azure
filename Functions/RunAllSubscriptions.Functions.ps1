@@ -65,11 +65,13 @@ function Invoke-RdaSupportLogCollection
             {
                 try
                 {
-                    $LogBlobUri = [System.Uri]$ContainerUri
-                    $LogAccount = $LogBlobUri.Host.Split('.')[0]
-                    $LogPathParts = $LogBlobUri.AbsolutePath.Trim('/').Split('/', 2)
-                    $LogContainer = $LogPathParts[0]
-                    $LogPrefix = if ($LogPathParts.Count -gt 1 -and $LogPathParts[1]) { $LogPathParts[1].Trim('/') + '/' } else { '' }
+                    # Shared parser (see Split-BlobContainerUri, later in this file -
+                    # PowerShell resolves the call at invocation time, so definition
+                    # order does not matter once the file is dot-sourced).
+                    $LogParts = Split-BlobContainerUri -Uri $ContainerUri
+                    $LogAccount = $LogParts.Account
+                    $LogContainer = $LogParts.Container
+                    $LogPrefix = $LogParts.Prefix
                     $LogShardTag = if ($ShardCount -gt 1) { 'shard-{0}of{1}-' -f $ShardIndex, $ShardCount } else { '' }
                     $LogBlobName = '{0}{1}{2}' -f $LogPrefix, $LogShardTag, (Split-Path -Path $SupportBundle -Leaf)
                     Write-Host ("Uploading support logs to blob: {0} / {1} / {2}" -f $LogAccount, $LogContainer, $LogBlobName) -ForegroundColor Cyan

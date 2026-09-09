@@ -1027,3 +1027,169 @@ Describe 'Report-archive loss detection: exit code' {
         $BannerIdx | Should -BeLessThan $StopIdx
     }
 }
+
+# ---------------------------------------------------------------------------
+# Blob container URI parsing: single owner
+#
+# The wrapper used to parse -UploadToBlobContainerUri with its own inline copies of
+# the [System.Uri] / Host.Split('.') / AbsolutePath.Trim('/').Split('/', 2)
+# sequence, character-for-character identical to Split-BlobContainerUri, which it
+# already calls for -StateBlobContainerUri. Identical copies of a parser are how the
+# upload path and the state path come to disagree about what a container URL means -
+# and the disagreement would surface as blobs written to the wrong prefix, not as an
+# error.
+#
+# SCOPE, stated precisely: this guards Run-AllSubscriptions.ps1 and
+# Functions/RunAllSubscriptions.Functions.ps1 only. A fourth copy still lives in
+# deploy/Test-NodeReadiness.ps1, left deliberately because that script is a
+# self-contained in-pod preflight that dot-sources nothing, so it cannot reach the
+# shared helper without acquiring a dependency it is designed not to have. The
+# guard is therefore not a repo-wide "exactly one copy" claim.
+#
+# A behavioural test cannot reach those blocks (they sit inline in the wrapper's
+# upload sections, behind a live blob account), so this guards the SOURCE, the same
+# way the report-archive guards above do.
+# ---------------------------------------------------------------------------
+Describe 'Blob container URI parsing has one owner in the wrapper and its shared functions' {
+
+    BeforeAll {
+        $script:UriRepoRoot = Split-Path $PSScriptRoot -Parent
+
+        # CODE ONLY - every comment token is removed before matching. A guard that
+        # reads comments traps itself: the comments explaining this very consolidation
+        # name the patterns being banned, so a later clarity edit to one of them would
+        # fail the guard with a completely misleading message.
+        #
+        # Tokenized via the PowerShell parser rather than a '^\s*#' line filter,
+        # because a line filter misses a TRAILING comment on a line of real code and
+        # misses the interior lines of a <# ... #> block, both of which would
+        # reintroduce the self-trap. Fails LOUD on an unparseable or empty result: a
+        # silently empty string would make every 'Should -Not -Match' ban below pass
+        # vacuously, which is the worst possible failure mode for a guard.
+        function Get-CodeOnly
+        {
+            param([string]$Path)
+
+            if (-not (Test-Path -LiteralPath $Path)) { throw "Get-CodeOnly: source file not found: $Path" }
+
+            $Tokens = $null
+            $ParseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$ParseErrors)
+            if ($ParseErrors -and $ParseErrors.Count -gt 0) { throw "Get-CodeOnly: $Path does not parse: $($ParseErrors[0].Message)" }
+
+            # Excise the comment tokens' character ranges from the RAW text rather than
+            # re-joining the code tokens. Re-joining would insert or drop whitespace and
+            # break the very patterns being searched for - joining with a space turns
+            # "Host.Split(" into "Host . Split (", joining with nothing welds
+            # "function Split-BlobContainerUri" into one word. Removing extents leaves
+            # every code character exactly where it was. Walk backwards so each removal
+            # cannot invalidate the offsets of the ones not yet processed.
+            $Raw = Get-Content -LiteralPath $Path -Raw
+            $Comments = @($Tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)
+            $Builder = [System.Text.StringBuilder]::new($Raw)
+            foreach ($C in $Comments)
+            {
+                $Start = $C.Extent.StartOffset
+                $Length = $C.Extent.EndOffset - $Start
+                if ($Length -gt 0 -and $Start -ge 0 -and ($Start + $Length) -le $Builder.Length)
+                {
+                    $null = $Builder.Remove($Start, $Length)
+                }
+            }
+            $Code = $Builder.ToString()
+
+            if ([string]::IsNullOrWhiteSpace($Code)) { throw "Get-CodeOnly: produced no code text for $Path" }
+            return $Code
+        }
+
+        $script:UriWrapperSrc = Get-CodeOnly -Path (Join-Path $script:UriRepoRoot 'Run-AllSubscriptions.ps1')
+        $script:UriFunctionsSrc = Get-CodeOnly -Path (Join-Path $script:UriRepoRoot 'Functions/RunAllSubscriptions.Functions.ps1')
+        # The stream worker dot-sources the same functions file, so unlike
+        # deploy/Test-NodeReadiness.ps1 it CAN reach the shared helper - and it already
+        # calls it. It is therefore in scope for the ban, not exempt from it.
+        $script:UriStreamSrc = Get-CodeOnly -Path (Join-Path $script:UriRepoRoot 'Run-AllSubscriptions.Stream.ps1')
+    }
+
+    It 'the comment-stripping helper removes every comment form and keeps real code' {
+        # Without this, a bug in Get-CodeOnly would make every guard below pass
+        # vacuously by stripping too much - or trap itself by stripping nothing.
+        # All three comment forms are covered because a line filter would only have
+        # caught the first.
+        $Sample = @'
+# Host.Split('.') on its own line
+$a = 1   # Host.Split('.') trailing on a code line
+<#
+   Host.Split('.') inside a block comment
+#>
+$b = 2
+'@
+        $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-codeonly-{0}.ps1' -f [guid]::NewGuid().ToString('N'))
+        try
+        {
+            Set-Content -LiteralPath $Tmp -Value $Sample -Encoding utf8
+            $Code = Get-CodeOnly -Path $Tmp
+
+            $Code | Should -Not -Match 'Host\.Split' -Because 'whole-line, trailing AND block comments must all be stripped'
+            $Code | Should -Match '\$a' -Because 'real code must survive stripping'
+            $Code | Should -Match '\$b' -Because 'code after a block comment must survive stripping'
+        }
+        finally
+        {
+            if (Test-Path -LiteralPath $Tmp) { Remove-Item -LiteralPath $Tmp -Force }
+        }
+    }
+
+    It 'the comment-stripping helper FAILS LOUD rather than returning an empty string' {
+        # An empty result would satisfy every 'Should -Not -Match' ban below without
+        # checking anything, so it must throw instead.
+        { Get-CodeOnly -Path (Join-Path ([System.IO.Path]::GetTempPath()) 'rda-definitely-not-here.ps1') } |
+            Should -Throw -Because 'a missing source file must not silently disable the guard'
+    }
+
+    # These two patterns are the account extraction and the container/prefix split
+    # specifically. A bare .AbsolutePath.Trim('/') is NOT matched: the wrapper's
+    # -UploadToBlobContainerUri / -StateBlobContainerUri preflight legitimately
+    # uses it to test that the URL carries any path at all, which is a validation,
+    # not a parse.
+    It 'neither the wrapper nor the stream worker re-derives a storage account name from a URI host' {
+        $script:UriWrapperSrc | Should -Not -Match 'Host\.Split\(' -Because 'the wrapper must call Split-BlobContainerUri instead of parsing a container URL itself'
+        $script:UriStreamSrc | Should -Not -Match 'Host\.Split\(' -Because 'the stream worker dot-sources the helper and must use it'
+    }
+
+    It 'neither the wrapper nor the stream worker re-derives a container and prefix from a URI path' {
+        $script:UriWrapperSrc | Should -Not -Match "AbsolutePath\.Trim\('/'\)\.Split" -Because 'the container/prefix split belongs to Split-BlobContainerUri'
+        $script:UriStreamSrc | Should -Not -Match "AbsolutePath\.Trim\('/'\)\.Split" -Because 'the stream worker must not carry its own copy either'
+    }
+
+    It 'the shared functions file parses a container URL in exactly ONE place' {
+        # The support-log upload used to carry its own copy of this parse.
+        @([regex]::Matches($script:UriFunctionsSrc, 'Host\.Split\(')).Count | Should -Be 1 -Because 'only Split-BlobContainerUri may extract the account'
+        @([regex]::Matches($script:UriFunctionsSrc, "AbsolutePath\.Trim\('/'\)\.Split")).Count | Should -Be 1 -Because 'only Split-BlobContainerUri may split container from prefix'
+    }
+
+    It 'the shared helper still owns both halves of the parse' {
+        $script:UriFunctionsSrc | Should -Match 'function Split-BlobContainerUri'
+        $script:UriFunctionsSrc | Should -Match 'Host\.Split\('
+        $script:UriFunctionsSrc | Should -Match "AbsolutePath\.Trim\('/'\)\.Split"
+    }
+
+    It 'the wrapper calls the shared helper at exactly the three places it needs container parts' {
+        # Exactly three, matching the sibling assertion's exact count rather than a
+        # weaker "at least": the -StateBlobContainerUri setup, the upload WRITE PROBE,
+        # and the real upload. The probe and the upload must agree, or the probe would
+        # confirm access to a location the upload does not use. A fourth call site is
+        # not automatically wrong - but it should be a deliberate edit to this number,
+        # not something that slides in unnoticed.
+        $Calls = @([regex]::Matches($script:UriWrapperSrc, 'Split-BlobContainerUri\s+-Uri'))
+
+        $Calls.Count | Should -Be 3 -Because 'the state path, the upload write probe and the upload itself must all go through the one parser'
+    }
+
+    # NOTE: this Describe deliberately contains no behavioural equivalence test.
+    # An earlier draft had one that re-implemented the removed inline expressions as
+    # its "expected" oracle - but those expressions are character-identical to
+    # Split-BlobContainerUri's body, so it compared an expression with itself and
+    # could not fail for any input. Split-BlobContainerUri's behaviour is pinned
+    # against LITERAL expected values in Tests/BlobStateReconciliation.Tests.ps1,
+    # which is the right owner for it. This Describe guards structure only.
+}

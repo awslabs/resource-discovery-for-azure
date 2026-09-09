@@ -1628,11 +1628,13 @@ if ($UploadToBlobContainerUri)
     $BlobProbeWritten = $false
     try
     {
-        $BlobProbeUri = [System.Uri]$UploadToBlobContainerUri
-        $BlobProbeAccount = $BlobProbeUri.Host.Split('.')[0]
-        $BlobProbePathParts = $BlobProbeUri.AbsolutePath.Trim('/').Split('/', 2)
-        $BlobProbeContainer = $BlobProbePathParts[0]
-        $BlobProbePrefix = if ($BlobProbePathParts.Count -gt 1 -and $BlobProbePathParts[1]) { $BlobProbePathParts[1].Trim('/') + '/' } else { '' }
+        # Shared parser (see Split-BlobContainerUri). The write probe MUST resolve
+        # the account/container/prefix the same way the real upload does, or it
+        # would confirm access to a different location than the one used later.
+        $BlobProbeParts = Split-BlobContainerUri -Uri $UploadToBlobContainerUri
+        $BlobProbeAccount = $BlobProbeParts.Account
+        $BlobProbeContainer = $BlobProbeParts.Container
+        $BlobProbePrefix = $BlobProbeParts.Prefix
 
         $BlobProbeName = '{0}_rda-upload-probe/{1}.txt' -f $BlobProbePrefix, ([guid]::NewGuid().ToString('N'))
         $BlobProbeFile = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-upload-probe-{0}.txt' -f ([guid]::NewGuid().ToString('N')))
@@ -3665,11 +3667,21 @@ if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -Lite
     try
     {
         # Expect https://<account>.blob.core.windows.net/<container>[/<prefix>].
-        $BlobUri = [System.Uri]$UploadToBlobContainerUri
-        $StorageAccountName = $BlobUri.Host.Split('.')[0]
-        $PathParts = $BlobUri.AbsolutePath.Trim('/').Split('/', 2)
-        $ContainerName = $PathParts[0]
-        $BlobPrefix = if ($PathParts.Count -gt 1 -and $PathParts[1]) { $PathParts[1].Trim('/') + '/' } else { '' }
+        # Parsed by the shared helper rather than a hand-copy of it. Three copies of
+        # that parse existed in this repo and were character-for-character identical,
+        # which is exactly how they would have drifted apart on the next change to any
+        # one of them; all three now call the helper. A fourth copy remains in
+        # deploy/Test-NodeReadiness.ps1, left deliberately because that script is a
+        # self-contained in-pod preflight that dot-sources nothing.
+        $BlobParts = Split-BlobContainerUri -Uri $UploadToBlobContainerUri
+        $StorageAccountName = $BlobParts.Account
+        $ContainerName = $BlobParts.Container
+        $BlobPrefix = $BlobParts.Prefix
+        # Retained deliberately after the parse moved into the helper: the Account half
+        # is still REACHABLE. A URL like https://.blob.core.windows.net/<container>
+        # satisfies the earlier -UploadToBlobContainerUri preflight (https scheme, host
+        # matches '\.blob\.', non-empty path) yet yields an EMPTY account, which would
+        # otherwise reach New-AzStorageContext as a blank name.
         if ([string]::IsNullOrWhiteSpace($StorageAccountName) -or [string]::IsNullOrWhiteSpace($ContainerName))
         {
             throw "Could not parse '<account>' and '<container>' from -UploadToBlobContainerUri '$UploadToBlobContainerUri' (expected https://<account>.blob.core.windows.net/<container>)."

@@ -296,3 +296,194 @@ function Test-ReportArchiveUsable
         return $false
     }
 }
+
+
+# Resolve the ONE directory this run writes everything under, and guarantee it is
+# actually usable before anything derives a path from it.
+#
+# WHY THIS IS SHARED. The root used to be computed inline as
+#   if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+# in SIX separate places across Run-AllSubscriptions.ps1 and ResourceInventory.ps1.
+# The wrapper does NOT tell the inner script where it chose - the inner script
+# derives its own - so the two agreed only because the arithmetic was duplicated
+# identically. Any per-site divergence (a fallback applied in one place but not
+# another) would leave the wrapper consolidating from a directory the inner script
+# never wrote to. One function removes that class of bug by construction.
+#
+# WHY A FALLBACK AT ALL. The previous behaviour on a machine where that path is
+# not writable was: creation fails, the failure is swallowed to Write-Verbose
+# (invisible by default), and the run continues and fails later somewhere
+# confusing. Verified failure modes:
+#   - $HOME unset or empty (daemon, container, `sudo -E`, some CI runners). The
+#     Unix branch then produced the literal '/InventoryReports' - the FILESYSTEM
+#     ROOT - which a normal user cannot create.
+#   - A managed macOS/Windows estate where MDM/DLP blocks writes to that path.
+#   - Windows C:\ root writes refused without elevation.
+# The tool should still produce a report in those cases rather than demand the
+# operator diagnose a path problem, so an unwritable preferred location degrades
+# to the OS temp directory with a LOUD warning naming where the output went.
+#
+# EXPLICIT REQUESTS ARE NEVER SILENTLY REDIRECTED. When the caller passed
+# -OutputDirectory they named a location on purpose, very often a mount or share
+# they intend to collect from. Quietly writing somewhere else would be worse than
+# failing, so an unusable explicit path returns Ok=$false and the caller hard-fails.
+# Only the DEFAULT location is allowed to degrade.
+#
+# PROCESS AGREEMENT. The chosen path is pinned into $env:RDA_INVENTORY_ROOT, which
+# child processes inherit. -ParallelStreams launches stream workers as separate
+# pwsh processes, so this is what makes a fallback chosen by the parent bind for
+# every worker instead of each one re-probing and possibly deciding differently.
+# It is an internal implementation detail, NOT a supported operator knob, and it is
+# deliberately not a script parameter: adding one would change the wrapper's
+# parameter surface and its passthrough key sets.
+#
+# Returns a result object rather than throwing, because the two callers hard-fail
+# differently (the wrapper calls Exit-Wrapper, the inner script uses exit 1) and
+# because a bare throw at script scope is SWALLOWED under this project's normal
+# $ErrorActionPreference = 'SilentlyContinue'.
+#   Ok         - $true when Path is created and proven writable
+#   Path       - the resolved root (no trailing separator)
+#   Source     - 'Explicit' | 'Inherited' | 'Default' | 'Fallback'
+#   IsFallback - $true when the preferred location was unusable
+#   Message    - operator-facing detail; caller decides the severity
+function Get-RdaInventoryRoot
+{
+    [CmdletBinding()]
+    param(
+        # An operator-supplied -OutputDirectory. Never silently redirected.
+        [string]$Requested,
+
+        # Ignore $env:RDA_INVENTORY_ROOT. Used by the process that ESTABLISHES the
+        # root so it re-probes rather than trusting a value left over in its own
+        # environment from an earlier run in the same shell.
+        [switch]$NoInherit
+    )
+
+    # Create + prove writable in one step. A Test-Path/permission inspection is not
+    # enough: DLP products, read-only mounts and ACL edge cases all present as a
+    # directory that exists and looks fine until something writes to it. The probe
+    # file is removed again, and a cleanup failure does not fail the probe - the
+    # write itself already succeeded, which is the thing being established.
+    $TestRoot = {
+        param([string]$Candidate)
+
+        if ([string]::IsNullOrWhiteSpace($Candidate)) { return 'empty path' }
+
+        try
+        {
+            if (-not (Test-Path -LiteralPath $Candidate -PathType Container))
+            {
+                New-Item -Path $Candidate -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            }
+        }
+        catch
+        {
+            return ("cannot create directory: {0}" -f $_.Exception.Message)
+        }
+
+        $Probe = Join-Path $Candidate (".rda-root-probe-{0}.tmp" -f ([guid]::NewGuid()))
+        try
+        {
+            Set-Content -LiteralPath $Probe -Value 'probe' -Encoding utf8 -ErrorAction Stop
+        }
+        catch
+        {
+            return ("directory exists but is not writable: {0}" -f $_.Exception.Message)
+        }
+        finally
+        {
+            try { if (Test-Path -LiteralPath $Probe) { Remove-Item -LiteralPath $Probe -Force -ErrorAction Stop } }
+            catch { Write-Verbose ("root probe cleanup failed at {0}: {1}" -f $Probe, $_.Exception.Message) }
+        }
+
+        return $null
+    }
+
+    $Trim = { param([string]$P) $P.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
+
+    # 1. Explicit -OutputDirectory. Pass or fail, never redirect.
+    if (-not [string]::IsNullOrWhiteSpace($Requested))
+    {
+        $Explicit = & $Trim $Requested
+        $Err = & $TestRoot $Explicit
+        if ($null -eq $Err)
+        {
+            return [pscustomobject]@{ Ok = $true; Path = $Explicit; Source = 'Explicit'; IsFallback = $false
+                Message                     = ("Output directory: {0} (from -OutputDirectory)" -f $Explicit)
+            }
+        }
+        return [pscustomobject]@{ Ok = $false; Path = $Explicit; Source = 'Explicit'; IsFallback = $false
+            Message                     = ("-OutputDirectory '{0}' is not usable: {1}. Choose a writable path, or omit -OutputDirectory to use the default location." -f $Explicit, $Err)
+        }
+    }
+
+    # 2. A root already established by a parent process in this run.
+    if (-not $NoInherit -and -not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT))
+    {
+        $Inherited = & $Trim $env:RDA_INVENTORY_ROOT
+        $Err = & $TestRoot $Inherited
+        if ($null -eq $Err)
+        {
+            return [pscustomobject]@{ Ok = $true; Path = $Inherited; Source = 'Inherited'; IsFallback = $false
+                Message                     = ("Output directory: {0}" -f $Inherited)
+            }
+        }
+        # Fall through and re-probe rather than failing: a stale value from an
+        # earlier shell session must not break this run.
+        Write-Verbose ("Inherited RDA_INVENTORY_ROOT '{0}' unusable ({1}); re-probing." -f $Inherited, $Err)
+    }
+
+    # 3. Preferred default, then the temp fallback. $HOME is only a candidate when
+    # it is actually set - otherwise "$HOME/InventoryReports" degrades to the
+    # filesystem root, which is the exact silent failure this ordering prevents.
+    $Candidates = @()
+    if ($PSVersionTable.Platform -eq 'Unix')
+    {
+        if (-not [string]::IsNullOrWhiteSpace($HOME)) { $Candidates += (Join-Path $HOME 'InventoryReports') }
+    }
+    else
+    {
+        $WinBase = if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) { $env:SystemDrive + '\' } else { 'C:\' }
+        $Candidates += (Join-Path $WinBase 'InventoryReports')
+        # A locked-down estate frequently refuses the drive root but allows the
+        # user profile, so try that before giving up on a persistent location.
+        if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $Candidates += (Join-Path $env:USERPROFILE 'InventoryReports') }
+    }
+    $Candidates += (Join-Path ([IO.Path]::GetTempPath()) 'InventoryReports')
+
+    $Attempts = @()
+    $Index = 0
+    foreach ($Candidate in $Candidates)
+    {
+        $Clean = & $Trim $Candidate
+        $Err = & $TestRoot $Clean
+        if ($null -eq $Err)
+        {
+            $IsFallback = ($Index -gt 0)
+            $Msg = if ($IsFallback)
+            {
+                ("The default output location was not usable, so this run is writing to {0} instead. Tried: {1}. Pass -OutputDirectory to choose a specific location." -f $Clean, ($Attempts -join '; '))
+            }
+            else
+            {
+                ("Output directory: {0}" -f $Clean)
+            }
+            return [pscustomobject]@{ Ok = $true; Path = $Clean; Source = $(if ($IsFallback) { 'Fallback' } else { 'Default' }); IsFallback = $IsFallback; Message = $Msg }
+        }
+        $Attempts += ("{0} ({1})" -f $Clean, $Err)
+        $Index++
+    }
+
+    return [pscustomobject]@{ Ok = $false; Path = $null; Source = 'Default'; IsFallback = $false
+        Message                     = ("No writable output directory could be established. Tried: {0}. Pass -OutputDirectory with a writable path." -f ($Attempts -join '; '))
+    }
+}
+
+# Pin the resolved root so child processes (the -ParallelStreams stream workers)
+# use the SAME directory as their parent instead of re-probing independently.
+function Set-RdaInventoryRootForChildren
+{
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $env:RDA_INVENTORY_ROOT = $Path
+}

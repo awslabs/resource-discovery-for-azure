@@ -586,12 +586,31 @@ $Global:CollectorFailures = @()
 # Inventory root (used for resume state, consolidated output, and the wrapper
 # transcript). Computed up front so the transcript can be started before
 # anything else writes to the host.
-$InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-if (-not (Test-Path -Path $InventoryRoot -PathType Container))
+# Get-RdaInventoryRoot (Functions/Common.Functions.ps1) is the SINGLE resolver for
+# this path. It creates the directory, PROVES it writable with a real write, and
+# degrades to a writable fallback (naming it loudly) rather than letting the run
+# continue toward a directory it cannot use. The previous inline computation
+# swallowed a creation failure to Write-Verbose, so on a machine where the path was
+# not writable the run carried on and failed later somewhere unrelated.
+#
+# -NoInherit because this is the process that ESTABLISHES the root for the whole
+# run: a stale RDA_INVENTORY_ROOT left in the operator's shell from an earlier run
+# must not be trusted. The resolved value is then pinned for children, so the inner
+# script and every -ParallelStreams worker write under the SAME root instead of
+# each re-deriving it - which is what keeps the consolidation step below looking in
+# the directory the subscriptions actually wrote to.
+$RootResult = Get-RdaInventoryRoot -NoInherit
+if (-not $RootResult.Ok)
 {
-    try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
-    catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
+    Write-Host ("ERROR: {0}" -f $RootResult.Message) -ForegroundColor Red
+    Exit-Wrapper -Code 1
 }
+$InventoryRoot = $RootResult.Path
+if ($RootResult.IsFallback)
+{
+    Write-Host ("WARNING: {0}" -f $RootResult.Message) -ForegroundColor Yellow
+}
+Set-RdaInventoryRootForChildren -Path $InventoryRoot
 
 # Wrapper-level transcript.
 #
@@ -1957,10 +1976,14 @@ if ($ParallelStreams -le 1)
 
             try
             {
-                $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-                if (Test-Path $InventoryRoot)
+                # Read the root this run actually RESOLVED (pinned by the resolver at
+                # startup) instead of recomputing "$HOME/InventoryReports" here. When
+                # the preferred location was unwritable and the run fell back, the old
+                # inline copy measured free space on a directory this run never used.
+                $DiagRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
+                if (-not [string]::IsNullOrWhiteSpace($DiagRoot) -and (Test-Path $DiagRoot))
                 {
-                    $RootDrive = (Get-Item $InventoryRoot).PSDrive
+                    $RootDrive = (Get-Item $DiagRoot).PSDrive
                     if ($RootDrive)
                     {
                         $DiagLines += "Free disk on $($RootDrive.Name): (MB): $([math]::Round($RootDrive.Free / 1MB, 1))"
@@ -1974,13 +1997,21 @@ if ($ParallelStreams -le 1)
             # Write to a per-run failures file so we don't lose the detail when many subs fail.
             if ($null -eq $DiagFile)
             {
-                $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-                if (-not (Test-Path $InventoryRoot))
+                # Same reason as the disk snapshot above: use the RESOLVED root so the
+                # failures log lands beside the run's other artefacts rather than in a
+                # directory the run fell back away from (or could not create at all).
+                $FailRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
+                if ([string]::IsNullOrWhiteSpace($FailRoot))
                 {
-                    try { New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null }
-                    catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
+                    $Resolved = Get-RdaInventoryRoot
+                    if ($Resolved.Ok) { $FailRoot = $Resolved.Path }
                 }
-                $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
+                if (-not [string]::IsNullOrWhiteSpace($FailRoot) -and -not (Test-Path $FailRoot))
+                {
+                    try { New-Item -ItemType Directory -Path $FailRoot -Force -ErrorAction Stop | Out-Null }
+                    catch { Write-Host ("WARNING: could not create {0} for the failures log: {1}" -f $FailRoot, $_.Exception.Message) -ForegroundColor Yellow }
+                }
+                $DiagFile = Join-Path $FailRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
             }
             try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
             catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }

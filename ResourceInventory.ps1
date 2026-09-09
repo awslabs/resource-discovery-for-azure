@@ -410,18 +410,31 @@ Function RunInventorySetup()
         $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $ProcDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
 
-        # Base output root depends only on the (already cached) platform, so
-        # recompute the per-sub default path from $Global:PlatformOS without
-        # re-detecting. These strings are byte-for-byte identical to the previous
-        # per-branch assignments so downstream glob/zip path handling is unchanged.
-        if ($Global:PlatformOS -eq 'Azure CloudShell' -or $Global:PlatformOS -eq 'PowerShell Unix')
+        # Base output root comes from the SINGLE resolver in
+        # Functions/Common.Functions.ps1 rather than an inline "$HOME/InventoryReports".
+        # By this point the root has already been established and pinned - by this
+        # script's own pre-flight on a standalone run, or by Run-AllSubscriptions.ps1
+        # under -RunAllSubs - so this call resolves to the SAME directory that was
+        # validated there instead of independently re-deriving it. That is what keeps
+        # the wrapper's consolidation step and the inner script's output in agreement
+        # when the preferred location was unwritable and a fallback was used.
+        #
+        # Still ends with a trailing separator: $Global:DefaultPath is string-
+        # concatenated with file names throughout this script (e.g.
+        # $DefaultPath + "Inventory_" + ...), and the parent-directory logic for the
+        # error/debug logs does Split-Path on it. Shape is unchanged from the
+        # previous per-branch assignments.
+        $RootForRun = Get-RdaInventoryRoot
+        if (-not $RootForRun.Ok)
         {
-            $DefaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
+            Write-Log -Message $RootForRun.Message -Severity 'Error'
+            Exit
         }
-        else
+        if ($RootForRun.IsFallback)
         {
-            $DefaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
+            Write-Log -Message $RootForRun.Message -Severity 'Warning'
         }
+        $DefaultOutputDir = (Join-Path $RootForRun.Path $Global:FolderName) + [IO.Path]::DirectorySeparatorChar
 
         if ($OutputDirectory)
         {
@@ -644,7 +657,22 @@ Function RunInventorySetup()
 
         if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false)
         {
-            New-Item -Type Directory -Force -Path $DefaultPath | Out-Null
+            # -ErrorAction Stop + catch. Without it this inherited the run's global
+            # 'SilentlyContinue', so a failure to create the report folder was
+            # invisible and every subsequent write into it failed one by one with no
+            # statement of the actual cause. The parent root was already created and
+            # write-probed by Get-RdaInventoryRoot, so reaching this is unusual - but
+            # it must name the problem rather than produce a run with no output.
+            try
+            {
+                New-Item -Type Directory -Force -Path $DefaultPath -ErrorAction Stop | Out-Null
+            }
+            catch
+            {
+                Write-Log -Message ("Could not create the report folder {0}: {1}" -f $DefaultPath, $_.Exception.Message) -Severity 'Error'
+                Write-Log -Message ("No report can be written for this run. Verify the location is writable, or pass -OutputDirectory with a writable path.") -Severity 'Error'
+                Exit
+            }
         }
 
         # Session init is complete once the first subscription's setup has run.
@@ -2324,7 +2352,12 @@ function FinalizeOutputs
 # catch. Intentional differences vs the wrapper copy:
 #   - This copy honors -OutputDirectory if the caller passed one (the wrapper
 #     does not expose or forward that parameter).
-#   - This copy throws on hard-fail; the wrapper's copy calls Exit-Wrapper.
+#   - This copy hard-fails with `exit 1`; the wrapper's copy calls Exit-Wrapper
+#     (which also stops its transcript and collects support logs). Both are
+#     non-zero exits. NEITHER may use a bare `throw` at script scope: this script
+#     runs with $ErrorActionPreference = 'SilentlyContinue' for any non-Debug run,
+#     under which such a throw is DISCARDED - the run printed "Pre-flight checks
+#     passed." and continued to authentication with exit code 0.
 #   - This copy is gated on -not $RunAllSubs to avoid duplicate execution
 #     when invoked by the wrapper.
 if (-not $RunAllSubs.IsPresent)
@@ -2335,24 +2368,28 @@ if (-not $RunAllSubs.IsPresent)
     # gate; we Resolve-Path here defensively so a relative path is checked at
     # the right location, and fall back to the raw value if it does not yet
     # resolve (the write probe below will surface the underlying error).
-    $PreFlightInventoryRoot = if ($OutputDirectory)
+    # Get-RdaInventoryRoot (Functions/Common.Functions.ps1) is the SINGLE resolver
+    # for this path. It creates the directory, PROVES it writable, and for the
+    # DEFAULT location degrades to a writable fallback rather than leaving the run
+    # to fail later - which is what happened when this was six inline copies of
+    # "$HOME/InventoryReports" whose creation failure went to Write-Verbose.
+    # An explicit -OutputDirectory is never redirected; it fails here instead.
+    # -NoInherit because this process ESTABLISHES the root for a standalone run,
+    # so a stale pin left in this shell's environment must not be trusted.
+    $RootResult = Get-RdaInventoryRoot -Requested $OutputDirectory -NoInherit
+    if (-not $RootResult.Ok)
     {
-        try { (Resolve-Path $OutputDirectory -ErrorAction Stop).Path }
-        catch { $OutputDirectory }
+        Write-Host ("ERROR: {0}" -f $RootResult.Message) -ForegroundColor Red
+        exit 1
     }
-    elseif ($PSVersionTable.Platform -eq 'Unix')
+    $PreFlightInventoryRoot = $RootResult.Path
+    if ($RootResult.IsFallback)
     {
-        "$HOME/InventoryReports"
+        Write-Host ("WARNING: {0}" -f $RootResult.Message) -ForegroundColor Yellow
     }
-    else
-    {
-        "C:\InventoryReports"
-    }
-    if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container))
-    {
-        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null }
-        catch { Write-Verbose ("PreFlightInventoryRoot create failed at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) }
-    }
+    # Pin it so the report folder derived in Variables() lands under the SAME root
+    # this pre-flight just validated, instead of re-deriving it from $HOME.
+    Set-RdaInventoryRootForChildren -Path $PreFlightInventoryRoot
 
     Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
 
@@ -2447,7 +2484,15 @@ if (-not $RunAllSubs.IsPresent)
             $FreeMB = [math]::Round($Drive.Free / 1MB, 0)
             if ($FreeMB -lt 100)
             {
-                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB)
+                # exit 1, NOT throw. $ErrorActionPreference is 'SilentlyContinue'
+                # for a normal run, under which a bare throw at script scope is
+                # SWALLOWED - the run printed "Pre-flight checks passed." and
+                # carried on to authentication with the gate having decided to
+                # stop it. Matches the -Service / -ObfuscationDictionary gates
+                # above, and the wrapper's copy of this check, which calls
+                # Exit-Wrapper -Code 1.
+                Write-Host ("ERROR: Free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Red
+                exit 1
             }
             elseif ($FreeMB -lt 500)
             {
@@ -2461,7 +2506,10 @@ if (-not $RunAllSubs.IsPresent)
     }
     catch
     {
-        if ($_.Exception.Message -match '^Pre-flight:') { throw }
+        # The low-space branch above now exits directly, so nothing reaching this
+        # catch is a deliberate hard-fail - it is only a failure to MEASURE, which
+        # stays a warning (an unreadable PSDrive.Free must not block a run that
+        # would otherwise work).
         Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
     }
 
@@ -2482,7 +2530,20 @@ if (-not $RunAllSubs.IsPresent)
     {
         try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
-        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+        # exit 1, NOT throw - see the disk-space gate above. A bare throw here was
+        # discarded under $ErrorActionPreference = 'SilentlyContinue', so an
+        # unwritable output directory printed "Pre-flight checks passed." and the
+        # run continued to authentication and failed later, with exit code 0.
+        #
+        # Reaching this at all is now unusual: Get-RdaInventoryRoot has already
+        # created and write-probed $PreFlightInventoryRoot, falling back to a
+        # writable location for the DEFAULT path. So this fires when an explicit
+        # -OutputDirectory is unusable, or when the directory became unwritable
+        # between that resolution and here.
+        Write-Host ("ERROR: cannot write to {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Red
+        Write-Host "  This usually means a readonly directory, denied permissions, an antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Yellow
+        Write-Host "  Verify the directory is writable and re-run, or pass -OutputDirectory with a writable path." -ForegroundColor Yellow
+        exit 1
     }
 
     Write-Host "Pre-flight checks passed." -ForegroundColor Green

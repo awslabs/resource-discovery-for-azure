@@ -68,14 +68,21 @@ BeforeAll {
             [string[]]$FailWhenId = @()
         )
         # Seed EXACTLY as the wrapper does (Run-AllSubscriptions.ps1): read the
-        # state object once, then derive the completed list with the same
-        # @(if...else @()) idiom. The outer @(...) is what stops a fresh-run
-        # empty result collapsing to $null (which would turn the first += into
-        # string concatenation). Going through Get-ResumeStateObject - not the
-        # already-@()-wrapping Get-CompletedSubscriptionIds - keeps this harness
-        # faithful to the production seed shape.
+        # state object ONCE via Get-ResumeStateObject, then project the completed
+        # list by passing that already-read state to Get-CompletedSubscriptionIds.
+        #
+        # This harness previously reproduced a hand-rolled
+        # `@(if ($SeedState -and ...) { ... } else { @() })` expression, because that
+        # is what the wrapper did. The wrapper now projects through the reader, so
+        # this mirrors the reader call instead - the point of the harness is to be
+        # faithful to the production seed shape, whatever that shape is.
+        #
+        # The outer @(...) is retained exactly as the wrapper retains it: the reader
+        # already returns @(), so the $null-collapse that turns the first += into
+        # string concatenation is prevented by the callee, but the wrapper still
+        # wraps and the source guard below still asserts it does.
         $SeedState = Get-ResumeStateObject -Path $StateFile -Tenant $script:Tenant
-        $CompletedIds = @(if ($SeedState -and $SeedState.CompletedSubscriptionIds) { $SeedState.CompletedSubscriptionIds } else { @() })
+        $CompletedIds = @(Get-CompletedSubscriptionIds -Path $StateFile -Tenant $script:Tenant -State $SeedState)
         $Processed = @()
         $Skipped = @()
         foreach ($Id in $SubIds)
@@ -123,14 +130,52 @@ Describe 'Sequential -Resume cycle' {
         # Run-AllSubscriptions.ps1 and asserts it keeps its outer @(...) wrapper -
         # the exact thing whose removal lets an empty fresh-run result collapse
         # to $null and turns the first += into string concatenation.
+        #
+        # The seed now projects through Get-CompletedSubscriptionIds rather than a
+        # hand-rolled @(if ... else @()), which is strictly safer because the reader
+        # returns @() by construction. The @(...) at the call site is still required
+        # here: it is the guarantee that does not depend on the callee's internals.
         $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
         Test-Path $WrapperPath | Should -BeTrue
-        $SeedLines = @(Get-Content -Path $WrapperPath |
-                Where-Object { $_ -notmatch '^\s*#' } |
-                Where-Object { $_ -match '\$CompletedIds\s*=\s*@\(\s*if' })
-        # Exactly one such seed line: 0 means the @(...) wrapper was dropped
-        # (the $null-collapse regression); >1 means a stray/duplicate seed slipped in.
-        $SeedLines.Count | Should -Be 1 -Because 'the completed-ids seed must stay wrapped in @(...) so an empty start is a real array, not $null'
+        $CodeLines = @(Get-Content -Path $WrapperPath | Where-Object { $_ -notmatch '^\s*#' })
+
+        # The SEED specifically - projected through the reader, handed the state that
+        # was already read. Exactly one: 0 means it was replaced by something else,
+        # >1 means a stray/duplicate seed slipped in.
+        $SeedLines = @($CodeLines | Where-Object { $_ -match '\$CompletedIds\s*=\s*@\(Get-CompletedSubscriptionIds' })
+        $SeedLines.Count | Should -Be 1 -Because 'the completed-ids seed must project through the shared reader'
+        $SeedLines[0] | Should -Match '-State\s+\$SeedState' -Because 'the reader must be handed the already-read state, or the blob is fetched twice'
+
+        # EVERY assignment to $CompletedIds must keep the @(...) wrapper, not just the
+        # seed. The wrapper is what stops an empty result collapsing to $null; the
+        # later fold-ins (stranded per-stream state, per-stream results) are assignments
+        # too and carry the same hazard. Asserting all of them is stronger than the
+        # single-line check this guard started as.
+        $Assignments = @($CodeLines | Where-Object { $_ -match '\$CompletedIds\s*=[^=]' })
+        $Assignments.Count | Should -BeGreaterOrEqual 1 -Because 'finding zero assignments would make the loop below vacuous'
+        foreach ($Line in $Assignments)
+        {
+            $Line | Should -Match '\$CompletedIds\s*=\s*@\(' -Because "every assignment to the completed set must be @()-wrapped, but found: $($Line.Trim())"
+        }
+    }
+
+    It 'the wrapper reads the resume state exactly ONCE for all three projections' {
+        # The three projections (completed ids, failed attempts, start snapshot) each
+        # accept an already-read state. If any of them omitted -State it would fetch
+        # the state blob again - a network round trip per projection, on the recovery
+        # path where the blob is least likely to be fast.
+        $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
+        $CodeLines = @(Get-Content -Path $WrapperPath | Where-Object { $_ -notmatch '^\s*#' })
+
+        $Reads = @($CodeLines | Where-Object { $_ -match '=\s*Get-ResumeStateObject' })
+        $Reads.Count | Should -Be 1 -Because 'the state is read once and projected, never read per view'
+
+        foreach ($Reader in @('Get-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Get-StartSnapshot'))
+        {
+            $Calls = @($CodeLines | Where-Object { $_ -match [regex]::Escape($Reader) })
+            $Calls.Count | Should -Be 1 -Because "$Reader is projected once in the wrapper"
+            $Calls[0] | Should -Match '-State\s+\$SeedState' -Because "$Reader must reuse the already-read state"
+        }
     }
 
     It 'a fresh run completing a subset persists a real multi-element completed array (not a mashed string)' {

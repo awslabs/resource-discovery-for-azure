@@ -1303,13 +1303,33 @@ if ($null -ne $StateBlobParts)
 # the per-iteration writes below append to existing state instead of overwriting
 # it. -ResumeFailedOnly uses the failed list to filter the subscription list.
 $SeedState = Get-ResumeStateObject -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs
-# Wrap the WHOLE if in @(...): a bare `else { @() }` captured from an if
-# expression collapses to $null (PowerShell unrolls the empty array on
-# assignment), which would make the first `$CompletedIds += $Sub.Id` do STRING
+# Project the three views through the shared readers, passing the state already
+# read above so the blob is fetched ONCE rather than once per projection.
+#
+# These used to be hand-rolled `@(if ($SeedState -and ...) { ... } else { @() })`
+# expressions. The outer @(...) was load-bearing: without it a bare `else { @() }`
+# captured from an if expression collapses to $null (PowerShell unrolls the empty
+# array on assignment), which makes the first `$CompletedIds += $Sub.Id` do STRING
 # concatenation instead of array append - silently corrupting the completed set
-# into one mashed-together string. @(...) forces a real (possibly empty) array.
-$CompletedIds = @(if ($SeedState -and $SeedState.CompletedSubscriptionIds) { $SeedState.CompletedSubscriptionIds } else { @() })
-$FailedAttempts = @(if ($SeedState -and $SeedState.FailedAttempts) { $SeedState.FailedAttempts } else { @() })
+# into one mashed-together string. That regression has happened, and parse, review
+# and the pure-helper unit tests all missed it.
+#
+# Get-CompletedSubscriptionIds and Get-FailedAttempts return @() by construction,
+# so the collapse is now prevented by the callee rather than by remembering to
+# wrap the call site. The @(...) is kept anyway as belt-and-braces, and a source
+# guard in Tests/ResumeCycle.Tests.ps1 still asserts it is here.
+#
+# -Path and the blob args are passed even though a supplied -State makes them
+# unused: if -State were ever dropped from these calls the readers would still
+# resolve the same state instead of silently reading nothing. -Tenant IS consulted
+# on this path - the readers re-assert the tenant guard on a supplied state.
+#
+# Get-FailedAttempts additionally strips a phantom null left by a version that
+# serialised an empty list as `[ null ]`. The inline expression did not, so state
+# written by that version put a null into the retry list; going through the reader
+# self-heals it.
+$CompletedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs -State $SeedState)
+$FailedAttempts = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs -State $SeedState)
 
 # Start-of-run subscription universe, for the end-of-run reconciliation of a
 # MOVING target (another team creating/deleting subscriptions mid-run). Prefer a
@@ -1318,13 +1338,10 @@ $FailedAttempts = @(if ($SeedState -and $SeedState.FailedAttempts) { $SeedState.
 # capture the CURRENT full-tenant enumeration ($AllSubscriptions is state-agnostic,
 # taken before the Enabled/scope filters). $StateSaveArgs adds this snapshot to the
 # blob trio so every Save-CompletedSubscriptionIds call persists it.
-$StartSnapshot = if ($SeedState -and $SeedState.EnumeratedAtStart)
+$StartSnapshot = Get-StartSnapshot -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs -State $SeedState
+if ($null -eq $StartSnapshot)
 {
-    $SeedState.EnumeratedAtStart
-}
-else
-{
-    [pscustomobject]@{ CapturedUtc = (Get-Date).ToString('o'); SubscriptionIds = @($AllSubscriptions.Id) }
+    $StartSnapshot = [pscustomobject]@{ CapturedUtc = (Get-Date).ToString('o'); SubscriptionIds = @($AllSubscriptions.Id) }
 }
 $StateSaveArgs = @{ StartSnapshot = $StartSnapshot } + $StateBlobArgs
 

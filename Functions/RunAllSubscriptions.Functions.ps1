@@ -1319,11 +1319,69 @@ function Get-ResumeStateObject
     }
 }
 
+# Resolve the resume-state object a projection should read from. Single owner of
+# the "-State supplied or not" decision for the three readers below
+# (Get-CompletedSubscriptionIds, Get-FailedAttempts, Get-StartSnapshot), each of
+# which is a thin projection over the same state object.
+#
+# Why -State exists at all: without it, every reader calls Get-ResumeStateObject
+# for itself, so a caller wanting two or three projections downloads the SAME
+# state blob two or three times, a network round trip apiece. -State reads once
+# and projects many. Omitting it preserves the original self-reading behaviour
+# exactly, so every existing call site is unaffected. The wrapper itself calls
+# Get-ResumeStateObject once directly and projects inline, which is the same
+# read-once discipline expressed by hand.
+#
+# -StateSupplied, NOT a $null default, is what distinguishes "no state given" from
+# "given a state that happens to be null". That distinction matters: the intended
+# caller shape is -State $SeedState, and the wrapper's $SeedState is legitimately
+# $null on a fresh run, on a tenant mismatch, and on an unreadable blob. Treating
+# $null as "not supplied" would send all three readers back to the blob on exactly
+# the recovery path this parameter exists to spare - re-running the retry and
+# re-emitting its warning up to three times.
+#
+# The tenant guard is re-asserted here rather than trusted. Get-ResumeStateObject
+# applies it on the read path, but a supplied state can come from anywhere, and
+# without this check -Tenant would be a silently ignored parameter on all three
+# readers - while the value it protects is CompletedSubscriptionIds, which is used
+# to SKIP subscriptions. Wrong-tenant state must never do that.
+function Resolve-ResumeState
+{
+    param(
+        [string]$Path,
+        [string]$Tenant,
+        $BlobContext = $null,
+        [string]$BlobContainer = $null,
+        [string]$BlobName = $null,
+        $State = $null,
+        [switch]$StateSupplied
+    )
+
+    if (-not $StateSupplied)
+    {
+        return Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    }
+
+    if ($null -eq $State) { return $null }
+
+    if ($State.TenantID -ne $Tenant)
+    {
+        Write-Host ("Supplied resume state is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
+        return $null
+    }
+
+    return $State
+}
+
+# -State: an ALREADY-READ resume-state object (see Resolve-ResumeState).
 function Get-CompletedSubscriptionIds
 {
-    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null,
+        $State = $null)
 
-    $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    $State = Resolve-ResumeState -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName `
+        -State $State -StateSupplied:$PSBoundParameters.ContainsKey('State')
+
     if ($null -eq $State -or $null -eq $State.CompletedSubscriptionIds) { return @() }
     return @($State.CompletedSubscriptionIds)
 }
@@ -1334,11 +1392,15 @@ function Get-CompletedSubscriptionIds
 # different tenant. Backward-compatible: state written by an older version of
 # this script (which has CompletedSubscriptionIds but no FailedAttempts key)
 # reads back as empty here, so existing on-disk/blob state never blocks an upgrade.
+# -State: an ALREADY-READ resume-state object (see Resolve-ResumeState).
 function Get-FailedAttempts
 {
-    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null,
+        $State = $null)
 
-    $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    $State = Resolve-ResumeState -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName `
+        -State $State -StateSupplied:$PSBoundParameters.ContainsKey('State')
+
     if ($null -eq $State -or $null -eq $State.FailedAttempts) { return @() }
     # Strip nulls: state written by a version that serialised an empty list as
     # `[ null ]` reads back as a one-element array holding a null; the existing
@@ -1352,11 +1414,15 @@ function Get-FailedAttempts
 # resumed / rescheduled run keep the ORIGINAL start-of-run universe for the
 # end-of-run reconciliation instead of re-capturing an already-moved mid-run
 # snapshot. Returns $null for state written before this key existed.
+# -State: an ALREADY-READ resume-state object (see Resolve-ResumeState).
 function Get-StartSnapshot
 {
-    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
+    param([string]$Path, [string]$Tenant, $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null,
+        $State = $null)
 
-    $State = Get-ResumeStateObject -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+    $State = Resolve-ResumeState -Path $Path -Tenant $Tenant -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName `
+        -State $State -StateSupplied:$PSBoundParameters.ContainsKey('State')
+
     if ($null -eq $State) { return $null }
     return $State.EnumeratedAtStart
 }

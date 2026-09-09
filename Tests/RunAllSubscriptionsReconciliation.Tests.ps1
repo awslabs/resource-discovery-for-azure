@@ -53,7 +53,8 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable')
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
+        'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -638,6 +639,147 @@ Describe 'FailedAttempts null-serialization regression' {
         $Read = @(Get-FailedAttempts -Path $script:StatePath -Tenant 't')
         $Read.Count | Should -Be 0
         @($Read | Where-Object { $null -eq $_ }).Count | Should -Be 0
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Read-once projection of the resume state
+#
+# Get-CompletedSubscriptionIds, Get-FailedAttempts and Get-StartSnapshot are
+# three thin projections over ONE resume-state object, and each reads that state
+# for itself. A caller wanting two or three of them would therefore download the
+# same state blob two or three times, one network round trip apiece. The -State
+# parameter lets a caller read once and project many.
+#
+# Honest scope: no SHIPPED caller does that today. All three readers have call
+# sites only under Tests/ - Run-AllSubscriptions.ps1 reads once via
+# Get-ResumeStateObject and projects inline, which is the same read-once discipline
+# expressed by hand. So these tests pin an API contract, not a live hot path.
+#
+# The bypass is proven two ways. WITHOUT a mock, by pointing -Path at a file that
+# does not exist: if a reader consulted the path it would see no state and return
+# empty, so a correct projection can only have come from -State. That covers the
+# LOCAL-file path only. The mock-based Its then pin the read count at exactly zero
+# and carry a positive control proving the mock is reachable, which is what covers
+# the blob round trip the -Path trick cannot reach.
+# ---------------------------------------------------------------------------
+Describe 'Resume-state readers: read-once projection via -State' {
+
+    BeforeAll {
+        $script:OneState = [pscustomobject]@{
+            TenantID                 = 't'
+            CompletedSubscriptionIds = @('s1', 's2')
+            FailedAttempts           = @([pscustomobject]@{ Id = 's3'; Name = 'Sub Three'; Reason = 'boom'; Attempts = 2 })
+            EnumeratedAtStart        = [pscustomobject]@{ CapturedUtc = '2026-01-01T00:00:00Z'; SubscriptionIds = @('s1', 's2', 's3') }
+        }
+
+        $script:NoSuchPath = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-no-such-state-{0}.json' -f [guid]::NewGuid().ToString('N'))
+        $script:RealPath = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-real-state-{0}.json' -f [guid]::NewGuid().ToString('N'))
+        ($script:OneState | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $script:RealPath -Encoding utf8
+    }
+
+    AfterAll {
+        if (Test-Path -LiteralPath $script:RealPath) { Remove-Item -LiteralPath $script:RealPath -Force }
+    }
+
+    It 'the unreadable path really is absent, so an accidental read would yield empty' {
+        Test-Path -LiteralPath $script:NoSuchPath | Should -BeFalse -Because 'the whole bypass proof rests on this path being unreadable'
+    }
+
+    It 'Get-CompletedSubscriptionIds projects from -State without consulting the path' {
+        @(Get-CompletedSubscriptionIds -Path $script:NoSuchPath -Tenant 't' -State $script:OneState) | Should -Be @('s1', 's2')
+    }
+
+    It 'Get-FailedAttempts projects from -State without consulting the path' {
+        $F = @(Get-FailedAttempts -Path $script:NoSuchPath -Tenant 't' -State $script:OneState)
+
+        $F.Count | Should -Be 1
+        $F[0].Id | Should -Be 's3'
+    }
+
+    It 'Get-StartSnapshot projects from -State without consulting the path' {
+        $S = Get-StartSnapshot -Path $script:NoSuchPath -Tenant 't' -State $script:OneState
+
+        @($S.SubscriptionIds).Count | Should -Be 3
+        $S.CapturedUtc | Should -Be '2026-01-01T00:00:00Z'
+    }
+
+    It 'reads the state EXACTLY ZERO times across all three readers when -State is supplied' {
+        Mock Get-ResumeStateObject { throw 'a reader must not read the state when -State was supplied' }
+
+        { Get-CompletedSubscriptionIds -Path $script:NoSuchPath -Tenant 't' -State $script:OneState } | Should -Not -Throw
+        { Get-FailedAttempts -Path $script:NoSuchPath -Tenant 't' -State $script:OneState } | Should -Not -Throw
+        { Get-StartSnapshot -Path $script:NoSuchPath -Tenant 't' -State $script:OneState } | Should -Not -Throw
+
+        # -Exactly is REQUIRED. Without it Pester's -Times means "at least N", so a
+        # bare '-Times 0' is trivially satisfied and can NEVER fail - the whole
+        # no-read claim would be unverified. Same trap documented in
+        # Tests/AzGraphQueryRetry.Tests.ps1.
+        Should -Invoke Get-ResumeStateObject -Exactly -Times 0 -Because 'one read must serve all three projections'
+
+        # POSITIVE CONTROL, in this same It. A -Times 0 assertion is only meaningful
+        # if the mock is reachable at all: if interception silently stopped working,
+        # the mock would never be hit, nothing would throw, and -Times 0 would pass
+        # on a registered-but-unreachable mock. Proving the mock DOES fire when
+        # -State is omitted is what makes the zero above mean something.
+        { Get-CompletedSubscriptionIds -Path $script:NoSuchPath -Tenant 't' } |
+            Should -Throw -Because 'the mock must be reachable from inside Resolve-ResumeState, or the zero above proves nothing'
+    }
+
+    It 'still reads for itself when -State is OMITTED, so existing call sites are unchanged' {
+        @(Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 't') | Should -Be @('s1', 's2')
+        @(Get-FailedAttempts -Path $script:RealPath -Tenant 't').Count | Should -Be 1
+        @((Get-StartSnapshot -Path $script:RealPath -Tenant 't').SubscriptionIds).Count | Should -Be 3
+    }
+
+    It 'reads once PER READER when -State is omitted - the behaviour -State exists to avoid' {
+        Mock Get-ResumeStateObject { return $script:OneState }
+
+        $null = Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 't'
+        $null = Get-FailedAttempts -Path $script:RealPath -Tenant 't'
+        $null = Get-StartSnapshot -Path $script:RealPath -Tenant 't'
+
+        Should -Invoke Get-ResumeStateObject -Times 3 -Exactly -Because 'this is the 3x read the -State parameter lets a caller collapse to 1'
+    }
+
+    It 'honours the tenant guard on the path it did read when -State is omitted' {
+        @(Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 'other-tenant') | Should -BeNullOrEmpty -Because 'state for a different tenant must be ignored, not projected'
+    }
+
+    It 'ALSO enforces the tenant guard on a SUPPLIED state, so -Tenant is never silently ignored' {
+        # The value being guarded is CompletedSubscriptionIds, which is used to SKIP
+        # subscriptions. Wrong-tenant state must never cause a skip, no matter whether
+        # the state was read here or handed in.
+        @(Get-CompletedSubscriptionIds -Path $script:NoSuchPath -Tenant 'other-tenant' -State $script:OneState) |
+            Should -BeNullOrEmpty -Because 'a supplied state can come from anywhere and must still be tenant-checked'
+
+        @(Get-FailedAttempts -Path $script:NoSuchPath -Tenant 'other-tenant' -State $script:OneState) | Should -BeNullOrEmpty
+        Get-StartSnapshot -Path $script:NoSuchPath -Tenant 'other-tenant' -State $script:OneState | Should -BeNullOrEmpty
+    }
+
+    It 'treats -State $null as SUPPLIED, not as omitted, so it does not fall back to the blob' {
+        # $SeedState is legitimately $null on a fresh run, a tenant mismatch and an
+        # unreadable blob. If an explicit $null were read as "omitted", all three
+        # readers would go back to the blob on exactly the recovery path -State exists
+        # to spare - re-running the retry and re-emitting its warning three times.
+        Mock Get-ResumeStateObject { throw 'an explicit -State $null must not trigger a read' }
+
+        { @(Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 't' -State $null) } | Should -Not -Throw
+        { @(Get-FailedAttempts -Path $script:RealPath -Tenant 't' -State $null) } | Should -Not -Throw
+        { Get-StartSnapshot -Path $script:RealPath -Tenant 't' -State $null } | Should -Not -Throw
+
+        # -Exactly required, as above: a bare -Times 0 cannot fail.
+        Should -Invoke Get-ResumeStateObject -Exactly -Times 0 -Because 'an explicit null is a supplied value, not an absent one'
+
+        # Positive control (see the sibling It): prove the mock is reachable here too.
+        { Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 't' } |
+            Should -Throw -Because 'omitting -State must reach the mock, or the zero above proves nothing'
+    }
+
+    It 'projects empty/null from an explicit -State $null rather than inventing data' {
+        @(Get-CompletedSubscriptionIds -Path $script:NoSuchPath -Tenant 't' -State $null) | Should -BeNullOrEmpty
+        @(Get-FailedAttempts -Path $script:NoSuchPath -Tenant 't' -State $null) | Should -BeNullOrEmpty
+        Get-StartSnapshot -Path $script:NoSuchPath -Tenant 't' -State $null | Should -BeNullOrEmpty
     }
 }
 

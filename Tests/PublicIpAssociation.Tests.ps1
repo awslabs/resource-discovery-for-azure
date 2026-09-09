@@ -190,6 +190,21 @@ Describe 'Public IP attached via ipConfiguration (must be unchanged by the fix)'
         $Rec.AssociatedResource | Should -BeExactly 'obfuscated'
     }
 
+    It 'extracts the same segments from a load-balancer frontend id, not just a NIC id' {
+        # An ipConfiguration id can name several parent types - a NIC, a
+        # load-balancer frontend, an app gateway frontend, a bastion. They all place
+        # the provider type at segment 7 and the name at segment 8, which is the
+        # assumption the single extraction rests on. Cover a second shape so that
+        # assumption is tested rather than only asserted in a comment.
+        $LbCfgId = "$($script:Base)/microsoft.network/loadbalancers/lb-public01/frontendipconfigurations/fe1"
+
+        $Rec = Invoke-PublicIpCollector -Resources @(New-PublicIpRecord -IpConfigurationId $LbCfgId) -Dictionary $null
+
+        $Rec.AssociatedResource | Should -BeExactly 'lb-public01'
+        $Rec.AssociatedResourceType | Should -BeExactly 'loadbalancers'
+        $Rec.Use | Should -BeExactly 'Utilized'
+    }
+
     It 'prefers ipConfiguration when BOTH surfaces are populated, so no existing row changes value' {
         $Rec = Invoke-PublicIpCollector -Resources @(New-PublicIpRecord -IpConfigurationId $script:NicCfgId -NatGatewayId $script:NatId) -Dictionary $null
 

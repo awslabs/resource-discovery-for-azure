@@ -54,7 +54,40 @@ BeforeAll {
     function Search-AzGraph
     {
         [CmdletBinding()]
-        param($Query, $Subscription, $First, $Skip, $ManagementGroup)
+        param($Query, $Subscription, $First, $Skip, $ManagementGroup, $SkipToken)
+    }
+
+    # Emit rows the way the REAL cmdlet does: ONE IEnumerable object, not N streamed
+    # rows. Hoisted to file scope because the mocks that most need it are in earlier
+    # Describes than the one it was first written for.
+    #
+    # This shape is the whole reason a real data-loss bug hid behind 48 passing
+    # tests. A mock returning a plain ARRAY is streamed by PowerShell as N separate
+    # outputs, so `@(Search-AzGraph ...)` flattened correctly under test while the
+    # real single-object response was collected UNFLATTENED in production. Mocks that
+    # return arrays therefore cannot see that class of defect at all.
+    #
+    # The unary comma is what produces one object: it wraps the list in a 1-element
+    # array which PowerShell unrolls back to the single list. Write-Output
+    # -NoEnumerate cannot be used - its -InputObject is typed PSObject[] and binding
+    # a generic List throws "Argument types do not match".
+    #
+    # Data is a SEPARATE list holding the same rows, deliberately not a self
+    # reference: pointing Data at its own container makes the object circular, and
+    # the -Lowercase path runs it through ConvertTo-Json -Depth 100.
+    function script:New-FakeGraphResponse
+    {
+        param([object[]]$Rows, [string]$SkipToken = $null)
+
+        $Response = [System.Collections.Generic.List[object]]::new()
+        foreach ($R in $Rows) { $Response.Add($R) }
+
+        $DataView = [System.Collections.Generic.List[object]]::new()
+        foreach ($R in $Rows) { $DataView.Add($R) }
+
+        Add-Member -InputObject $Response -MemberType NoteProperty -Name 'Data' -Value $DataView -Force
+        Add-Member -InputObject $Response -MemberType NoteProperty -Name 'SkipToken' -Value $SkipToken -Force
+        return , $Response
     }
 }
 
@@ -70,7 +103,9 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
     Context 'Success path (Search-AzGraph returns rows)' {
 
         BeforeAll {
-            Mock -CommandName Search-AzGraph -MockWith { [pscustomobject]@{ count_ = 42 } }
+            # Response-SHAPED so the summarize count() probe is pinned against the
+            # real single-object output rather than a plain array.
+            Mock -CommandName Search-AzGraph -MockWith { script:New-FakeGraphResponse -Rows @([pscustomobject]@{ count_ = 42 }) }
         }
 
         It 'returns an object exposing the .data row(s)' {
@@ -92,7 +127,9 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
     Context '-Lowercase lowercases the payload (keys and values)' {
 
         BeforeAll {
-            Mock -CommandName Search-AzGraph -MockWith { [pscustomobject]@{ Name = 'MyResource' } }
+            # Response-SHAPED, so the -Lowercase round-trip is exercised against the
+            # real single-object output rather than a plain array.
+            Mock -CommandName Search-AzGraph -MockWith { script:New-FakeGraphResponse -Rows @([pscustomobject]@{ Name = 'MyResource' }) }
         }
 
         It 'returns lowercased keys and values' {
@@ -354,7 +391,10 @@ function Search-AzGraph { [CmdletBinding()] param($Query,$Subscription,$First,$S
     if ($global:Calls -gt 200) { return @([pscustomobject]@{ id = 'ceiling' }) }
     throw 'ServiceUnavailable (503) - transient'
 }
-function Start-Sleep { param([int]$Seconds, [switch]$Milliseconds) }
+# -Milliseconds is an [int] on the real cmdlet, not a switch. The fake must match
+# the real signature or a caller passing -Milliseconds <n> would bind <n> as a
+# positional arg here and behave differently from production.
+function Start-Sleep { param([int]$Seconds, [int]$Milliseconds) }
 # NO try/catch - production parity.
 $null = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000
 "CALLS=$($global:Calls)"
@@ -363,6 +403,13 @@ $null = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000
         try
         {
             Set-Content -LiteralPath $Tmp -Value $Script -Encoding utf8
+
+            # Precondition: without this, a missing pwsh host produces an empty
+            # $Out and the assertion below fails as though the retry bound were
+            # broken - misattributing an environment problem to the code.
+            (Get-Command pwsh -ErrorAction SilentlyContinue) |
+                Should -Not -BeNullOrEmpty -Because 'this test needs a pwsh host on PATH to spawn the child process'
+
             $Out = & pwsh -NoProfile -File $Tmp $Repo 2>&1
             $Line = @($Out | Where-Object { $_ -match '^CALLS=\d+$' }) | Select-Object -Last 1
             $Line | Should -Not -BeNullOrEmpty -Because 'the child process must reach the end, which an unbounded loop never would'
@@ -395,7 +442,11 @@ Describe 'Oversized Resource Graph response (16 MB cap)' {
                 $Count = [int]$First
                 [void]$script:Requests.Add([pscustomobject]@{ Skip = $Offset; First = $Count })
                 if ($Count -gt 250) { throw $script:PayloadError }
-                return @(0..($Count - 1) | ForEach-Object { [pscustomobject]@{ id = "/r/$($Offset + $_)" } })
+                # Response-SHAPED, not a plain array. These four tests are about the
+                # split path, which is exactly where the unflattened-response bug
+                # corrupted the row set - so the mock has to reproduce the real
+                # single-object output or they only exercise the split arithmetic.
+                script:New-FakeGraphResponse -Rows @(0..($Count - 1) | ForEach-Object { [pscustomobject]@{ id = "/r/$($Offset + $_)" } })
             }
         }
 
@@ -432,7 +483,10 @@ Describe 'Oversized Resource Graph response (16 MB cap)' {
             $null = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 0
             @($script:Requests | Where-Object { $_.First -gt 250 }).Count | Should -Be 3
             @($script:Requests).Count | Should -Be 7
-            Should -Invoke -CommandName Start-Sleep -Times 0 -Because 'no backoff should be incurred for an oversized response'
+            # -Exactly is REQUIRED here. Without it Pester's -Times means "at
+            # least N", so '-Times 0' is trivially satisfied and the assertion can
+            # never fail - the no-backoff claim would be unverified.
+            Should -Invoke -CommandName Start-Sleep -Exactly -Times 0 -Because 'no backoff should be incurred for an oversized response'
         }
     }
 
@@ -639,5 +693,174 @@ Describe 'Consumption paging token does not leak between subscriptions' {
                 $_ -match '\$Params\.ContinuationToken\s*=\s*\$UsageData\.ContinuationToken'
             })
         $Unguarded.Count | Should -Be 0 -Because 'that exact form is the leak: it carries the previous subscription token into the next subscription'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Regression: the response object must be FLATTENED to rows at the boundary.
+#
+# Every other mock in this file returns a plain PSCustomObject ARRAY, which
+# PowerShell streams as N output objects. The real Search-AzGraph does NOT do
+# that - it writes ONE PSResourceGraphResponse object (an IEnumerable holding the
+# rows). That difference made the suite blind to a real data-loss bug:
+#
+#   $Rows = @(Search-AzGraph ...)    collected the RESPONSE, not the rows.
+#   Get-AzGraphRowWindow then accumulated one response object PER SUB-WINDOW
+#   after a 16 MB payload split, and the -Lowercase ConvertTo-Json round-trip
+#   turned those N responses into N NESTED arrays. $Global:Resources received
+#   arrays instead of resources, so every resource in the split window silently
+#   disappeared from the report - no error, no warning.
+#
+# These tests reproduce the real "one enumerable object" output shape via the
+# unary comma (see New-FakeGraphResponse), which is the ONLY way to catch this
+# in-process. They fail against the wrapped form and pass against the flattened
+# one.
+# ---------------------------------------------------------------------------
+Describe 'Search-AzGraph response is flattened to rows at the boundary' {
+
+    BeforeAll {
+        Mock -CommandName Start-Sleep -MockWith { }
+
+        # New-FakeGraphResponse is defined once in the file-level BeforeAll, because
+        # the earlier split-path and count-probe mocks need the same shape.
+    }
+
+    Context 'single window (no split)' {
+
+        BeforeAll {
+            Mock -CommandName Search-AzGraph -MockWith {
+                $Offset = if ($null -eq $Skip) { 0 } else { [int]$Skip }
+                $Count = [int]$First
+                script:New-FakeGraphResponse -Rows @(0..($Count - 1) | ForEach-Object {
+                        [pscustomobject]@{ id = "/r/$($Offset + $_)"; name = "Res$($Offset + $_)" }
+                    })
+            }
+        }
+
+        It 'returns flat rows, not a wrapped response object' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 5
+            @($Result.data).Count | Should -Be 5 -Because '@($x.data).Count must be the ROW count, never 1 for the response'
+        }
+
+        It 'every element is a row, not a collection' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 5
+            foreach ($Row in @($Result.data))
+            {
+                # Parenthesised so the assertion does not depend on -and vs pipeline
+                # precedence being read correctly.
+                (($Row -is [System.Collections.IEnumerable]) -and ($Row -isnot [string])) |
+                    Should -BeFalse -Because 'a nested collection here is the corruption this guards against'
+                $Row.id | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        It 'is flat WITHOUT -Lowercase too, so the shape does not depend on that switch' {
+            $Plain = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 5
+            $Lower = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 5 -Lowercase
+            @($Plain.data).Count | Should -Be @($Lower.data).Count -Because '-Lowercase must control casing ONLY, never the shape'
+        }
+    }
+
+    Context 'after a 16 MB payload split (the case that silently lost resources)' {
+
+        BeforeAll {
+            # Reuse the literal defined at the top of the pre-existing split
+            # context rather than restating it, so the two cannot drift apart.
+            $script:PayloadTooLarge = $script:PayloadError
+            Mock -CommandName Search-AzGraph -MockWith {
+                $Offset = if ($null -eq $Skip) { 0 } else { [int]$Skip }
+                $Count = [int]$First
+                # Force the splitter to run by refusing anything wider than 250.
+                if ($Count -gt 250) { throw $script:PayloadTooLarge }
+                script:New-FakeGraphResponse -Rows @(0..($Count - 1) | ForEach-Object {
+                        [pscustomobject]@{ id = "/r/$($Offset + $_)"; name = "Res$($Offset + $_)" }
+                    })
+            }
+        }
+
+        It 'returns the full window as FLAT rows across every sub-window' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Lowercase
+            @($Result.data).Count | Should -Be 1000 -Because 'a split must concatenate ROWS; nested per-sub-window arrays are the bug'
+        }
+
+        It 'produces no nested collection anywhere in the result' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Lowercase
+            $Nested = @(@($Result.data) | Where-Object { $_ -is [System.Collections.IEnumerable] -and $_ -isnot [string] })
+            $Nested.Count | Should -Be 0 -Because 'each nested array would append to $Global:Resources as one unusable object'
+        }
+
+        It 'covers the window exactly once, with no gap and no overlap' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 116000 -Lowercase
+            # Index the FLAT array rather than a member-enumerated projection.
+            # `$Result.data | ForEach-Object { $_.id }` would pass even against the
+            # nested-array bug, because member enumeration reaches through the
+            # nesting and still yields the right ids - so it would not discriminate.
+            # Asserting the element count and indexing [0]/[-1] on the array itself
+            # fails when the elements are per-sub-window arrays instead of rows.
+            $Rows = @($Result.data)
+            $Rows.Count | Should -Be 1000 -Because 'nested per-sub-window arrays would collapse this to the sub-window count'
+            $Rows[0].id | Should -Be '/r/116000'
+            $Rows[-1].id | Should -Be '/r/116999'
+            @($Rows | ForEach-Object { $_.id } | Select-Object -Unique).Count | Should -Be 1000 -Because 'overlapping sub-windows would duplicate rows'
+        }
+    }
+
+    Context 'empty result' {
+
+        BeforeAll {
+            Mock -CommandName Search-AzGraph -MockWith { script:New-FakeGraphResponse -Rows @() }
+        }
+
+        It 'yields 0 rows, not a 1-element array holding an empty response' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 5
+            @($Result.data).Count | Should -Be 0 -Because 'an empty response must not present as one phantom row'
+        }
+    }
+
+    Context 'source guard' {
+
+        # Every file that calls Search-AzGraph directly is exposed to this
+        # regression, not just the wrapper's own file. Guarding only the owner
+        # would miss a reintroduction in the bypassing consumer - which is exactly
+        # the search-by-capability point in change-protocol.md.
+        It 'never collects the cmdlet output directly with @(Search-AzGraph ...) in ANY file' {
+            $Repo = Split-Path $PSScriptRoot -Parent
+            $Targets = @(
+                'Functions/ResourceInventory.Functions.ps1'
+                'Functions/RunAllSubscriptions.Functions.ps1'
+                'Run-AllSubscriptions.ps1'
+                'ResourceInventory.ps1'
+            )
+            $Offenders = @()
+            foreach ($Rel in $Targets)
+            {
+                $Path = Join-Path $Repo $Rel
+                if (-not (Test-Path -LiteralPath $Path)) { continue }
+
+                # Strip comments before matching, so the fix's own explanatory
+                # comment (which quotes the broken form deliberately) is not read as
+                # an offence. Uses the PowerShell tokenizer rather than a regex, so
+                # trailing comments and <# block comments #> are both handled -
+                # a '^\s*#' filter catches neither.
+                $Errors = $null
+                $Tokens = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$Errors)
+                $CodeOnly = -join (@($Tokens |
+                            Where-Object { $_.Kind -ne 'Comment' } |
+                            ForEach-Object { $_.Text + ' ' }))
+
+                if ($CodeOnly -match '@\(\s*Search-AzGraph') { $Offenders += $Rel }
+            }
+            $Offenders -join ', ' | Should -BeNullOrEmpty -Because 'that form wraps the response instead of enumerating its rows, which is exactly the regression'
+        }
+
+        It 'still assigns the response to a variable before enumerating it' {
+            # Positive counterpart to the ban above: proving the broken form is
+            # absent does not prove the correct form is present.
+            $Path = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/ResourceInventory.Functions.ps1'
+            $Src = Get-Content -LiteralPath $Path -Raw
+            $Src | Should -Match '\$Response\s*=\s*Search-AzGraph\s+@GraphParams' -Because 'the intermediate variable is what makes the enumeration happen'
+            $Src | Should -Match '\$Rows\s*=\s*if \(\$null -eq \$Response\)' -Because 'the null guard prevents a phantom row when the cmdlet emits nothing'
+        }
     }
 }

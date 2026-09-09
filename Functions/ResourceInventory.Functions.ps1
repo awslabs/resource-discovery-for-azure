@@ -423,7 +423,38 @@ function Invoke-AzGraphRequest
         $AttemptsMade = $Attempt + 1
         try
         {
-            $Rows = @(Search-AzGraph @GraphParams)
+            # The intermediate $Response variable is REQUIRED - do not inline this
+            # back to @(Search-AzGraph @GraphParams).
+            #
+            # Search-AzGraph writes ONE PSResourceGraphResponse object to the
+            # pipeline (it does not stream rows), so @(command) collects a 1-element
+            # array WRAPPING the response instead of the rows. Assigning first and
+            # then using @($variable) enumerates the response's IEnumerable, giving
+            # the flat row array every caller and this function's own accumulation
+            # logic assume.
+            #
+            # @($Response) rather than @($Response.Data) deliberately: it is correct
+            # for BOTH shapes - a single enumerable response object AND N streamed
+            # rows - so it survives an SDK output-shape change, and it also handles
+            # the plain array the test mocks return. Live behaviour confirmed on
+            # Az.ResourceGraph 1.2.1. Trade-off to know: if the response type ever
+            # stops being IEnumerable, @() re-wraps SILENTLY (this same bug),
+            # whereas .Data would break loudly.
+            #
+            # The null guard matters: @($null) is a ONE-element array CONTAINING
+            # $null, so on no output at all this would inject a phantom row that
+            # flows through Get-AzGraphRowWindow into $Global:Resources and inflates
+            # the resource count. The old @(command) form yielded @() there.
+            #
+            # This is not cosmetic. With the wrapped form, a 16 MB payload split in
+            # Get-AzGraphRowWindow accumulated N response objects, and the
+            # -Lowercase ConvertTo-Json round-trip then produced N NESTED arrays
+            # rather than one flat row set - so $Global:Resources received arrays
+            # instead of resources and every resource in the split window silently
+            # vanished from the report. Verified against real responses; the unit
+            # tests could not see it because their mock returns a plain array.
+            $Response = Search-AzGraph @GraphParams
+            $Rows = if ($null -eq $Response) { @() } else { @($Response) }
             $FailureMessage = $null
             $Failure = $null
             break
@@ -473,7 +504,12 @@ function Invoke-AzGraphRequest
 
     # A structured result rather than a throw, so the window splitter can read the
     # CLASSIFICATION (IsPayloadTooLarge) directly instead of re-deriving it from a
-    # message. Rows is $null exactly when Failure is set.
+    # message.
+    #
+    # The property callers rely on: on SUCCESS Rows is never $null - an empty array
+    # is the floor - and Rows is $null exactly when Failure is set. Success is the
+    # only path that assigns Rows, and it breaks immediately, so the three failure
+    # exits (payload-too-large, permanent, retry-exhausted) all leave it $null.
     return [pscustomobject]@{
         Rows           = $Rows
         Failure        = $Failure
@@ -596,8 +632,19 @@ function Invoke-AzGraphQuerySafe
     # Windows/Linux/macOS with no az.cmd/cmd.exe argument-quoting boundary.
     #
     # Contract preserved for the callers (unchanged): returns an object exposing
-    # a .data member - the row array for a fetch, or the single row for a
-    # 'summarize count()' probe (so $x.data.'count_' keeps working). Paging is
+    # a lowercase .data member - the row array for a fetch, or the single row for
+    # a 'summarize count()' probe (so $x.data.count_ keeps working). The lowercase
+    # spelling deliberately mirrors the ARM REST API's own JSON key; it is NOT the
+    # Az SDK's PascalCase PSResourceGraphResponse.Data.
+    #
+    # .data is ALWAYS a flat array of row objects, independent of -Lowercase. That
+    # flattening happens once, at the boundary in Invoke-AzGraphRequest, so
+    # @($x.data).Count is always the row count and -Lowercase controls ONLY casing.
+    # It used to be the ConvertTo-Json round-trip below that incidentally flattened
+    # the response, which meant the shape silently depended on -Lowercase and a
+    # payload split corrupted the row set - see the note in Invoke-AzGraphRequest.
+    #
+    # Paging is
     # caller-driven via -First (max 1000) / -Skip offset, mirroring the previous
     # --first/--skip. -Subscription scopes the query (mirrors --subscriptions);
     # omitting it queries the whole accessible tenant, as before.
@@ -636,8 +683,13 @@ function Invoke-AzGraphQuerySafe
     # lowercased type/location/value strings (and on both sides of intra-collector
     # self-joins being lowercased), so round-trip through JSON to lowercase both.
     if ($Lowercase -and $Rows.Count -gt 0)
+    #
+    # ToLowerInvariant(), NOT ToLower(): ToLower() is culture-sensitive, so on a
+    # tr-TR / az-AZ host it maps 'I' to the dotless 'i' and would corrupt JSON KEYS
+    # as well as values - 'subscriptionId' becomes unreadable to every collector.
+    # This file already uses invariant casing elsewhere for the same reason.
     {
-        $Rows = @(($Rows | ConvertTo-Json -Depth 100).ToLower() | ConvertFrom-Json)
+        $Rows = @(($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant() | ConvertFrom-Json)
     }
 
     # Preserve the historical .data accessor the call sites read.

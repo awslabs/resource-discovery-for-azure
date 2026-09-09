@@ -779,6 +779,50 @@ function Get-SubscriptionHashValue
     return ([uint32]$Hash[0] -shl 24) -bor ([uint32]$Hash[1] -shl 16) -bor ([uint32]$Hash[2] -shl 8) -bor [uint32]$Hash[3]
 }
 
+# One bounded-retry Resource Graph call for the -Plan weight query.
+#
+# Declared at FILE scope, like every other helper here. It used to be nested inside
+# Get-PlanSubscriptionWeights as 'function script:Invoke-PlanWeightQuery', which
+# defined it into the SCRIPT scope of whatever dot-sourced this file as a side
+# effect of calling its parent - so it appeared or vanished depending on whether
+# -Plan had run yet, and it stayed defined afterwards. A helper's existence should
+# not depend on call history.
+#
+# Plain exponential backoff with jitter, NOT the server-directed Get-RetryWaitSeconds
+# the discovery wrapper uses. That helper lives in
+# Functions/ResourceInventory.Functions.ps1, which Run-AllSubscriptions.ps1 does not
+# dot-source (it takes RunAllSubscriptions.Functions.ps1 + Common.Functions.ps1), so
+# calling it here would fail with "not recognized" the first time a query actually
+# throttled - a bug that only shows up under the exact conditions this retry exists
+# for. Honouring Retry-After matters for a long sustained throttle, which is the
+# 30-attempt discovery case; this is a short sizing query that falls back to a usable
+# flat estimate, so exponential is sufficient and carries no cross-file dependency.
+# Jitter keeps concurrent shards from retrying on the same tick.
+function Invoke-PlanWeightQuery
+{
+    param([hashtable]$GraphArgs, [int]$MaxRetries)
+
+    for ($Attempt = 0; ; $Attempt++)
+    {
+        try
+        {
+            return Search-AzGraph @GraphArgs -ErrorAction Stop
+        }
+        catch
+        {
+            if ($Attempt -ge $MaxRetries) { throw }
+
+            # The clamp is a CEILING for future growth of $MaxRetries, not a limit that
+            # bites today: with 4 retries the waits are 1, 2, 4, 8 so it is never
+            # reached. It is set to the largest wait the current schedule produces, so
+            # raising the retry budget cannot silently introduce a minute-long sleep in
+            # a pre-flight sizing query.
+            $Wait = [math]::Min([math]::Pow(2, $Attempt), 8)
+            Start-Sleep -Seconds ([math]::Round($Wait + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2))
+        }
+    }
+}
+
 # Query the live tenant (native Search-AzGraph) for each subscription's projected
 # metric-query weight. Chunks the subscription list into groups of <=1000 (the
 # ARG per-query subscription cap) and pages each chunk via SkipToken. Returns a
@@ -799,13 +843,45 @@ function Get-PlanSubscriptionWeights
     if (-not (Get-Command Search-AzGraph -ErrorAction SilentlyContinue)) { return $null }
     $Kql = Get-PlanWeightKql -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:$SkipStorageMetrics
     $Weights = @{}
+
+    # Bounded retry around each Search-AzGraph call.
+    #
+    # This is the MOST throttle-prone query in the tool and it had none: sharding is
+    # precisely the scenario where N nodes contend for one tenant-wide Resource Graph
+    # budget, and a single transient 429 here made the whole weight query return
+    # $null, dropping the caller back to the coarse flat estimate. That is not silent
+    # (the caller warns) but it does mean the shard-sizing recommendation quietly
+    # gets worse exactly when composition-aware sizing matters most.
+    #
+    # Deliberately SMALLER than the discovery wrapper's 30-attempt budget: this runs
+    # during -Plan, before any inventory work, and an operator waiting on a sizing
+    # recommendation should not sit through minutes of backoff. Falling back to the
+    # flat estimate after a few honest attempts is the better trade here.
+    # 4 RETRIES after the first try, so 5 attempts in total. Worst-case cumulative
+    # backoff is 1+2+4+8 = 15s plus up to 4s of jitter, which is the wait an operator
+    # can be asked to absorb before falling back to the flat estimate.
+    $PlanQueryMaxRetries = 4
+
+    # ONE constant, used for the chunk stride, the slice width and -First, because all
+    # three must stay equal for the completeness argument below to hold. They were three
+    # separate literals (1000 / 999 / 1000) plus a half-applied variable, which made the
+    # value unsafe to change: lowering the stride alone silently SKIPS subscription ids,
+    # raising it alone OVERLAPS chunks, and changing -First alone breaks the row bound.
+    #
+    # 1000 is the Resource Graph per-query subscription cap. It doubles as the row page
+    # size here only because the aggregate emits at most one row per subscription, so the
+    # two limits coincide for this query. Do not reuse this constant for a non-aggregate
+    # query, where rows and subscriptions are unrelated.
+    $PlanQueryChunkSize = 1000
+
     try
     {
         $Ids = @($SubscriptionIds | Where-Object { $_ })
-        for ($Offset = 0; $Offset -lt $Ids.Count; $Offset += 1000)
+        for ($Offset = 0; $Offset -lt $Ids.Count; $Offset += $PlanQueryChunkSize)
         {
-            $Chunk = @($Ids[$Offset..([math]::Min($Offset + 999, $Ids.Count - 1))])
-            $Batch = Search-AzGraph -Query $Kql -Subscription $Chunk -First 1000 -ErrorAction Stop
+            $Chunk = @($Ids[$Offset..([math]::Min($Offset + ($PlanQueryChunkSize - 1), $Ids.Count - 1))])
+            $GraphArgs = @{ Query = $Kql; Subscription = $Chunk; First = $PlanQueryChunkSize }
+            $Batch = Invoke-PlanWeightQuery -GraphArgs $GraphArgs -MaxRetries $PlanQueryMaxRetries
             while ($true)
             {
                 foreach ($Row in $Batch)
@@ -819,12 +895,55 @@ function Get-PlanSubscriptionWeights
                         }
                     }
                 }
+
+                # ROW-LIMIT TRUNCATION IS STRUCTURALLY IMPOSSIBLE FOR THIS QUERY, so an
+                # absent SkipToken really does mean "done" here. The KQL aggregates with
+                # 'summarize by subscriptionId', so it emits AT MOST ONE ROW PER
+                # SUBSCRIPTION IN THE CHUNK, and the chunk is capped at
+                # $PlanQueryChunkSize which equals the requested -First. Rows can
+                # therefore never exceed the page size, and the row cap can never bite.
+                #
+                # Two WRONG guards were tried here; both are recorded so neither returns.
+                #
+                #   1. '$Batch.resultTruncated' - DEAD, could never fire. Verified by
+                #      reflection against a live response: Search-AzGraph returns
+                #      PSResourceGraphResponse whose ONLY members are SkipToken, Data,
+                #      Item, IsReadOnly and Count. There is no resultTruncated and no
+                #      TotalRecords; the cmdlet does not surface the REST body's
+                #      truncation flag at all. The expression fell through to member
+                #      enumeration over the rows, yielded an array of nulls, and compared
+                #      false forever.
+                #
+                #   2. 'rows >= page size with no token' - WORSE, could only fire FALSELY.
+                #      Given the bound above, that condition is reachable only when the
+                #      chunk holds exactly $PlanQueryChunkSize subscriptions AND every one
+                #      returned a row - which is precisely the case where completeness is
+                #      PROVABLE, not doubtful. It would have thrown away a correct weight
+                #      map for the coarse flat estimate in exactly the large tenants that
+                #      -Plan sharding exists for, while a genuinely short page still
+                #      slipped through.
+                #
+                # What remains genuinely undetectable is SIZE-based truncation, because
+                # the wrapper drops the flag that would report it. Saying so plainly is
+                # better than a guard that pretends to cover it: a guard that cannot fire
+                # reads like the case is handled, and one that only fires falsely is a
+                # self-inflicted outage.
                 if (-not $Batch.SkipToken) { break }
-                $Batch = Search-AzGraph -Query $Kql -Subscription $Chunk -First 1000 -SkipToken $Batch.SkipToken -ErrorAction Stop
+                $GraphArgs['SkipToken'] = $Batch.SkipToken
+                $Batch = Invoke-PlanWeightQuery -GraphArgs $GraphArgs -MaxRetries $PlanQueryMaxRetries
             }
         }
     }
-    catch { return $null }
+    catch
+    {
+        # Tell the operator WHY the composition-aware estimate was abandoned. Returning
+        # a bare $null made the caller print its generic "falling back to the flat
+        # estimate" warning with no cause, so a throttle, a permission gap and a
+        # refusing-to-guess truncation check were indistinguishable - and the two that
+        # are fixable looked like the one that is not.
+        Write-Warning ("Plan weight query failed, so shard sizing will use the coarse flat estimate instead of per-subscription composition: {0}" -f $_.Exception.Message)
+        return $null
+    }
     # A successful-but-empty result ($Weights.Count -eq 0) is a USABLE answer (no
     # metric-eligible resources in scope), NOT a failure - return the empty map so
     # the caller sizes every subscription at base overhead rather than triggering

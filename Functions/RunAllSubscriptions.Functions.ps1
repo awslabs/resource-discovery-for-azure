@@ -2445,31 +2445,106 @@ function Save-StateBlob
     }
 }
 
-# Download a state blob and return its parsed object, or $null if the blob is
-# absent/unreadable. Used for blob-first resume reads (a rescheduled pod has no
+# Download a state blob and return its parsed object, or $null when there is no
+# resume state to use. Used for blob-first resume reads (a rescheduled pod has no
 # local state file). Never throws - an absent blob is a normal "start fresh"
 # signal, identical to a missing local file.
+#
+# THE DISTINCTION THAT MATTERS. A single blanket catch used to return $null for two
+# opposite situations:
+#
+#   blob genuinely ABSENT       -> "start fresh" is CORRECT (first run for this shard)
+#   blob present, read FAILED   -> "start fresh" RE-RUNS THE WHOLE ESTATE
+#
+# The second is the expensive one and it was silent. On AKS this is the exact moment it
+# bites: a pod is evicted, a replacement pod reads the blob to recover its shard's
+# progress, and a momentary throttle or network blip makes it look like a first run - so
+# it re-collects every subscription the dead pod had already finished. Hours of work and
+# Azure quota, with nothing in the log saying why.
+#
+# Two changes, in the order they help:
+#
+#   1. RETRY the download with backoff. Most blips are transient by definition, so this
+#      resolves the common case outright rather than merely reporting it.
+#   2. CLASSIFY what is left. Probe whether the blob EXISTS. If it does and it still
+#      cannot be read, that is NOT "start fresh" - it is unreadable resume state, and the
+#      operator is told LOUDLY, with the consequence named.
+#
+# It still returns $null in that case rather than throwing, and that is deliberate. Neither
+# caller sits inside a try/catch, and the per-stream fold in Run-AllSubscriptions.ps1 runs
+# AFTER collection - so throwing there would discard a completed run's summary and
+# packaging in order to report a resume-state problem. Warning loudly and continuing keeps
+# the output while making the risk visible. The residual is honest: the operator has to
+# read the warning to know this run may re-process subscriptions an earlier attempt
+# finished.
+#
+# Existence is probed with Get-AzStorageBlob rather than by inspecting exception types,
+# because those differ across Az.Storage versions and binding to them would be the same
+# fragile-external-surface mistake this project avoids elsewhere.
 function Read-StateBlob
 {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)][string]$Container,
-        [Parameter(Mandatory = $true)][string]$BlobName
+        [Parameter(Mandatory = $true)][string]$BlobName,
+        # Small on purpose. This runs before any inventory work on the recovery path, so an
+        # operator waiting to resume should not sit through a long backoff; 3 attempts
+        # (1s + 2s of waiting) clears a momentary blip without stalling the run.
+        [int]$MaxAttempts = 3
     )
-    $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-state-dl-{0}.json' -f ([guid]::NewGuid().ToString('N')))
+
+    $LastError = $null
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++)
+    {
+        # A fresh temp path per attempt: a partial download left by a failed attempt must
+        # not be re-read as though it were complete.
+        $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-state-dl-{0}.json' -f ([guid]::NewGuid().ToString('N')))
+        try
+        {
+            $null = Get-AzStorageBlobContent -Container $Container -Blob $BlobName -Destination $Tmp -Context $Context -Force -ErrorAction Stop
+            return (Get-Content -LiteralPath $Tmp -Raw | ConvertFrom-Json)
+        }
+        catch
+        {
+            $LastError = $_.Exception.Message
+            if ($Attempt -lt $MaxAttempts) { Start-Sleep -Seconds $Attempt }
+        }
+        finally
+        {
+            Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Every attempt failed. Absent, or present-but-unreadable?
+    $Exists = $false
     try
     {
-        $null = Get-AzStorageBlobContent -Container $Container -Blob $BlobName -Destination $Tmp -Context $Context -Force -ErrorAction Stop
-        return (Get-Content -LiteralPath $Tmp -Raw | ConvertFrom-Json)
+        $Probe = Get-AzStorageBlob -Container $Container -Blob $BlobName -Context $Context -ErrorAction Stop
+        $Exists = ($null -ne $Probe)
     }
     catch
     {
-        return $null
+        # The probe failing tells us nothing either way, so do not claim it does. Fall
+        # through to the quiet branch rather than asserting the blob is present.
+        $Exists = $false
+        Write-Verbose ("Read-StateBlob: existence probe for {0} also failed: {1}" -f $BlobName, $_.Exception.Message)
     }
-    finally
+
+    if ($Exists)
     {
-        Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue
+        Write-Host ("WARNING: resume state blob '{0}' EXISTS but could not be read after {1} attempt(s): {2}" -f $BlobName, $MaxAttempts, $LastError) -ForegroundColor Yellow
+        Write-Host "  This is NOT the same as having no resume state. Treating it as absent means this run may RE-PROCESS subscriptions an earlier attempt already completed." -ForegroundColor Yellow
+        Write-Host "  If that matters, stop now and re-run once the storage account is reachable, rather than paying for the whole estate again." -ForegroundColor Yellow
     }
+    else
+    {
+        # Genuinely absent (the normal first-run signal), or absence could not be
+        # confirmed. Quiet either way - this is the historical behaviour and the case the
+        # blob-absence contract test pins.
+        Write-Verbose ("Read-StateBlob: no usable state blob '{0}' ({1}); starting fresh." -f $BlobName, $LastError)
+    }
+
+    return $null
 }
 
 # List the per-stream state blob names under the shard's _state area, so a

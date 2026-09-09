@@ -913,8 +913,12 @@ Write-Host ""
 # this wrapper to report "All subscriptions processed!" with an empty
 # inventory. Capture warnings and treat zero-results-with-warnings as a
 # loud failure instead of a silent one.
-$SubWarnings = @()
-$AllSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable subWarnings -WarningAction SilentlyContinue
+# -WarningVariable names the variable WITHOUT the sigil and populates it itself, so it
+# is spelled to match the reads below. PowerShell variable names are case-insensitive,
+# so the previous lowercase 'subWarnings' did populate $SubWarnings - but it read as a
+# different, never-assigned variable, and a review pass duly flagged the block below as
+# dead code on that basis. Matching the case removes the misreading.
+$AllSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable SubWarnings -WarningAction SilentlyContinue
 if ($null -eq $AllSubscriptions) { $AllSubscriptions = @() }
 $AllSubscriptions = @($AllSubscriptions)
 

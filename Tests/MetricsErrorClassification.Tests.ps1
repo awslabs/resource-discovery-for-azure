@@ -38,21 +38,28 @@ BeforeAll {
     $script:MetricsSrc = Get-Content -LiteralPath $script:MetricsPath -Raw
     $script:MetricsLines = Get-Content -LiteralPath $script:MetricsPath
 
-    # The two patterns as they appear in the file.
-    $script:PermanentPattern = "invalid status code '(?<Status>NotFound|BadRequest)'"
+    # Extract the permanent pattern FROM THE SOURCE rather than retyping it. A
+    # hardcoded copy keeps passing after the real classifier is weakened, so every
+    # logic case below would go green against broken code.
+    $PermMatch = [regex]::Match($script:MetricsSrc, 'if \(\$LastError -match "(?<Rx>invalid status code[^"]*)"\)')
+    if (-not $PermMatch.Success)
+    {
+        throw 'Could not locate the permanent-failure classifier regex in Extension/Metrics.ps1; this test cannot verify what it cannot find.'
+    }
+    $script:PermanentPattern = $PermMatch.Groups['Rx'].Value
     $script:ThrottlePattern = '429|throttl|TooManyRequests|rate limit'
 }
 
 Describe 'Metrics per-call failure classification' {
 
     It 'still has both classification branches' {
-        $script:MetricsSrc | Should -Match ([regex]::Escape("invalid status code '(?<Status>NotFound|BadRequest)'")) -Because 'the anchored permanent check must exist'
+        $script:MetricsSrc | Should -Match ([regex]::Escape("invalid status code '?(?<Status>NotFound|BadRequest)'?")) -Because 'the anchored permanent check must exist'
         $script:MetricsSrc | Should -Match ([regex]::Escape("'429|throttl|TooManyRequests|rate limit'")) -Because 'the throttle check must exist'
     }
 
     It 'evaluates the anchored permanent check BEFORE the loose throttle check' {
         # This is the whole finding. Compare source positions.
-        $PermIdx = $script:MetricsSrc.IndexOf("invalid status code '(?<Status>NotFound|BadRequest)'")
+        $PermIdx = $script:MetricsSrc.IndexOf("invalid status code '?(?<Status>NotFound|BadRequest)'?")
         $ThrottleIdx = $script:MetricsSrc.IndexOf("'429|throttl|TooManyRequests|rate limit'")
 
         $PermIdx | Should -BeGreaterThan -1
@@ -86,6 +93,37 @@ Describe 'The anchored permanent pattern cannot be fooled by a resource id' {
         $Msg = "Operation returned an invalid status code 'NotFound'"
         $Msg -match $script:PermanentPattern | Should -BeTrue
         $Matches['Status'] | Should -Be 'NotFound'
+    }
+
+    It 'matches an UNQUOTED status too, so the classifier does not fail OPEN on a rendering change' {
+        # The exposure this closes. The pattern used to REQUIRE the quotes, which made a
+        # permanent classification depend on an SDK formatting detail nothing pins. If a
+        # version or locale ever drops them, the status stops being recognised as
+        # permanent and the call is retried for the full budget - silently, and in the
+        # direction that burns wall-clock and Azure Monitor quota.
+        foreach ($Status in @('NotFound', 'BadRequest'))
+        {
+            $Msg = 'Operation returned an invalid status code {0}' -f $Status
+            $Msg -match $script:PermanentPattern | Should -BeTrue -Because 'the quotes are optional, the "invalid status code " prefix is the anchor'
+            $Matches['Status'] | Should -Be $Status
+        }
+    }
+
+    It 'still refuses every negative case now that the quotes are optional' {
+        # Making the quotes optional must not widen what counts as permanent. Each of
+        # these must stay unmatched, because none carries the status IMMEDIATELY after
+        # the 'invalid status code ' prefix.
+        $Negatives = @(
+            "Operation returned an invalid status code 'TooManyRequests'"
+            'Operation returned an invalid status code TooManyRequests'
+            "Operation returned an invalid status code 'TooManyRequests'. Resource: /disks/disk404"
+            'The operation has timed out for /resourceGroups/rg-404-prod/providers/x'
+            'Timeout for /resourceGroups/rg-NotFound/providers/x'
+        )
+        foreach ($Msg in $Negatives)
+        {
+            $Msg -match $script:PermanentPattern | Should -BeFalse -Because ('"{0}" must not be classified permanent' -f $Msg)
+        }
     }
 
     It 'matches a genuine BadRequest and captures the status' {

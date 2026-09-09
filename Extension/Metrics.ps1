@@ -1276,19 +1276,31 @@ if ($Task -eq 'Processing')
                                 # GUID containing '429' would otherwise be read as throttling
                                 # and drag a terminal failure back onto the 4-attempt path
                                 # (with the doubled throttle backoff) that this block exists
-                                # to avoid. The permanent pattern is anchored on the quoted
-                                # status phrase, so it cannot match a genuine
-                                # TooManyRequests message; checking it first is strictly safer.
+                                # to avoid. The anchor that does the work is the literal
+                                # 'invalid status code ' PREFIX, not the quotes, so it cannot
+                                # match a genuine TooManyRequests message; checking it first
+                                # is strictly safer.
                                 #
-                                # Anchoring is also why a bare '404' / 'ResourceNotFound'
-                                # substring is NOT matched: a resource group may legally
-                                # contain parentheses, so a looser pattern could match the
-                                # id itself. $PermanentOutcome is taken FROM the match so the
-                                # recorded outcome cannot drift from the branch that set it.
-                                # An unmatched permanent failure just falls through to the
-                                # retry path - slower, never wrong - which is the correct
-                                # way for this classifier to fail.
-                                if ($LastError -match "invalid status code '(?<Status>NotFound|BadRequest)'")
+                                # The QUOTES ARE OPTIONAL ('?), and that matters. The pattern
+                                # used to require them, which made the classifier depend on an
+                                # SDK formatting detail nothing pins. If a version or locale
+                                # ever renders the status unquoted, a permanent BadRequest
+                                # stops being recognised and gets retried for the full budget
+                                # - i.e. it fails OPEN, silently, in the direction that costs
+                                # wall-clock and Azure Monitor quota. Verified that making
+                                # them optional closes both unquoted renderings while keeping
+                                # every negative case negative: a real throttle, a '404'
+                                # inside a resource id, and 'NotFound' used as a resource NAME
+                                # all still fail to match, because none of them carries the
+                                # 'invalid status code ' prefix immediately before the status.
+                                #
+                                # A bare '404' / 'ResourceNotFound' substring is still NOT
+                                # matched, for the same reason. $PermanentOutcome is taken FROM
+                                # the match so the recorded outcome cannot drift from the
+                                # branch that set it. An unmatched permanent failure falls
+                                # through to the retry path - slower, never wrong - which is
+                                # the correct way for this classifier to fail.
+                                if ($LastError -match "invalid status code '?(?<Status>NotFound|BadRequest)'?")
                                 {
                                     $Permanent = $true
                                     $PermanentOutcome = $Matches['Status']

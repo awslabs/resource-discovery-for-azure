@@ -259,7 +259,7 @@ Describe 'Get-ConsumptionAccessOutcome classification' {
 
     It 'Returns Ok for a null/empty message (successful probe)' {
         Get-ConsumptionAccessOutcome -ErrorMessage $null | Should -Be 'Ok'
-        Get-ConsumptionAccessOutcome -ErrorMessage ''   | Should -Be 'Ok'
+        Get-ConsumptionAccessOutcome -ErrorMessage '' | Should -Be 'Ok'
     }
 
     It 'Classifies authorization / RBAC denials as Denied' {
@@ -651,10 +651,15 @@ Describe 'FailedAttempts null-serialization regression' {
 # same state blob two or three times, one network round trip apiece. The -State
 # parameter lets a caller read once and project many.
 #
-# Honest scope: no SHIPPED caller does that today. All three readers have call
-# sites only under Tests/ - Run-AllSubscriptions.ps1 reads once via
-# Get-ResumeStateObject and projects inline, which is the same read-once discipline
-# expressed by hand. So these tests pin an API contract, not a live hot path.
+# Run-AllSubscriptions.ps1 IS that caller: it reads the state once via
+# Get-ResumeStateObject and hands it to all three readers with -State. So these
+# tests pin a live path, not a hypothetical API contract - and the source guards in
+# Tests/ResumeCycle.Tests.ps1 assert the wrapper keeps doing it that way.
+#
+# An earlier revision of this note said no shipped caller existed and that the
+# wrapper projected inline. Both stopped being true when the wrapper was wired
+# through the readers; the note is corrected here because it was the comment most
+# likely to convince a future reader that -State is unused and removable.
 #
 # The bypass is proven two ways. WITHOUT a mock, by pointing -Path at a file that
 # does not exist: if a reader consulted the path it would see no state and return
@@ -726,7 +731,15 @@ Describe 'Resume-state readers: read-once projection via -State' {
             Should -Throw -Because 'the mock must be reachable from inside Resolve-ResumeState, or the zero above proves nothing'
     }
 
-    It 'still reads for itself when -State is OMITTED, so existing call sites are unchanged' {
+    # Omitting -State remains valid and back-compatible; every shipped call site now
+    # passes it, so the only omitted-State callers left are these tests.
+    #
+    # This It has a role none of its siblings can cover: it is the ONLY unmocked
+    # proof that the self-read actually projects correct DATA off a real file. The
+    # -Times 3 test and the two positive controls all mock Get-ResumeStateObject, so
+    # they only prove the read was dispatched, not that its result is right. Do not
+    # delete this as redundant.
+    It 'still reads for itself when -State is OMITTED, so that shape stays valid' {
         @(Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 't') | Should -Be @('s1', 's2')
         @(Get-FailedAttempts -Path $script:RealPath -Tenant 't').Count | Should -Be 1
         @((Get-StartSnapshot -Path $script:RealPath -Tenant 't').SubscriptionIds).Count | Should -Be 3

@@ -1080,16 +1080,16 @@ function Get-WeightedInventoryPlan
     }
 
     return [pscustomobject]@{
-        Mode                    = if ($ChosenN -le 1) { 'Single' } else { 'Sharded' }
-        ShardCount              = $ChosenN
-        Streams                 = $Streams
-        SubscriptionCount       = $SubCount
-        TotalSeconds            = [long]$TotalSeconds
-        BusiestShardSeconds     = [long]$Busiest
-        LargestSingleSubSeconds = [long]$LargestSingle
-        PerMachineSubscriptions = [int][math]::Ceiling($SubCount / $ChosenN)
-        MaxSingleMachineHours   = $MaxSingleMachineHours
-        CeilingUnreachable      = $CeilingUnreachable
+        Mode                     = if ($ChosenN -le 1) { 'Single' } else { 'Sharded' }
+        ShardCount               = $ChosenN
+        Streams                  = $Streams
+        SubscriptionCount        = $SubCount
+        TotalSeconds             = [long]$TotalSeconds
+        BusiestShardSeconds      = [long]$Busiest
+        LargestSingleSubSeconds  = [long]$LargestSingle
+        PerMachineSubscriptions  = [int][math]::Ceiling($SubCount / $ChosenN)
+        MaxSingleMachineHours    = $MaxSingleMachineHours
+        CeilingUnreachable       = $CeilingUnreachable
         CeilingUnreachableReason = $CeilingUnreachableReason
     }
 }
@@ -1328,9 +1328,12 @@ function Get-ResumeStateObject
 # for itself, so a caller wanting two or three projections downloads the SAME
 # state blob two or three times, a network round trip apiece. -State reads once
 # and projects many. Omitting it preserves the original self-reading behaviour
-# exactly, so every existing call site is unaffected. The wrapper itself calls
-# Get-ResumeStateObject once directly and projects inline, which is the same
-# read-once discipline expressed by hand.
+# exactly, so every existing call site is unaffected.
+#
+# Run-AllSubscriptions.ps1 is that caller: it reads once via Get-ResumeStateObject
+# and hands the result to all three readers. Source guards in
+# Tests/ResumeCycle.Tests.ps1 assert both the single read and the reuse, so a
+# projection that silently drops -State fails the suite.
 #
 # -StateSupplied, NOT a $null default, is what distinguishes "no state given" from
 # "given a state that happens to be null". That distinction matters: the intended
@@ -1445,8 +1448,8 @@ function Save-CompletedSubscriptionIds
     # keys (TenantID, CompletedSubscriptionIds, FailedAttempts, LastUpdated),
     # keeping the existing shape unchanged for readers that ignore the new key.
     $StateMap = [ordered]@{
-        TenantID                  = $Tenant
-        CompletedSubscriptionIds  = @($Ids)
+        TenantID                 = $Tenant
+        CompletedSubscriptionIds = @($Ids)
         # FailedAttempts is the canonical "what to retry" list. The wrapper
         # appends/refreshes entries on every catch and removes them on the
         # next successful attempt for the same sub, so the file is always
@@ -1459,8 +1462,8 @@ function Save-CompletedSubscriptionIds
         # `[ null ]` - a one-element array holding a null - instead of `[]`.
         # Stripping nulls here guarantees the persisted list never contains one,
         # regardless of which caller collapsed an empty array upstream.
-        FailedAttempts            = @($FailedAttempts | Where-Object { $null -ne $_ })
-        LastUpdated               = (Get-Date).ToString('o')
+        FailedAttempts           = @($FailedAttempts | Where-Object { $null -ne $_ })
+        LastUpdated              = (Get-Date).ToString('o')
     }
     if ($null -ne $StartSnapshot) { $StateMap['EnumeratedAtStart'] = $StartSnapshot }
     $State = [pscustomobject]$StateMap

@@ -150,10 +150,34 @@ function Variables
 
     if ($Obfuscate.IsPresent)
     {
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        # The four IDENTIFIER dictionaries are CASE-INSENSITIVE (OrdinalIgnoreCase).
+        #
+        # ARM resource ids, subscription ids and resource-group names are
+        # case-insensitive identifiers by specification - Azure preserves the case
+        # you created them with but treats two spellings as the same resource. A
+        # lookup keyed on exact case therefore MISSES on a casing difference, and
+        # every consequence of that miss is silent:
+        #   - a cross-reference (VM <-> disk, SQL VM <-> parent VM) falls through to
+        #     the 'obfuscated' sentinel instead of the real token
+        #   - a consumption row fails to join back to its inventory resource
+        #   - a dictionary seeded from a PREVIOUS run (-ObfuscationDictionary) stops
+        #     matching, so the same resource is re-tokenised and the two runs no
+        #     longer correlate
+        # None of those raise an error. Making the comparer explicit removes the
+        # whole failure class rather than relying on every upstream producer to
+        # lowercase consistently forever.
+        #
+        # TagValueDictionary and FreeTextDictionary stay CASE-SENSITIVE deliberately.
+        # Azure tag values are genuinely case-sensitive, so 'Env=Prod' and 'Env=prod'
+        # are two different values; collapsing them onto one token would lose a real
+        # distinction in the estate. There is no injectivity/distinctness test in the
+        # suite that would catch such a collapse, which makes the conservative choice
+        # the correct one here.
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        # Case-SENSITIVE on purpose - see the note above.
         $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     }
@@ -978,11 +1002,16 @@ Function RunInventorySetup()
             {
                 $ObfuscatedID = $ResourceIdDictionary[$resourceItem.ID]
                 # Guard the name-map read: a seeded/hand-edited -ObfuscationDictionary
-                # can contain the ID in the ResourceId map but NOT the ResourceName map,
-                # and the generic Dictionary indexer throws KeyNotFoundException (not
-                # $null) on a miss - which would abort the whole obfuscation pass. On a
-                # normal run both maps are populated together so this is a no-op; on a
-                # sparse seed we keep the freshly-minted $ObfuscatedName instead of throwing.
+                # can contain the ID in the ResourceId map but NOT the ResourceName map.
+                #
+                # MEASURED, correcting an earlier claim in this comment: the indexer does
+                # NOT throw KeyNotFoundException here. PowerShell's indexer adapter
+                # swallows it and yields $null, so the unguarded read would have produced
+                # a NULL masked name rather than an abort - quieter, and worse. The guard
+                # is still exactly right, only the stated reason was wrong.
+                #
+                # On a normal run both maps are populated together so this is a no-op; on
+                # a sparse seed we keep the freshly-minted $ObfuscatedName.
                 if ($ResourceNameDictionary.ContainsKey($resourceItem.ID))
                 {
                     $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
@@ -2067,11 +2096,15 @@ function ExecuteInventoryProcessing()
                                     # reuse the inventory/metrics token and falls back to the
                                     # per-name cache. That is legitimate for resources deleted
                                     # between the graph scan and the billing pull, or for a
-                                    # -Service-narrowed inventory - but it is ALSO the silent
-                                    # signature of a lowercasing regression, because the
-                                    # dictionary is a case-SENSITIVE Dictionary[string,string]
-                                    # and $RawUri must already be lowercased (via the
-                                    # InstanceData .tolower() upstream). Child/sub-resource
+                                    # -Service-narrowed inventory.
+                                    #
+                                    # This used to ALSO be the signature of a lowercasing
+                                    # regression, because the dictionary was a case-SENSITIVE
+                                    # Dictionary[string,string] that missed on any casing
+                                    # difference. It is now built with OrdinalIgnoreCase (see
+                                    # Variables()), so a casing difference can no longer cause
+                                    # a miss and this diagnostic means what it says: the uri is
+                                    # genuinely absent from the inventory. Child/sub-resource
                                     # rows ($LeafNameIndex >= 4) legitimately miss and would
                                     # flood, so only the top-level case is surfaced. Routed to
                                     # the debug log ONLY (-NoConsole so it never touches the
@@ -2083,7 +2116,7 @@ function ExecuteInventoryProcessing()
                                     # before the debug log path is set.
                                     if ($LeafNameIndex -eq 2 -and $null -eq $InventoryLeafToken)
                                     {
-                                        Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; if unexpected, verify resourceUri lowercasing vs the case-sensitive dictionary): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
+                                        Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; the dictionary is case-insensitive, so this means the resource is genuinely absent - deleted between the graph scan and the billing pull, or outside a -Service-narrowed inventory): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
                                     }
 
                                     $Rebuilt = @()

@@ -117,6 +117,36 @@ if ($Task -eq 'Processing')
     # to a single implementation so the per-call and batch fast-path produce
     # IDENTICAL obfuscation - divergent copies could break determinism.
     # -----------------------------------------------------------------------
+    # Read one obfuscation map safely. Returns the mapped token, or the standard
+    # 'obfuscated' sentinel when the map is absent or lacks the key.
+    #
+    # MEASURED, not assumed: indexing a Dictionary[string,string] with a missing key
+    # does NOT throw under PowerShell - its indexer adapter swallows the
+    # KeyNotFoundException and yields $null. So the risk here is not a crash, it is a
+    # SILENT NULL: Protect-RdaMetrics checks ContainsKey on the ID map only, so a
+    # dictionary seeded from a previous run (-ObfuscationDictionary) whose maps are
+    # not perfectly parallel produces a record with a tokenised ID and null
+    # Name/Subscription/ResourceGroup. That is a nulled-out field where the rest of
+    # the codebase - including the third branch of this very function - uses the
+    # 'obfuscated' sentinel, and the no-null-obfuscated-fields assertion in the PII
+    # suite treats a null there as a defect.
+    #
+    # The sentinel is also the only safe fallback: it cannot put a real identifier
+    # into the shared JSON. The try/catch is belt-and-braces for a map type whose
+    # ContainsKey behaves differently, and costs nothing on the normal path.
+    function Get-RdaMappedValue
+    {
+        param($Map, [string]$Key)
+
+        if ($null -eq $Map) { return 'obfuscated' }
+        try
+        {
+            if ($Map.ContainsKey($Key)) { return $Map[$Key] }
+        }
+        catch { }
+        return 'obfuscated'
+    }
+
     function Protect-RdaMetrics
     {
         param($Metrics, $ResourceIdDictionary, $ResourceNameDictionary, $ResourceSubDictionary, $ResourceGroupDictionary)
@@ -126,10 +156,22 @@ if ($Task -eq 'Processing')
             $OriginalId = $metric.ID
             if (![string]::IsNullOrEmpty($OriginalId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($OriginalId))
             {
+                # ContainsKey is checked on the ID dictionary ONLY, so the three
+                # companion maps are read for a key nobody verified they hold. A
+                # missing key yields $null under PowerShell rather than throwing
+                # (measured - see Get-RdaMappedValue), which is worse than a crash
+                # here: the record ships with a tokenised ID and a null Name,
+                # Subscription and ResourceGroup, and nothing says why. Reachable on a
+                # run seeded with -ObfuscationDictionary, where the four maps come from
+                # a file and are not guaranteed to be parallel.
+                #
+                # Fall back to the 'obfuscated' sentinel per field, matching the third
+                # branch of this function. When all four maps agree - the normal case -
+                # behaviour is byte-for-byte unchanged.
                 $metric.ID = $ResourceIdDictionary[$OriginalId]
-                $metric.Name = $ResourceNameDictionary[$OriginalId]
-                $metric.Subscription = $ResourceSubDictionary[$OriginalId]
-                $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
+                $metric.Name = Get-RdaMappedValue $ResourceNameDictionary $OriginalId
+                $metric.Subscription = Get-RdaMappedValue $ResourceSubDictionary $OriginalId
+                $metric.ResourceGroup = Get-RdaMappedValue $ResourceGroupDictionary $OriginalId
             }
             else
             {

@@ -127,7 +127,17 @@ Describe "Inventory JSON Structure" {
         $Populated.Count | Should -BeGreaterThan 0 -Because "At least one service should have discovered resources"
     }
 
-    It "Every resource should have ID, Name, and Location fields" {
+    # Title says ID and Location ONLY, and deliberately does not claim Name. A plain
+    # 'Name' column is NOT universal: Services/Compute/ARO.ps1 and
+    # Services/Storage/NetApp.ps1 emit none, and Services/Infrastructure/AutomationAcc.ps1
+    # uses the domain-specific AutomationAccountName / RunbookName instead. So asserting
+    # Name here would fail on real output.
+    #
+    # The previous title read "ID, Name, and Location" while the body checked only two of
+    # the three, which is the worse failure of the two available: a reader trusts the
+    # title, and the obvious "fix" is to add the missing assertion - which then breaks on
+    # three legitimate collectors and looks like a collector bug rather than a test bug.
+    It "Every resource should have ID and Location fields" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_)

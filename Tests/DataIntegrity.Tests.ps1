@@ -47,6 +47,51 @@ BeforeAll {
                 }
             }
     }
+
+    # Return the rows a "field was NOT obfuscated" check can actually examine, or SKIP
+    # the It when there are none.
+    #
+    # WHY. The Non-Sensitive Fields Preserved tests below were written as
+    #   foreach ($vm in @($Inventory.VirtualMachines)) { if (field non-empty) { assert } }
+    # which runs ZERO assertions - and therefore reports PASSED - on a subscription with
+    # no VMs, or no storage accounts, or where the field is empty on every row. Pester
+    # does not fail an It for making no assertions, so the suite reported green while
+    # verifying nothing. That is false assurance in the PII suite specifically, which is
+    # the one place a silent pass is most expensive.
+    #
+    # Set-ItResult -Skipped ABORTS the It immediately (verified, not assumed), so the
+    # caller needs no guard after calling this: either it gets rows back, or its body
+    # stops here and the run shows a visible Skipped instead of a misleading Passed.
+    function script:Get-ExaminableRows
+    {
+        param(
+            [AllowNull()][object[]]$Rows,
+            [Parameter(Mandatory = $true)][string]$Property,
+            [Parameter(Mandatory = $true)][string]$TypeLabel
+        )
+
+        $All = @($Rows | Where-Object { $null -ne $_ })
+        $Examined = @($All | Where-Object { -not [string]::IsNullOrEmpty($_.$Property) })
+
+        if ($Examined.Count -eq 0)
+        {
+            # Name WHICH of the two zeroes it was, so the skip reason is diagnostic
+            # rather than just "nothing to do".
+            $Reason = if ($All.Count -eq 0)
+            {
+                "this bundle contains no {0} rows, so there is no {1} value to check" -f $TypeLabel, $Property
+            }
+            else
+            {
+                "every one of the {0} {1} row(s) has an empty {2}, so there is nothing to check" -f $All.Count, $TypeLabel, $Property
+            }
+            Set-ItResult -Skipped -Because $Reason
+            return
+        }
+
+        return $Examined
+    }
+
 }
 
 AfterAll {
@@ -196,46 +241,38 @@ Describe "Deterministic Mapping" {
 # ============================================================
 Describe "Non-Sensitive Fields Preserved" {
     It "VM Location should be a real Azure region" {
-        foreach ($vm in @($script:Inventory.VirtualMachines))
+        $Rows = script:Get-ExaminableRows -Rows @($script:Inventory.VirtualMachines) -Property 'Location' -TypeLabel 'VirtualMachines'
+        foreach ($vm in $Rows)
         {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Location))
-            {
-                $vm.Location | Should -Not -Match '^(prod|nonprod)_' -Because "Location should be a real region"
-            }
+            $vm.Location | Should -Not -Match '^(prod|nonprod)_' -Because "Location should be a real region"
         }
     }
 
     It "VM Size should be a real Azure VM size" {
-        foreach ($vm in @($script:Inventory.VirtualMachines))
+        # Azure VM SKUs include Standard_*, Basic_*, M-series (M64s, M128ms),
+        # N-series GPU sizes etc. The invariant is "not obfuscated" - i.e.
+        # the size string was not run through the obfuscator. The actual
+        # SKU shape is not under this script's control.
+        $Rows = script:Get-ExaminableRows -Rows @($script:Inventory.VirtualMachines) -Property 'Size' -TypeLabel 'VirtualMachines'
+        foreach ($vm in $Rows)
         {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.Size))
-            {
-                # Azure VM SKUs include Standard_*, Basic_*, M-series (M64s, M128ms),
-                # N-series GPU sizes etc. The invariant is "not obfuscated" - i.e.
-                # the size string was not run through the obfuscator. The actual
-                # SKU shape is not under this script's control.
-                $vm.Size | Should -Not -Match '^(prod|nonprod)_' -Because "VM Size should not be obfuscated"
-            }
+            $vm.Size | Should -Not -Match '^(prod|nonprod)_' -Because "VM Size should not be obfuscated"
         }
     }
 
     It "VM OS should be windows or linux" {
-        foreach ($vm in @($script:Inventory.VirtualMachines))
+        $Rows = script:Get-ExaminableRows -Rows @($script:Inventory.VirtualMachines) -Property 'OSType' -TypeLabel 'VirtualMachines'
+        foreach ($vm in $Rows)
         {
-            if ($null -ne $vm -and ![string]::IsNullOrEmpty($vm.OSType))
-            {
-                $vm.OSType | Should -BeIn @('windows', 'linux') -Because "OSType should be a real OS type"
-            }
+            $vm.OSType | Should -BeIn @('windows', 'linux') -Because "OSType should be a real OS type"
         }
     }
 
     It "Storage SKU should not be obfuscated" {
-        foreach ($sa in @($script:Inventory.StorageAcc))
+        $Rows = script:Get-ExaminableRows -Rows @($script:Inventory.StorageAcc) -Property 'SKU' -TypeLabel 'StorageAcc'
+        foreach ($sa in $Rows)
         {
-            if ($null -ne $sa -and ![string]::IsNullOrEmpty($sa.SKU))
-            {
-                $sa.SKU | Should -Not -Match '^(prod|nonprod)_' -Because "Storage SKU should be real"
-            }
+            $sa.SKU | Should -Not -Match '^(prod|nonprod)_' -Because "Storage SKU should be real"
         }
     }
 

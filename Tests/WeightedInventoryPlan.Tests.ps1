@@ -118,18 +118,17 @@ Describe 'Get-PlanWeightKql' {
 
     # SOURCE GUARD. The Storage Account UsedCapacity metric is opt-in, so -Plan must
     # drop the storage weight term unless the run would actually collect it. If the
-    # wrapper ever passes its raw -SkipStorageMetrics here instead of the effective
-    # decision, -Plan silently sizes in a cost the run never spends and recommends
-    # more machines than needed. That is invisible in the output, hence a guard on
-    # the source rather than on a value.
-    It 'the wrapper derives the plan storage term from the opt-in, not from -SkipStorageMetrics alone' {
+    # wrapper ever stops deriving the sizer's storage gate from -IncludeStorageMetrics,
+    # -Plan silently sizes in a cost the run never spends and recommends more machines
+    # than needed. That is invisible in the output, hence a guard on the source rather
+    # than on a value.
+    It 'the wrapper derives the plan storage term from the opt-in' {
         $WrapperSrc = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
 
-        # The effective decision mirrors the runtime gate in Extension/Metrics.ps1:
-        # collect only when opted in, and an explicit skip always wins.
-        $WrapperSrc | Should -Match '\$PlanSkipStorage\s*=\s*\(\s*-not\s+\$IncludeStorageMetrics\s*\)\s*-or\s+\$SkipStorageMetrics'
+        # Mirrors the runtime gate in Extension/Metrics.ps1: collect only when opted in.
+        $WrapperSrc | Should -Match '\$PlanSkipStorage\s*=\s*-not\s+\$IncludeStorageMetrics'
 
-        # ...and that effective value, not the raw switch, is what reaches the sizer.
+        # ...and that derived value is what reaches the sizer's internal switch.
         $WrapperSrc | Should -Match 'Get-PlanSubscriptionWeights[^\r\n]*-SkipStorageMetrics:\$PlanSkipStorage'
     }
 }

@@ -18,11 +18,10 @@
 #                         UsedCapacity metrics ARE emitted (the metric is opt-in,
 #                         so this proves the gate opens; 'default' proves it is
 #                         absent when not asked for)
-#   8. skipstorage      - -SkipStorageMetrics: asserts no Storage Account metrics
-#   9. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
-#  10. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
+#   8. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
+#   9. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
 #                         series carry the 60-min grain
-#  11. recovery         - LIVE end-to-end recovery workflow: generate an obfuscated
+#  10. recovery         - LIVE end-to-end recovery workflow: generate an obfuscated
 #                         scoped "gap" bundle, re-collect one populated service
 #                         seeded with the gap dictionary, splice with
 #                         Merge-RecoveryData, then run the structural + obfuscation
@@ -54,7 +53,7 @@
 param(
     [string]   $SubscriptionID,
     [string]   $TenantID,
-    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'includestorage', 'skipstorage', 'skipdisk', 'metricinterval', 'recovery'),
+    [string[]] $Scenarios = @('default', 'obfuscate', 'skipboth', 'skipmetrics', 'skipconsumption', 'service', 'includestorage', 'skipdisk', 'metricinterval', 'recovery'),
     [int]      $MetricsLookbackDays = 2,
     [int]      $ConcurrencyLimit = 6,
     [switch]   $KeepOutput
@@ -187,10 +186,8 @@ $Catalog = @{
     # flag's specific effect (no Storage Account / no Managed Disk metrics, or the
     # VM/SQL sampled series at the requested grain).
     # The Storage Account UsedCapacity metric is OPT-IN, so 'includestorage' is the
-    # scenario that proves the gate OPENS. Without it, 'skipstorage' would pass
-    # trivially (the metric is absent by default) and prove nothing.
+    # scenario that proves the gate OPENS; 'default' proves it stays shut.
     'includestorage'  = @{ Args = @{ IncludeStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
-    'skipstorage'     = @{ Args = @{ SkipStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'skipdisk'        = @{ Args = @{ SkipDiskMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'metricinterval'  = @{ Args = @{ MetricsIntervalMinutes = 60 }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     # Live recovery workflow. It does NOT fit the one-generation-per-scenario
@@ -462,7 +459,6 @@ try
             # capacity metric is genuinely OPT-IN (absent unless asked for).
             'default' { $env:TEST_EXPECT_NO_STORAGE_METRICS = '1' }
             'includestorage' { $env:TEST_EXPECT_STORAGE_METRICS = '1' }
-            'skipstorage' { $env:TEST_EXPECT_NO_STORAGE_METRICS = '1' }
             'skipdisk' { $env:TEST_EXPECT_NO_DISK_METRICS = '1' }
             'metricinterval' { $env:TEST_EXPECT_METRIC_GRAIN_MINUTES = [string]$Scenario.Args.MetricsIntervalMinutes }
         }

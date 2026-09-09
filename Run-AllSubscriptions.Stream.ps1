@@ -67,12 +67,10 @@ param (
     [switch] $UseMetricsBatch,
     # Metric-volume controls forwarded by the parent wrapper on to
     # ResourceInventory.ps1. -IncludeStorageMetrics OPTS IN to the Storage Account
-    # UsedCapacity metric, which is NOT collected by default; -SkipStorageMetrics is
-    # retained and still wins over it. -SkipDiskMetrics drops the Managed Disk I/O
-    # metrics; -MetricsIntervalMinutes overrides the VM / SQL / OSS-DB utilization
-    # grain (0 = native). See the notes in Extension/Metrics.ps1.
+    # UsedCapacity metric, which is NOT collected by default. -SkipDiskMetrics drops
+    # the Managed Disk I/O metrics; -MetricsIntervalMinutes overrides the VM / SQL /
+    # OSS-DB utilization grain (0 = native). See the notes in Extension/Metrics.ps1.
     [switch] $IncludeStorageMetrics,
-    [switch] $SkipStorageMetrics,
     [switch] $SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
     # Collector scope forwarded to ResourceInventory.ps1's -Service filter. The
@@ -227,11 +225,17 @@ if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
-if ($SkipStorageMetrics) { $InventoryPassthrough['SkipStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
 if ($Service -and $Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
+# Forward -Debug on to the inner script, mirroring the sequential path in
+# Run-AllSubscriptions.ps1. This stream is a background job, which does NOT
+# inherit the parent's $DebugPreference, so the wrapper forwards -Debug to this
+# script explicitly and this line carries it the last hop. Without both hops
+# -Debug is accepted and silently ignored for every parallel run.
+# [bool] so an explicit -Debug:$false is honoured rather than inverted.
+if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = [bool]$PSBoundParameters['Debug'] }
 
 # ---- Per-sub iteration -------------------------------------------------------
 #

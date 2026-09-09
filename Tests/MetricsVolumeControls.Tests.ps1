@@ -5,8 +5,6 @@
 #   -IncludeStorageMetrics   : Storage Account UsedCapacity records ARE emitted.
 #                              The metric is OPT-IN, so the default emits none and
 #                              this is the assertion that proves the gate opens.
-#   -SkipStorageMetrics      : no Storage Account metric records are emitted (also
-#                              the default, since the metric is opt-in).
 #   -SkipDiskMetrics         : no Managed Disk metric records are emitted.
 #   -MetricsIntervalMinutes N: the high-frequency SAMPLED utilization series - VM
 #                              (Percentage CPU / Available Memory Bytes), Azure SQL
@@ -109,7 +107,7 @@ Describe 'Metrics Volume Controls' {
         if (-not $script:Active) { Set-ItResult -Skipped -Because 'TEST_ZIP_PATH not set / missing'; return }
         if ($script:StorageAccountCount -eq 0) { Set-ItResult -Skipped -Because 'this subscription owns no storage account, so an absence of storage metrics would prove nothing'; return }
         $Storage = @($script:Metrics | Where-Object { $_.Service -eq 'Storage Account' })
-        $Storage.Count | Should -Be 0 -Because 'the UsedCapacity def must be absent both by DEFAULT (it is opt-in) and when -SkipStorageMetrics is passed'
+        $Storage.Count | Should -Be 0 -Because 'the UsedCapacity def must be absent by DEFAULT (it is opt-in)'
     }
 
     # The counterpart to the assertion above. Without this, that absence test would

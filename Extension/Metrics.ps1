@@ -19,15 +19,9 @@ param(
     #       storage account and a tenant with a very large storage estate spends a
     #       large share of the metrics phase on a single capacity figure. Pass it
     #       when storage capacity is actually wanted.
-    #   -SkipStorageMetrics : retained and still honoured. Now that the storage
-    #       metric is opt-in it is redundant, but it remains accurate ("skip the
-    #       storage metric") so existing callers and pipelines keep working rather
-    #       than failing on an unknown parameter. It WINS over
-    #       -IncludeStorageMetrics, so an explicit skip is never silently overridden.
     #   -SkipDiskMetrics : opt-out. Skip the four Managed Disk composite I/O
     #       metrics (4 calls per attached disk).
     [switch]$IncludeStorageMetrics,
-    [switch]$SkipStorageMetrics,
     [switch]$SkipDiskMetrics,
     # Override the sampling grain (TimeGrain) of the high-frequency utilization
     # series: VM (Percentage CPU / Available Memory Bytes, native 15 min), Azure
@@ -598,29 +592,21 @@ if ($Task -eq 'Processing')
 
     $StorageAccounts = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
 
-    # OPT-IN: the capacity metric is collected only when explicitly asked for. An
-    # explicit -SkipStorageMetrics still wins, so a caller that already passes it
-    # keeps the same behaviour even if it also passes -IncludeStorageMetrics.
-    $CollectStorageCapacity = ($IncludeStorageMetrics -and -not $SkipStorageMetrics)
+    # OPT-IN: the capacity metric is collected only when explicitly asked for.
     if ($StorageAccounts)
     {
         # State the decision, so a report with no storage capacity figure is
         # explainable from the log instead of looking like a collection failure.
-        if ($CollectStorageCapacity)
+        if ($IncludeStorageMetrics)
         {
             Write-MetricsDiag ("Storage Account 'UsedCapacity': COLLECTING for {0} account(s) (-IncludeStorageMetrics was passed)." -f @($StorageAccounts).Count)
-        }
-        elseif ($SkipStorageMetrics)
-        {
-            $SkipReason = if ($IncludeStorageMetrics) { '-SkipStorageMetrics was passed and WINS over -IncludeStorageMetrics' } else { '-SkipStorageMetrics was passed' }
-            Write-MetricsDiag ("Storage Account 'UsedCapacity': skipped for {0} account(s) ({1})." -f @($StorageAccounts).Count, $SkipReason)
         }
         else
         {
             Write-MetricsDiag ("Storage Account 'UsedCapacity': skipped for {0} account(s) (opt-in; pass -IncludeStorageMetrics to collect it)." -f @($StorageAccounts).Count)
         }
     }
-    if ($StorageAccounts -and $CollectStorageCapacity)
+    if ($StorageAccounts -and $IncludeStorageMetrics)
     {
         foreach ($storageAccount in $StorageAccounts)
         {

@@ -1,3 +1,19 @@
+# [CmdletBinding()] makes this an ADVANCED script, which is what gets the
+# parameter binder to REJECT unrecognized arguments instead of silently
+# collecting them into $args. A mistyped -Obfusacte must not run the whole
+# inventory UNOBFUSCATED while the operator believes the output was masked.
+# It also provides -? help for free.
+#
+# There is deliberately NO [switch]$Debug in the param block below. -Debug is a
+# CmdletBinding COMMON parameter, and declaring it here as well is a hard
+# MetadataError ("A parameter with the name 'Debug' was defined multiple times")
+# that stops the script from starting at all. The built-in one is equivalent for
+# this script's purposes: passing -Debug sets $DebugPreference to 'Continue' in
+# script scope, so Write-Debug output appears exactly as before, and
+# $PSBoundParameters.ContainsKey('Debug') is how the -Debug-only branches below
+# test for it. -Debug therefore remains the public flag name and
+# Run-AllSubscriptions.ps1's existing passthrough of it is unchanged.
+[CmdletBinding()]
 param ($TenantID,
     $Appid,
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', ErrorMessage = 'Invalid SubscriptionID; must be a GUID')]
@@ -7,7 +23,6 @@ param ($TenantID,
     [string]$ResourceGroup,
     [string[]]$Service,
     [string]$ObfuscationDictionary,
-    [switch]$Debug,
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$DeviceLogin,
@@ -24,71 +39,16 @@ param ($TenantID,
     # -IncludeStorageMetrics OPTS IN to the Storage Account UsedCapacity metric,
     # which is NOT collected by default (one metric-query call per storage account
     # makes it the dominant cost on a large storage estate).
-    # -SkipStorageMetrics is retained and still wins over -IncludeStorageMetrics.
     # -SkipDiskMetrics drops the Managed Disk composite I/O metrics.
     # -MetricsIntervalMinutes overrides the VM / SQL / OSS-DB utilization sampling
     # grain (0 = native 15 min VM / 30 min SQL / 60 min OSS-DB). See Extension/Metrics.ps1.
     [switch]$IncludeStorageMetrics,
-    [switch]$SkipStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
     $OutputDirectory)
-
-# ---------------------------------------------------------------------------
-# Reject unrecognized arguments.
-#
-# This script deliberately does NOT use [CmdletBinding()]: it declares its own
-# -Debug switch, which is a CmdletBinding common-parameter name, and both
-# wrappers forward -Debug explicitly. Without [CmdletBinding()] - and with no
-# [Parameter()] attribute either, since [ValidatePattern]/[ValidateSet] do not
-# promote a script to advanced - PowerShell treats this as a SIMPLE script and
-# silently collects unrecognized arguments into $args instead of failing.
-#
-# A silently dropped flag is worse than an error: a mistyped -Obfusacte would
-# run the whole inventory UNOBFUSCATED while the operator believes the output
-# was masked. The other entry points (Run-AllSubscriptions.ps1,
-# Run-AllSubscriptions.Stream.ps1, Reveal.ps1 and Build-MainSummaryFromZip.ps1)
-# already reject unknown args for free because they are advanced scripts. This
-# restores the same guarantee here.
-#
-# Fails the same way as the dot-source guards below (Write-Host + exit 1) so a
-# direct interactive run sets a non-zero exit code, and so a wrapper-driven run
-# is caught by the callers' existing $LASTEXITCODE check and marked as a failed
-# subscription.
-if ($args.Count -gt 0)
-{
-    # Help is the one universal flag and must always pass. A simple script does
-    # not get -? handled by the binder, so it arrives here in $args. Only treat
-    # the run as a help request when EVERY unbound token is a help flag, so a
-    # mixed '-Obfusacte -?' still names the typo instead of hiding it behind a
-    # successful help screen. $PSCommandPath is wildcard-escaped because
-    # Get-Help -Name treats its value as a pattern, and a repo path containing
-    # '[' or ']' would otherwise resolve nothing and exit 0 showing no help.
-    $HelpFlags = @('-?', '-h', '-help', '--help')
-    $NonHelpArgs = @($args | Where-Object { $_ -notin $HelpFlags })
-    if ($NonHelpArgs.Count -eq 0)
-    {
-        Get-Help -Name ([System.Management.Automation.WildcardPattern]::Escape($PSCommandPath))
-        exit 0
-    }
-
-    Write-Host ("ERROR: Unrecognized argument(s): {0}" -f ($NonHelpArgs -join ', ')) -ForegroundColor Red
-    Write-Host "Check for a typo. A mistyped switch would otherwise be ignored and the run would continue with that option OFF - for example producing an UNOBFUSCATED report." -ForegroundColor Yellow
-    Write-Host "Note: this script is not an advanced function, so PowerShell common parameters (-Verbose, -ErrorAction and similar) are not accepted either. Use -Debug for verbose diagnostics." -ForegroundColor Yellow
-    Write-Host "Run this script with -? to list the valid parameters." -ForegroundColor Yellow
-    exit 1
-}
-
-# Contradictory storage-metric flags, warned once for a STANDALONE run. Suppressed
-# under -RunAllSubs because the wrapper already warns once up front and this script
-# is invoked per subscription there, so warning here too would repeat it N times.
-if ($IncludeStorageMetrics -and $SkipStorageMetrics -and -not $RunAllSubs.IsPresent)
-{
-    Write-Warning "Both -IncludeStorageMetrics and -SkipStorageMetrics were passed. -SkipStorageMetrics WINS, so the Storage Account 'UsedCapacity' metric will NOT be collected. Drop -SkipStorageMetrics to collect it."
-}
 
 # ---------------------------------------------------------------------------
 # Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
@@ -115,11 +75,39 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 . $CommonFunctionsFile
 
 
-if ($Debug.IsPresent) { $DebugPreference = 'Continue' }
+# -Debug is the CmdletBinding COMMON parameter (see the note above the param
+# block). When it was passed the binder has ALREADY set $DebugPreference to
+# 'Continue' for this scope, so Write-Debug output appears with no work here -
+# the old explicit '$DebugPreference = Continue' line is now redundant and was
+# removed. $DebugMode is still needed for the $ErrorActionPreference choice.
+#
+# ContainsKey alone is NOT enough: '-Debug:$false' is a BOUND parameter whose
+# value is $false, so ContainsKey returns $true and the old form treated an
+# explicit opt-OUT as an opt-IN. That flipped $ErrorActionPreference to
+# 'Continue' for the whole run, which is the opposite of what the caller asked
+# for and turns the deliberately-swallowed long tail of per-resource errors into
+# console noise. The value has to be read, not just its presence. This also keeps
+# the flag consistent with the two forwarding sites in Run-AllSubscriptions.ps1
+# and Run-AllSubscriptions.Stream.ps1, which already use [bool] on the value.
+$DebugMode = ($PSBoundParameters.ContainsKey('Debug') -and [bool]$PSBoundParameters['Debug'])
 
-if ($Debug.IsPresent) { $ErrorActionPreference = "Continue" }Else { $ErrorActionPreference = "silentlycontinue" }
+# Production runs deliberately swallow the long tail of trivial per-resource
+# errors so a partial-but-useful inventory still completes; -Debug surfaces
+# everything. Do NOT "fix" this default - the high-value phases each opt into
+# terminating behavior with their own -ErrorAction Stop + try/catch (resource
+# discovery, Test-DataPlaneAuthReady, the consumption pull, packaging).
+#
+# Becoming an advanced script means -ErrorAction is now ACCEPTED by the binder,
+# which sets $ErrorActionPreference for this scope before the script body runs.
+# Honor that when the caller passed it explicitly instead of unconditionally
+# clobbering it, which would accept the flag and silently ignore it. With no
+# -ErrorAction the behavior is byte-for-byte what it was before.
+if (-not $PSBoundParameters.ContainsKey('ErrorAction'))
+{
+    $ErrorActionPreference = if ($DebugMode) { 'Continue' } else { 'SilentlyContinue' }
+}
 
-Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
+Write-Debug ('Debugging Mode: On. ErrorActionPreference is "{0}", every error will be presented.' -f $ErrorActionPreference)
 
 
 
@@ -1248,7 +1236,7 @@ function ExecuteInventoryProcessing()
 
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -IncludeStorageMetrics:$IncludeStorageMetrics -SkipStorageMetrics:$SkipStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsIntervalMinutes $MetricsIntervalMinutes
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -IncludeStorageMetrics:$IncludeStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsIntervalMinutes $MetricsIntervalMinutes
         }
     }
 

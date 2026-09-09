@@ -463,9 +463,17 @@ Describe "Non-Obfuscated Mode Safety" {
     }
 }
 Describe "Cross-Reference Field Obfuscation" {
-    # Helper: field should be obfuscated, null, or a safe non-ID value like 'None' or 'obfuscated'
+    # Each It below asserts a cross-reference field is either an obfuscation token
+    # ($script:ObfuscationPattern, defined once in the file-level BeforeAll) or one of
+    # the tolerated sentinels 'None' / 'obfuscated' / null.
+    #
+    # There used to be a $script:SafePattern here that spelled that contract out a
+    # second time. It was assigned and never referenced by any It, so it documented a
+    # rule nothing enforced - and it had drifted: it omitted the
+    # (databricks_|aks_|vmss_)? segment that $script:ObfuscationPattern carries, so
+    # wiring it up would have failed legitimate AKS / Databricks / VMSS tokens. It has
+    # been removed rather than fixed; $script:ObfuscationPattern is the single owner.
     BeforeAll {
-        $script:SafePattern = '^((prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|None|obfuscated)$'
         $script:AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
     }
 
@@ -572,6 +580,30 @@ Describe "Cross-Reference Field Obfuscation" {
             }
         }
         if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no SQLDB had a non-null ElasticPoolID in this fixture" }
+    }
+
+    It "AppInsights: WorkspaceResourceId should be obfuscated or 'None'" {
+        $Resources = @($script:Inventory.AppInsights) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AppInsights resources in this fixture"; return }
+        $Checked = 0
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.WorkspaceResourceId))
+            {
+                $r.WorkspaceResourceId | Should -Not -Match $script:AzureIdPattern -Because "WorkspaceResourceId is a full ARM id in a non-obfuscated run and must be tokenized here"
+                # An ARM-path check alone would let a raw workspace NAME through, so
+                # require a token unless it is a tolerated sentinel. This asserts the
+                # SHAPE of the value only - that it is a token rather than any real
+                # identifier. It deliberately does not assert WHICH token: matching it
+                # against the WrkSpace row's own ID is a join, covered separately.
+                if ($r.WorkspaceResourceId -notin @('obfuscated', 'None'))
+                {
+                    $r.WorkspaceResourceId | Should -Match $script:ObfuscationPattern -Because "a resolved workspace link must be an obfuscation token, not a raw name or id"
+                }
+                $Checked++
+            }
+        }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no AppInsights had a non-null WorkspaceResourceId in this fixture" }
     }
 
     It "SQLMI: InstancePoolName should not contain raw resource IDs" {

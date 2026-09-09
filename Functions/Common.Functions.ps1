@@ -487,3 +487,101 @@ function Set-RdaInventoryRootForChildren
     param([Parameter(Mandatory = $true)][string]$Path)
     $env:RDA_INVENTORY_ROOT = $Path
 }
+
+# =============================================================================
+# Consumption / billing error classification
+# =============================================================================
+# Does this billing error mean "you are not allowed", as opposed to "try again"?
+#
+# It lives HERE rather than beside either caller because BOTH entry points need
+# it and both dot-source this file:
+#   - Run-AllSubscriptions.ps1 : the up-front access gate, via
+#     Get-ConsumptionAccessOutcome in Functions/RunAllSubscriptions.Functions.ps1,
+#     which delegates to this function so the signatures are defined once.
+#   - ResourceInventory.ps1    : the per-page retry loop around Get-UsageAggregates,
+#     which must ABANDON a denial immediately instead of retrying it.
+#
+# One owner matters here specifically: the two callers draw opposite conclusions
+# from the same verdict (the gate STOPS the run, the retry loop STOPS RETRYING),
+# so two copies of the pattern drifting apart would make the run's behaviour
+# depend on which copy saw the error first.
+#
+# Returns $true only for an unambiguous AUTHORIZATION denial. Everything else -
+# throttling, a token that needs refreshing, Conditional Access, a 5xx, an
+# unsupported-API 404, a transient "Error while copying content to a stream" - is
+# deliberately NOT a denial, because those can succeed on a retry and the
+# expensive mistake is abandoning a subscription's billing data that was
+# retrievable. A missed denial only costs some wasted backoff; a false denial
+# costs the data.
+function Test-RdaConsumptionDenial
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$ErrorMessage)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
+
+    # Authorization / permission denial signatures across ARM and the billing APIs.
+    #
+    # Every branch below is deliberately anchored, because this predicate decides
+    # whether to ABANDON a subscription's billing data. Each loose form that was
+    # here before had a way to fire on something retryable:
+    #
+    #   'authoriz'  -> also matched UNAUTHORIZED, i.e. HTTP 401. A 401 is a failed
+    #                  AUTHENTICATION (missing, expired or invalid token), which is
+    #                  exactly the transient class that succeeds after a refresh.
+    #                  Classifying it as a denial abandoned recoverable data.
+    #                  KNOWN RESIDUAL, accepted deliberately: an interaction-required
+    #                  or revoked refresh token is a PERMANENT 401, and the retry loop
+    #                  does not re-auth, so it now burns the full budget (~26 min for
+    #                  that subscription) before failing where it used to fail at once.
+    #                  That is the correct trade under this function's asymmetry - the
+    #                  alternative abandons recoverable billing data on every ordinary
+    #                  token expiry - but it is a cost, not a free win.
+    #   'does not have'
+    #               -> matched any sentence with that phrase, including benign ones
+    #                  such as a scope that "does not have any usage data". Only the
+    #                  ARM permission phrasing counts.
+    #   '\b403\b'   -> \b treats '-' as a boundary, so an id or URL echoed back in a
+    #                  billing exception ('rg-403-prod') read as a 403. The bare number
+    #                  now needs HTTP-status context around it.
+    #   'RBAC'      -> unbounded, so it hit the letters inside a longer token.
+    #
+    # The asymmetry that drives all of this: a MISSED denial costs wasted backoff before
+    # failing in the same place anyway, while a FALSE denial throws away billing data that
+    # was retrievable. So when in doubt, not a denial.
+    #
+    # One qualification on that asymmetry, because it is load-bearing and easy to
+    # over-apply: it is NOT symmetric between the two callers. At the wrapper's up-front
+    # gate a false denial stops the WHOLE RUN, so precision matters most there; but that
+    # gate probes only the first eligible subscription, so a MISSED denial is paid as
+    # ~26 minutes of pointless backoff on EVERY subscription. Neither direction is cheap
+    # at scale - this reasoning must not be read as licence to loosen the pattern.
+    # A hyphen is a NON-word character, so '\b' offers no protection against a resource
+    # name: '\bforbidden\b' matches inside 'rg-forbidden-01' and '\bRBAC\b' matches inside
+    # 'rg-rbac-prod'. Since a billing exception echoes ids and resource groups back, the
+    # word-class guards below exclude hyphen on BOTH sides - (?<![\w-]) ... (?![\w-]) -
+    # which still matches every real rendering ('(403) Forbidden', "'Forbidden'",
+    # 'Forbidden.') while refusing the embedded-in-a-name case. All verified both ways.
+    $DenialPattern = '(?i)(' + (@(
+            # (?<!un) rather than \b. \b excluded 'Unauthorized' correctly but ALSO
+            # excluded 'LinkedAuthorizationFailed', which is a REAL ARM error code, so the
+            # 401 fix had introduced a false NEGATIVE. A negative lookbehind on 'un' says
+            # exactly what is meant: any 'authoriz' except the unauthenticated one.
+            '(?<!un)authoriz'                           # Authorization / AuthorizationFailed / LinkedAuthorizationFailed / not authorized
+            '(?<![\w-])forbidden(?![\w-])'              # the HTTP 403 reason phrase, how ARM actually renders it
+            '\(403\)'                                   # '(403)' when only the numeric status is present
+            # \s? and a 40-char gap because .NET renders 'Response status code does not
+            # indicate success: 403 (Forbidden).' - a 27-char gap that the previous
+            # {0,15} could not span - and 'StatusCode: 403' as a single token. \D cannot
+            # cross another digit, so this still cannot reach the 403 inside a request id.
+            '\bstatus\s?code\D{0,40}403\b'
+            'does not have (?:authorization|permission|access|the required)'
+            '\bnot authorized\b'
+            '\binsufficient privileg'
+            '\baccess is denied\b'
+            '(?<![\w-])RBAC(?![\w-])'
+        ) -join '|') + ')'
+
+    return [bool]($ErrorMessage -match $DenialPattern)
+}

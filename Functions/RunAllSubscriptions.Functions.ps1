@@ -1609,8 +1609,13 @@ function Get-ConsumptionAccessOutcome
 {
     param([string]$ErrorMessage)
     if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return 'Ok' }
-    # Authorization / permission denial signatures across ARM + the billing APIs.
-    if ($ErrorMessage -match '(?i)authoriz|forbidden|\b403\b|does not have|AuthorizationFailed|not authorized|insufficient privileg|access is denied|RBAC')
+    # The denial signatures live in Test-RdaConsumptionDenial (Common.Functions.ps1)
+    # because ResourceInventory.ps1's consumption retry loop needs the SAME verdict
+    # to decide when to stop retrying. Both entry points dot-source that file, so
+    # delegating keeps one definition instead of two that can drift - and the two
+    # callers act on it in opposite ways (this gate STOPS the run; the retry loop
+    # stops retrying), which is exactly when drift would be hardest to spot.
+    if (Test-RdaConsumptionDenial -ErrorMessage $ErrorMessage)
     {
         return 'Denied'
     }

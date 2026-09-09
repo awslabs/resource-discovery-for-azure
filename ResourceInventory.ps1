@@ -1815,6 +1815,32 @@ function ExecuteInventoryProcessing()
                         }
                         catch
                         {
+                            # ABANDON an authorization denial immediately. Retrying a 403
+                            # cannot make it a 200, and this catch is otherwise untyped, so
+                            # a denial previously consumed the whole 30-attempt budget -
+                            # roughly 26 minutes of escalating backoff PER SUBSCRIPTION -
+                            # before propagating to exactly the same place it goes now.
+                            #
+                            # This is deliberately checked FIRST, before the throttle test
+                            # below, for the same reason the metrics classifier orders its
+                            # branches that way: the throttle test is a loose substring
+                            # match and a billing exception echoes ids and URLs that can
+                            # contain '429', so evaluating it first could reclassify a
+                            # terminal denial as throttling and restore the full burn.
+                            #
+                            # Test-RdaConsumptionDenial (Common.Functions.ps1) is the SAME
+                            # verdict the wrapper's up-front access gate uses, so a denial
+                            # is treated identically whether it is caught before the run or
+                            # part-way through it. Only an unambiguous denial qualifies -
+                            # throttling, an expired token, a 5xx and the transient "Error
+                            # while copying content to a stream" all still retry, because
+                            # abandoning retrievable billing data is the expensive mistake.
+                            if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                            {
+                                Write-Log -Message ("Consumption page query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                                throw
+                            }
+
                             $ConsumptionAttempt++
                             if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }
 

@@ -34,7 +34,7 @@ cd resource-discovery-for-azure
 
 This:
 - Inventories every enabled subscription in the tenant.
-- Produces a full-fidelity report with real resource names and IDs. If you need to share it externally (e.g. with the AWS team), add `-Obfuscate` to mask identifying details first — see [Obfuscation Mode](#obfuscation-mode).
+- Produces a full-fidelity report with real resource names and IDs. This is the normal, recommended output.
 - Automatically tunes how many subscriptions run in parallel to the machine's CPU and memory: small boxes (e.g. 2 vCPU) run one subscription at a time, larger boxes scale up. Add `-ParallelStreams <N>` (and/or `-ConcurrencyLimit <N>`) only if you want to override the auto-detected values.
 
 The script tracks progress automatically as it goes. You don't need `-Resume` on the first run. Only if a run is interrupted (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added — it skips the subscriptions that already finished and picks up the rest. See [Resuming an interrupted run](#resuming-an-interrupted-run) for details.
@@ -43,7 +43,9 @@ The script tracks progress automatically as it goes. You don't need `-Resume` on
 
 **Do not zip or send the `InventoryReports` folder itself.** The folder also holds files that are deliberately kept local: the obfuscation dictionary (`ObfuscationDictionary_*.json`, which reverses the masking and undoes the whole point of `-Obfuscate`), PowerShell transcripts containing your signed-in account and tenant ID, and debug logs carrying real resource names. Sending the folder hands over all of it. It also accumulates every previous run's output, so a recipient cannot tell which report is current.
 
-This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details - see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
+This report contains real resource names and IDs, which is what makes it useful for analysis. Treat it as confidential and share it through whatever channel your agreement with the recipient allows.
+
+If a specific engagement requires identifying details to be masked before the report leaves your environment, that is available but is NOT the default - see [Obfuscation Mode](#obfuscation-mode). Do not turn it on speculatively: a masked report loses the resource names that make findings actionable, and it can only be interpreted by reconciling it against the local dictionary that never leaves your machine.
 
 For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) for sizing guidance. For all available options, see the [Run-AllSubscriptions Wrapper Parameters](#run-allsubscriptions-wrapper-parameters).
 
@@ -223,7 +225,7 @@ For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it i
 ./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ConcurrencyLimit 8
 ```
 
-To mask identifying details before sharing externally, add `-Obfuscate` — see [Obfuscation Mode](#obfuscation-mode).
+If an engagement specifically requires identifying details to be masked, see [Obfuscation Mode](#obfuscation-mode). It is off by default and should stay off unless it has been asked for.
 
 #### Targeting a single subscription or resource group
 
@@ -397,9 +399,9 @@ Recommended `-ParallelStreams` per environment:
 
 ```powershell
 # Machine 0:
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 0 -Obfuscate
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 0
 # Machine 1:
-./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 1 -Obfuscate
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 1
 # ... through ShardIndex 9
 ```
 
@@ -477,7 +479,11 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 ### Obfuscation Mode
 
-Obfuscation is **opt-in** (off by default). Add `-Obfuscate` to mask identifying details so the report can be shared externally — it works on both entry points:
+Obfuscation is **opt-in, off by default, and that is the intended state for most runs.**
+Use it only when an engagement has specifically asked for identifying details to be masked.
+It is not a general hardening step, and enabling it by habit has a real cost: the report loses the resource names that make findings actionable, and it can only be interpreted by reconciling it against the `ObfuscationDictionary_*.json` that stays on the machine that produced it.
+
+When it has been asked for, add `-Obfuscate` - it works on both entry points:
 
 ```powershell
 # Whole tenant (per-subscription reports):

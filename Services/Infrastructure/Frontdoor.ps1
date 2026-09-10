@@ -49,7 +49,12 @@ if ($Task -eq 'Processing')
             $WAF = $false
             if ($1.TYPE -eq 'microsoft.network/frontdoors')
             {
-                $WafId = $Data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id
+                # frontendendpoints is an ARRAY: with more than one endpoint carrying a WAF
+                # link the walk yields an array, which read as a non-empty string, missed the
+                # dictionary lookup, and on the plain path indexed [8] into every id at once.
+                $WafId = @($Data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id |
+                        Where-Object { -not [string]::IsNullOrEmpty($_) } |
+                        Select-Object -First 1)[0]
                 if (![string]::IsNullOrEmpty($WafId))
                 {
                     $WAF = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)

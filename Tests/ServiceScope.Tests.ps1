@@ -69,6 +69,14 @@ Describe 'Service Scope' {
         # metadata) must be one that was requested. Guards against a collector
         # leaking output when it was not in -Service.
         $Keys = @($script:Inventory.PSObject.Properties.Name | Where-Object { $_ -notin $script:MetadataKeys })
+        # With no keys the foreach never runs, so this It reported PASS having asserted
+        # nothing - the same false assurance finding 22 covered. An empty set is not
+        # evidence that scoping works, so skip loudly instead of passing green.
+        if ($Keys.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because 'the scoped run emitted no service keys; the sibling It pins the disallowed-key case'
+            return
+        }
         foreach ($k in $Keys)
         {
             $k | Should -BeIn $script:Expected -Because "service key '$k' was not in the requested -Service set [$($script:Expected -join ', ')]"

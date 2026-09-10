@@ -604,6 +604,33 @@ function Get-MetricQueryWeightMap
     )
 }
 
+# The three function-app metric-query costs, derived from the map so the two can
+# never drift apart. A function app's cost is NOT the map's single integer:
+#
+#   NonFlex     the legacy FunctionExecutionCount/Units pair only.
+#   Flex        the five Flex-only billing names (AlwaysReady/OnDemand execution
+#               Count+Units, plus AlwaysReadyUnits). Measured on a live
+#               FC1/FlexConsumption app: the legacy pair is ABSENT there, so this
+#               REPLACES the base rather than adding to it.
+#   Unresolved  both sets, because Extension/Metrics.ps1 deliberately enqueues both
+#               when the hosting plan cannot be resolved from the Resource Graph
+#               snapshot (never drop a real Flex app's only execution metrics).
+#
+# FlexOnlyMetricCount is the one hardcoded figure; a unit test pins it against the
+# metric names Extension/Metrics.ps1 actually enqueues, so adding a sixth Flex name
+# there turns that test red instead of silently under-sizing a shard.
+# PURE (no Azure) so it is unit-testable.
+function Get-FunctionAppPlanWeight
+{
+    $BaseWeight = [int](Get-MetricQueryWeightMap | Where-Object { $_.Type -eq 'microsoft.web/sites' }).Weight
+    $FlexOnlyMetricCount = 5
+    return [pscustomobject]@{
+        NonFlex    = $BaseWeight
+        Flex       = $FlexOnlyMetricCount
+        Unresolved = $BaseWeight + $FlexOnlyMetricCount
+    }
+}
+
 function Get-PlanWeightKql
 {
     param(
@@ -623,6 +650,7 @@ function Get-PlanWeightKql
     }
     $CaseBody = $Cases -join ",`n    "
     $BatchCaseBody = if ($BatchCases.Count -gt 0) { $BatchCases -join ",`n    " } else { "1 == 0, 0" }
+    $AppWeight = Get-FunctionAppPlanWeight
     return @"
 Resources
 | extend __w = case(
@@ -632,6 +660,19 @@ Resources
     $BatchCaseBody,
     0)
 | where __w > 0
+| extend __farmId = tolower(tostring(properties.serverFarmId))
+| join kind=leftouter (
+    Resources
+    | where type =~ 'microsoft.web/serverfarms'
+    | project __planId = tolower(tostring(id)), __planSkuName = tostring(sku.name), __planSkuTier = tostring(sku.tier)
+    ) on `$left.__farmId == `$right.__planId
+| extend __planResolved = isnotempty(__planId) and (isnotempty(__planSkuName) or isnotempty(__planSkuTier))
+| extend __isFlex = __planResolved and (__planSkuName =~ 'FC1' or __planSkuTier =~ 'FlexConsumption')
+| extend __w = case(
+    type !~ 'microsoft.web/sites', __w,
+    __isFlex, $($AppWeight.Flex),
+    not(__planResolved), $($AppWeight.Unresolved),
+    $($AppWeight.NonFlex))
 | summarize QueryWeight = sum(__w), BatchWeight = sum(__bw) by subscriptionId
 "@
 }

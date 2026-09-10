@@ -434,15 +434,78 @@ if ($Task -eq 'Processing')
 
     if ($AppServices)
     {
+        # Hosting-plan SKU lookup: plan ARM id -> the plan's sku object. Built ONCE
+        # from rows ALREADY in $Resources, in the same style as $SubLookup above, so
+        # the per-app decision below is an O(1) hashtable hit and costs NO extra
+        # Azure call. The startup Resource Graph query carries no type filter and
+        # already projects 'sku', so every microsoft.web/serverfarms row arrives
+        # alongside the sites. Keys are lowercased because a site's serverFarmId is
+        # not guaranteed to match the plan row's id casing.
+        $PlanSkuLookup = @{}
+        foreach ($PlanRow in ($Resources | Where-Object { $_.TYPE -eq 'microsoft.web/serverfarms' }))
+        {
+            if ($null -ne $PlanRow -and ![string]::IsNullOrEmpty($PlanRow.id))
+            {
+                $PlanSkuLookup[$PlanRow.id.ToLower()] = $PlanRow.sku
+            }
+        }
+
         foreach ($app in $AppServices)
         {
             $Subscription = $SubLookup[$app.subscriptionId]
 
             # Do NOT narrow this on 'kind': a FlexConsumption (FC1) app and a working Linux Dedicated app
+            # share the same kind and reserved values but need different metric sets. The hosting plan
+            # SKU decides: that SKU discriminator is now IMPLEMENTED, via $PlanSkuLookup above.
             if ($app.kind -match 'functionapp')
             {
-                $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'FunctionExecutionCount'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
-                $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'FunctionExecutionUnits'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                $PlanSku = $null
+                $FarmId = $app.properties.serverFarmId
+                if (![string]::IsNullOrEmpty($FarmId))
+                {
+                    $PlanSku = $PlanSkuLookup[$FarmId.ToLower()]
+                }
+                # "Resolved" means a plan row was found AND it actually carried a SKU
+                # marker. A found-but-empty sku is treated as unresolved, not as
+                # "definitely not Flex" - see the fallback note below.
+                $PlanResolved = $null -ne $PlanSku -and (![string]::IsNullOrEmpty($PlanSku.name) -or ![string]::IsNullOrEmpty($PlanSku.tier))
+                $IsFlexConsumption = $PlanResolved -and ($PlanSku.name -eq 'FC1' -or $PlanSku.tier -eq 'FlexConsumption')
+
+                # FALLBACK, stated explicitly: when the plan CANNOT be resolved we
+                # enqueue BOTH sets. Resource Graph is a change-fed cached snapshot,
+                # not a live read, so a site can arrive before its plan or with a null
+                # sku. Guessing "not Flex" there would silently lose a real Flex app's
+                # only execution metrics, and guessing "Flex" would lose a working
+                # app's. Asking for both costs a handful of already-non-retried
+                # BadRequests for that one app and matches today's behaviour for the
+                # legacy pair, but can never drop a metric that would have returned
+                # data. Never treat a missing plan or missing SKU as "this is not Flex".
+                if (-not $IsFlexConsumption)
+                {
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'FunctionExecutionCount'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'FunctionExecutionUnits'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                }
+
+                # Aggregation/Measure deliberately match the legacy pair ('Total'/'Sum'):
+                # all five names reported primaryAggregationType = Total, unit = Count,
+                # and Total among their supported aggregations, so they are the same
+                # kind of figure (an execution count / execution units total) and stay
+                # directly comparable with the legacy pair downstream.
+                #
+                # AlwaysReadyUnits is the FIFTH Flex-only billing name. It measures the
+                # always-ready baseline resource consumption an app is charged for even
+                # while idle, which none of the four execution names capture, so omitting
+                # it loses a billing dimension rather than duplicating one. Measured on a
+                # live FC1/FlexConsumption app: primaryAggregationType = Total,
+                # unit = Count, 30 daily buckets returned; absent on Y1/Dynamic.
+                if ($IsFlexConsumption -or -not $PlanResolved)
+                {
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'AlwaysReadyFunctionExecutionCount'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'OnDemandFunctionExecutionCount'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'AlwaysReadyFunctionExecutionUnits'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'OnDemandFunctionExecutionUnits'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                    $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'AlwaysReadyUnits'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
+                }
             }
         }
     }

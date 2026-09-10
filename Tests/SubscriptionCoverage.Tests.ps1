@@ -76,11 +76,11 @@ Describe 'Get-RdaMgSubscriptionId (pure recursive collector)' {
         $Root = New-MgNode -Name 'root' -Children @(
             (New-MgSub -Id 'sub-root-1'),
             (New-MgNode -Name 'child' -Children @(
-                    (New-MgSub -Id 'sub-child-1'),
-                    (New-MgNode -Name 'grandchild' -Children @(
-                            (New-MgSub -Id 'sub-grandchild-1')
-                        ))
+                (New-MgSub -Id 'sub-child-1'),
+                (New-MgNode -Name 'grandchild' -Children @(
+                    (New-MgSub -Id 'sub-grandchild-1')
                 ))
+            ))
         )
         $Ids = @(Get-RdaMgSubscriptionId -Node $Root)
         $Ids.Count | Should -Be 3
@@ -118,7 +118,8 @@ Describe 'Get-TenantSubscriptionId (side-effecting fetch)' {
             [pscustomobject]@{ Type = 'Microsoft.Management/managementGroups'; Name = 'root'; Children = @(
                     [pscustomobject]@{ Type = '/subscriptions'; Name = 'sub-1'; Children = $null },
                     [pscustomobject]@{ Type = '/subscriptions'; Name = 'sub-2'; Children = $null }
-                ) }
+                )
+            }
         }
         $Result = Get-TenantSubscriptionId -TenantId '12345678-1234-1234-1234-123456789012'
         $Result.Detail | Should -BeNullOrEmpty
@@ -132,7 +133,8 @@ Describe 'Get-TenantSubscriptionId (side-effecting fetch)' {
             [pscustomobject]@{ Type = 'Microsoft.Management/managementGroups'; Name = 'root'; Children = @(
                     [pscustomobject]@{ Type = '/subscriptions'; Name = 'dupe'; Children = $null },
                     [pscustomobject]@{ Type = '/subscriptions'; Name = 'dupe'; Children = $null }
-                ) }
+                )
+            }
         }
         $Result = Get-TenantSubscriptionId -TenantId '12345678-1234-1234-1234-123456789012'
         @($Result.Ids).Count | Should -Be 1

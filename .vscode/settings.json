@@ -1,6 +1,77 @@
 {
+    // ------------------------------------------------------------------------
+    // Repo-level PowerShell formatter configuration.
+    //
+    // WHY THIS FILE EXISTS
+    // Editor "format on save" runs PSScriptAnalyzer's formatting rules. Without
+    // this file the editor pins only the Allman preset and lets every OTHER
+    // formatting rule fall through to the formatter's own DEFAULTS - which
+    // enables two rules this repo DELIBERATELY EXCLUDES in
+    // PSScriptAnalyzerSettings.psd1 (PSUseCorrectCasing and
+    // PSAlignAssignmentStatement, each of which throws a process-aborting
+    // NullReferenceException on this repo's Az-cmdlet-heavy files - see the
+    // ExcludeRules comments there for the captured stack traces) and picks a
+    // different PipelineIndentation than the analyzer pins.
+    //
+    // The result was that editing ONE line rewrote unrelated lines: Function ->
+    // function, get-date -> Get-Date, -depth -> -Depth, hashtable '=' columns
+    // re-aligned, and pipeline continuations de-indented. The formatter was
+    // undoing the project's own deliberate choices.
+    //
+    // Every value below mirrors PSScriptAnalyzerSettings.psd1. Keep the two in
+    // sync - and keep both in sync with .kiro/steering/powershell-style.md.
+    // ------------------------------------------------------------------------
+
+    // ---- Brace style: Allman ------------------------------------------------
+    // Mirrors PSPlaceOpenBrace / PSPlaceCloseBrace. Opening brace on its own
+    // line so signatures stay visible when the body is folded.
     "powershell.codeFormatting.preset": "Allman",
     "powershell.codeFormatting.openBraceOnSameLine": false,
     "powershell.codeFormatting.newLineAfterOpenBrace": true,
-    "powershell.codeFormatting.whitespaceBeforeOpenBrace": true
+    "powershell.codeFormatting.newLineAfterCloseBrace": true,
+    "powershell.codeFormatting.whitespaceBeforeOpenBrace": true,
+    // PSPlaceOpenBrace/PSPlaceCloseBrace both set IgnoreOneLineBlock = $true:
+    // leave `Where-Object { ... }` on one line.
+    "powershell.codeFormatting.ignoreOneLineBlock": true,
+
+    // ---- Indentation: 4 spaces ---------------------------------------------
+    // Mirrors PSUseConsistentIndentation (Kind = 'space', IndentationSize = 4,
+    // PipelineIndentation = 'IncreaseIndentationForFirstPipeline').
+    "editor.insertSpaces": true,
+    "editor.tabSize": 4,
+    "editor.detectIndentation": false,
+    "powershell.codeFormatting.pipelineIndentationStyle": "IncreaseIndentationForFirstPipeline",
+
+    // ---- Whitespace ---------------------------------------------------------
+    // Mirrors PSUseConsistentWhitespace field-for-field.
+    "powershell.codeFormatting.whitespaceInsideBrace": true,          // CheckInnerBrace = $true
+    "powershell.codeFormatting.whitespaceBeforeOpenParen": true,      // CheckOpenParen  = $true
+    "powershell.codeFormatting.whitespaceAroundOperator": true,       // CheckOperator   = $true
+    "powershell.codeFormatting.whitespaceAroundPipe": true,           // CheckPipe       = $true
+    "powershell.codeFormatting.trimWhitespaceAroundPipe": false,      // CheckPipeForRedundantWhitespace = $false
+    "powershell.codeFormatting.whitespaceAfterSeparator": true,       // CheckSeparator  = $true
+    "powershell.codeFormatting.whitespaceBetweenParameters": false,   // CheckParameter  = $false
+
+    // ---- Rules the repo EXCLUDES - must stay OFF ---------------------------
+    // PSUseCorrectCasing is in ExcludeRules (upstream NullReferenceException in
+    // CommandInfo.get_Parameters() aborts the whole analyzer process). It only
+    // enforces cosmetic cmdlet/keyword casing, so leaving it off costs nothing.
+    "powershell.codeFormatting.useCorrectCasing": false,
+
+    // PSAlignAssignmentStatement is in ExcludeRules (upstream
+    // NullReferenceException in its own alignment logic). Our hashtable layouts
+    // are valid PowerShell; re-aligning them is churn.
+    "powershell.codeFormatting.alignPropertyValuePairs": false,
+
+    // Not pinned by PSScriptAnalyzerSettings.psd1's Rules block, so the
+    // formatter must not rewrite them either. Pinned explicitly so a future
+    // change to the formatter's defaults cannot start rewriting source.
+    "powershell.codeFormatting.autoCorrectAliases": false,
+    "powershell.codeFormatting.useConstantStrings": false,
+
+    // ---- Analyzer settings the editor should use ---------------------------
+    // Point the editor's live analysis at the repo settings so the squiggles
+    // match `Invoke-ScriptAnalyzer -Settings ./PSScriptAnalyzerSettings.psd1`.
+    "powershell.scriptAnalysis.enable": true,
+    "powershell.scriptAnalysis.settingsPath": "PSScriptAnalyzerSettings.psd1"
 }

@@ -11,9 +11,9 @@ BeforeAll {
     # seed in the first 4 bytes (guarantees uniqueness for 0..499), so the tests
     # are fully reproducible run-to-run with no id collisions.
     $script:Subs = 0..499 | ForEach-Object {
-        $bytes = [byte[]]::new(16)
-        [System.BitConverter]::GetBytes([int]$_).CopyTo($bytes, 0)
-        [pscustomobject]@{ Id = ([guid]::new($bytes)).ToString() }
+        $Bytes = [byte[]]::new(16)
+        [System.BitConverter]::GetBytes([int]$_).CopyTo($Bytes, 0)
+        [pscustomobject]@{ Id = ([guid]::new($Bytes)).ToString() }
     }
 }
 
@@ -26,8 +26,10 @@ Describe 'Horizontal sharding partition helpers' {
         }
 
         It 'always returns a shard in [0, ShardCount-1]' {
-            foreach ($n in 2, 3, 5, 8) {
-                foreach ($s in $script:Subs) {
+            foreach ($n in 2, 3, 5, 8)
+            {
+                foreach ($s in $script:Subs)
+                {
                     $k = Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount $n
                     $k | Should -BeGreaterOrEqual 0
                     $k | Should -BeLessThan $n
@@ -36,46 +38,49 @@ Describe 'Horizontal sharding partition helpers' {
         }
 
         It 'is deterministic - same id + count always yields the same shard' {
-            foreach ($s in $script:Subs) {
-                $a = Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount 7
-                $b = Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount 7
-                $a | Should -Be $b
+            foreach ($s in $script:Subs)
+            {
+                $A = Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount 7
+                $B = Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount 7
+                $A | Should -Be $B
             }
         }
 
         It 'is case-insensitive on the subscription id' {
-            $id = [guid]::NewGuid().ToString()
-            $lower = Get-ShardKeyForSubscription -SubscriptionId $id.ToLower() -ShardCount 6
-            $upper = Get-ShardKeyForSubscription -SubscriptionId $id.ToUpper() -ShardCount 6
-            $lower | Should -Be $upper
+            $Id = [guid]::NewGuid().ToString()
+            $Lower = Get-ShardKeyForSubscription -SubscriptionId $Id.ToLower() -ShardCount 6
+            $Upper = Get-ShardKeyForSubscription -SubscriptionId $Id.ToUpper() -ShardCount 6
+            $Lower | Should -Be $Upper
         }
     }
 
     Context 'Select-ShardSubscriptions' {
         It 'ShardCount <= 1 returns the full list unchanged' {
-            $out = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex 0 -ShardCount 1
-            $out.Count | Should -Be $script:Subs.Count
+            $Out = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex 0 -ShardCount 1
+            $Out.Count | Should -Be $script:Subs.Count
 
             # ShardCount 0 hits the same '$ShardCount -le 1' no-op branch and is the
             # value the wrapper passes when not sharding, so pin it explicitly.
-            $zero = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex 0 -ShardCount 0
-            $zero.Count | Should -Be $script:Subs.Count
+            $Zero = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex 0 -ShardCount 0
+            $Zero.Count | Should -Be $script:Subs.Count
         }
 
         It 'partitions the tenant into DISJOINT and EXHAUSTIVE slices across all shards' {
-            foreach ($n in 2, 3, 4, 6) {
-                $union = @()
-                for ($i = 0; $i -lt $n; $i++) {
-                    $slice = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex $i -ShardCount $n
-                    $union += @($slice.Id)
+            foreach ($n in 2, 3, 4, 6)
+            {
+                $Union = @()
+                for ($i = 0; $i -lt $n; $i++)
+                {
+                    $Slice = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex $i -ShardCount $n
+                    $Union += @($Slice.Id)
                 }
                 # Exhaustive: union covers every subscription exactly once.
-                $union.Count | Should -Be $script:Subs.Count
+                $Union.Count | Should -Be $script:Subs.Count
                 # Disjoint: no id appears in more than one shard.
-                ($union | Sort-Object -Unique).Count | Should -Be $script:Subs.Count
+                ($Union | Sort-Object -Unique).Count | Should -Be $script:Subs.Count
                 # Every original id is present in the union.
-                $missing = @($script:Subs.Id | Where-Object { $union -notcontains $_ })
-                $missing.Count | Should -Be 0
+                $Missing = @($script:Subs.Id | Where-Object { $Union -notcontains $_ })
+                $Missing.Count | Should -Be 0
             }
         }
 
@@ -85,19 +90,19 @@ Describe 'Horizontal sharding partition helpers' {
             # through Select-ShardSubscriptions itself (not just the key helper)
             # so an unstable/positional split would be caught here - the raw key
             # helper never sees the subscription set, so it cannot.
-            $baseline = @{}
+            $Baseline = @{}
             for ($i = 0; $i -lt $n; $i++)
             {
                 foreach ($s in @(Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex $i -ShardCount $n))
                 {
-                    $baseline[$s.Id] = $i
+                    $Baseline[$s.Id] = $i
                 }
             }
 
             # Drop one sub and add a brand-new one (simulates tenant drift between
             # two machines' Get-AzSubscription snapshots).
-            $drifted = @($script:Subs | Select-Object -Skip 1)
-            $drifted += [pscustomobject]@{ Id = [guid]::NewGuid().ToString() }
+            $Drifted = @($script:Subs | Select-Object -Skip 1)
+            $Drifted += [pscustomobject]@{ Id = [guid]::NewGuid().ToString() }
 
             # Re-slice the DRIFTED set the same way: every surviving sub must land
             # in the SAME shard slice as before the drift (the added sub, absent
@@ -105,11 +110,11 @@ Describe 'Horizontal sharding partition helpers' {
             # subs by one slice once the first sub is dropped, and fail here.
             for ($i = 0; $i -lt $n; $i++)
             {
-                foreach ($s in @(Select-ShardSubscriptions -Subscriptions $drifted -ShardIndex $i -ShardCount $n))
+                foreach ($s in @(Select-ShardSubscriptions -Subscriptions $Drifted -ShardIndex $i -ShardCount $n))
                 {
-                    if ($baseline.ContainsKey($s.Id))
+                    if ($Baseline.ContainsKey($s.Id))
                     {
-                        $i | Should -Be $baseline[$s.Id]
+                        $i | Should -Be $Baseline[$s.Id]
                     }
                 }
             }
@@ -117,16 +122,18 @@ Describe 'Horizontal sharding partition helpers' {
 
         It 'distributes subscriptions across shards with rough balance (no empty shard for a large set)' {
             $n = 5
-            $counts = @{}
-            for ($i = 0; $i -lt $n; $i++) {
-                $counts[$i] = (Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex $i -ShardCount $n).Count
+            $Counts = @{}
+            for ($i = 0; $i -lt $n; $i++)
+            {
+                $Counts[$i] = (Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex $i -ShardCount $n).Count
             }
             # Uniform hash over 500 ids into 5 shards => ~100 each. Assert every
             # shard is non-empty and within a generous tolerance (not exact
             # balance - SHA-256 mod N is uniform, not perfectly even).
-            foreach ($i in 0..($n - 1)) {
-                $counts[$i] | Should -BeGreaterThan 40
-                $counts[$i] | Should -BeLessThan 160
+            foreach ($i in 0..($n - 1))
+            {
+                $Counts[$i] | Should -BeGreaterThan 40
+                $Counts[$i] | Should -BeLessThan 160
             }
         }
     }

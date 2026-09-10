@@ -175,7 +175,7 @@ try
         try
         {
             $State = (Get-AzResourceProvider -ProviderNamespace $Provider -ErrorAction Stop |
-                Select-Object -First 1).RegistrationState
+                    Select-Object -First 1).RegistrationState
             if ($State -eq 'Registered')
             {
                 Add-Result -Name ("Provider {0}" -f $Provider) -Status 'PASS' -Detail 'Registered'
@@ -238,12 +238,12 @@ try
             if ($Context.Account.Type -eq 'ServicePrincipal')
             {
                 $MyRoles = @(Get-AzRoleAssignment -ApplicationId $Context.Account.Id -Scope $Scope -ErrorAction Stop |
-                    Select-Object -ExpandProperty RoleDefinitionName)
+                        Select-Object -ExpandProperty RoleDefinitionName)
             }
             else
             {
                 $MyRoles = @(Get-AzRoleAssignment -SignInName $Context.Account.Id -Scope $Scope -ErrorAction Stop |
-                    Select-Object -ExpandProperty RoleDefinitionName)
+                        Select-Object -ExpandProperty RoleDefinitionName)
             }
             $CanCreate = $MyRoles -contains 'Owner' -or $MyRoles -contains 'Contributor'
             $CanAssign = $MyRoles -contains 'Owner' -or $MyRoles -contains 'User Access Administrator'

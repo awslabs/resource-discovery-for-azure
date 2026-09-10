@@ -23,7 +23,10 @@ if ($Task -eq 'Processing')
                 'Location'             = $1.location;
             }
 
-            $Obj | Add-Member -MemberType NoteProperty -Name Roles -Value NotSet
+            # No Add-Member here: the assignment below creates 'Roles' by itself. A
+            # NoteProperty of the same name shadowed it for member access while
+            # ConvertTo-Json read the other, and which one won depended on whether the
+            # property had already been read. One store means nothing to shadow.
             $Obj.Roles = [System.Collections.Generic.List[object]]::new()
 
             foreach ($roleProfile in $Roles)

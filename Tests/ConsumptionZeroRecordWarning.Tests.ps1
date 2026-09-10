@@ -5,6 +5,11 @@
 BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
 
+    # Read as TEXT by the source-guard Describes at the end of this file. Those two
+    # counting/gating sites have no callable seam - see the coverage note there.
+    $script:InventoryScript = Join-Path $script:RepoRoot 'ResourceInventory.ps1'
+    $script:WrapperScript = Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'
+
     . (Join-Path $script:RepoRoot 'Functions/Common.Functions.ps1')
     . (Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1')
     . (Join-Path $script:RepoRoot 'Functions/ResourceInventory.Functions.ps1')
@@ -20,9 +25,10 @@ BeforeAll {
         Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
     }
 
-    # Fail loudly here rather than with a confusing "command not found" mid-test
-    # if a future change renames either builder.
-    foreach ($Fn in @('Get-RunSummaryLogContent', 'Write-RdaShareableDiagnosticsLog'))
+    # Fail loudly here rather than with a confusing "command not found" mid-test if
+    # a future change renames either builder, or the single owner of the
+    # excluded-by-scope text that both of them call.
+    foreach ($Fn in @('Get-RunSummaryLogContent', 'Write-RdaShareableDiagnosticsLog', 'Get-RdaConsumptionExcludedByScopeText'))
     {
         if (-not (Get-Command -Name $Fn -ErrorAction SilentlyContinue))
         {
@@ -61,6 +67,24 @@ BeforeAll {
     $script:SummaryAnyMetricNaPattern = 'Metric-query API calls issued\s*:\s*n/a'
     $script:DiagAnyMetricNaPattern = 'Metric-query API calls issued:\s*n/a'
 
+    # The marker for the SIBLING condition: the billing API returned rows and the
+    # tool wrote none of them. Taken from the shared preamble in
+    # Get-RdaConsumptionExcludedByScopeText, so both surfaces carry it verbatim and
+    # neither can be reworded without the other failing.
+    #
+    # CONSTRAINT: this phrase must stay free of regex metacharacters. It is used BOTH
+    # as a regex (Should -Match) and as a literal (.Contains in
+    # script:GetExcludedNoteText), and those two only agree while it has none. That
+    # is why it stops short of the preamble's 'usage row(s)' parenthetical.
+    $script:ExcludedMarker = 'but none were written'
+
+    # The two mutually exclusive cause forms the helper emits. Narrow is the
+    # default (no -ResourceGroup in play, so only the data-shape guard is
+    # reachable); scoped names all three exclusions and closes with a remedy.
+    $script:NarrowCauseMarker = 'The exclusion that does this is:'
+    $script:ScopedCauseMarker = 'The exclusions that do this are:'
+    $script:ScopedRemedyMarker = 'Re-run without -ResourceGroup'
+
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
     $script:DiagDir = Join-Path $TmpBase ('ConsumpWarn_' + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:DiagDir -Force | Out-Null
@@ -79,7 +103,24 @@ BeforeAll {
             [bool]$MetricsRequested = $true,
             [int]$MetricsApiCallCount = 0,
             [switch]$Obfuscated,
-            [string]$RunTag
+            [string]$RunTag,
+            # Rows FETCHED from the billing API, and whether the run was
+            # -ResourceGroup scoped. Both are added to the splat ONLY when the
+            # caller actually supplies them, so every pre-existing It block calls
+            # the builder exactly as it does today and keeps the -1 / $false
+            # defaults under test. Do NOT give these defaults that get splatted
+            # unconditionally - that would silently retire the sentinel coverage.
+            [int]$RowsFetched,
+            [bool]$ResourceGroupScoped,
+            # Per-subscription consumption failures for THIS call. NOT splatted like
+            # the two above, because it is not a builder parameter:
+            # Write-RdaShareableDiagnosticsLog reads $Global:ConsumptionFailedSubs
+            # directly, so setting that global is the only way to drive its
+            # $ConsumpSkips guard. Assigned on EVERY call - to the empty default when
+            # the caller omits it - and restored in the finally, so the gate never
+            # reads ambient state another suite left behind, and an omitting caller
+            # gets the same "no failures reported" verdict it gets today.
+            $ConsumptionFailedSubs = @()
         )
         $Params = @{
             DefaultPath            = $script:DiagPathPrefix
@@ -93,12 +134,24 @@ BeforeAll {
             MetricsApiCallCount    = $MetricsApiCallCount
         }
         if ($Obfuscated) { $Params.Obfuscated = $true }
-        $File = Write-RdaShareableDiagnosticsLog @Params
-        if ([string]::IsNullOrEmpty($File) -or -not (Test-Path -LiteralPath $File))
+        if ($PSBoundParameters.ContainsKey('RowsFetched')) { $Params.ConsumptionRowsFetchedCount = $RowsFetched }
+        if ($PSBoundParameters.ContainsKey('ResourceGroupScoped')) { $Params.ConsumptionResourceGroupScoped = $ResourceGroupScoped }
+
+        $PriorFailedSubs = $Global:ConsumptionFailedSubs
+        $Global:ConsumptionFailedSubs = $ConsumptionFailedSubs
+        try
         {
-            throw 'Write-RdaShareableDiagnosticsLog did not return a written file.'
+            $File = Write-RdaShareableDiagnosticsLog @Params
+            if ([string]::IsNullOrEmpty($File) -or -not (Test-Path -LiteralPath $File))
+            {
+                throw 'Write-RdaShareableDiagnosticsLog did not return a written file.'
+            }
+            return (Get-Content -LiteralPath $File -Raw)
         }
-        return (Get-Content -LiteralPath $File -Raw)
+        finally
+        {
+            $Global:ConsumptionFailedSubs = $PriorFailedSubs
+        }
     }
 
     # $Requested / $MetricsRequested mirror the builder's own -ConsumptionRequested /
@@ -116,7 +169,12 @@ BeforeAll {
             [bool]$Requested = $true,
             [bool]$MetricsRequested = $true,
             [int]$MetricsApiCallCount = 0,
-            [switch]$Obfuscated
+            [switch]$Obfuscated,
+            # Splatted ONLY when supplied - see the note on script:GetDiagText.
+            # There is deliberately no scoped counterpart here: Get-RunSummaryLogContent
+            # has no such parameter, because Run-AllSubscriptions.ps1 (whose
+            # RunSummary.log it builds) has no -ResourceGroup to be scoped by.
+            [int]$RowsFetched
         )
         $Params = @{
             InvocationParameters   = $InvocationParameters
@@ -129,8 +187,82 @@ BeforeAll {
             MetricsApiCallCount    = $MetricsApiCallCount
         }
         if ($Obfuscated) { $Params.Obfuscated = $true }
+        if ($PSBoundParameters.ContainsKey('RowsFetched')) { $Params.ConsumptionRowsFetchedCount = $RowsFetched }
         return ((Get-RunSummaryLogContent @Params) -join [Environment]::NewLine)
     }
+
+    # Slice ONLY the excluded-by-scope note out of a surface's full text: the run of
+    # lines starting at the marker, as many lines as the single owner returns.
+    #
+    # Asserting a negative against the NOTE rather than the whole artifact is what
+    # keeps it honest. A whole-artifact negative is coupled to every other line the
+    # builder might ever emit, so it can be tripped by unrelated wording (a false
+    # failure) or - worse - be satisfied because the note was never emitted at all
+    # (a vacuous pass). Returns '' when the note is absent, so a caller that forgot
+    # to assert presence gets an obviously empty subject rather than a silent pass.
+    # Plain param() with an explicit throw, matching the two helpers above rather
+    # than using [Parameter(Mandatory)]: a Mandatory parameter turns this into an
+    # advanced function that PROMPTS for a missing argument, and a prompt is
+    # invisible when output is captured, so an omission would hang a run instead of
+    # failing it.
+    function script:GetExcludedNoteText
+    {
+        param(
+            [string]$SurfaceText,
+            [int]$RowsFetched,
+            [bool]$ResourceGroupScoped = $false
+        )
+        if ([string]::IsNullOrEmpty($SurfaceText)) { throw 'script:GetExcludedNoteText requires -SurfaceText.' }
+
+        $Owner = @(Get-RdaConsumptionExcludedByScopeText -RowsFetched $RowsFetched -Indent '  ' -ResourceGroupScoped:$ResourceGroupScoped)
+        $Lines = @($SurfaceText -split "`r?`n")
+        for ($Index = 0; $Index -lt $Lines.Count; $Index++)
+        {
+            if (-not $Lines[$Index].Contains($script:ExcludedMarker)) { continue }
+
+            # The slice LENGTH comes from the owner, but which form the owner returns
+            # is chosen by the CALLER's -ResourceGroupScoped. If the caller disagrees
+            # with the form the surface actually emitted, the slice runs short (and a
+            # negative asserted against the dropped tail passes vacuously - the exact
+            # failure this helper exists to prevent) or long (dragging in following
+            # lines, restoring the whole-artifact coupling it removed). Verifying the
+            # last line pins the BOUNDARY and throws on a mismatch, while leaving the
+            # note's BODY for the tests to assert.
+            $Last = $Index + $Owner.Count - 1
+            if ($Last -gt ($Lines.Count - 1))
+            {
+                throw ("Note starts at line {0} but the surface has only {1} line(s), so a {2}-line note cannot fit: -ResourceGroupScoped disagrees with what was emitted." -f ($Index + 1), $Lines.Count, $Owner.Count)
+            }
+            if ($Lines[$Last] -cne $Owner[-1])
+            {
+                throw ("Sliced {0} line(s) ending '{1}' but the owner's note ends '{2}': -ResourceGroupScoped disagrees with the form the surface emitted." -f $Owner.Count, $Lines[$Last], $Owner[-1])
+            }
+            return (($Lines[$Index..$Last]) -join "`n")
+        }
+        return ''
+    }
+}
+
+# Every meaningful relation between rows FETCHED and rows WRITTEN. The domain is
+# two integers, so it is ENUMERATED rather than sampled: the builders are pure
+# functions of these inputs, so covering the grid exhaustively is stronger than
+# generating points in it. The last row (written greater than fetched) is
+# impossible in a real run - it is the stale mixed-version stream-summary path -
+# and is included so the gates are proven not to emit BOTH texts even on nonsense.
+#
+# BeforeDiscovery, not BeforeAll: -ForEach is expanded during Pester's DISCOVERY
+# pass, so a grid built in BeforeAll would still be $null when the It blocks are
+# generated and every case would silently vanish.
+BeforeDiscovery {
+    $script:FetchedWrittenGrid = @(
+        @{ Fetched = 0; Written = 0; Case = 'API returned nothing' }
+        @{ Fetched = 1; Written = 0; Case = 'one row arrived, excluded' }
+        @{ Fetched = 481; Written = 0; Case = 'every row excluded' }
+        @{ Fetched = 481; Written = 180; Case = 'partially excluded' }
+        @{ Fetched = 481; Written = 481; Case = 'nothing excluded' }
+        @{ Fetched = 1; Written = 1; Case = 'single row, nothing excluded' }
+        @{ Fetched = 180; Written = 481; Case = 'written exceeds fetched, stale input' }
+    )
 }
 
 AfterAll {
@@ -360,7 +492,7 @@ Describe 'RunSummary.log consumption zero-record warning' {
     It 'The wrapper hands it the number of streams that did not report, and gates its own console claims on it (source guard)' {
         $WrapSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
         $WrapSrc | Should -Match '-UnreportedStreamCount \$UnreportedStreamCount `'
-        $WrapSrc | Should -Match '(?m)^if \(-not \$SkipConsumption -and \$ConsumptionRecords -eq 0 [^\r\n]*-and \$UnreportedStreamCount -eq 0\)\s*$'
+        $WrapSrc | Should -Match '(?m)^if \(-not \$SkipConsumption -and \$ConsumptionRowsFetched -eq 0 [^\r\n]*-and \$UnreportedStreamCount -eq 0\)\s*$'
         $WrapSrc | Should -Match '(?m)^elseif \(\$MarketplaceRequested -and \$MarketplaceRecords -eq 0 [^\r\n]*-and \$UnreportedStreamCount -eq 0\)\s*$'
     }
     It 'Stays silent when a consumption failure was already reported' {
@@ -609,6 +741,7 @@ Describe 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' {
         # Every run-wide total the wrapper summarises, with a value an earlier run can leave behind.
         $script:RunTotals = @(
             @{ Name = 'ConsumptionRecordCount'; IsList = $false; Stale = 612 }
+            @{ Name = 'ConsumptionRowsFetchedCount'; IsList = $false; Stale = 640 }
             @{ Name = 'ConsumptionFailedSubs'; IsList = $true; Stale = @([pscustomobject]@{ Name = 'earlier run'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stale' }) }
             @{ Name = 'MetricsApiCallCount'; IsList = $false; Stale = 34 }
             @{ Name = 'MetricsFailedSubs'; IsList = $true; Stale = @([pscustomobject]@{ Name = 'earlier run'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stale' }) }
@@ -730,5 +863,482 @@ Describe 'Run-AllSubscriptions.Stream.ps1 passes every consumption failure to th
 
         $Reported.Count | Should -Be 2 -Because 'each failed subscription must reach RunSummary and its MainSummary row'
         (@($Reported | ForEach-Object { $_.Id }) -join ',') | Should -Be '12345678-1234-1234-1234-123456789012,second-subscription'
+    }
+}
+
+# =============================================================================
+# Rows FETCHED from the billing API vs rows WRITTEN to Consumption_*.csv
+# =============================================================================
+# One consumption counter was split into two at the point their meanings diverge.
+# Both builders are driven FOR REAL below, across the whole fetched/written grid -
+# nothing here reimplements them.
+#
+# WHAT THIS SUITE DOES NOT COVER - stated plainly rather than implied away:
+#
+#   1. The per-stream summary field (ConsumptionRowsFetched, written by
+#      Run-AllSubscriptions.Stream.ps1) and the parent's aggregation arithmetic in
+#      Run-AllSubscriptions.ps1. Neither is reachable without launching a real
+#      stream worker, so cross-stream aggregation (spec clause 2.8) is proven ONLY
+#      by a live -ParallelStreams 2 run. Do NOT read this file as covering it.
+#
+#   2. GetResourceConsumption()'s counting change itself. It is a nested function
+#      inside ExecuteInventoryProcessing() in ResourceInventory.ps1, so it cannot
+#      be dot-sourced or invoked without executing the whole script including
+#      authentication, and the wrapper's console gate sits in the top-level script
+#      body. Neither has a seam. The two source-guard Describes at the end of this
+#      file read those files as TEXT and assert presence and ORDER only, never
+#      behaviour. The end-to-end run against a real subscription is what proves
+#      those paths. Tests/ConsumptionResourceGroupFilter.Tests.ps1 carries the
+#      same limitation and the same pattern.
+
+Describe 'Both consumption numbers are reported, distinctly labelled' {
+
+    It 'Diagnostics_*.log reports collected and fetched separately when they differ' {
+        $Text = script:GetDiagText -RecordCount 180 -Requested $true -RowsFetched 481 -RunTag 'fw1'
+        $Text | Should -Match 'Consumption records collected:\s*180(?!\d)'
+        $Text | Should -Match 'Consumption rows fetched from the billing API:\s*481(?!\d)'
+    }
+
+    It 'RunSummary.log reports collected and fetched separately when they differ' {
+        $Text = script:GetSummaryText -RecordCount 180 -Processed 1 -RowsFetched 481
+        $Text | Should -Match 'Consumption records collected\s*:\s*180(?!\d)'
+        $Text | Should -Match 'Consumption rows fetched\s*:\s*481(?!\d)'
+    }
+
+    It 'Reports the same figure twice on both surfaces when nothing was excluded' {
+        $Diag = script:GetDiagText -RecordCount 481 -Requested $true -RowsFetched 481 -RunTag 'fw2'
+        $Summary = script:GetSummaryText -RecordCount 481 -Processed 1 -RowsFetched 481
+        $Diag | Should -Match 'Consumption records collected:\s*481(?!\d)'
+        $Diag | Should -Match 'Consumption rows fetched from the billing API:\s*481(?!\d)'
+        $Summary | Should -Match 'Consumption records collected\s*:\s*481(?!\d)'
+        $Summary | Should -Match 'Consumption rows fetched\s*:\s*481(?!\d)'
+    }
+
+    It 'Diagnostics_*.log omits the fetched line entirely when -SkipConsumption was passed' {
+        # A skipped phase reports as SKIPPED, not as numbers. The fetched figure is
+        # supplied here and must still be suppressed.
+        $Text = script:GetDiagText -RecordCount 0 -Requested $false -RowsFetched 481 -RunTag 'fw3'
+        $Text | Should -Match 'n/a'
+        $Text | Should -Not -Match 'Consumption rows fetched'
+    }
+}
+
+Describe 'The billing-API zero-record warning is keyed on rows FETCHED' {
+
+    Context 'It fires when the API itself returned nothing' {
+
+        It 'Diagnostics_*.log warns when fetched is 0' {
+            $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 0 -RunTag 'zk1'
+            $Text | Should -Match $script:WarnMarker
+        }
+
+        It 'RunSummary.log warns when fetched is 0' {
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 0
+            $Text | Should -Match $script:WarnMarker
+        }
+
+        It 'Keeps the existing named causes unchanged on both surfaces' {
+            # Those three causes are true ONLY when the API returned nothing, which
+            # is exactly why the gate moved onto the fetched count rather than away
+            # from this text.
+            $Diag = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 0 -RunTag 'zk2'
+            $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 0
+            foreach ($Text in @($Diag, $Summary))
+            {
+                $Text | Should -Match 'CSP'
+                $Text | Should -Match 'Partner Center'
+                $Text | Should -Match 'not transitioned to the Azure plan'
+                $Text | Should -Match 'legacy usage API does not serve'
+            }
+        }
+    }
+
+    Context 'It is withheld when rows arrived and none were written' {
+
+        It 'Diagnostics_*.log does not warn when fetched is greater than 0 and written is 0' {
+            $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -RunTag 'zk3'
+            $Text | Should -Not -Match $script:WarnMarker -Because 'the billing API answered WITH data, so every cause that warning names is false'
+        }
+
+        It 'RunSummary.log does not warn when fetched is greater than 0 and written is 0' {
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481
+            $Text | Should -Not -Match $script:WarnMarker -Because 'the billing API answered WITH data, so every cause that warning names is false'
+        }
+    }
+}
+
+Describe 'The excluded-by-scope note reports the previously unreported case' {
+
+    Context 'It appears when fetched is greater than 0 and written is 0' {
+
+        It 'Diagnostics_*.log emits the note' {
+            $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -RunTag 'ex1'
+            $Text | Should -Match $script:ExcludedMarker
+            $Text | Should -Match 'the billing API returned 481 usage row'
+        }
+
+        It 'RunSummary.log emits the note' {
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481
+            $Text | Should -Match $script:ExcludedMarker
+            $Text | Should -Match 'the billing API returned 481 usage row'
+        }
+    }
+
+    Context 'It stays silent on every other input' {
+
+        It 'Diagnostics_*.log is silent when records were written' {
+            $Text = script:GetDiagText -RecordCount 180 -Requested $true -RowsFetched 481 -RunTag 'ex2'
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'RunSummary.log is silent when records were written' {
+            $Text = script:GetSummaryText -RecordCount 180 -Processed 1 -RowsFetched 481
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'Diagnostics_*.log is silent when the API returned nothing' {
+            $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 0 -RunTag 'ex3'
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'RunSummary.log is silent when the API returned nothing' {
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 0
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'Diagnostics_*.log is silent when -SkipConsumption was passed' {
+            $Text = script:GetDiagText -RecordCount 0 -Requested $false -RowsFetched 481 -RunTag 'ex4'
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'RunSummary.log is silent when -SkipConsumption was passed' {
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481 -Requested $false -InvocationParameters @{ SkipConsumption = [switch]$true }
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'RunSummary.log is silent when a consumption failure was already reported' {
+            # A reported failure is surfaced by its own block, exactly as for the
+            # zero-record warning; both branches repeat that guard, on both surfaces.
+            $Failed = @([pscustomobject]@{ Name = 'x'; Id = 'y'; Message = 'boom' })
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481 -ConsumptionFailedSubs $Failed
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+
+        It 'Diagnostics_*.log is silent when a consumption failure was already reported' {
+            # The guard this branch was previously missing. A reported billing failure
+            # already has its own block in the log, and it - not scope - is then the
+            # reason nothing was written, so emitting the note here would assert a
+            # cause the run has no evidence for.
+            #
+            # The presence assertion comes FIRST and is load-bearing: the builder reads
+            # $Global:ConsumptionFailedSubs rather than taking a parameter, so if the
+            # failure never reached it the negative below would pass vacuously.
+            $Failed = @([pscustomobject]@{ Name = 'x'; Id = 'y'; Message = 'boom' })
+            $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -ConsumptionFailedSubs $Failed -RunTag 'ex5'
+            $Text | Should -Match 'Consumption failed/incomplete subscriptions:\s*1(?!\d)' -Because 'the failure must actually reach the builder, or the negative below is vacuous'
+            $Text | Should -Not -Match $script:ExcludedMarker
+            $Text | Should -Not -Match $script:WarnMarker -Because 'a reported failure withholds BOTH texts, not just this one - otherwise dropping the sibling''s fetched test would hand this input to a branch claiming the API returned nothing'
+        }
+
+        It 'RunSummary.log is silent when no subscription actually ran' {
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 0 -RowsFetched 481
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+    }
+}
+
+Describe 'The two consumption branches are mutually exclusive' {
+
+    It 'Diagnostics_*.log never emits both texts - <Case> (fetched <Fetched>, written <Written>)' -ForEach $script:FetchedWrittenGrid {
+        $Text = script:GetDiagText -RecordCount $Written -Requested $true -RowsFetched $Fetched -RunTag ('mx{0}x{1}' -f $Fetched, $Written)
+        $BothPresent = ($Text -match $script:WarnMarker) -and ($Text -match $script:ExcludedMarker)
+        $BothPresent | Should -BeFalse -Because 'the two texts contradict each other - one says the API returned nothing, the other says it returned rows'
+    }
+
+    It 'RunSummary.log never emits both texts - <Case> (fetched <Fetched>, written <Written>)' -ForEach $script:FetchedWrittenGrid {
+        $Text = script:GetSummaryText -RecordCount $Written -Processed 1 -RowsFetched $Fetched
+        $BothPresent = ($Text -match $script:WarnMarker) -and ($Text -match $script:ExcludedMarker)
+        $BothPresent | Should -BeFalse -Because 'the two texts contradict each other - one says the API returned nothing, the other says it returned rows'
+    }
+
+    It 'Diagnostics_*.log emits the RIGHT one of the pair - <Case> (fetched <Fetched>, written <Written>)' -ForEach $script:FetchedWrittenGrid {
+        # The positive companion to the two above. Mutual exclusivity alone is
+        # satisfied by emitting NEITHER, so this pins which branch owns which case.
+        $Text = script:GetDiagText -RecordCount $Written -Requested $true -RowsFetched $Fetched -RunTag ('one{0}x{1}' -f $Fetched, $Written)
+        if ($Fetched -eq 0)
+        {
+            $Text | Should -Match $script:WarnMarker -Because 'the API returned nothing'
+            $Text | Should -Not -Match $script:ExcludedMarker
+        }
+        elseif ($Written -eq 0)
+        {
+            $Text | Should -Match $script:ExcludedMarker -Because 'rows arrived and none were written'
+            $Text | Should -Not -Match $script:WarnMarker
+        }
+        else
+        {
+            $Text | Should -Not -Match $script:WarnMarker -Because 'rows were written, so neither signal applies'
+            $Text | Should -Not -Match $script:ExcludedMarker -Because 'rows were written, so neither signal applies'
+        }
+    }
+}
+
+Describe 'The excluded-by-scope note is safe in an obfuscated bundle' {
+
+    It 'Appears in the OBFUSCATED Diagnostics_*.log and carries no GUID' {
+        # Obfuscated bundles are the ones normally shared, so this is the build that
+        # actually reaches a report consumer.
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -Obfuscated -RunTag 'ob1'
+        $Text | Should -Match $script:ExcludedMarker
+        $Text | Should -Not -Match '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    }
+
+    It 'Appears in the OBFUSCATED RunSummary.log and carries no GUID' {
+        $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481 -Obfuscated
+        $Text | Should -Match $script:ExcludedMarker
+        $Text | Should -Not -Match '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    }
+
+    It 'Carries no GUID in its SCOPED form either' {
+        # The scoped form names more causes, so it is the longer text and the one
+        # more likely to acquire an identifier by accident later.
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -ResourceGroupScoped $true -Obfuscated -RunTag 'ob2'
+        $Text | Should -Match $script:ScopedCauseMarker
+        $Text | Should -Not -Match '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    }
+}
+
+Describe 'The two surfaces agree on the excluded-by-scope note BODY' {
+
+    # Scope of the claim, stated exactly: the two surfaces render the same note
+    # TEXT. Their gates agree on requested / fetched / written / no-reported-failure,
+    # but they are not identical - only Get-RunSummaryLogContent carries
+    # ($Processed -gt 0), which has no per-subscription analogue in the diagnostics
+    # builder - and nothing here asserts that they are.
+
+    It 'Uses the same marker phrase in RunSummary.log and Diagnostics_*.log' {
+        # Mirrors the existing "The two surfaces agree" Describe above. The note has
+        # ONE owner (Get-RdaConsumptionExcludedByScopeText); this is what stops a
+        # reword of one surface leaving the other behind.
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -RunTag 'ag1'
+        $Summary | Should -Match $script:ExcludedMarker
+        $Diag | Should -Match $script:ExcludedMarker
+    }
+
+    It 'Renders the identical note body on both surfaces for the same input' {
+        # Stronger than a shared marker: the whole note, line for line, EQUAL to what
+        # the owner returns rather than merely contained in the surface. Both
+        # surfaces pass the same two-space indent, so a divergence here means one of
+        # them stopped calling the shared owner. -BeExactly, not -Be: Should -Be is
+        # case-insensitive, which is the wrong bar for a text-identity check, and it
+        # prints both texts on failure.
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -RunTag 'ag2'
+        $Expected = ((Get-RdaConsumptionExcludedByScopeText -RowsFetched 481 -Indent '  ') -join "`n")
+        script:GetExcludedNoteText -SurfaceText $Summary -RowsFetched 481 | Should -BeExactly $Expected -Because 'the RunSummary note must come from the shared owner verbatim'
+        script:GetExcludedNoteText -SurfaceText $Diag -RowsFetched 481 | Should -BeExactly $Expected -Because 'the Diagnostics note must come from the shared owner verbatim'
+    }
+}
+
+Describe 'Each surface names only the exclusions it could actually have hit' {
+
+    It 'The RunSummary note never mentions -ResourceGroup, because the wrapper has no such parameter' {
+        # Run-AllSubscriptions.ps1 cannot be resource-group scoped, so naming a
+        # -ResourceGroup filter - or telling the operator to remove one - would be a
+        # factual error about the run they just performed.
+        #
+        # The negatives are asserted against the NOTE, sliced out of the log, not
+        # against the whole log: a whole-log negative would be coupled to every
+        # other line Get-RunSummaryLogContent can emit, and would read as a pass if
+        # the note were missing entirely. The presence assertion comes first for the
+        # same reason - an empty subject must not look like success.
+        $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -RowsFetched 481
+        $Note = script:GetExcludedNoteText -SurfaceText $Text -RowsFetched 481
+        $Note | Should -Not -BeNullOrEmpty -Because 'the note must be PRESENT for the negatives below to mean anything'
+        $Note | Should -Not -Match '-ResourceGroup' -Because 'Get-RunSummaryLogContent must not pass -ResourceGroupScoped'
+        $Note | Should -Not -Match 'Re-run' -Because 'there is no -ResourceGroup on this entry point to re-run without'
+        $Note | Should -Match $script:NarrowCauseMarker
+        $Note | Should -Not -Match $script:ScopedCauseMarker
+    }
+
+    It 'Diagnostics_*.log names all three exclusions and the remedy when the run WAS scoped' {
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -ResourceGroupScoped $true -RunTag 'sc1'
+        $Text | Should -Match $script:ScopedCauseMarker
+        $Text | Should -Match 'the -ResourceGroup filter, when no billed resource lives in that group'
+        $Text | Should -Match 'a meter with no resource id'
+        $Text | Should -Match 'a meter carrying no instance data at all'
+        $Text | Should -Match $script:ScopedRemedyMarker
+    }
+
+    It 'Diagnostics_*.log names only the reachable exclusion when the run was NOT scoped' {
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -ResourceGroupScoped $false -RunTag 'sc2'
+        $Note = script:GetExcludedNoteText -SurfaceText $Text -RowsFetched 481
+        $Note | Should -Not -BeNullOrEmpty -Because 'the note must be PRESENT for the negatives below to mean anything'
+        $Note | Should -Match $script:NarrowCauseMarker
+        $Note | Should -Match 'a meter carrying no instance data at all'
+        $Note | Should -Not -Match '-ResourceGroup' -Because 'the operator passed no -ResourceGroup, so that exclusion was unreachable'
+        $Note | Should -Not -Match 'Re-run' -Because 'there is no parameter to remove'
+    }
+
+    It 'Defaults to the narrow form when the caller omits the scoped flag entirely' {
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -RowsFetched 481 -RunTag 'sc3'
+        $Text | Should -Match $script:NarrowCauseMarker
+        $Text | Should -Not -Match $script:ScopedCauseMarker
+    }
+}
+
+Describe 'Sentinel collapse - omitting the fetched count preserves today''s verdict' {
+
+    # This Describe is what protects the pre-existing It blocks above: every one of
+    # them calls the builders WITHOUT the new parameter, so the -1 default must make
+    # fetched collapse onto collected. A default of 0 would instead read as "N
+    # written out of 0 fetched" and fire the zero-record warning on all of them.
+
+    It 'Diagnostics_*.log reports fetched equal to collected when the parameter is omitted' {
+        foreach ($Count in @(0, 1, 42, 481))
+        {
+            $Text = script:GetDiagText -RecordCount $Count -Requested $true -RunTag ('sn{0}' -f $Count)
+            $Text | Should -Match ('Consumption records collected:\s*{0}(?!\d)' -f $Count)
+            $Text | Should -Match ('Consumption rows fetched from the billing API:\s*{0}(?!\d)' -f $Count)
+        }
+    }
+
+    It 'RunSummary.log reports fetched equal to collected when the parameter is omitted' {
+        foreach ($Count in @(0, 1, 42, 481))
+        {
+            $Text = script:GetSummaryText -RecordCount $Count -Processed 1
+            $Text | Should -Match ('Consumption records collected\s*:\s*{0}(?!\d)' -f $Count)
+            $Text | Should -Match ('Consumption rows fetched\s*:\s*{0}(?!\d)' -f $Count)
+        }
+    }
+
+    It 'Gives the same warning verdict as explicitly passing fetched equal to collected' {
+        foreach ($Count in @(0, 1, 42, 481))
+        {
+            $Omitted = script:GetDiagText -RecordCount $Count -Requested $true -RunTag ('so{0}' -f $Count)
+            $Explicit = script:GetDiagText -RecordCount $Count -Requested $true -RowsFetched $Count -RunTag ('se{0}' -f $Count)
+            ($Omitted -match $script:WarnMarker) | Should -Be ($Explicit -match $script:WarnMarker) -Because ('the -1 sentinel must behave exactly like fetched equal to written for {0} record(s)' -f $Count)
+
+            $OmittedSummary = script:GetSummaryText -RecordCount $Count -Processed 1
+            $ExplicitSummary = script:GetSummaryText -RecordCount $Count -Processed 1 -RowsFetched $Count
+            ($OmittedSummary -match $script:WarnMarker) | Should -Be ($ExplicitSummary -match $script:WarnMarker) -Because ('the -1 sentinel must behave exactly like fetched equal to written for {0} record(s)' -f $Count)
+        }
+    }
+
+    It 'Can never fire the excluded-by-scope note when the parameter is omitted' {
+        # With the sentinel, "fetched greater than 0" and "written is 0" cannot both
+        # hold, so an omitting caller stays silent rather than guessing that
+        # something was excluded. That silence is correct: nothing is KNOWN.
+        foreach ($Count in @(0, 1, 42, 481))
+        {
+            $Text = script:GetDiagText -RecordCount $Count -Requested $true -RunTag ('sx{0}' -f $Count)
+            $Text | Should -Not -Match $script:ExcludedMarker
+            $Summary = script:GetSummaryText -RecordCount $Count -Processed 1
+            $Summary | Should -Not -Match $script:ExcludedMarker
+        }
+    }
+
+    It 'Still warns on the 0-record case exactly as the pre-existing blocks expect' {
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $true -RunTag 'sw1'
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1
+        $Diag | Should -Match $script:WarnMarker
+        $Summary | Should -Match $script:WarnMarker
+    }
+}
+
+Describe 'Source guard - ResourceInventory.ps1 counts fetched at arrival, written after the write' {
+
+    # NO behavioural coverage here, and none is available: GetResourceConsumption()
+    # is nested inside ExecuteInventoryProcessing(), so it cannot be dot-sourced or
+    # invoked without running the entire script including authentication. These
+    # blocks verify PRESENCE and ORDER in the source text, nothing more - a refactor
+    # that relocated the counters into another function earlier in the same file
+    # would keep them green. Only the live run closes that gap.
+    #
+    # IndexOf is called with [StringComparison]::Ordinal throughout: the default
+    # overload is culture-sensitive, and a source guard's verdict must not depend on
+    # the host's collation when the tool has to behave identically on every OS.
+
+    It 'ResourceInventory.ps1 exists at the expected path' {
+        Test-Path -LiteralPath $script:InventoryScript | Should -BeTrue
+    }
+
+    It 'counts rows FETCHED with the Records found: log line, before anything is written' {
+        $Text = Get-Content -LiteralPath $script:InventoryScript -Raw
+
+        $LogIdx = $Text.IndexOf('Write-Log -Message ("Records found:', [StringComparison]::Ordinal)
+        $FetchIdx = $Text.IndexOf('$ConsumptionRowsFetchedThisSub += $UsageDataExport.Count', [StringComparison]::Ordinal)
+        $ExportIdx = $Text.IndexOf('Export-Csv -LiteralPath $Global:ConsumptionFileCsv', [StringComparison]::Ordinal)
+
+        $LogIdx | Should -BeGreaterThan -1 -Because 'the per-page operator log line reporting the fetched page size must survive unchanged'
+        $FetchIdx | Should -BeGreaterThan -1 -Because 'the fetched counter must exist'
+        $ExportIdx | Should -BeGreaterThan -1 -Because 'the single per-page Export-Csv must still exist'
+
+        $LogIdx | Should -BeLessThan $FetchIdx -Because 'fetched is counted where the page ARRIVES, next to the line that reports the page size'
+        $FetchIdx | Should -BeLessThan $ExportIdx -Because 'fetched is counted before the filter loop and the write, which is what makes it the API-volume signal'
+    }
+
+    It 'counts rows WRITTEN only AFTER Export-Csv has returned' {
+        $Text = Get-Content -LiteralPath $script:InventoryScript -Raw
+
+        $ExportIdx = $Text.IndexOf('Export-Csv -LiteralPath $Global:ConsumptionFileCsv', [StringComparison]::Ordinal)
+        $WrittenIdx = $Text.IndexOf('$ConsumptionRecordsThisSub += $NewUsageDataExport.Count', [StringComparison]::Ordinal)
+
+        # Both presence checks first. IndexOf returns -1 when absent, so without the
+        # $ExportIdx one a vanished Export-Csv would leave the ordering assertion
+        # comparing against -1 and passing - green while the thing it orders against
+        # no longer exists.
+        $ExportIdx | Should -BeGreaterThan -1 -Because 'the single per-page Export-Csv must still exist for the ordering below to mean anything'
+        $WrittenIdx | Should -BeGreaterThan -1 -Because 'the written counter must read the filtered ArrayList, which already IS the rows-written figure'
+        $WrittenIdx | Should -BeGreaterThan $ExportIdx -Because 'counting BEFORE the call would overstate by up to a whole page when Export-Csv throws, and overstating on a healthy-looking run is the defect this split removes'
+    }
+
+    It 'no longer counts the fetched page size as records collected' {
+        $Text = Get-Content -LiteralPath $script:InventoryScript -Raw
+        $Text.Contains('$ConsumptionRecordsThisSub += $UsageDataExport.Count') | Should -BeFalse -Because 'that form IS the original overstatement'
+    }
+
+    It 'introduced exactly one new consumption global' {
+        # (?i) is load-bearing: PowerShell treats $global: and $Global: identically
+        # and this repo already writes the lowercase form elsewhere, so a
+        # case-sensitive pattern would let $global:ConsumptionSomething straight past
+        # the one guard whose whole job is to fail loud on an unapproved global.
+        # Scope limit worth knowing: this only covers names beginning "Consumption".
+        $Text = Get-Content -LiteralPath $script:InventoryScript -Raw
+        $Names = @([regex]::Matches($Text, '(?i)\$Global:(Consumption[A-Za-z0-9_]*)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        ($Names -join ',') | Should -Be 'ConsumptionFailedSubs,ConsumptionFileCsv,ConsumptionRecordCount,ConsumptionRowsFetchedCount' -Because 'ConsumptionRowsFetchedCount is the ONE approved addition - anything else is an unapproved global'
+    }
+}
+
+Describe 'Source guard - Run-AllSubscriptions.ps1 console gate reads the FETCHED count' {
+
+    # Source guard only for the same reason: the console block sits in the top-level
+    # script body, not a function, so there is no seam to call. .Contains is used
+    # rather than -BeLike so a bracket or '?' in a future needle cannot turn the
+    # check into a wildcard match.
+
+    It 'Run-AllSubscriptions.ps1 exists at the expected path' {
+        Test-Path -LiteralPath $script:WrapperScript | Should -BeTrue
+    }
+
+    It 'gates the zero-record console warning on the fetched count' {
+        $Text = Get-Content -LiteralPath $script:WrapperScript -Raw
+        $Text.Contains('-not $SkipConsumption -and $ConsumptionRowsFetched -eq 0') | Should -BeTrue -Because 'that warning''s named causes are true only when the API itself returned nothing'
+    }
+
+    It 'no longer gates that warning on the collected count' {
+        $Text = Get-Content -LiteralPath $script:WrapperScript -Raw
+        $Text.Contains('-not $SkipConsumption -and $ConsumptionRecords -eq 0') | Should -BeFalse -Because 'that form fires on a run where rows arrived and were all excluded, which is a DIFFERENT condition with different causes'
+    }
+
+    It 'emits the excluded-by-scope text from its single owner' {
+        $Text = Get-Content -LiteralPath $script:WrapperScript -Raw
+        $Text.Contains('Get-RdaConsumptionExcludedByScopeText') | Should -BeTrue -Because 'the console is the third surface and must not hand-copy the text'
+    }
+
+    It 'reads the fetched total from the one approved global' {
+        $Text = Get-Content -LiteralPath $script:WrapperScript -Raw
+        $Text.Contains('$Global:ConsumptionRowsFetchedCount') | Should -BeTrue
     }
 }

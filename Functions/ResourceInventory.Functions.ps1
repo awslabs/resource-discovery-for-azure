@@ -1825,6 +1825,8 @@ function Write-RdaShareableDiagnosticsLog
         $PhaseTimings,
         $MemoryReadings = @(),
         [int]$ConsumptionRecordCount = 0,
+        # Rows FETCHED from the billing API. -1 = not supplied.
+        [int]$ConsumptionRowsFetchedCount = -1,
         [bool]$ConsumptionRequested = $true,
         [int]$MarketplaceRecordCount = 0,
         [bool]$MarketplaceRequested = $true,
@@ -1837,8 +1839,20 @@ function Write-RdaShareableDiagnosticsLog
         # was kept.
         [switch]$ConsumptionSkippedForAbort,
         [switch]$MarketplaceSkippedForAbort,
+        # Was this run scoped with -ResourceGroup? Selects which exclusions the
+        # excluded-by-scope note is allowed to name - see
+        # Get-RdaConsumptionExcludedByScopeText. A [bool] defaulting to $false (not
+        # a [switch]) so an omitting caller gets the honest narrow form.
+        [bool]$ConsumptionResourceGroupScoped = $false,
         [switch]$Obfuscated
     )
+
+    # -1 means "not supplied". A caller reporting only the collected count is
+    # describing a run where nothing was excluded, so fetched collapses to written and
+    # every existing gate verdict is preserved. A default of 0 would instead read as
+    # "N written out of 0 fetched", which is impossible, and would fire the zero-record
+    # warning on every existing caller.
+    $RowsFetched = if ($ConsumptionRowsFetchedCount -lt 0) { $ConsumptionRecordCount } else { $ConsumptionRowsFetchedCount }
 
     try
     {
@@ -1948,6 +1962,7 @@ function Write-RdaShareableDiagnosticsLog
         if ($ConsumptionRequested -or $ConsumptionRecordCount -ne 0)
         {
             $DiagLines.Add(('Consumption records collected: {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+            $DiagLines.Add(('Consumption rows fetched from the billing API: {0}' -f $RowsFetched.ToString('N0', [cultureinfo]::InvariantCulture)))
         }
         else
         {
@@ -1955,7 +1970,7 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add(('Consumption records collected: n/a ({0})' -f $ConsumptionNaReason))
         }
 
-        if ($ConsumptionRequested -and $ConsumptionRecordCount -eq 0 -and $ConsumpSkips.Count -eq 0)
+        if ($ConsumptionRequested -and $RowsFetched -eq 0 -and $ConsumpSkips.Count -eq 0)
         {
             # LIMITATION (accepted): $ConsumpSkips reads $Global:ConsumptionFailedSubs,
             # which accumulates across the subscriptions of one run: ResourceInventory.ps1
@@ -1980,6 +1995,38 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('      help - the partner must enable it in Partner Center.')
             $DiagLines.Add('    - Subscription not transitioned to the Azure plan.')
             $DiagLines.Add('    - A subscription offer the legacy usage API does not serve.')
+        }
+        # The other half of that signature, and the half nothing reported at all
+        # before: the billing API DID return rows, and the tool excluded every one
+        # of them. The causes named above are all false here - the API answered with
+        # data - so this branch is mutually exclusive with the one above and carries
+        # the scope/filter explanation instead.
+        #
+        # Inert by design when -ConsumptionRowsFetchedCount is omitted: the -1
+        # sentinel collapses $RowsFetched to $ConsumptionRecordCount, so the two
+        # tests below cannot both hold. That is right - with no fetched figure
+        # nothing is KNOWN to have been excluded, so staying silent beats guessing.
+        # This is load-bearing: do not "simplify" the sentinel without re-checking it.
+        #
+        # The $ConsumpSkips.Count -eq 0 guard is deliberately SHARED with the sibling
+        # above: a reported billing failure is already surfaced by its own block, and
+        # it - not scope - is then the reason nothing was written. Neither branch may
+        # also claim a cause in that case, so this guard must stay in step with its
+        # sibling. Both branches of Get-RunSummaryLogContent carry the equivalent
+        # ($Consumption.Count -eq 0); the parity is on THAT guard only - those two
+        # also carry ($Processed -gt 0), which has no per-subscription analogue here.
+        #
+        # Known limitation, accepted: $ConsumpSkips is run-CUMULATIVE, not
+        # per-subscription (ResourceInventory.ps1 nil-initializes
+        # $Global:ConsumptionFailedSubs once and appends per subscription in the same
+        # process), so under the wrapper one subscription's billing failure also
+        # withholds this note from later subscriptions. Bounded - the fetched/written
+        # counts and the failure list are still printed - and the sibling above
+        # already behaves this way. Narrowing it would need a current-subscription id
+        # parameter this function does not take.
+        elseif ($ConsumptionRequested -and $RowsFetched -gt 0 -and $ConsumptionRecordCount -eq 0 -and $ConsumpSkips.Count -eq 0)
+        {
+            foreach ($Line in (Get-RdaConsumptionExcludedByScopeText -RowsFetched $RowsFetched -Indent '  ' -ResourceGroupScoped:$ConsumptionResourceGroupScoped)) { $DiagLines.Add($Line) }
         }
 
         $DiagLines.Add('')

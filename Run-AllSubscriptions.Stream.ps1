@@ -112,12 +112,12 @@ catch
 {
     Write-Stream ("FATAL: could not import Az context from {0}: {1}" -f $AzContextPath, $_.Exception.Message) 'Red'
     @{
-        StreamId      = $StreamId
-        Tenant        = $TenantID
-        Status        = 'failed-to-start'
-        Reason        = $_.Exception.Message
-        Completed     = @()
-        Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
+        StreamId       = $StreamId
+        Tenant         = $TenantID
+        Status         = 'failed-to-start'
+        Reason         = $_.Exception.Message
+        Completed      = @()
+        Failed         = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
                 $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
                 $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
                 [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
@@ -205,6 +205,7 @@ $ArchiveWriteFailures = @()
 $CollectionAbortedSubs = @()
 
 $Global:ConsumptionRecordCount = 0
+$Global:ConsumptionRowsFetchedCount = 0
 $Global:ConsumptionFailedSubs = @()
 
 $Global:MetricsApiCallCount = 0
@@ -310,6 +311,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
 }
 
 $ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+$ConsumptionRowsFetchedTotal = if ($null -ne $Global:ConsumptionRowsFetchedCount) { [int]$Global:ConsumptionRowsFetchedCount } else { 0 }
 $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
 $MarketplaceTotal = if ($null -ne $Global:MarketplaceRecordCount) { [int]$Global:MarketplaceRecordCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
@@ -327,6 +329,7 @@ $Summary = [pscustomobject]@{
     Failed                 = $FailedSubs
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
+    ConsumptionRowsFetched = $ConsumptionRowsFetchedTotal
     MetricsApiCalls        = $MetricsApiCallTotal
     MarketplaceRecords     = $MarketplaceTotal
     # No dedupe: Select-Object -Unique treats any two [pscustomobject] rows as equal, so it

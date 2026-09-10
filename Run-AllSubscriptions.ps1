@@ -273,6 +273,7 @@ $CollectionAbortedSubs = @()
 # A PowerShell prompt (Cloud Shell included) keeps one process across runs, so start every run from
 # zero, or a second run reports the first run's records and failures as its own.
 $Global:ConsumptionRecordCount = 0
+$Global:ConsumptionRowsFetchedCount = 0
 $Global:ConsumptionFailedSubs = @()
 
 $Global:MetricsApiCallCount = 0
@@ -1759,6 +1760,14 @@ else
                     $Global:ConsumptionRecordCount = [int]$Global:ConsumptionRecordCount + [int]$StreamSummary.ConsumptionRecords
                 }
 
+                # A stream summary from an older build has no fetched field; the guard
+                # skips it, so it contributes nothing to the fetched total.
+                if ($null -ne $StreamSummary.ConsumptionRowsFetched)
+                {
+                    if ($null -eq $Global:ConsumptionRowsFetchedCount) { $Global:ConsumptionRowsFetchedCount = 0 }
+                    $Global:ConsumptionRowsFetchedCount = [int]$Global:ConsumptionRowsFetchedCount + [int]$StreamSummary.ConsumptionRowsFetched
+                }
+
                 if ($null -ne $StreamSummary.MetricsApiCalls)
                 {
                     if ($null -eq $Global:MetricsApiCallCount) { $Global:MetricsApiCallCount = 0 }
@@ -2416,6 +2425,9 @@ if ($EmptySubs.Count -gt 0)
 }
 
 $ConsumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+# Falls back to the written count, not 0: absent a fetched figure, treat the run as
+# having excluded nothing. Same sentinel reasoning as the two builders.
+$ConsumptionRowsFetched = if ($null -ne $Global:ConsumptionRowsFetchedCount) { [int]$Global:ConsumptionRowsFetchedCount } else { $ConsumptionRecords }
 $ConsumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
 if (-not $SkipConsumption)
 {
@@ -2442,7 +2454,7 @@ elseif ($MarketplaceRecords -gt 0 -or $MarketplaceFailures.Count -gt 0)
 
 # A stream that did not report back took its record counts with it, so a zero here is not proven.
 $UnreportedStreamCount = @($UnreportedStreams | Where-Object { $null -ne $_ }).Count
-if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0 -and $UnreportedStreamCount -eq 0)
+if (-not $SkipConsumption -and $ConsumptionRowsFetched -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0 -and $UnreportedStreamCount -eq 0)
 {
     Write-Host ""
     Write-Host "WARNING: Consumption data was requested (no -SkipConsumption) but ZERO usage records were collected," -ForegroundColor Yellow
@@ -2457,6 +2469,27 @@ if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailur
     Write-Host "           - The subscription has not been transitioned to the Azure plan (required for CSP billing APIs)." -ForegroundColor Yellow
     Write-Host "           - A subscription offer the legacy usage API does not serve (e.g. sponsored/sandbox offers)." -ForegroundColor Yellow
     Write-Host "         Confirm in the Azure portal under Cost Management + Billing before sharing this report." -ForegroundColor Yellow
+    Write-Host ""
+}
+# The other half of that signature, and the half nothing reported at all before:
+# the billing API DID return rows, and the tool excluded every one of them. The
+# causes named above are all false here - the API answered with data - so this
+# branch is mutually exclusive with the one above and carries the scope/filter
+# explanation instead. Gate matches the sibling in Get-RunSummaryLogContent's
+# Health block so the console and the SHIPPED RunSummary.log never disagree.
+#
+# Cyan, NOT Yellow: this is correct filtering, not lost data. A meter carrying no
+# instance data cannot be attributed to a resource, so exclusion is the right
+# outcome and the operator is being informed, not warned. Deliberate - do not
+# raise it to a warning colour.
+elseif (-not $SkipConsumption -and $ConsumptionRowsFetched -gt 0 -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0 -and $UnreportedStreamCount -eq 0)
+{
+    Write-Host ""
+    # -ResourceGroupScoped is deliberately NOT passed, so this surface gets the
+    # narrow form. This script has no -ResourceGroup parameter, so the exclusions
+    # that need one cannot apply here. Full rationale lives with the helper in
+    # Functions/Common.Functions.ps1. Do NOT add the switch.
+    foreach ($Line in (Get-RdaConsumptionExcludedByScopeText -RowsFetched $ConsumptionRowsFetched)) { Write-Host $Line -ForegroundColor Cyan }
     Write-Host ""
 }
 if ($ConsumptionFailures.Count -gt 0)
@@ -2594,6 +2627,7 @@ try
 {
     $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
     $MarketplaceRecordTotal = if ($null -ne $Global:MarketplaceRecordCount) { [int]$Global:MarketplaceRecordCount } else { 0 }
+    $ConsumptionRowsFetchedTotal = if ($null -ne $Global:ConsumptionRowsFetchedCount) { [int]$Global:ConsumptionRowsFetchedCount } else { $ConsumptionRecordTotal }
     $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
     $RunSummaryLines = Get-RunSummaryLogContent `
         -InvocationParameters $PSBoundParameters `
@@ -2612,6 +2646,7 @@ try
         -MemoryReadings $Global:MemoryReadings `
         -ConsumptionRecordCount $ConsumptionRecordTotal `
         -MarketplaceRecordCount $MarketplaceRecordTotal `
+        -ConsumptionRowsFetchedCount $ConsumptionRowsFetchedTotal `
         -MetricsApiCallCount $MetricsApiCallTotal `
         -UnreportedStreamCount $UnreportedStreamCount `
         -ConsumptionRequested:(-not $SkipConsumption.IsPresent) `

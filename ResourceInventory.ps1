@@ -916,9 +916,9 @@ function ExecuteInventoryProcessing()
             }
 
             $RgTip = ''
-            if (-not $SkipMetrics.IsPresent -and [string]::IsNullOrEmpty($ResourceGroup))
+            if ([string]::IsNullOrEmpty($ResourceGroup))
             {
-                $RgTip = ' For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which scopes inventory and metrics - but NOT consumption, which stays whole-subscription.'
+                $RgTip = ' For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which scopes inventory, metrics AND consumption. Consumption is narrowed per usage record because the billing API only serves whole-subscription usage, so meters with no resource id (marketplace purchases, reservations, tenant-level charges) are excluded from a resource-group-scoped run.'
             }
 
             if (@($UnscopedPhases).Count -gt 0 -and -not $RunAllSubs.IsPresent)
@@ -1188,6 +1188,21 @@ function ExecuteInventoryProcessing()
                 {
                     continue
                 }
+
+                # Emitted AFTER the skip so it appears once, for the subscription
+                # actually processed, rather than once per subscription in the tenant.
+                # The previous text claimed consumption could NOT be narrowed by
+                # resource group, which is the opposite of what the filter below does.
+                # Measured on a live subscription: an unscoped run wrote 480 rows across
+                # 29 resource groups, and the same run with -ResourceGroup wrote the 180
+                # rows belonging to that one group. Get-UsageAggregates has no
+                # server-side resource-group filter, so the narrowing is applied per
+                # usage record instead - which is why an unattributed meter cannot
+                # satisfy it and is excluded.
+                if (![string]::IsNullOrEmpty($ResourceGroup))
+                {
+                    Write-Log -Message ("Consumption for {0} will be narrowed to resource group '{1}'. The billing API serves whole-subscription usage, so the narrowing is applied per usage record; meters with no resource id (marketplace purchases, reservations, tenant-level charges) cannot be attributed to a resource group and are excluded." -f $sub.Name, $ResourceGroup) -Severity 'Info'
+                }
             }
 
             $ContextOk = $false
@@ -1228,6 +1243,18 @@ function ExecuteInventoryProcessing()
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
             $ConsumptionRecordsThisSub = 0
+            # Rows FETCHED from the billing API, as distinct from rows WRITTEN to the
+            # CSV. They diverge whenever the -ResourceGroup filter or either null
+            # guard excludes a record, so one number cannot serve both meanings: a
+            # reader comparing against Consumption_*.csv needs written, while the
+            # zero-record billing warning needs fetched, because its named causes are
+            # only true when the API itself returned nothing.
+            $ConsumptionRowsFetchedThisSub = 0
+            # Count of records skipped by the -ResourceGroup filter because the
+            # meter carries no resourceUri, so the skip is reported once per
+            # subscription instead of vanishing. Function-scoped local, matching the
+            # other per-subscription counters in this block; NOT a global.
+            $ConsumptionNullUriSkipsThisSub = 0
             $ConsumptionFailedThisSub = $false
             $ConsumptionFailureMessage = $null
             $ConsumptionPageIndex = 0
@@ -1243,7 +1270,13 @@ function ExecuteInventoryProcessing()
                         ReportedStartTime      = $ReportedStartTime
                         ReportedEndTime        = $ReportedEndTime
                         AggregationGranularity = 'Daily'
-                        ShowDetails            = $true
+                        # Canonical parameter name. 'ShowDetails' is a declared alias
+                        # that binds identically, but depending on an alias is a
+                        # needless fragility for a value this load-bearing: it selects
+                        # instance-level detail over server-side aggregation, and the
+                        # whole consumption-to-resource attribution below depends on
+                        # the instance-level InstanceData it returns.
+                        ShowDetail             = $true
                     }
 
                     $Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }
@@ -1412,6 +1445,7 @@ function ExecuteInventoryProcessing()
                     $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
+                    $ConsumptionRowsFetchedThisSub += $UsageDataExport.Count
 
                     $NewUsageDataExport = [System.Collections.ArrayList]::new()
 
@@ -1426,7 +1460,26 @@ function ExecuteInventoryProcessing()
 
                         if (![string]::IsNullOrEmpty($ResourceGroup))
                         {
-                            if (!$InstanceInfo.'Microsoft.Resources'.resourceUri.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
+                            # Same class of null as the InstanceData guard above, one
+                            # statement later: a marketplace purchase, certain reservations
+                            # and tenant-level charges return InstanceData that parses fine
+                            # yet carries NO resourceUri. Calling .toLower() on that null
+                            # throws, and because this loop sits inside the per-subscription
+                            # paging try/catch that throw abandons the REST of this
+                            # subscription's consumption - marking it INCOMPLETE over a
+                            # record that could never have matched the requested resource
+                            # group in the first place. An unattributed record has no
+                            # resource group to compare, so excluding it IS the correct
+                            # filter result rather than lost data. Count it so the skip is
+                            # reported once per subscription instead of vanishing.
+                            $ResourceUriValue = $InstanceInfo.'Microsoft.Resources'.resourceUri
+                            if ([string]::IsNullOrEmpty($ResourceUriValue))
+                            {
+                                $ConsumptionNullUriSkipsThisSub++
+                                continue
+                            }
+
+                            if (!$ResourceUriValue.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
                             {
                                 continue;
                             }
@@ -1513,8 +1566,11 @@ function ExecuteInventoryProcessing()
                         $NewUsageDataExport.Add($UsageDataExport[$Item]) | Out-Null
                     }
 
-                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation -ErrorAction Stop
 
+                    # Counted only after Export-Csv returns. -ErrorAction Stop on the write makes a failed
+                    # write terminating under the run-wide SilentlyContinue, so a page that never reached the
+                    # file is never counted as written.
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
 
                     # The page is on disk now, so drop its rows before the next page downloads. $UsageData
@@ -1555,11 +1611,27 @@ function ExecuteInventoryProcessing()
                 }
             }
 
+            # Report the null-resourceUri skips ONCE for this subscription. Placed
+            # after the paging catch so the count is still reported when a later page
+            # fails for an unrelated reason, and inside the foreach so it is emitted
+            # once per subscription rather than once per row. Info severity: these
+            # records are correctly excluded rather than lost, so this is not a
+            # consumption failure and nothing is added to $Global:ConsumptionFailedSubs.
+            if ($ConsumptionNullUriSkipsThisSub -gt 0)
+            {
+                Write-Log -Message ("Consumption: {0} - {1} record(s) skipped by the -ResourceGroup filter because the meter has no resourceUri (marketplace / reservation / tenant-level charges cannot be attributed to a resource group). This is correct filtering, not lost data." -f $sub.Name, $ConsumptionNullUriSkipsThisSub) -Severity 'Info'
+            }
+
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
             $Global:ConsumptionRecordCount += $ConsumptionRecordsThisSub
             if ($null -eq $script:ConsumptionRecordsThisRun) { $script:ConsumptionRecordsThisRun = 0 }
             $script:ConsumptionRecordsThisRun += $ConsumptionRecordsThisSub
+            # Fetched total, mirroring the written chain above at both scopes.
+            if ($null -eq $script:ConsumptionRowsFetchedThisRun) { $script:ConsumptionRowsFetchedThisRun = 0 }
+            $script:ConsumptionRowsFetchedThisRun += $ConsumptionRowsFetchedThisSub
+            if ($null -eq $Global:ConsumptionRowsFetchedCount) { $Global:ConsumptionRowsFetchedCount = 0 }
+            $Global:ConsumptionRowsFetchedCount = [int]$Global:ConsumptionRowsFetchedCount + $ConsumptionRowsFetchedThisSub
             if ($ConsumptionFailedThisSub)
             {
                 $Global:ConsumptionFailedSubs += [pscustomobject]@{
@@ -3562,7 +3634,7 @@ Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
 
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -ConsumptionRowsFetchedCount $(if ($null -ne $script:ConsumptionRowsFetchedThisRun) { [int]$script:ConsumptionRowsFetchedThisRun } else { -1 }) -ConsumptionResourceGroupScoped (-not [string]::IsNullOrEmpty($ResourceGroup)) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
@@ -3576,7 +3648,7 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent)
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -ConsumptionRowsFetchedCount $(if ($null -ne $script:ConsumptionRowsFetchedThisRun) { [int]$script:ConsumptionRowsFetchedThisRun } else { -1 }) -ConsumptionResourceGroupScoped (-not [string]::IsNullOrEmpty($ResourceGroup)) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 

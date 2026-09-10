@@ -1727,6 +1727,8 @@ function Get-RunSummaryLogContent
         $MemoryReadings = @(),
         [int]$ConsumptionRecordCount = 0,
         [int]$MarketplaceRecordCount = 0,
+        # Rows FETCHED from the billing API. -1 = not supplied.
+        [int]$ConsumptionRowsFetchedCount = -1,
         [int]$MetricsApiCallCount = 0,
         # Parallel streams that ended without a summary: their record counts and health are not in
         # the totals, so a zero-record total proves nothing.
@@ -1856,6 +1858,8 @@ function Get-RunSummaryLogContent
 
     $Lines.Add('')
     $Lines.Add('Health:')
+    # -1 sentinel: see the same parameter on Write-RdaShareableDiagnosticsLog.
+    $RowsFetched = if ($ConsumptionRowsFetchedCount -lt 0) { $ConsumptionRecordCount } else { $ConsumptionRowsFetchedCount }
     if ((-not $ConsumptionRequested) -and ($ConsumptionRecordCount -eq 0))
     {
         $Lines.Add('  Consumption records collected : n/a (-SkipConsumption was passed)')
@@ -1863,6 +1867,7 @@ function Get-RunSummaryLogContent
     else
     {
         $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+        $Lines.Add(('  Consumption rows fetched      : {0}' -f $RowsFetched.ToString('N0', [cultureinfo]::InvariantCulture)))
     }
     if ((-not $MarketplaceRequested) -and ($MarketplaceRecordCount -eq 0))
     {
@@ -1892,7 +1897,7 @@ function Get-RunSummaryLogContent
         $Lines.Add(('  Streams that did not report   : {0} (their record counts and health are not in the figures above)' -f $UnreportedStreamCount))
     }
 
-    if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0) -and ($UnreportedStreamCount -eq 0))
+    if ($ConsumptionRequested -and ($RowsFetched -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0) -and ($UnreportedStreamCount -eq 0))
     {
         $Lines.Add('')
         $Lines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')
@@ -1906,6 +1911,28 @@ function Get-RunSummaryLogContent
         $Lines.Add('      help - the partner must enable it in Partner Center.')
         $Lines.Add('    - Subscription not transitioned to the Azure plan.')
         $Lines.Add('    - A subscription offer the legacy usage API does not serve.')
+    }
+    # The other half of that signature, and the half nothing reported at all
+    # before: the billing API DID return rows, and the tool excluded every one of
+    # them. The causes named above are all false here - the API answered with data -
+    # so this branch is mutually exclusive with the one above and carries the
+    # scope/filter explanation instead. It repeats that block's remaining guards so
+    # neither fires on a run that already reported a per-subscription billing error.
+    #
+    # Inert by design when -ConsumptionRowsFetchedCount is omitted: the -1 sentinel
+    # collapses $RowsFetched to $ConsumptionRecordCount, so the two tests below
+    # cannot both hold. That is right - with no fetched figure nothing is KNOWN to
+    # have been excluded, so staying silent beats guessing. This is load-bearing:
+    # do not "simplify" the sentinel without re-checking this branch.
+    elseif ($ConsumptionRequested -and ($RowsFetched -gt 0) -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0) -and ($UnreportedStreamCount -eq 0))
+    {
+        $Lines.Add('')
+        # -ResourceGroupScoped is deliberately NOT passed, so this surface gets the
+        # narrow form. Run-AllSubscriptions.ps1 - whose RunSummary.log this block
+        # ships in - has no -ResourceGroup parameter, so the exclusions that need
+        # one cannot apply here. Full rationale lives with the helper in
+        # Functions/Common.Functions.ps1. Do NOT add the switch.
+        foreach ($Line in (Get-RdaConsumptionExcludedByScopeText -RowsFetched $RowsFetched -Indent '  ')) { $Lines.Add($Line) }
     }
 
     # Per-subscription memory readings from the inner script: counts and megabytes, labelled by

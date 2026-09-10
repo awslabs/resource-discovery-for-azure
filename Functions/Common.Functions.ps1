@@ -319,6 +319,85 @@ function Set-RdaInventoryRootForChildren
     $env:RDA_INVENTORY_ROOT = $Path
 }
 
+# Single owner for the "rows arrived but none survived the filter" text.
+#
+# A DIFFERENT condition from the zero-record billing warning, and it must not be
+# confused with it. There the billing API returned nothing and the named causes
+# (partner cost visibility, Azure plan transition, an unserved offer) apply. Here
+# the API returned rows and the tool excluded all of them, so those causes are
+# false and must not be shown.
+#
+# Emitted by three surfaces (the shareable diagnostics log, the RunSummary Health
+# block, the wrapper console), so it gets one owner rather than three hand copies.
+# Every line is a single-quoted literal, so the text carries no identifier and is
+# safe in an obfuscated bundle.
+#
+# -ResourceGroupScoped selects WHICH exclusions are named, and the NARROW form is
+# the default deliberately. In ResourceInventory.ps1's consumption page loop the
+# three exclusions sit at different nesting levels: the empty-instance-data guard
+# is outside the -ResourceGroup gate and so is reachable on EVERY run, while the
+# no-resource-id guard and the resource-group-mismatch filter are INSIDE that gate
+# and so are reachable ONLY when -ResourceGroup was supplied. Naming all three
+# unconditionally therefore told the operator that two impossible things might
+# have happened, and the closing remedy told them to remove a parameter they
+# never passed. Worse on the wrapper surfaces: Run-AllSubscriptions.ps1 has no
+# -ResourceGroup parameter at all, so a caller that CANNOT have been given it must
+# not be told to remove it. Callers that can be resource-group-scoped pass the
+# switch; callers that cannot simply omit it and get the honest narrow form.
+function Get-RdaConsumptionExcludedByScopeText
+{
+    [CmdletBinding()]
+    # object[], not string[]: both exit paths build the collection with @(), which
+    # produces a System.Object[] whose elements all happen to be String. Declaring
+    # string[] would be inaccurate - neither path satisfies -is [string[]] - and it
+    # does not silence PSUseOutputTypeCorrectly either, because that rule matches the
+    # inferred collection type. Every caller iterates the result, so the element type
+    # is what matters to them and the collection type is what matters here.
+    [OutputType([object[]])]
+    param(
+        [int]$RowsFetched = 0,
+        [string]$Indent = '',
+        [switch]$ResourceGroupScoped
+    )
+
+    # Shared preamble. Deliberately mode-NEUTRAL and a COMPLETE sentence: it must
+    # not name a scope or a filter, because the default branch's only cause is a
+    # data-shape guard with neither in play, and it must not run on into the branch
+    # text, because a sentence split across both branches has to be hand-copied and
+    # then drifts when only one copy is reworded.
+    $Lines = @(
+        ('NOTE - the billing API returned {0} usage row(s), but none were written:' -f $RowsFetched)
+        'every row was excluded before it could be written. This is NOT the billing'
+        'API returning no data, so the partner cost-visibility, Azure-plan and'
+        'unsupported-offer causes do NOT apply here.'
+    )
+
+    if ($ResourceGroupScoped)
+    {
+        $Lines += @(
+            'The exclusions that do this are:'
+            '  - the -ResourceGroup filter, when no billed resource lives in that group'
+            '  - a meter with no resource id (marketplace purchases, reservations,'
+            '    tenant-level charges), which cannot be attributed to a resource group'
+            '  - a meter carrying no instance data at all'
+            'Re-run without -ResourceGroup to see the whole subscription.'
+        )
+    }
+    else
+    {
+        # Only the exclusion that is actually reachable without a resource-group
+        # scope. No remedy line: there is no parameter to remove, and an
+        # unattributed meter is correct filtering rather than lost data.
+        $Lines += @(
+            'The exclusion that does this is:'
+            '  - a meter carrying no instance data at all'
+        )
+    }
+
+    if ([string]::IsNullOrEmpty($Indent)) { return $Lines }
+    return @($Lines | ForEach-Object { $Indent + $_ })
+}
+
 function Test-RdaConsumptionDenial
 {
     [CmdletBinding()]

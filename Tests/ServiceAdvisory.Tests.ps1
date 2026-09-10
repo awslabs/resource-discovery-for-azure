@@ -31,11 +31,24 @@ Describe '-Service advisory: per-phase accuracy (source guard)' {
         $script:InvSrc | Should -Match '@\(\$UnscopedPhases\)\.Count\s*-gt\s*0'
     }
 
-    # REGRESSION GUARD for the residual clause. The -ResourceGroup tip must not be
-    # emitted unconditionally: its only benefit is scoping metrics, so offering it
-    # to a -SkipMetrics run advertises a benefit that run cannot receive.
-    It 'offers the -ResourceGroup tip only when metrics are actually still running' {
-        $script:InvSrc | Should -Match '(?s)\$RgTip\s*=\s*''''.*?if\s*\(\s*-not\s+\$SkipMetrics\.IsPresent'
+    # REGRESSION GUARD, corrected. This used to require the tip be gated on
+    # -not $SkipMetrics.IsPresent, on the belief that scoping metrics was its only
+    # benefit. Measured otherwise: -ResourceGroup also narrows consumption
+    # (480 rows across 29 resource groups unscoped, 180 rows in 1 group scoped), so
+    # a -SkipMetrics run still benefits and must still be offered it.
+    #
+    # The gate is now the single honest condition - withhold only when the operator
+    # already supplied it. Withholding on -SkipMetrics would hide a switch that
+    # genuinely helps the consumption phase such a run is still executing. The
+    # advisory as a whole is already silent when BOTH phases are skipped
+    # ($UnscopedPhases non-empty, asserted above), so nothing reaching this point
+    # lacks a phase the tip narrows.
+    It 'gates the -ResourceGroup tip only on -ResourceGroup not already being supplied' {
+        $script:InvSrc | Should -Match '(?s)\$RgTip\s*=\s*''''.*?if\s*\(\s*\[string\]::IsNullOrEmpty\(\$ResourceGroup\)\s*\)'
+    }
+
+    It 'no longer withholds the -ResourceGroup tip from a -SkipMetrics run' {
+        $script:InvSrc | Should -Not -Match '(?s)\$RgTip\s*=\s*''''.*?if\s*\(\s*-not\s+\$SkipMetrics\.IsPresent'
     }
 
     # ...and not when the operator already passed it. -Service and -ResourceGroup
@@ -45,13 +58,32 @@ Describe '-Service advisory: per-phase accuracy (source guard)' {
         $script:InvSrc | Should -Match '\$RgTip[\s\S]{0,400}?\[string\]::IsNullOrEmpty\(\$ResourceGroup\)'
     }
 
-    # HONESTY GUARD. -ResourceGroup narrows the Resource Graph query, so it scopes
-    # inventory and metrics - but Get-UsageAggregates is whole-subscription billing
-    # with no resource-group filter, so consumption is NOT scoped. The advisory
-    # names consumption as part of the problem, so it must not imply -ResourceGroup
-    # solves it. See docs/recovery-and-diagnostics.md.
-    It 'states that -ResourceGroup does NOT scope consumption' {
-        $script:InvSrc | Should -Match '(?i)\$RgTip[\s\S]{0,400}?NOT\s+consumption'
+    # HONESTY GUARD, corrected. This previously asserted that -ResourceGroup does
+    # NOT scope consumption, reasoning that Get-UsageAggregates is whole-subscription
+    # billing with no resource-group filter. That premise is true but the conclusion
+    # was not: GetResourceConsumption() applies the narrowing CLIENT-side, per usage
+    # record, so consumption IS scoped.
+    #
+    # Measured on a live subscription, same subscription and window, only
+    # -ResourceGroup differing:
+    #   without -ResourceGroup : 480 consumption rows across 29 resource groups
+    #   with    -ResourceGroup : 180 rows, 1 resource group - exactly that group's
+    #                            180 rows from the unscoped run
+    #
+    # So the advisory must say consumption IS scoped. The honesty obligation does not
+    # disappear, it moves: because the narrowing is per-record, a meter with no
+    # resource id (marketplace purchases, reservations, tenant-level charges) cannot
+    # be attributed to a resource group and is excluded. Both halves are asserted.
+    It 'states that -ResourceGroup DOES scope consumption' {
+        $script:InvSrc | Should -Match '(?i)\$RgTip[\s\S]{0,400}?scopes inventory, metrics AND consumption'
+    }
+
+    It 'warns that unattributed meters are excluded from a resource-group-scoped run' {
+        $script:InvSrc | Should -Match '(?i)\$RgTip[\s\S]{0,700}?no resource id[\s\S]{0,200}?excluded'
+    }
+
+    It 'no longer claims consumption stays whole-subscription' {
+        $script:InvSrc | Should -Not -Match '(?i)NOT consumption'
     }
 
     It 'no longer claims -ResourceGroup "also scopes metrics" without qualification' {

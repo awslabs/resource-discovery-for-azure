@@ -98,14 +98,11 @@ Write-Host '=== RDA multi-node (AKS) readiness check - read-only, nothing is cre
 Write-Host ''
 
 # 1. PowerShell 7+
-if ($PSVersionTable.PSVersion.Major -ge 7)
-{
-    Add-Result -Name 'PowerShell 7+' -Status 'PASS' -Detail $PSVersionTable.PSVersion.ToString()
-}
-else
-{
-    Add-Result -Name 'PowerShell 7+' -Status 'FAIL' -Detail "Found $($PSVersionTable.PSVersion); install PowerShell 7+."
-}
+# Unconditional PASS: '#Requires -Version 7.0' above means PowerShell refuses to run this
+# file at all below 7, so reaching this line already proves the check. The FAIL branch that
+# used to sit here could never execute, and a preflight offering a result it cannot reach is
+# worse than one that does not offer it.
+Add-Result -Name 'PowerShell 7+' -Status 'PASS' -Detail $PSVersionTable.PSVersion.ToString()
 
 # 2. Azure CLI present + signed in (the AKS setup commands use `az`).
 $AzCli = Get-Command az -ErrorAction SilentlyContinue

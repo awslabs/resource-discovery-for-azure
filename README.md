@@ -54,6 +54,7 @@ For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-w
 - [Getting Started](#getting-started)
 - [Usage](#usage)
 - [Output Files](#output-files)
+- [Searching Reports You Already Have](#searching-reports-you-already-have)
 - [Parameters Reference](#parameters-reference)
 - [Troubleshooting](#troubleshooting)
 
@@ -489,6 +490,43 @@ If automatic compression fails:
 cd InventoryReports
 Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-Date -Format 'yyyy-MM-dd').zip"
 ```
+## Searching Reports You Already Have
+
+`FindResource.ps1` answers one question against report output that has **already been generated**: *does resource type X exist anywhere in this estate, and how big is it?* It makes no Azure calls and writes nothing back into the scanned tree.
+
+You need it because a resource type can be collected into `Inventory_*.json` before the server-side ingestion handles it. When that happens the report bundle is the only copy of that data. You cannot search for it in the HTML report either, because **each per-subscription report covers exactly one subscription** - there is no single report spanning an estate to search. This walks the bundles instead.
+
+```powershell
+# How many Azure VMware Solution private clouds are there, and how many hosts?
+./FindResource.ps1 -Path ./ScanRoot -ResourceType VMWare -SumBy ClusterSize -GroupBy Location
+
+# Same search, rows written out for further analysis
+./FindResource.ps1 -Path ./ScanRoot -ResourceType VMWare -CsvPath ./avs.csv
+
+# Rows go to the pipeline, so post-process with ordinary PowerShell
+./FindResource.ps1 -Path ./ScanRoot -ResourceType StorageAcc | Group-Object Location
+```
+
+`-Path` is searched recursively and accepts any mix of a sharded scan root, per-subscription `ResourcesReport*.zip` files, consolidated `AllSubscriptions_*.zip` bundles, and extracted folders holding a loose `Inventory_*.json`.
+
+`-ResourceType` is the `Inventory_*.json` key, which is the base name of the collector under `Services/`. It is **typo-protected**: the value is validated against the `Services` tree at parameter-binding time and tab completion offers the valid names, so a misspelling fails immediately with a suggestion rather than silently returning nothing. Note the collector name is not always the marketing name - Azure VMware Solution is `VMWare`.
+
+### It will not claim an absence it has not proved
+
+A wrong "no" is the worst answer this tool could give, so it only calls a zero a **confirmed** zero when the scan covered everything asked of it *and* every inventory it read actually contained the requested key. Otherwise it says which of those it could not establish:
+
+| Output | Meaning |
+|---|---|
+| `This is a confirmed zero` | Every inventory read carried the key and nothing was lost. The type really is absent. |
+| `CANNOT CONFIRM ABSENCE` | The key was in **no** inventory read. These bundles predate the collector, or the run was scoped with `-Service`. |
+| `PARTIAL COVERAGE` | Only some inventories carried the key. The count is a lower bound. |
+| `PARTIAL SCAN` | A path was missing or refused, a subtree was unreadable, or a bundle was skipped. |
+| `NOTHING WAS SCANNED` | No bundles were found. Check the path. |
+
+Exit codes mirror this, so an automated caller reading only `$LASTEXITCODE` reaches the same conclusion: `0` complete, `1` nothing scanned, `2` read failures, `3` scope incomplete, `4` output file could not be written.
+
+De-obfuscated reports produced by `Reveal.ps1` are **refused and reported**, never read, so a revealed copy left on disk cannot leak real identifiers into the results.
+
 ## Parameters Reference
 
 ### Core Parameters

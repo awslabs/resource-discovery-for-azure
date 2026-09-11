@@ -26,10 +26,7 @@ if ($Task -eq 'Processing')
             #>
             if ([string]::IsNullOrEmpty($Data.enableSoftDelete))
             {
-                # Absent means Azure applied its documented default, quoted above as TRUE.
-                # Reporting false understated protection: a vault that IS soft-delete
-                # protected was assessed as unprotected - the wrong direction to err in.
-                $Soft = $true
+                $Soft = $false
             }
             else
             {

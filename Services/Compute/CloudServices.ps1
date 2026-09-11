@@ -13,7 +13,10 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            $Roles = $Data.roleProfile
+            # roleProfile is a CloudServiceRoleProfile OBJECT whose 'roles' member holds the
+            # array. Iterating roleProfile itself walked one object with no name or sku, so
+            # every cloud service emitted a single all-null role row whatever its real count.
+            $Roles = $Data.roleProfile.roles
 
             $Obj = @{
                 'ID'                   = $1.id;

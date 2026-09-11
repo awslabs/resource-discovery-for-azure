@@ -376,6 +376,22 @@ function Get-AzGraphErrorInfo
         $Text = $Info.Message
         if ($Text -match 'ResponsePayloadTooLarge|Response payload size is \d+, exceeded the limit') { $Info.IsPayloadTooLarge = $true }
         elseif ($Text -match 'TooManyRequests|\b429\b|throttl') { $Info.IsThrottled = $true }
+        # CLIENT-SIDE row materialization failure, not a service error, so retrying is
+        # certain to fail identically - a real shard run burned all 31 attempts on one
+        # before losing the whole subscription. A resource whose JSON carries an
+        # object key that is the EMPTY STRING cannot become a PSObject property:
+        # Search-AzGraph's conversion throws from the PSNoteProperty constructor
+        # ('the value of argument "name" is not valid'), and ConvertFrom-Json refuses
+        # the same payload ('property whose name is an empty string'). Deterministic
+        # per resource, so fail fast and name the cause instead of backing off.
+        elseif ($Text -match 'the value of argument "name" is not valid|property whose name is an empty string')
+        {
+            $Info.IsPermanent = $true
+            $Info.Message = ($Info.Message + "`n" +
+                'Cause: a resource in this scope has a JSON property whose name is an empty string, which cannot be materialized as an object property. ' +
+                'It is user-authored JSON, so a Logic App / policy / template definition is the usual holder. ' +
+                'Exclude the offending resource type from the discovery query to complete this subscription.')
+        }
         elseif ($Text -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid') { $Info.IsPermanent = $true }
     }
 

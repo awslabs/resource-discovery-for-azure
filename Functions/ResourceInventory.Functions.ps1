@@ -36,7 +36,7 @@ function GetLocalVersion()
     if ([string]::IsNullOrWhiteSpace($PSScriptRoot))
     {
         Write-Host 'Cannot resolve the script location ($PSScriptRoot is empty). Run the tool from its files on disk, not an inline script block. Exiting.' -ForegroundColor Red
-        Exit 1
+        exit 1
     }
 
     $VersionJsonPath = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'Version.json'
@@ -44,7 +44,7 @@ function GetLocalVersion()
     if (-not (Test-Path -LiteralPath $VersionJsonPath -PathType Leaf))
     {
         Write-Host ("Version.json not found at '{0}' (expected at the repo root, alongside ResourceInventory.ps1). Ensure the full repo is present. Exiting." -f $VersionJsonPath) -ForegroundColor Red
-        Exit 1
+        exit 1
     }
 
     # -Raw + explicit parse guard: a truncated or malformed Version.json (e.g. a
@@ -57,7 +57,7 @@ function GetLocalVersion()
     catch
     {
         Write-Host ("Version.json at '{0}' could not be read or parsed as JSON: {1}. Exiting." -f $VersionJsonPath, $_.Exception.Message) -ForegroundColor Red
-        Exit 1
+        exit 1
     }
 
     return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
@@ -71,7 +71,7 @@ function GetLocalVersion()
 # returns $null (preserving the previous "absent" shape); when obfuscation is off
 # the dictionary is $null and the original value is returned unchanged. Defined
 # Global so it is reachable from the collectors invoked via '& $Module'.
-Function Global:Protect-FreeTextValue([string]$Value)
+function Global:Protect-FreeTextValue([string]$Value)
 {
     if ([string]::IsNullOrEmpty($Value)) { return $null }
     if ($null -eq $Global:FreeTextDictionary) { return $Value }
@@ -112,7 +112,7 @@ Function Global:Protect-FreeTextValue([string]$Value)
 # report (never inventoried, so not in any dictionary) and is not GUID/host/
 # email/path shaped could still appear in words - the caller keeps this to the
 # obfuscated bundle (shared only with the ingestion party), not a public surface.
-Function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDictionary]$ValueMap)
+function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDictionary]$ValueMap)
 {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
 
@@ -296,13 +296,20 @@ function Get-AzGraphErrorInfo
     param($Exception)
 
     $Info = [pscustomobject]@{
-        Codes             = @()
-        HttpStatus        = 0
-        Message           = ''
-        HasStructuredBody = $false
-        IsPayloadTooLarge = $false
-        IsThrottled       = $false
-        IsPermanent       = $false
+        Codes               = @()
+        HttpStatus          = 0
+        Message             = ''
+        HasStructuredBody   = $false
+        IsPayloadTooLarge   = $false
+        IsThrottled         = $false
+        IsPermanent         = $false
+        # A CLIENT-SIDE materialization failure caused by a resource whose JSON
+        # carries an object key that is the EMPTY STRING. NOT a service error and
+        # NOT permanent in the "give up" sense: the caller recovers it by
+        # re-fetching the same window via the raw ARM REST path and renaming empty
+        # keys before parsing. Kept as its own flag so the caller can route it to
+        # that fallback instead of failing the whole subscription.
+        IsEmptyPropertyName = $false
     }
     if ($null -eq $Exception) { return $Info }
 
@@ -386,16 +393,103 @@ function Get-AzGraphErrorInfo
         # per resource, so fail fast and name the cause instead of backing off.
         elseif ($Text -match 'the value of argument "name" is not valid|property whose name is an empty string')
         {
-            $Info.IsPermanent = $true
-            $Info.Message = ($Info.Message + "`n" +
-                'Cause: a resource in this scope has a JSON property whose name is an empty string, which cannot be materialized as an object property. ' +
-                'It is user-authored JSON, so a Logic App / policy / template definition is the usual holder. ' +
-                'Exclude the offending resource type from the discovery query to complete this subscription.')
+            # A resource whose JSON carries an object key that is the EMPTY STRING
+            # cannot become a PSObject property: Search-AzGraph's conversion throws
+            # from the PSNoteProperty constructor ('the value of argument "name" is
+            # not valid'), and ConvertFrom-Json refuses the same payload ('property
+            # whose name is an empty string'). It is user-authored JSON (a Logic App
+            # / policy / template definition is the usual holder), so it is
+            # deterministic per resource and retrying the identical Search-AzGraph
+            # call is futile. It is NOT marked IsPermanent: the caller recovers the
+            # window via the raw ARM REST path, which returns a JSON STRING whose
+            # empty keys are renamed to a sentinel BEFORE parsing, so the resource
+            # is CAPTURED rather than the whole subscription being lost.
+            $Info.IsEmptyPropertyName = $true
         }
         elseif ($Text -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid') { $Info.IsPermanent = $true }
     }
 
     return $Info
+}
+
+# The sentinel an empty-string JSON property name is renamed to when a resource is
+# recovered via the raw-REST fallback. An empty key cannot survive PowerShell
+# object materialization (PSNoteProperty rejects it) or ConvertFrom-Json, so it is
+# renamed rather than dropped - the value is preserved under a stable, greppable
+# name. Chosen to be collision-proof: no real Azure property is named this. NOTE
+# for downstream/server ingestion: this key can appear anywhere inside a resource's
+# free-form 'properties' bag in Inventory_*.json; it is inert (no collector reads
+# it) and marks a resource whose original JSON had an unnamed property.
+$Script:RdaEmptyPropertyNameSentinel = '_rda_emptykey'
+
+# Recover ONE window that Search-AzGraph could not materialize because a resource
+# in it has a JSON object key that is the EMPTY STRING (see Get-AzGraphErrorInfo's
+# IsEmptyPropertyName). Fetches the SAME query/window via the raw Resource Graph
+# REST endpoint, which returns a JSON STRING; the empty keys are renamed to
+# $Script:RdaEmptyPropertyNameSentinel in that string BEFORE any ConvertFrom-Json,
+# so neither PSNoteProperty nor ConvertFrom-Json ever sees an empty name and the
+# resource is CAPTURED intact rather than the subscription being lost.
+#
+# Uses Invoke-AzRestMethod (the house pattern - portable by construction, no `az`
+# CLI). Throws on failure so the caller's existing failure handling still applies
+# if the fallback itself cannot complete.
+function Get-AzGraphRowsViaRest
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Query,
+        [string[]]$Subscription,
+        [int]$First = 1000,
+        [int]$Skip = 0
+    )
+
+    $Body = @{
+        query   = $Query
+        options = @{
+            '$top'  = $First
+            '$skip' = $Skip
+        }
+    }
+    # Scope to the given subscriptions when supplied; omitting it queries the whole
+    # accessible tenant, matching Search-AzGraph's -Subscription semantics.
+    if ($Subscription) { $Body['subscriptions'] = @($Subscription) }
+
+    $Payload = $Body | ConvertTo-Json -Depth 10
+    $Response = Invoke-AzRestMethod -Method POST `
+        -Path '/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01' `
+        -Payload $Payload -ErrorAction Stop
+
+    $Status = [int]$Response.StatusCode
+    if ($Status -lt 200 -or $Status -ge 300)
+    {
+        # Include only a bounded slice of the response body in the thrown message.
+        # The body is enough to diagnose an ARG REST rejection, but the full
+        # payload is an unbounded free-text surface; cap it so the failure message
+        # (which flows into the shareable diagnostics log, scrubbed) stays small.
+        $Detail = [string]$Response.Content
+        if ($Detail.Length -gt 500) { $Detail = $Detail.Substring(0, 500) + '...(truncated)' }
+        throw ("Resource Graph REST fallback returned HTTP {0}: {1}" -f $Status, $Detail)
+    }
+
+    # Rename EMPTY-STRING JSON keys to the sentinel in the raw response TEXT, before
+    # parsing. A JSON object key is a quoted string immediately followed by a colon;
+    # an empty key is the literal "" in key position. Matching "" that is followed
+    # by optional whitespace and a colon targets keys without touching empty string
+    # VALUES (a value is preceded by a colon or a comma/bracket, never itself in key
+    # position). The replace runs on the response string so the empty name is gone
+    # before ConvertFrom-Json, which would otherwise reject it identically.
+    $Sanitized = [regex]::Replace(
+        $Response.Content,
+        '(?<=[{,]\s*)""(?=\s*:)',
+        ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
+
+    $Parsed = $Sanitized | ConvertFrom-Json
+    # The ARG REST response wraps rows in a 'data' array (the SDK's .Data). Return
+    # the flat row array so the caller can treat it exactly like Search-AzGraph output.
+    if ($null -ne $Parsed -and $Parsed.PSObject.Properties.Name -contains 'data')
+    {
+        return @($Parsed.data)
+    }
+    return @()
 }
 
 # ONE Resource Graph request, with the project's bounded retry around it.
@@ -492,6 +586,32 @@ function Invoke-AzGraphRequest
             {
                 $Failure = $ErrorInfo
                 break
+            }
+
+            # A resource in this window has an EMPTY-STRING JSON property name, which
+            # Search-AzGraph cannot materialize (PSNoteProperty). Retrying the same
+            # call is futile - but the data is fine on the service side, so recover
+            # the SAME window via the raw REST path, which renames empty keys to a
+            # sentinel before parsing. The resource is CAPTURED, not dropped, and the
+            # subscription completes. If the REST fallback ITSELF fails, fall through
+            # to the normal failure handling (treat as permanent) rather than looping.
+            if ($ErrorInfo.IsEmptyPropertyName)
+            {
+                try
+                {
+                    $Rows = @(Get-AzGraphRowsViaRest -Query $Query -Subscription $Subscription -First $First -Skip $Skip)
+                    $FailureMessage = $null
+                    $Failure = $null
+                    Write-Log -Message ("Recovered {0} row(s) at offset {1} via the raw Resource Graph REST path after an empty-property-name materialization error; empty JSON keys were renamed to '{2}'. The resource(s) were captured, not dropped." -f $Rows.Count, $Skip, $Script:RdaEmptyPropertyNameSentinel) -Severity 'Warning'
+                    break
+                }
+                catch
+                {
+                    $RestInfo = Get-AzGraphErrorInfo -Exception $_.Exception
+                    $Failure = $RestInfo
+                    $FailureMessage = ("Resource Graph empty-property-name recovery via REST failed at offset {0}: {1}`nQuery: {2}" -f $Skip, $RestInfo.Message, $Query)
+                    break
+                }
             }
 
             # Clearly-permanent failures: a retry cannot help, so stop now rather
@@ -706,7 +826,19 @@ function Invoke-AzGraphQuerySafe
     # This file already uses invariant casing elsewhere for the same reason.
     if ($Lowercase -and $Rows.Count -gt 0)
     {
-        $Rows = @(($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant() | ConvertFrom-Json)
+        # Defense in depth for the empty-property-name case: the REST fallback in
+        # Get-AzGraphRowsViaRest already renamed empty JSON keys to the sentinel, so
+        # rows reaching here should carry none. But ConvertFrom-Json rejects an
+        # empty property name identically to Search-AzGraph, so if one ever survived
+        # (an SDK shape this path did not sanitize), the round-trip below would
+        # re-throw and lose the window. Rename any empty key in the serialized TEXT
+        # to the sentinel before parsing - same targeted key-position match as the
+        # REST helper - so this round-trip can never be the thing that drops a
+        # resource. On the normal path (no empty keys) the regex matches nothing and
+        # behaviour is byte-for-byte unchanged.
+        $Json = ($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant()
+        $Json = [regex]::Replace($Json, '(?<=[{,]\s*)""(?=\s*:)', ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
+        $Rows = @($Json | ConvertFrom-Json)
     }
 
     # Preserve the historical .data accessor the call sites read.

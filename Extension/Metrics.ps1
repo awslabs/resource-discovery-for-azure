@@ -328,8 +328,14 @@ if ($Task -eq 'Processing')
             $Endpoint = "https://$Region.metrics.monitor.azure.com"
             $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
             $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLower() })
-            $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            # InvariantCulture is REQUIRED, not cosmetic: these two strings go on the wire
+            # as the metrics:getBatch timespan. A format string with no provider takes the
+            # calendar from CurrentCulture, so a th-TH host would send a 2569- window and an
+            # ar-SA host a 1448- one. Azure Monitor then either rejects the request or
+            # answers with an empty window - degrading the service to the per-call path at
+            # best, and silently writing ZEROED metrics that are never re-queued at worst.
+            $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
+            $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
             $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
 
             $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue

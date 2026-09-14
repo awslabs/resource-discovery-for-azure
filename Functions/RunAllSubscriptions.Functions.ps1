@@ -1176,7 +1176,10 @@ function Invoke-PreFlightChecks
             }
             else
             {
-                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $FreeMB, $InventoryRoot) -ForegroundColor Green
+                # InvariantCulture: a bare "{0:N0}" formats with CURRENT culture, so on an
+                # en-NL host 22378 rendered as "22.378 MB" and read as a fraction of a MB
+                # when the disk actually had ~22 GB free.
+                Write-Host ("Free disk space: {0} MB at {1}" -f $FreeMB.ToString('N0', [cultureinfo]::InvariantCulture), $InventoryRoot) -ForegroundColor Green
             }
         }
     }
@@ -1929,7 +1932,10 @@ function Get-RunSummaryLogContent
     # an obfuscated bundle (tuning knobs, never identifiers). Any other valued
     # parameter has its value omitted under -Obfuscated so a future value-carrying
     # parameter cannot leak into a shared log.
-    $SafeValueParamNames = @('ParallelStreams', 'ConcurrencyLimit')
+    # Both metric knobs are attribute-bounded ints (ValidateSet 0/5/15/30/60 and
+    # ValidateRange 1-93), so neither can carry an identifier, and recording the
+    # value is what makes an obfuscated run's metric window auditable afterwards.
+    $SafeValueParamNames = @('ParallelStreams', 'ConcurrencyLimit', 'MetricsIntervalMinutes', 'MetricsLookbackDays')
 
     # Normalise possibly-$null collections to real arrays so .Count is stable.
     $NoAccess = @(@($EmptyNoAccess) | Where-Object { $null -ne $_ })
@@ -1951,15 +1957,20 @@ function Get-RunSummaryLogContent
     {
         $Lines.Add('Non-obfuscated run: contains real subscription names/ids.')
     }
-    $Lines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+    # InvariantCulture on every timestamp below: a format string with no provider takes
+    # the YEAR from CurrentCulture's Calendar and the ':' from its TimeSeparator, so a
+    # th-TH host stamps 2569 and an ar-SA host 1448-04-03 into this SHIPPED log.
+    # Measured, not theoretical.
+    # Same fix and rationale as Functions/AllSubHtmlSummary.Functions.ps1:313-318.
+    $Lines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)))
     $Lines.Add(('Tool version    : {0}' -f [string]$Version))
     if ($StartTime -is [datetime] -and $StartTime -ne [datetime]::MinValue)
     {
-        $Lines.Add(('Run started     : {0}' -f $StartTime.ToString('yyyy-MM-dd HH:mm:ss')))
+        $Lines.Add(('Run started     : {0}' -f $StartTime.ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)))
     }
     if ($EndTime -is [datetime] -and $EndTime -ne [datetime]::MinValue)
     {
-        $Lines.Add(('Run finished    : {0}' -f $EndTime.ToString('yyyy-MM-dd HH:mm:ss')))
+        $Lines.Add(('Run finished    : {0}' -f $EndTime.ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)))
     }
     if (($StartTime -is [datetime]) -and ($EndTime -is [datetime]) -and ($EndTime -ge $StartTime) -and ($StartTime -ne [datetime]::MinValue))
     {
@@ -2018,7 +2029,11 @@ function Get-RunSummaryLogContent
     # (standalone/offline callers) the whole section is omitted.
     $HostLines = [System.Collections.Generic.List[string]]::new()
     if ($HostVCpu -gt 0) { $HostLines.Add(('  Host vCPU         : {0}' -f $HostVCpu)) }
-    if ($HostRamGB -gt 0) { $HostLines.Add(('  Host RAM (GB)     : {0}' -f $HostRamGB)) }
+    # InvariantCulture: $HostRamGB is a one-decimal [double] GB value from
+    # Get-RecommendedParallelism, so a bare -f writes '15,6' on this en-NL host into the
+    # SHIPPED RunSummary.log, which a reader treating ',' as a group separator sees as
+    # 156 GB.
+    if ($HostRamGB -gt 0) { $HostLines.Add(('  Host RAM (GB)     : {0}' -f $HostRamGB.ToString([cultureinfo]::InvariantCulture))) }
     if ($Streams -gt 0)
     {
         $StreamsSrcText = if (-not [string]::IsNullOrEmpty($StreamsSource)) { ' ({0})' -f $StreamsSource } else { '' }
@@ -2052,8 +2067,14 @@ function Get-RunSummaryLogContent
     # --- Health --------------------------------------------------------------
     $Lines.Add('')
     $Lines.Add('Health:')
-    $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount))
-    $Lines.Add(('  Metric-query API calls issued : {0:N0}' -f $MetricsApiCallCount))
+    # N0 invariant to match the metric-query line below: both can exceed four digits,
+    # and a grouped figure beside an ungrouped one reads as a formatting bug.
+    $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+    # InvariantCulture: this line SHIPS in RunSummary.log inside the customer-bound
+    # bundle, and a bare '{0:N0}' formats with CURRENT culture - on an en-NL host
+    # 1234567 recorded as '1.234.567', misreadable by six orders of magnitude against
+    # the 10,000,000/month metric-query free-tier ceiling this figure exists to test.
+    $Lines.Add(('  Metric-query API calls issued : {0}' -f $MetricsApiCallCount.ToString('N0', [cultureinfo]::InvariantCulture)))
     $Lines.Add(('  Failed subscriptions          : {0}' -f $Failed.Count))
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
@@ -2228,7 +2249,9 @@ function New-RdaSupportLogBundle
     }
     if ([string]::IsNullOrWhiteSpace($DestinationPath))
     {
-        $DestinationPath = Join-Path $InventoryRoot ('RdaSupportLogs_{0}.zip' -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        # InvariantCulture: a bare -Format takes the year from CurrentCulture's Calendar,
+        # which would put a Buddhist/Hijri year in the support-bundle FILENAME.
+        $DestinationPath = Join-Path $InventoryRoot ('RdaSupportLogs_{0}.zip' -f (Get-Date).ToString('yyyy-MM-dd_HH-mm-ss', [cultureinfo]::InvariantCulture))
     }
 
     # Names that must NEVER be collected: the reveal dictionary would expose the
@@ -2310,9 +2333,10 @@ function New-RdaSupportLogBundle
         # Manifest: what each file is + the mandatory do-not-post-publicly warning.
         $Manifest = [System.Collections.Generic.List[string]]::new()
         $Manifest.Add('Resource Discovery for Azure - support log bundle')
-        $Manifest.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+        # InvariantCulture for the same reason as the RunSummary timestamps above.
+        $Manifest.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)))
         $Manifest.Add(('Inventory root  : {0}' -f $InventoryRoot))
-        if ($PSBoundParameters.ContainsKey('SinceTime')) { $Manifest.Add(('Scoped to files at/after : {0}' -f $SinceTime.ToString('yyyy-MM-dd HH:mm:ss'))) }
+        if ($PSBoundParameters.ContainsKey('SinceTime')) { $Manifest.Add(('Scoped to files at/after : {0}' -f $SinceTime.ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture))) }
         $Manifest.Add(('Files collected : {0}' -f $Collected))
         $Manifest.Add('')
         $Manifest.Add('*** PRIVATE - contains real identifiers ***')

@@ -443,13 +443,15 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Match 'no usable token'
     }
 
-    It 'drops TenantID / SubscriptionID / InventoryRoot from the parameter list' {
+    It 'drops target identifiers from the parameter list but keeps allowlisted tuning knobs' {
         $Params = @{
-            TenantID        = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-            SubscriptionID  = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
-            InventoryRoot   = '/home/someone/InventoryReports'
-            SkipConsumption = [switch]$true
-            ParallelStreams = 4
+            TenantID               = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+            SubscriptionID         = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+            InventoryRoot          = '/home/someone/InventoryReports'
+            SkipConsumption        = [switch]$true
+            ParallelStreams        = 4
+            MetricsIntervalMinutes = 60
+            MetricsLookbackDays    = 30
         }
         $Text = (Get-RunSummaryLogContent -InvocationParameters $Params -Obfuscated) -join "`n"
 
@@ -457,8 +459,12 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Not -Match 'bbbbbbbb-bbbb'
         $Text | Should -Not -Match '/home/someone'
         $Text | Should -Match '-SkipConsumption'
-        # Allowlisted tuning knob keeps its value even under obfuscation.
+        # Allowlisted tuning knobs keep their value even under obfuscation. Asserting a
+        # METRIC knob too, so trimming $SafeValueParamNames back cannot silently regress
+        # -MetricsLookbackDays to '<value omitted>' with the suite still green.
         $Text | Should -Match '-ParallelStreams 4'
+        $Text | Should -Match '-MetricsIntervalMinutes 60'
+        $Text | Should -Match '-MetricsLookbackDays 30'
     }
 
     It 'omits a non-allowlisted valued parameter value under obfuscation but keeps it otherwise' {

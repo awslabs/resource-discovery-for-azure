@@ -840,7 +840,11 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('sensitive. Human-readable troubleshooting log - NOT report data, do not')
             $DiagLines.Add('ingest into tables.')
         }
-        $DiagLines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')))
+        # InvariantCulture: Diagnostics_*.log ships in BOTH packaging branches, including
+        # the obfuscated bundle, so this is the timestamp a report consumer actually reads.
+        # See Functions/AllSubHtmlSummary.Functions.ps1:313-318 for why a missing provider
+        # is a defect rather than a style choice.
+        $DiagLines.Add(('Generated (UTC) : {0}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)))
         $DiagLines.Add(('Tool version    : {0}' -f [string]$Version))
         $DiagLines.Add('')
         $DiagLines.Add('Phase timings:')

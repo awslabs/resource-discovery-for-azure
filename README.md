@@ -529,15 +529,20 @@ De-obfuscated reports produced by `Reveal.ps1` are **refused and reported**, nev
 
 ## Parameters Reference
 
+The sections below cover both entry points, so each row is tagged where it matters.
+**Inner script only** means the parameter exists on `ResourceInventory.ps1` and passing it to `Run-AllSubscriptions.ps1` fails parameter binding.
+**Wrapper only** means the reverse.
+Everything untagged is accepted by both, and the wrapper forwards it to the inner script unchanged.
+
 ### Core Parameters
 
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
-| `ReportName` | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
+| `ReportName` | String | **Inner script only.** **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
 | `TenantID` | String | Target specific Azure tenant | `-TenantID "12345678-1234-1234-1234-123456789012"` |
-| `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
-| `ResourceGroup` | String | Scan specific resource group only | `-ResourceGroup "Production-RG"` |
-| `OutputDirectory` | String | Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
+| `SubscriptionID` | String | **Inner script only.** Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
+| `ResourceGroup` | String | **Inner script only.** Scan specific resource group only | `-ResourceGroup "Production-RG"` |
+| `OutputDirectory` | String | **Inner script only.** Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
 
 ### Performance Parameters
 
@@ -549,14 +554,13 @@ De-obfuscated reports produced by `Reveal.ps1` are **refused and reported**, nev
 | `IncludeStorageMetrics` | Switch | **Opt in** to the Storage Account `UsedCapacity` metric. It is **not collected by default**, because it costs one metric-query call per storage account and on a tenant with a very large storage estate that single capacity figure can dominate the metrics phase. Pass this when storage capacity is actually wanted. | False | `-IncludeStorageMetrics` |
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
 | `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = each family's native cadence (15 min VM, 30 min SQL, 60 min OSS-DB). A set value (5/15/30/60) is applied **uniformly** to all three families and honored as-is. Coarser than a family's native cadence cuts that family's data-point volume/memory; finer increases it (your choice — e.g. `30` for finer OSS-DB fidelity than its 60-min default). Does **not** change the API-call count. All values are supported (these series have a 1-minute base grain). Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
+| `MetricsLookbackDays` | Integer (1-93) | How many days of history to request for the **lookback-bound trend / utilization** series (see below). Omit to use the 31-day default. Does **not** change the number of Azure Monitor queries, only the data points each one returns, so it trades right-sizing sample depth for run time / memory / `Metrics_*.json` size. Capacity and limit metrics use a fixed 24h window and are unaffected. Upper bound is Azure Monitor's 93-day platform-metric retention. | 31 | `-MetricsLookbackDays 14` |
 | `UseMetricsBatch` | Switch | Collect VM/disk/storage metrics via the Azure Monitor `metrics:getBatch` data-plane API (one request per ≤50 resources), which lowers the metric-query API-call count. Falls back to the per-call path on any failure. See `docs/metrics-batch-trial.md`. | False | `-UseMetricsBatch` |
-| `HeadRoom` | Integer (0–90) | Leave this percentage of the chosen metrics concurrency unused so the run consumes less of the shared Azure API throttle budget (leaving room for the tenant's production workloads). `0` = full concurrency. | 0 | `-HeadRoom 20` |
-| `Plan` | Switch | Assess-only sizing: authenticate, size the workload from live metric-query volume, print a single-machine or shard recommendation with ready-to-paste commands, then exit **without** inventorying anything. | False | `-Plan` |
-| `PlanPerQuerySeconds` | Double | `-Plan` only: override the estimated per-metric-query wall-time (seconds) with a figure measured from a prior run's Diagnostics timings, for a tenant-accurate estimate. | 0 (auto) | `-PlanPerQuerySeconds 2.5` |
-| `UploadToBlobContainerUri` | String | Upload each node's finalized report zip to a shared blob container (passwordless, via the run's own identity; requires `Az.Storage`). Omit to keep output node-local. | (none) | `-UploadToBlobContainerUri https://acct.blob.core.windows.net/container` |
-| `StateBlobContainerUri` | String | Mirror the resume/state file to a blob container so a run survives local-disk loss (e.g. an AKS pod reschedule; requires `Az.Storage`). Omit to keep state local-only. | (none) | `-StateBlobContainerUri https://acct.blob.core.windows.net/container` |
-
-> **Inner-script only:** `MetricsLookbackDays` (days of metric history for the trend metrics; lower reduces run time/memory) is a parameter of the inner `ResourceInventory.ps1`, **not** of `Run-AllSubscriptions.ps1` — passing it to the wrapper fails parameter binding. Use it only when calling the inner script directly: `./ResourceInventory.ps1 ... -MetricsLookbackDays 14`.
+| `HeadRoom` | Integer (0–90) | **Wrapper only.** Leave this percentage of the chosen metrics concurrency unused so the run consumes less of the shared Azure API throttle budget (leaving room for the tenant's production workloads). `0` = full concurrency. | 0 | `-HeadRoom 20` |
+| `Plan` | Switch | **Wrapper only.** Assess-only sizing: authenticate, size the workload from live metric-query volume, print a single-machine or shard recommendation with ready-to-paste commands, then exit **without** inventorying anything. | False | `-Plan` |
+| `PlanPerQuerySeconds` | Double | **Wrapper only.** `-Plan` only: override the estimated per-metric-query wall-time (seconds) with a figure measured from a prior run's Diagnostics timings, for a tenant-accurate estimate. | 0 (auto) | `-PlanPerQuerySeconds 2.5` |
+| `UploadToBlobContainerUri` | String | **Wrapper only.** Upload each node's finalized report zip to a shared blob container (passwordless, via the run's own identity; requires `Az.Storage`). Omit to keep output node-local. | (none) | `-UploadToBlobContainerUri https://acct.blob.core.windows.net/container` |
+| `StateBlobContainerUri` | String | **Wrapper only.** Mirror the resume/state file to a blob container so a run survives local-disk loss (e.g. an AKS pod reschedule; requires `Az.Storage`). Omit to keep state local-only. | (none) | `-StateBlobContainerUri https://acct.blob.core.windows.net/container` |
 
 ### Metrics Lookback Window
 
@@ -582,6 +586,7 @@ captured.
 | cpu_used, dtu_used | SQL DB | 30-min |
 | physical_data_read_percent, log_write_percent | SQL DB | 1-hr |
 | FunctionExecutionCount/Units | Functions | daily |
+| Composite Disk Read/Write Operations/sec, Read/Write Bytes/sec | Managed Disks (attached) | 15-min (fixed) |
 
 Capacity and point-in-time metrics (storage used, limits, CosmosDB throughput,
 ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
@@ -609,8 +614,8 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
-| `Appid` | String | Service Principal application ID | `-Appid "app-id-here"` |
-| `Secret` | String | Service Principal client secret | `-Secret "secret-here"` |
+| `Appid` | String | **Inner script only.** Service Principal application ID | `-Appid "app-id-here"` |
+| `Secret` | String | **Inner script only.** Service Principal client secret | `-Secret "secret-here"` |
 | `DeviceLogin` | Switch | Use device code authentication | `-DeviceLogin` |
 
 ### Debugging Parameters
@@ -623,7 +628,7 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 
 These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`,
 `-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`,
-`-MetricsIntervalMinutes`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
+`-MetricsIntervalMinutes`, `-MetricsLookbackDays`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
 `ResourceInventory.ps1`, so they behave the same in both contexts (see
 [Performance Parameters](#performance-parameters) for the metric-volume controls).
 

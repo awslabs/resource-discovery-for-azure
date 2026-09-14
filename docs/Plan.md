@@ -28,8 +28,9 @@ correlations by Azure service type, drawn from a representative run.
 - The single biggest runtime levers are, in order: **`-SkipDiskMetrics`**
   (disks are ~two-thirds of the storage-inclusive metric queries, and ~74% of what
   a default run issues now that storage capacity is opt-in), **`-UseMetricsBatch`**
-  (collapses the per-query cost), and **`-MetricsIntervalMinutes 60`**
-  (shrinks each response).
+  (collapses the per-query cost), **`-MetricsIntervalMinutes 60`**
+  (shrinks each response), and **`-MetricsLookbackDays 14`** (shortens the
+  window each response covers).
 
 ## The three phases, and which one matters
 
@@ -187,6 +188,7 @@ actually issues.
 | storage capacity metric (opt-in) | adds **~10%** when `-IncludeStorageMetrics` is passed | one query per storage account; omitted by default, so the default run never pays this |
 | `-UseMetricsBatch` | collapses the **per-query cost** | many resources per `metrics:getBatch` HTTP call instead of one call each; falls back to per-call on batch failure |
 | `-MetricsIntervalMinutes 60` | shrinks each response ~4× vs 15-min grain | fewer datapoints per series |
+| `-MetricsLookbackDays 14` | shrinks each response ~2× vs the 31-day default | fewer datapoints per series; and the only lever that *shrinks* the Managed Disk composite I/O series rather than removing it, since that series is lookback-bound but its 15-min grain is hardcoded (`-SkipDiskMetrics` drops it entirely) |
 
 With disk metrics skipped (and storage capacity not opted into), the remaining query load is dominated by
 **Virtual Machines** (~2 queries each), so on VM-dense tenants VM count becomes

@@ -53,6 +53,12 @@ Describe 'Test-RdaAuthExpiry: an expired/invalid token, distinct from a denial' 
         @{ Label = 'a 401 Unauthorized status'; Msg = "Operation returned an invalid status code 'Unauthorized'" }
         @{ Label = 'a numeric (401) rendering'; Msg = 'The remote server returned an error: (401).' }
         @{ Label = 'a .NET status-code 401 rendering'; Msg = 'Response status code does not indicate success: 401 (Unauthorized).' }
+        # The AuthenticationFailed code + 'Authentication failed.' message are the
+        # VERBATIM 401 body the LIVE ARM server returns for a rejected/unusable
+        # bearer (captured against the real management endpoint, not synthesised).
+        # This is a 401 authentication failure, so the loop must refresh + retry.
+        @{ Label = 'the real ARM AuthenticationFailed code'; Msg = '{ "error": { "code": "AuthenticationFailed", "message": "Authentication failed." } }' }
+        @{ Label = 'the AuthenticationFailed message form alone'; Msg = 'Authentication failed.' }
     ) {
         Test-RdaAuthExpiry -ErrorMessage $Msg | Should -BeTrue
     }

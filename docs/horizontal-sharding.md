@@ -236,7 +236,8 @@ are subscriptions. One of three verdicts comes out:
     subscriptions and cannot speed up *one*, so no shard count fixes this. Cut
     that subscription's metrics load instead: `-SkipDiskMetrics` (disk queries
     dominate volume), `-UseMetricsBatch` (cuts per-query cost),
-    `-MetricsIntervalMinutes 60` (shrinks each response).
+    `-MetricsIntervalMinutes 60` (shrinks each response),
+    `-MetricsLookbackDays 14` (shortens the window each response covers).
   - **Even one shard per subscription is not enough** - the maximum useful count,
     and the hash partition still clumps enough mid-weight subscriptions onto one
     shard. Same remedy: reduce metrics load.

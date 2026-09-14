@@ -1,0 +1,6 @@
+{
+    "powershell.codeFormatting.preset": "Allman",
+    "powershell.codeFormatting.openBraceOnSameLine": false,
+    "powershell.codeFormatting.newLineAfterOpenBrace": true,
+    "powershell.codeFormatting.whitespaceBeforeOpenBrace": true
+}

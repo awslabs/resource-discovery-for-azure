@@ -69,10 +69,20 @@ param (
     # ResourceInventory.ps1. -IncludeStorageMetrics OPTS IN to the Storage Account
     # UsedCapacity metric, which is NOT collected by default. -SkipDiskMetrics drops
     # the Managed Disk I/O metrics; -MetricsIntervalMinutes overrides the VM / SQL /
-    # OSS-DB utilization grain (0 = native). See the notes in Extension/Metrics.ps1.
+    # OSS-DB utilization grain (0 = native); -MetricsLookbackDays sets how many days
+    # of history the lookback-bound trend series cover. See the notes in
+    # Extension/Metrics.ps1.
     [switch] $IncludeStorageMetrics,
     [switch] $SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
+    # No default, matching the parent: the parent sends this key ONLY when the
+    # operator passed it, so an absent key must leave ResourceInventory.ps1's 31-day
+    # default in force rather than a copy of it held here. Same [ValidateRange] as
+    # the parent so a bad value cannot reach the metrics phase by this path either.
+    # Consequence of having no default: when unbound this variable reads 0, NOT 31,
+    # so anything needing the EFFECTIVE lookback must go through the same
+    # ContainsKey gate used below rather than reading the variable directly.
+    [ValidateRange(1, 93)][int] $MetricsLookbackDays,
     # Collector scope forwarded to ResourceInventory.ps1's -Service filter. The
     # parent (Run-AllSubscriptions.ps1) already normalized + validated it and
     # passes a clean array via the Start-Job argument hashtable, so the worker
@@ -227,6 +237,9 @@ if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
+# ContainsKey, not a value sentinel - 0 is a real, harmful lookback rather than
+# "unset". Populated from the parent's splat, exactly as the -Debug forward below.
+if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $InventoryPassthrough['MetricsLookbackDays'] = $MetricsLookbackDays }
 if ($Service -and $Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 # Forward -Debug on to the inner script, mirroring the sequential path in

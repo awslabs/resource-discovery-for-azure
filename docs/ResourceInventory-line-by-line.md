@@ -762,7 +762,7 @@ Two jobs in one function: detect the environment once per session, and compute a
         #  workers compute the same folder and the second Compress-Archive fails with
         #  "archive file already exists".]
         $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
-        $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $ProcDiscriminator)
+        $Global:CurrentDateTime = ((Get-Date).ToString('yyyyMMddHHmmssfff', [cultureinfo]::InvariantCulture) + $ProcDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
 
         # [long comment: resolve through the SHARED Get-RdaInventoryRoot rather than an
@@ -822,7 +822,7 @@ Two jobs in one function: detect the environment once per session, and compute a
 | Line | Code | What it does |
 |---|---|---|
 | 398 | `$ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))` | Takes the current process ID, masks it to its low 16 bits with a bitwise AND against `0xffff`, and formats it as exactly 4 lowercase hex digits. The result is a short, fixed length, per process fingerprint. |
-| 399 | `$Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $ProcDiscriminator)` | Builds the run's unique stamp: year, month, day, hour, minute, second, **milliseconds** (`fff`), then the process discriminator. |
+| 399 | `$Global:CurrentDateTime = ((Get-Date).ToString('yyyyMMddHHmmssfff', [cultureinfo]::InvariantCulture) + $ProcDiscriminator)` | Builds the run's unique stamp: year, month, day, hour, minute, second, **milliseconds** (`fff`), then the process discriminator. Formatted with `InvariantCulture` so a non-Gregorian host cannot stamp a Buddhist/Hijri year into every output filename. |
 | 400 | `$Global:FolderName = $Global:ReportName + $CurrentDateTime` | For example `ResourcesReport202609081432051234a1b2`. |
 
 Both the milliseconds and the discriminator are there because of a real failure.
@@ -3442,7 +3442,8 @@ Ephemeral mode is a legitimate choice if you download the zip before closing, an
             $FreeMB = [math]::Round($Drive.Free / 1MB, 0)
             if ($FreeMB -lt 100)
             {
-                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB)
+                Write-Host ("ERROR: Free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Red
+                exit 1
             }
             elseif ($FreeMB -lt 500)
             {
@@ -3450,13 +3451,12 @@ Ephemeral mode is a legitimate choice if you download the zip before closing, an
             }
             else
             {
-                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $FreeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+                Write-Host ("Free disk space: {0} MB at {1}" -f $FreeMB.ToString('N0', [cultureinfo]::InvariantCulture), $PreFlightInventoryRoot) -ForegroundColor Green
             }
         }
     }
     catch
     {
-        if ($_.Exception.Message -match '^Pre-flight:') { throw }
         Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f ...) -ForegroundColor Yellow
     }
 ```
@@ -3628,7 +3628,7 @@ if ($Obfuscate.IsPresent)
     $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
 
     $Dictionary = @{
-        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        GeneratedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)
         ResourceIdMap = @{}
         ResourceNameMap = @{}
         SubscriptionMap = @{}

@@ -30,7 +30,9 @@ param (
 
     # Metric-volume controls for very large tenants. Forwarded to every
     # subscription in both the sequential and parallel-streams paths, and honoured
-    # by -Plan when it sizes the run.
+    # by -Plan when it sizes the run - except -MetricsIntervalMinutes and
+    # -MetricsLookbackDays, which -Plan cannot size from because neither changes
+    # the metric-query COUNT.
     #   -IncludeStorageMetrics : OPT-IN to the Storage Account 'UsedCapacity'
     #                         metric (1 Azure Monitor call per storage account).
     #                         NOT collected by default: on a tenant with a very
@@ -46,9 +48,35 @@ param (
     #                         data-point volume / memory / JSON size; does NOT reduce
     #                         API-call count. Limited to Azure Monitor's supported
     #                         sub-hourly grains. See the notes in Extension/Metrics.ps1.
+    #   -MetricsLookbackDays : how many days of history to request for the
+    #                         lookback-bound trend / utilization series (VM +
+    #                         VMSS CPU/memory, the Managed Disk composite I/O
+    #                         metrics, SQL DB, OSS-DB, Functions execution
+    #                         counts). Omit to leave the inner script's 31-day
+    #                         default in force. Like -MetricsIntervalMinutes it
+    #                         does NOT reduce the API-call count - it changes the
+    #                         data points each query returns, so it trades
+    #                         right-sizing sample depth for run time / memory /
+    #                         Metrics_*.json size, and it MULTIPLIES with the
+    #                         grain knob. Capacity and limit metrics (including
+    #                         storage UsedCapacity) use a fixed 24h window and are
+    #                         NOT affected. Note the Managed Disk grain is fixed
+    #                         at 15 min, so -MetricsIntervalMinutes cannot offset
+    #                         a long window there - only -SkipDiskMetrics can.
+    #                         Upper bound is Azure Monitor's 93-day platform-metric
+    #                         retention. See the notes in Extension/Metrics.ps1.
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
+    # Deliberately NO default: an omitted value must leave ResourceInventory.ps1's
+    # own 31-day default as the single authority, so it is forwarded below only
+    # when the operator actually passed it. A visible 31 here would pin a second
+    # copy of that default and drift the day the inner one changes. Validation is
+    # essential rather than cosmetic: the inner param is untyped and unvalidated,
+    # and Extension/Metrics.ps1 runs the value through [math]::Abs, so a negative
+    # would silently become positive and a 0 would produce a zero-width window
+    # that reports Success while shipping every trend metric as a measured 0.
+    [ValidateRange(1, 93)][int]$MetricsLookbackDays,
 
     # Re-collect ONLY these inventory collectors (by their Services/*.ps1
     # BaseName, e.g. VirtualMachines, Streamanalytics), across every in-scope
@@ -1019,11 +1047,14 @@ if ($Plan)
     if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
+    if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $ExtraFlags += ('-MetricsLookbackDays {0}' -f $MetricsLookbackDays) }
     if ($HeadRoom -gt 0) { $ExtraFlags += ('-HeadRoom {0}' -f $HeadRoom) }
     if ($UploadToBlobContainerUri) { $ExtraFlags += ('-UploadToBlobContainerUri {0}' -f (& $QuoteArg $UploadToBlobContainerUri)) }
     if ($StateBlobContainerUri) { $ExtraFlags += ('-StateBlobContainerUri {0}' -f (& $QuoteArg $StateBlobContainerUri)) }
     $ExtraStr = if ($ExtraFlags.Count -gt 0) { ' ' + ($ExtraFlags -join ' ') } else { '' }
-    $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB } else { 'RAM undetected' }
+    # InvariantCulture: a one-decimal double, and this console line is captured in
+    # RunAllSubscriptions_transcript_*.txt, which the support bundle collects.
+    $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB.ToString([cultureinfo]::InvariantCulture) } else { 'RAM undetected' }
 
     # Composition-aware sizing (preferred): count each subscription's projected
     # metric-query volume live via Resource Graph, then size shards from the
@@ -1134,11 +1165,11 @@ if ($Plan)
             # fits - it does not.
             if ($WeightedPlan.CeilingUnreachableReason -eq 'single-subscription-exceeds-ceiling')
             {
-                Write-Host ("WARNING: the single slowest subscription alone is ~{0}, over the {1} h ceiling. Sharding splits work ACROSS subscriptions and cannot speed up ONE subscription, so NO shard count fixes this - reduce that subscription's metrics load instead (-SkipDiskMetrics removes the disk queries that dominate volume, -UseMetricsBatch cuts the per-query cost, -MetricsIntervalMinutes 60 shrinks each response). See docs/Plan.md." -f (& $FmtDur $WeightedPlan.LargestSingleSubSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Yellow
+                Write-Host ("WARNING: the single slowest subscription alone is ~{0}, over the {1} h ceiling. Sharding splits work ACROSS subscriptions and cannot speed up ONE subscription, so NO shard count fixes this - reduce that subscription's metrics load instead (-SkipDiskMetrics removes the disk queries that dominate volume, -UseMetricsBatch cuts the per-query cost, -MetricsIntervalMinutes 60 shrinks each response, -MetricsLookbackDays 14 shortens the window each response covers). See docs/Plan.md." -f (& $FmtDur $WeightedPlan.LargestSingleSubSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Yellow
             }
             else
             {
-                Write-Host ("WARNING: even at {0} shard(s) - one per subscription, the maximum useful - the busiest shard is ~{1}, over the {2} h ceiling, because the hash partition clumps several heavy subscriptions together. Reduce metrics load (-SkipDiskMetrics / -UseMetricsBatch / -MetricsIntervalMinutes 60) to bring the busiest shard down. See docs/Plan.md." -f $WeightedPlan.ShardCount, (& $FmtDur $WeightedPlan.BusiestShardSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Yellow
+                Write-Host ("WARNING: even at {0} shard(s) - one per subscription, the maximum useful - the busiest shard is ~{1}, over the {2} h ceiling, because the hash partition clumps several heavy subscriptions together. Reduce metrics load (-SkipDiskMetrics / -UseMetricsBatch / -MetricsIntervalMinutes 60 / -MetricsLookbackDays 14) to bring the busiest shard down. See docs/Plan.md." -f $WeightedPlan.ShardCount, (& $FmtDur $WeightedPlan.BusiestShardSeconds), $WeightedPlan.MaxSingleMachineHours) -ForegroundColor Yellow
             }
             Write-Host ""
             Write-Host ("Best achievable with the current settings: SHARD across {0} machine(s) (busiest shard still ~{1} - does NOT get under the ceiling)." -f $WeightedPlan.ShardCount, (& $FmtDur $WeightedPlan.BusiestShardSeconds)) -ForegroundColor Yellow
@@ -1740,7 +1771,8 @@ if ($HeadRoom -gt 0)
     Write-Host ("API headroom: -HeadRoom {0} -> ConcurrencyLimit {1} -> {2} (leaving ~{0}% of concurrency in reserve for other workloads)." -f $HeadRoom, $ConcurrencyBeforeHeadroom, $ConcurrencyLimit) -ForegroundColor DarkGray
 }
 
-$RamLabel = if ($AutoTune.RamGB -gt 0) { '{0} GB RAM' -f $AutoTune.RamGB } else { 'RAM undetected' }
+# InvariantCulture, as for the -Plan copy above: captured in the wrapper transcript.
+$RamLabel = if ($AutoTune.RamGB -gt 0) { '{0} GB RAM' -f $AutoTune.RamGB.ToString([cultureinfo]::InvariantCulture) } else { 'RAM undetected' }
 $StreamsSrc = if ($StreamsAuto) { 'auto' } else { 'explicit' }
 $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
 # Reflect the headroom reduction in the source label so the single-line
@@ -1837,6 +1869,10 @@ if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
+# ContainsKey rather than a value sentinel: 0 is a REAL (and harmful) lookback
+# value, not "unset", so -gt 0 would silently swallow it. Omitted -> the key is
+# absent -> the inner script's 31-day default stands, byte-identical to before.
+if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $InventoryPassthrough['MetricsLookbackDays'] = $MetricsLookbackDays }
 if ($Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 # Always forward ConcurrencyLimit so the operator can tune metrics-phase
 # throttling end-to-end from a single param instead of editing the inner
@@ -2313,6 +2349,11 @@ else
                 if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
                 if ($MetricsIntervalMinutes -gt 0) { $WorkerArgs.MetricsIntervalMinutes = $MetricsIntervalMinutes }
+                # NOT a key in the $WorkerArgs literal above: this form is what
+                # Tests/ParamForwardingParity.Tests.ps1 harvests, and widening the
+                # aligned literal would re-indent ConcurrencyLimit and break that
+                # test's headroom-ordering probe.
+                if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $WorkerArgs.MetricsLookbackDays = $MetricsLookbackDays }
                 if ($Service.Count -gt 0) { $WorkerArgs.Service = $Service }
                 # -Debug must be forwarded EXPLICITLY. Background jobs do not inherit
                 # the parent's preference variables, so without this line the flag is

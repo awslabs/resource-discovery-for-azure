@@ -602,6 +602,7 @@ function Test-RdaConsumptionDenial
 # ARM and the Az/MSAL stack actually produce, anchored the same way the denial
 # predicate is so an id or URL echoed back in an exception cannot trip them:
 #   ExpiredAuthenticationToken / InvalidAuthenticationToken - ARM error codes
+#   AuthenticationFailed / 'Authentication failed.'          - ARM 401 for a rejected bearer (verified against the live server)
 #   'the access token ... expired' / 'token ... has expired' - MSAL / Az renderings
 #   '(401)' / 'status code ... 401' / 'Unauthorized'         - the HTTP 401 status
 # 403 / AuthorizationFailed are intentionally ABSENT: those are denials, owned by
@@ -618,8 +619,10 @@ function Test-RdaAuthExpiry
     $AuthExpiryPattern = '(?i)(' + (@(
             'ExpiredAuthenticationToken'
             'InvalidAuthenticationToken'
+            'AuthenticationFailed'                       # the ARM error CODE for a rejected/failed bearer. Verified against the live ARM server: a malformed or otherwise unusable token returns '{ "error": { "code": "AuthenticationFailed", "message": "Authentication failed." } }' as a 401. Like its two sibling *AuthenticationToken codes above it is a compound identifier that cannot appear inside a resource name, so it needs no hyphen anchoring. It is a 401 (authentication), NOT a 403 - it stays out of Test-RdaConsumptionDenial so the loop refreshes and retries rather than abandoning the subscription.
             '\baccess token\b[^.]{0,40}\bexpir'          # 'the access token expiry ...' / 'access token has expired'
             '\btoken\b[^.]{0,20}\bhas expired\b'
+            '\bauthentication failed\b'                  # the human-readable message form ('Authentication failed.') that accompanies the AuthenticationFailed code, in case only the message survives. \b-anchored like the phrase branches above; it is a two-word auth phrase with no hyphen-in-name hazard.
             '\(401\)'                                    # '(401)' when only the numeric status is present
             '\bstatus\s?code\D{0,40}401\b'               # '... status code does not indicate success: 401'
             '(?<![\w-])unauthorized(?![\w-])'            # the HTTP 401 reason phrase. Anchored with (?<![\w-])...(?![\w-]) - NOT plain \b - because \b treats '-' as a boundary, so a resource group or id echoed back in a billing exception ('rg-unauthorized-01') would otherwise trip a false auth-expiry match and a spurious token refresh. Same guard the denial predicate uses.

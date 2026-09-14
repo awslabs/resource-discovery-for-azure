@@ -146,13 +146,30 @@ Describe 'Get-RdaInventoryRoot: child-process agreement' {
 
     It 're-probes instead of failing when the pinned value is stale' {
         # A leftover value from an earlier shell session must not break a new run.
-        Set-RdaInventoryRootForChildren -Path (Join-Path $script:Sandbox 'does-not-exist/and-cannot-be-made/../../nope')
-        $env:RDA_INVENTORY_ROOT = "$([IO.Path]::DirectorySeparatorChar)rda-definitely-not-writable-$([guid]::NewGuid())"
+        #
+        # The pin has to be unusable WITHOUT depending on privilege. A path at the
+        # filesystem root is not: on Windows the default drive-root ACL lets any
+        # authenticated user create C:\<name>, and on POSIX root can write to /, so
+        # that shape made the probe SUCCEED and the resolver correctly answer
+        # 'Inherited'. Pin a path underneath a FILE instead - no OS can create a
+        # directory there at any privilege level. Pin the CHILD rather than the file
+        # itself so New-Item's -Force clobber semantics never come into play, and
+        # keep it inside $script:Sandbox so AfterAll cleans it up either way.
+        $Blocker = Join-Path $script:Sandbox 'blocker-file'
+        Set-Content -LiteralPath $Blocker -Value 'not a directory' -Encoding utf8
+        Set-RdaInventoryRootForChildren -Path (Join-Path $Blocker 'child')
         try
         {
             $R = Get-RdaInventoryRoot
             $R.Ok | Should -BeTrue -Because 'a stale pin must be ignored, not fatal'
             $R.Source | Should -Not -Be 'Inherited'
+            $R.Path | Should -Not -Match ([regex]::Escape($Blocker)) -Because 'the re-probe must land elsewhere entirely, not inside the unusable pin'
+            # The Source/Path assertions only prove the pin was REJECTED. Assert the
+            # re-probe actually produced a usable directory too, so a future change
+            # cannot satisfy this case by falling through to something unusable.
+            # Deliberately not asserting Source -eq 'Default': a locked-down host may
+            # legitimately answer 'Fallback', which would make that brittle.
+            Test-Path -LiteralPath $R.Path -PathType Container | Should -BeTrue -Because 'the re-probe must yield a root that actually exists'
         }
         finally { $env:RDA_INVENTORY_ROOT = $null }
     }

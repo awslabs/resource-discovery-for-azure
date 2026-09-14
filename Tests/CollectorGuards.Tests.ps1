@@ -23,6 +23,10 @@
 # (precedent for mocking an Az cmdlet in a focused error-handling unit test:
 # Tests/AzGraphQueryRetry.Tests.ps1 mocks Search-AzGraph). $ResourceIdDictionary
 # is passed $null so the obfuscation / Protect-FreeTextValue branches are skipped.
+# Offline also means MODULE-free, not just session-free: Pester's Mock resolves the
+# target command and throws when it does not exist, so a host without Az.Compute
+# would fail every mocking case here. The BeforeAll below stubs the cmdlet when it
+# is absent, which is what makes that promise true on such a host.
 # =============================================================================
 
 BeforeAll {
@@ -60,6 +64,39 @@ BeforeAll {
         param([string]$RelPath, $Resources)
         $Full = Join-Path $script:RepoRoot (Join-Path 'Services' $RelPath)
         & $Full -Sub $script:Sub -Resources $Resources -Task 'Processing' -ResourceIdDictionary $null
+    }
+
+    # Stub Get-AzComputeResourceSku so the SKU path is mockable even on a host
+    # without Az.Compute installed. Pester's Mock RESOLVES the command first and
+    # throws if it does not exist, which failed every test in both mocking Describes
+    # below on a Windows host carrying only Az.Accounts + Az.ResourceGraph - the
+    # header's 'no Azure session is needed' promise needs the MODULE to be optional
+    # too, not just the auth. Defined ONLY when absent so a real cmdlet is never
+    # shadowed where Az.Compute IS present; the tests Mock it either way.
+    # [CmdletBinding()] so the collectors' '-ErrorAction Stop' binds as a common
+    # parameter. Same idiom as Tests/SubscriptionCoverage.Tests.ps1.
+    #
+    # Tradeoff of guarding rather than always defining: on a host that DOES have
+    # Az.Compute, an unmocked call would reach the real cmdlet and the live API, so
+    # the offline promise holds there by mock discipline rather than by construction.
+    # Guarding is still preferred - it never shadows a real cmdlet for the whole
+    # container, and under Mock both hosts resolve to the same replaced command.
+    #
+    # Write-Warning BEFORE the throw is load-bearing, not decoration. Both callers
+    # wrap this call in try/catch and trace with Write-Verbose, so a bare throw from
+    # an unmocked stub would be SWALLOWED and would look exactly like the legitimate
+    # SKU-failure path (CPU/Memory '0'), i.e. a silent false PASS. They suppress
+    # DebugPreference only, never WarningPreference, so a warning still reaches the
+    # Pester output even though the throw itself is caught.
+    if (-not (Get-Command Get-AzComputeResourceSku -ErrorAction SilentlyContinue))
+    {
+        function Get-AzComputeResourceSku
+        {
+            [CmdletBinding()]
+            param([string]$Location)
+            Write-Warning 'Get-AzComputeResourceSku stub was INVOKED - the calling test forgot to Mock it, so this result is not trustworthy.'
+            throw 'stub - should be mocked'
+        }
     }
 }
 

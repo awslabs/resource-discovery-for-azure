@@ -191,7 +191,7 @@ function Write-RdaProgress
 #     appends to one file are not safe. Those paths record into a thread-safe
 #     bag and are logged as an aggregated summary on the main thread instead.
 # =============================================================================
-Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsole, [switch]$ToDebugLog)
+function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsole, [switch]$ToDebugLog)
 {
     $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
 
@@ -409,11 +409,11 @@ function Get-RdaInventoryRoot
         if ($null -eq $Err)
         {
             return [pscustomobject]@{ Ok = $true; Path = $Explicit; Source = 'Explicit'; IsFallback = $false
-                Message                     = ("Output directory: {0} (from -OutputDirectory)" -f $Explicit)
+                Message = ("Output directory: {0} (from -OutputDirectory)" -f $Explicit)
             }
         }
         return [pscustomobject]@{ Ok = $false; Path = $Explicit; Source = 'Explicit'; IsFallback = $false
-            Message                     = ("-OutputDirectory '{0}' is not usable: {1}. Choose a writable path, or omit -OutputDirectory to use the default location." -f $Explicit, $Err)
+            Message = ("-OutputDirectory '{0}' is not usable: {1}. Choose a writable path, or omit -OutputDirectory to use the default location." -f $Explicit, $Err)
         }
     }
 
@@ -425,7 +425,7 @@ function Get-RdaInventoryRoot
         if ($null -eq $Err)
         {
             return [pscustomobject]@{ Ok = $true; Path = $Inherited; Source = 'Inherited'; IsFallback = $false
-                Message                     = ("Output directory: {0}" -f $Inherited)
+                Message = ("Output directory: {0}" -f $Inherited)
             }
         }
         # Fall through and re-probe rather than failing: a stale value from an
@@ -475,7 +475,7 @@ function Get-RdaInventoryRoot
     }
 
     return [pscustomobject]@{ Ok = $false; Path = $null; Source = 'Default'; IsFallback = $false
-        Message                     = ("No writable output directory could be established. Tried: {0}. Pass -OutputDirectory with a writable path." -f ($Attempts -join '; '))
+        Message = ("No writable output directory could be established. Tried: {0}. Pass -OutputDirectory with a writable path." -f ($Attempts -join '; '))
     }
 }
 
@@ -584,4 +584,46 @@ function Test-RdaConsumptionDenial
         ) -join '|') + ')'
 
     return [bool]($ErrorMessage -match $DenialPattern)
+}
+
+# Recognise a FAILED AUTHENTICATION (an expired, invalid, or missing access
+# token) as distinct from an authorization DENIAL and from THROTTLING. This is
+# the class that a token REFRESH can fix, so the consumption retry loop uses it
+# to decide when to re-establish the Azure context (via Test-DataPlaneAuthReady)
+# before retrying the same page - the gap that previously let an interactive
+# session's token lapse mid-subscription and then burned the whole retry budget
+# against a dead token before failing (see the KNOWN RESIDUAL note in
+# Test-RdaConsumptionDenial above).
+#
+# Kept deliberately separate from Test-RdaConsumptionDenial: a 401 / expired
+# token must NOT be a denial (a denial is abandoned; this is refreshed and
+# retried), and it must NOT be read as throttling (throttling backs off but does
+# not re-auth). The signatures below are the authentication-failure renderings
+# ARM and the Az/MSAL stack actually produce, anchored the same way the denial
+# predicate is so an id or URL echoed back in an exception cannot trip them:
+#   ExpiredAuthenticationToken / InvalidAuthenticationToken - ARM error codes
+#   'the access token ... expired' / 'token ... has expired' - MSAL / Az renderings
+#   '(401)' / 'status code ... 401' / 'Unauthorized'         - the HTTP 401 status
+# 403 / AuthorizationFailed are intentionally ABSENT: those are denials, owned by
+# Test-RdaConsumptionDenial. A message that is BOTH (rare) is treated as a denial
+# because the caller checks Test-RdaConsumptionDenial first.
+function Test-RdaAuthExpiry
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$ErrorMessage)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
+
+    $AuthExpiryPattern = '(?i)(' + (@(
+            'ExpiredAuthenticationToken'
+            'InvalidAuthenticationToken'
+            '\baccess token\b[^.]{0,40}\bexpir'          # 'the access token expiry ...' / 'access token has expired'
+            '\btoken\b[^.]{0,20}\bhas expired\b'
+            '\(401\)'                                    # '(401)' when only the numeric status is present
+            '\bstatus\s?code\D{0,40}401\b'               # '... status code does not indicate success: 401'
+            '(?<![\w-])unauthorized(?![\w-])'            # the HTTP 401 reason phrase. Anchored with (?<![\w-])...(?![\w-]) - NOT plain \b - because \b treats '-' as a boundary, so a resource group or id echoed back in a billing exception ('rg-unauthorized-01') would otherwise trip a false auth-expiry match and a spurious token refresh. Same guard the denial predicate uses.
+        ) -join '|') + ')'
+
+    return [bool]($ErrorMessage -match $AuthExpiryPattern)
 }

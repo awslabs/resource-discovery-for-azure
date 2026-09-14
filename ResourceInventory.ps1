@@ -176,7 +176,7 @@ function Variables
 
 
 
-Function RunInventorySetup()
+function RunInventorySetup()
 {
     function CheckVersion()
     {
@@ -399,7 +399,7 @@ Function RunInventorySetup()
                 {
                     Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
                     Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                    Exit
+                    exit
                 }
             }
         }
@@ -420,7 +420,12 @@ Function RunInventorySetup()
         # different folder names. Discriminator is hex-only and length-stable
         # so the existing `*<timestamp>*` glob filters keep matching.
         $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
-        $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $ProcDiscriminator)
+        # InvariantCulture: 'Get-Date -Format' takes the YEAR from CurrentCulture's
+        # Calendar, so a th-TH host stamped 2569... and an ar-SA host 1448... into
+        # $Global:FolderName and every output filename. Measured byte-identical to the
+        # previous expression on any Gregorian culture, and the digit count is unchanged
+        # (17), so the existing *<timestamp>* glob filters keep matching either way.
+        $Global:CurrentDateTime = ((Get-Date).ToString('yyyyMMddHHmmssfff', [cultureinfo]::InvariantCulture) + $ProcDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
 
         # Base output root comes from the SINGLE resolver in
@@ -441,7 +446,7 @@ Function RunInventorySetup()
         if (-not $RootForRun.Ok)
         {
             Write-Log -Message $RootForRun.Message -Severity 'Error'
-            Exit
+            exit
         }
         if ($RootForRun.IsFallback)
         {
@@ -458,7 +463,7 @@ Function RunInventorySetup()
             catch
             {
                 Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
-                Exit
+                exit
             }
         }
 
@@ -582,7 +587,7 @@ Function RunInventorySetup()
                 $SequenceID = 1
                 foreach ($TenantID in $Tenants)
                 {
-                    write-host "$SequenceID)  $TenantID"
+                    Write-Host "$SequenceID)  $TenantID"
                     $SequenceID ++
                 }
 
@@ -602,7 +607,7 @@ Function RunInventorySetup()
                 }
                 else
                 {
-                    [int]$SelectTenant = read-host "Select Tenant (Default 1)"
+                    [int]$SelectTenant = Read-Host "Select Tenant (Default 1)"
                     if ($SelectTenant -lt 1) { $SelectTenant = 1 }
                     $TenantID = $Tenants[$SelectTenant - 1]
                 }
@@ -658,7 +663,7 @@ Function RunInventorySetup()
                     Write-Log -Message ("You are trying to use Service Principal Authentication Method in a wrong way.") -Severity 'Error'
                     Write-Log -Message ("It's Mandatory to specify Application ID, Secret and Tenant ID in Azure Resource Inventory") -Severity 'Error'
                     Write-Log -Message (".\ResourceInventory.ps1 -appid <SP AppID> -secret <SP Secret> -tenant <TenantID>") -Severity 'Error'
-                    Exit
+                    exit
                 }
             }
 
@@ -698,7 +703,7 @@ Function RunInventorySetup()
             {
                 Write-Log -Message ("Could not create the report folder {0}: {1}" -f $DefaultPath, $_.Exception.Message) -Severity 'Error'
                 Write-Log -Message ("No report can be written for this run. Verify the location is writable, or pass -OutputDirectory with a writable path.") -Severity 'Error'
-                Exit
+                exit
             }
         }
 
@@ -718,7 +723,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
             Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            Exit
+            exit
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup))
@@ -1285,7 +1290,9 @@ function ExecuteInventoryProcessing()
                 $MemHeapBeforeMB = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
                 $MemHeapAfterMB = [math]::Round([System.GC]::GetTotalMemory($true) / 1MB, 1)
                 $MemWorkingSetMB = [math]::Round([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB, 1)
-                Write-Log -Message ('[Memory] Post-metrics GC: managed heap {0} MB -> {1} MB after collect; process working set {2} MB.' -f $MemHeapBeforeMB, $MemHeapAfterMB, $MemWorkingSetMB) -Severity 'Info' -NoConsole -ToDebugLog
+                # InvariantCulture: one-decimal doubles, so a bare -f writes '1234,5 MB' on
+                # this en-NL host into DebugLog_*.log, which ships in a default run's zip.
+                Write-Log -Message ('[Memory] Post-metrics GC: managed heap {0} MB -> {1} MB after collect; process working set {2} MB.' -f $MemHeapBeforeMB.ToString([cultureinfo]::InvariantCulture), $MemHeapAfterMB.ToString([cultureinfo]::InvariantCulture), $MemWorkingSetMB.ToString([cultureinfo]::InvariantCulture)) -Severity 'Info' -NoConsole -ToDebugLog
             }
             catch
             {
@@ -1660,7 +1667,7 @@ function ExecuteInventoryProcessing()
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
-        $Global:SmaResources | ConvertTo-Json -depth 100 -compress | Out-File $Global:JsonFile
+        $Global:SmaResources | ConvertTo-Json -Depth 100 -Compress | Out-File $Global:JsonFile
         #$Global:Resources | ConvertTo-Json -depth 100 -compress | Out-File $Global:AllResourceFile
 
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
@@ -1833,6 +1840,11 @@ function ExecuteInventoryProcessing()
                     # sustained, self-contended throttling when many shards run at once.
                     $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
+                    # Reset per PAGE: the token can lapse at any page during a multi-hour
+                    # subscription, so each page is allowed its own single reconnect
+                    # attempt. Without this reset, once one page refreshed no later page
+                    # in the same subscription could recover from a fresh expiry.
+                    $ConsumptionAuthRefreshedThisPage = $false
                     while ($true)
                     {
                         try
@@ -1866,6 +1878,42 @@ function ExecuteInventoryProcessing()
                             {
                                 Write-Log -Message ("Consumption page query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
                                 throw
+                            }
+
+                            # REFRESH a lapsed token before retrying. On a very large
+                            # subscription this paging loop can run for well over an hour;
+                            # an interactive sign-in whose policy lifetime expires part-way
+                            # through fails every remaining page with an expired/invalid
+                            # token. Because that is NOT a denial (see Test-RdaConsumptionDenial's
+                            # KNOWN RESIDUAL note), it used to just retry the SAME dead token
+                            # until the budget was exhausted, then fail the subscription.
+                            # Here we re-establish the Azure context ONCE per page via the
+                            # same reconnect helper used before the phase (Test-DataPlaneAuthReady,
+                            # which reuses the script's own auth method - SP / device / browser -
+                            # and introduces no new auth path), then let the existing backoff
+                            # retry the SAME page (the ContinuationToken guard above re-sends the
+                            # previous page's token, so no rows are skipped or duplicated).
+                            #
+                            # Guarded by $ConsumptionAuthRefreshedThisPage so a genuinely
+                            # PERMANENT 401 (a revoked or interaction-required refresh token
+                            # that a reconnect cannot fix) triggers at most ONE reconnect
+                            # attempt per page rather than one on every retry - it then rides
+                            # out the remaining budget and fails loud, exactly as before.
+                            # A managed identity / service principal / workload identity
+                            # re-issues its own token transparently, so this branch is a
+                            # no-op cost for them (the retry simply succeeds).
+                            if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
+                            {
+                                $ConsumptionAuthRefreshedThisPage = $true
+                                Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting one Azure re-authentication before retrying this page." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                                if (Test-DataPlaneAuthReady -Phase 'Consumption')
+                                {
+                                    Write-Log -Message ("Consumption: Azure context re-established for {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                }
+                                else
+                                {
+                                    Write-Log -Message ("Consumption: re-authentication for {0} did not yield a usable token; the remaining retries will still be attempted but may not recover." -f $sub.Name) -Severity 'Warning'
+                                }
                             }
 
                             $ConsumptionAttempt++
@@ -1953,27 +2001,27 @@ function ExecuteInventoryProcessing()
                         $InstanceObject = [PSCustomObject]@{}
 
                         $AdditionalInfoInstance = [PSCustomObject]@{
-                            ResourceUri = $InstanceInfo.'Microsoft.Resources'.resourceUri
-                            Location = $InstanceInfo.'Microsoft.Resources'.location
+                            ResourceUri    = $InstanceInfo.'Microsoft.Resources'.resourceUri
+                            Location       = $InstanceInfo.'Microsoft.Resources'.location
                             additionalInfo = [PSCustomObject]@{
-                                ConsumptionMeter = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter }
-                                ImageType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType }
-                                AHB = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB }
-                                vCores = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores }
-                                VCPUs = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs }
-                                ServiceType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType }
-                                ResourceCategory = ""
-                                Edition = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition }
-                                LicenseType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType }
-                                HostLicenseType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType }
-                                OS = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS }
-                                IsVM = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM }
-                                NumberOfCores = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores }
+                                ConsumptionMeter          = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter }
+                                ImageType                 = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType }
+                                AHB                       = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB }
+                                vCores                    = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores }
+                                VCPUs                     = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs }
+                                ServiceType               = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType }
+                                ResourceCategory          = ""
+                                Edition                   = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition }
+                                LicenseType               = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType }
+                                HostLicenseType           = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType }
+                                OS                        = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS }
+                                IsVM                      = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM }
+                                NumberOfCores             = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores }
                                 NumberOfLogicalProcessors = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfLogicalProcessors) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfLogicalProcessors }
-                                SLO = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO }
-                                ServerSku = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku }
-                                ServerEdition = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition }
-                                IsHAEnabled = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled }
+                                SLO                       = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO }
+                                ServerSku                 = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku }
+                                ServerEdition             = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition }
+                                IsHAEnabled               = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled }
                             }
                         }
 
@@ -2564,7 +2612,11 @@ if (-not $RunAllSubs.IsPresent)
             }
             else
             {
-                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $FreeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+                # InvariantCulture, mirroring the wrapper copy in
+                # Functions/RunAllSubscriptions.Functions.ps1: a bare "{0:N0}" formats with
+                # CURRENT culture, so an en-NL host renders 22378 as "22.378 MB", which
+                # reads as a fraction of a MB rather than ~22 GB.
+                Write-Host ("Free disk space: {0} MB at {1}" -f $FreeMB.ToString('N0', [cultureinfo]::InvariantCulture), $PreFlightInventoryRoot) -ForegroundColor Green
             }
         }
     }
@@ -2666,11 +2718,13 @@ if ($Obfuscate.IsPresent)
     $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
 
     $Dictionary = @{
-        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        ResourceIdMap = @{}
-        ResourceNameMap = @{}
-        SubscriptionMap = @{}
-        ResourceGroupMap = @{}
+        # InvariantCulture: this is a PERSISTED field in ObfuscationDictionary_*.json,
+        # so a non-Gregorian host would write a Buddhist/Hijri year into dictionary data.
+        GeneratedAt         = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)
+        ResourceIdMap       = @{}
+        ResourceNameMap     = @{}
+        SubscriptionMap     = @{}
+        ResourceGroupMap    = @{}
         # Maps an obfuscated subscription token to the REAL subscription display
         # name, so Unmask-Obfuscation.ps1 can resolve the friendly name fully
         # offline. The other maps store ARM resource Ids, which only contain the
@@ -2680,11 +2734,11 @@ if ($Obfuscate.IsPresent)
         # Maps an obfuscated tag-value token back to the REAL tag value, so tag
         # values (which keep their keys but have obfuscated values) can be
         # reversed offline like every other obfuscated field.
-        TagMap = @{}
+        TagMap              = @{}
         # Maps an obfuscated free-text/identity token back to the REAL value
         # (Description, FriendlyName, CreatedBy, RoleName, container image, etc.)
         # so Reveal-Obfuscation.ps1 can restore these free-form fields offline.
-        FreeTextMap = @{}
+        FreeTextMap         = @{}
     }
 
     foreach ($key in $ResourceIdDictionary.Keys)
@@ -2745,7 +2799,7 @@ if ($Obfuscate.IsPresent)
         }
     }
 
-    $Dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
+    $Dictionary | ConvertTo-Json -Depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
     Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
@@ -2791,7 +2845,7 @@ if ($Obfuscate.IsPresent)
 
 if ($SkipMetrics.IsPresent)
 {
-    @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+    @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File $Global:MetricsJsonFile -Encoding utf8
 }
 else
 {
@@ -2808,7 +2862,7 @@ else
     $MetricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)
     if ($MetricsAny.Count -eq 0)
     {
-        @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+        @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File $Global:MetricsJsonFile -Encoding utf8
     }
 }
 
@@ -2874,9 +2928,9 @@ if ($Obfuscate.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
     $CompressionOutput = @{
-        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        Path             = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
-        DestinationPath = $Global:ZipOutputFile
+        DestinationPath  = $Global:ZipOutputFile
     }
     Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
@@ -2931,9 +2985,9 @@ else
     # The Diagnostics_*.log (a .log, not swept by the *.json wildcard) is added
     # explicitly via $ShareableExtras so it ships in the default zip too.
     $CompressionOutput = @{
-        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        Path             = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
-        DestinationPath = $Global:ZipOutputFile
+        DestinationPath  = $Global:ZipOutputFile
     }
     Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }

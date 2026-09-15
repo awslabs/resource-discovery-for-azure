@@ -1013,8 +1013,22 @@ function Write-RdaShareableDiagnosticsLog
         # log looked healthy while the billing data the operator asked for was
         # missing. The record count is a plain integer - no identifier - so it is
         # safe in an obfuscated bundle, which is the bundle we normally receive.
+        #
+        # The n/a is gated on a ZERO count, not on the skip flag alone. Records
+        # arriving from a phase that was supposed to be skipped is a contradiction,
+        # and printing 'n/a' over a non-zero figure would hide exactly the anomaly
+        # worth seeing - so that case falls through to the numeric form.
+        #
+        # This is logically equivalent to the INVERSE of Get-RunSummaryLogContent's
+        # gate in Functions/RunAllSubscriptions.Functions.ps1. The polarity differs
+        # on purpose and is not drift: that surface DERIVES $SkipConsumptionRequested
+        # from the wrapper's bound parameters and so tests (skip -and count -eq 0),
+        # whereas this one RECEIVES $ConsumptionRequested and tests its complement.
+        # The two lines ship in the SAME bundle and must never disagree about
+        # whether data is missing, so a cross-surface Pester assertion pins the
+        # shared phrase.
         $DiagLines.Add('')
-        if ($ConsumptionRequested)
+        if ($ConsumptionRequested -or $ConsumptionRecordCount -ne 0)
         {
             $DiagLines.Add(('Consumption records collected: {0}' -f $ConsumptionRecordCount))
         }

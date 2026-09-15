@@ -2065,11 +2065,54 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  0 resources - undetermined: {0}' -f $Undetermined.Count))
 
     # --- Health --------------------------------------------------------------
+    #
+    # Was -SkipConsumption passed? Derived HERE, above the Health block, because
+    # the consumption record line below reports it - not just the zero-record
+    # warning further down. A bare "Consumption records collected : 0" on a run
+    # that never called the billing API reads as a billing-access failure, and it
+    # contradicted the Diagnostics_*.log in the SAME bundle, which already says
+    # "n/a (-SkipConsumption was passed)" (Write-RdaShareableDiagnosticsLog in
+    # Functions/ResourceInventory.Functions.ps1). Two shipped artifacts disagreeing
+    # about whether requested data is missing costs more than either being terse.
+    $SkipConsumptionRequested = $false
+    # Key probe via .Keys -contains, because NEITHER method name is universal across the
+    # dictionary shapes this [System.Collections.IDictionary] parameter accepts:
+    #   - $PSBoundParameters (the real caller - Run-AllSubscriptions.ps1, where it
+    #     builds RunSummary.log) is a PSBoundParametersDictionary deriving from
+    #     Dictionary[string,object]; its public Contains() takes a KeyValuePair, so
+    #     .Contains('SkipConsumption') throws "Cannot find an overload ... argument count: 1".
+    #   - [ordered]@{} (OrderedDictionary) has Contains() but NO ContainsKey().
+    #   - Hashtable (what the tests pass) happens to have both, which is exactly why a
+    #     Hashtable-only fixture hid the Dictionary failure until an end-to-end run.
+    # .Keys is present on all three, so this is the one probe that binds for every caller.
+    if ($null -ne $InvocationParameters -and $InvocationParameters.Keys -contains 'SkipConsumption')
+    {
+        $SkipConsumptionValue = $InvocationParameters['SkipConsumption']
+        $SkipConsumptionRequested = if ($SkipConsumptionValue -is [switch]) { $SkipConsumptionValue.IsPresent } else { [bool]$SkipConsumptionValue }
+    }
+
     $Lines.Add('')
     $Lines.Add('Health:')
     # N0 invariant to match the metric-query line below: both can exceed four digits,
     # and a grouped figure beside an ungrouped one reads as a formatting bug.
-    $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+    #
+    # The n/a wording is deliberately verbatim-identical to the diagnostics log's,
+    # so the two artifacts cannot be read as saying different things.
+    #
+    # The n/a is gated on a ZERO count, not on the skip flag alone. Records arriving
+    # from a phase that was supposed to be skipped is a contradiction, and printing
+    # 'n/a' over a non-zero figure would hide exactly the anomaly worth seeing. That
+    # case falls through to the numeric form instead - matching the console gate in
+    # Run-AllSubscriptions.ps1, which also still prints the count when the skip was
+    # passed but records nonetheless arrived.
+    if ($SkipConsumptionRequested -and $ConsumptionRecordCount -eq 0)
+    {
+        $Lines.Add('  Consumption records collected : n/a (-SkipConsumption was passed)')
+    }
+    else
+    {
+        $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+    }
     # InvariantCulture: this line SHIPS in RunSummary.log inside the customer-bound
     # bundle, and a bare '{0:N0}' formats with CURRENT culture - on an en-NL host
     # 1234567 recorded as '1.234.567', misreadable by six orders of magnitude against
@@ -2088,12 +2131,8 @@ function Get-RunSummaryLogContent
     # SHIPPED bundle is a bare "Consumption records collected : 0", which reads
     # like an idle tenant rather than a missing-data problem. The text carries no
     # identifiers, so it is emitted for obfuscated runs too.
-    $SkipConsumptionRequested = $false
-    if ($null -ne $InvocationParameters -and $InvocationParameters.ContainsKey('SkipConsumption'))
-    {
-        $SkipConsumptionValue = $InvocationParameters['SkipConsumption']
-        $SkipConsumptionRequested = if ($SkipConsumptionValue -is [switch]) { $SkipConsumptionValue.IsPresent } else { [bool]$SkipConsumptionValue }
-    }
+    # $SkipConsumptionRequested is derived above, with the Health block, because
+    # the consumption record line reports it as well as this warning gate.
     if ((-not $SkipConsumptionRequested) -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0))
     {
         $Lines.Add('')

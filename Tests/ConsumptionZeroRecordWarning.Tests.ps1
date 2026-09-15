@@ -47,6 +47,26 @@ BeforeAll {
     # two surfaces from drifting apart silently.
     $script:WarnMarker = 'ZERO usage records were collected'
 
+    # The skip cause, shared verbatim by BOTH surfaces. Declared once here so the
+    # phrase has a single owner and the assertions below cannot drift from each
+    # other. Deliberately does NOT include the label or its column padding: the
+    # Health block is hand-aligned to its longest label, and an approved pending
+    # addition ($Global:ConsumptionRowsFetchedCount adds a 'Consumption rows
+    # fetched' row) will re-pad every line in it. Pinning the padding would break
+    # these tests on a benign re-alignment with no real regression.
+    $script:SkipCausePhrase = 'n/a (-SkipConsumption was passed)'
+
+    # Line-anchored patterns. Anchoring to the label matters for the NEGATIVE
+    # assertions: a bare 'n/a' negative is a whole-document match, and both
+    # builders interpolate caller-supplied strings (valued parameters, phase-timing
+    # key names), so any path or label containing 'n/a' would fail a consumption
+    # test for an unrelated reason - and a future 'n/a' on the metric-query line
+    # would be reported as a consumption failure.
+    $script:SummaryNaPattern = 'Consumption records collected\s*:\s*' + [regex]::Escape($script:SkipCausePhrase)
+    $script:DiagNaPattern = 'Consumption records collected:\s*' + [regex]::Escape($script:SkipCausePhrase)
+    $script:SummaryAnyNaPattern = 'Consumption records collected\s*:\s*n/a'
+    $script:DiagAnyNaPattern = 'Consumption records collected:\s*n/a'
+
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
     $script:DiagDir = Join-Path $TmpBase ('ConsumpWarn_' + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:DiagDir -Force | Out-Null
@@ -116,9 +136,77 @@ Describe 'RunSummary.log consumption zero-record warning' {
         $Text | Should -Match $script:WarnMarker
     }
 
-    It 'Always reports the record count in the Health block' {
+    It 'Reports the record count when consumption was requested' {
+        # Retitled from 'Always reports...': the count is now conditional, so the
+        # old title described a contract the code no longer offers.
         $Text = script:GetSummaryText -RecordCount 0 -Processed 1
         $Text | Should -Match 'Consumption records collected\s*:\s*0'
+    }
+
+    It 'Reports n/a instead of a bare 0 when -SkipConsumption was passed' {
+        # The defect this pins: a bare "0" sitting under a Parameters block that
+        # names -SkipConsumption reads as a billing-access failure, and it
+        # contradicted the Diagnostics_*.log in the same bundle. Pinning the CAUSE
+        # phrase on the labelled line (not merely 'n/a' anywhere) is what stops a
+        # silent regression to '0' without coupling to column alignment.
+        $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -InvocationParameters @{ SkipConsumption = [switch]$true }
+        $Text | Should -Match $script:SummaryNaPattern
+        $Text | Should -Not -Match 'Consumption records collected\s*:\s*0'
+    }
+
+    It 'Still prints the count when the skip was passed but records nonetheless arrived' {
+        # Records from a phase that was supposed to be skipped is a contradiction.
+        # Printing 'n/a' over a non-zero figure would hide exactly that anomaly.
+        $Text = script:GetSummaryText -RecordCount 7 -Processed 1 -InvocationParameters @{ SkipConsumption = [switch]$true }
+        $Text | Should -Match 'Consumption records collected\s*:\s*7'
+        $Text | Should -Not -Match $script:SummaryAnyNaPattern
+    }
+
+    It 'Detects the skip across every dictionary shape a caller can pass' {
+        # RUNTIME REGRESSION GUARD, added after a real one.
+        #
+        # The parameter is typed [System.Collections.IDictionary], and no single
+        # membership method binds across the shapes that satisfies:
+        #   - $PSBoundParameters (the REAL caller, Run-AllSubscriptions.ps1:3448) is a
+        #     PSBoundParametersDictionary : Dictionary[string,object]. Its public
+        #     Contains() takes a KeyValuePair, so .Contains('SkipConsumption') throws
+        #     'Cannot find an overload ... argument count: "1"' at RUN TIME.
+        #   - [ordered]@{} (OrderedDictionary) has Contains() but NO ContainsKey().
+        #   - Hashtable has both - which is why the Hashtable fixtures used by every
+        #     other test in this file passed while the shipped RunSummary.log silently
+        #     failed to generate. Only .Keys is common to all three.
+        #
+        # Building a genuine $PSBoundParameters here (not a stand-in) is the point:
+        # it is the exact type the wrapper hands in. Deliberately NOT script:-scoped
+        # - in Pester v5 'script:' inside an It resolves to the FILE scope, so the
+        # definition would outlive the test and become order-dependent shared state.
+        # A plain function is visible at the call site below and dies with the test.
+        function MakeBoundParams { param([switch]$SkipConsumption) return $PSBoundParameters }
+
+        $Shapes = @(
+            @{ TypeName = 'Hashtable'; Value = @{ SkipConsumption = [switch]$true } }
+            @{ TypeName = 'PSBoundParametersDictionary'; Value = (MakeBoundParams -SkipConsumption) }
+            @{ TypeName = 'OrderedDictionary'; Value = ([ordered]@{ SkipConsumption = [switch]$true }) }
+        )
+
+        foreach ($Shape in $Shapes)
+        {
+            # Guard the guard. These shapes only reach the builder untransformed
+            # because script:GetSummaryText's -InvocationParameters is UNTYPED. If
+            # anyone ever types it [hashtable], all three coerce to Hashtable and
+            # this whole test goes vacuous while staying green - which is exactly the
+            # failure mode it exists to prevent. Asserting the runtime type makes
+            # that defanging fail loudly instead of silently.
+            $Shape.Value.GetType().Name | Should -Be $Shape.TypeName -Because 'the fixture must reach the builder as its original dictionary type'
+
+            $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -InvocationParameters $Shape.Value
+            $Text | Should -Match $script:SummaryNaPattern -Because ('the {0} shape must bind without throwing' -f $Shape.TypeName)
+
+            # The probe feeds TWO consumers - this line and the zero-record warning
+            # gate. Cover both, since the defect class here is 'two derivations of
+            # one fact drift apart'.
+            $Text | Should -Not -Match $script:WarnMarker -Because ('the {0} shape must also suppress the zero-record warning' -f $Shape.TypeName)
+        }
     }
 
     It 'Stays silent when -SkipConsumption was passed as a switch' {
@@ -165,10 +253,14 @@ Describe 'RunSummary.log consumption zero-record warning' {
     }
 
     It 'Names the CSP cost-visibility cause and does not claim RBAC will fix it' {
+        # The bare `Should -Match 'not'` this replaces was vacuous: 'not', 'nothing',
+        # 'cannot' or 'Otherwise' anywhere in a ~40-line document satisfied it, so it
+        # could only fail if the whole warning block vanished - which the two
+        # assertions above already catch. Pin the actual claim instead.
         $Text = script:GetSummaryText -RecordCount 0 -Processed 1
         $Text | Should -Match 'CSP'
         $Text | Should -Match 'Partner Center'
-        $Text | Should -Match 'not'
+        $Text | Should -Match 'Cost Management\s+Reader does not'
     }
 
     It 'Carries no identifier of its own (safe for an obfuscated bundle)' {
@@ -191,9 +283,42 @@ Describe 'Diagnostics_*.log consumption zero-record warning' {
     }
 
     It 'Stays silent and reports n/a when -SkipConsumption was passed' {
+        # Pins the CAUSE on the labelled line, not a bare 'n/a' anywhere in the
+        # document: the loose form would still pass if the cause were dropped, and
+        # this Describe should state its own contract rather than leaning on the
+        # cross-surface test below to do it.
         $Text = script:GetDiagText -RecordCount 0 -Requested $false -RunTag 'd3'
-        $Text | Should -Match 'n/a'
+        $Text | Should -Match $script:DiagNaPattern
         $Text | Should -Not -Match $script:WarnMarker
+    }
+
+    It 'Still prints the count when the skip was passed but records nonetheless arrived' {
+        # Mirrors the RunSummary gate exactly: 'n/a' must not mask a non-zero
+        # figure, because records from a skipped phase are the anomaly worth seeing.
+        $Text = script:GetDiagText -RecordCount 9 -Requested $false -RunTag 'd8'
+        $Text | Should -Match 'Consumption records collected:\s*9'
+        $Text | Should -Not -Match $script:DiagAnyNaPattern
+    }
+
+    It 'Never invents the skip cause when -ConsumptionRequested was not supplied' {
+        # The builder declares [bool]$ConsumptionRequested = $true - a deliberately
+        # SAFE default, so a caller that forgets the parameter gets the numeric form
+        # rather than a false '-SkipConsumption was passed' claim. Nothing pinned
+        # that default, and inventing a cause the log does not know is the same
+        # defect class as the bare-0 this change fixed.
+        $Params = @{
+            DefaultPath            = $script:DiagPathPrefix
+            ReportName             = 'R'
+            RunDateTime            = 'd9'
+            Version                = '0.0.0-test'
+            PhaseTimings           = $null
+            ConsumptionRecordCount = 0
+        }
+        $File = Write-RdaShareableDiagnosticsLog @Params
+        $Text = Get-Content -LiteralPath $File -Raw
+
+        $Text | Should -Not -Match $script:DiagAnyNaPattern -Because 'an omitted -ConsumptionRequested must not be reported as a deliberate skip'
+        $Text | Should -Match 'Consumption records collected:\s*0'
     }
 
     It 'Stays silent when records were collected' {
@@ -226,6 +351,30 @@ Describe 'The two surfaces agree' {
         $Diag = script:GetDiagText -RecordCount 0 -Requested $true -RunTag 'a1'
         $Summary | Should -Match $script:WarnMarker
         $Diag | Should -Match $script:WarnMarker
+    }
+
+    It 'Uses the same n/a phrase on both surfaces when -SkipConsumption was passed' {
+        # These two lines ship in the SAME bundle. Before this was pinned, the
+        # diagnostics log said "n/a (-SkipConsumption was passed)" while the run
+        # summary said a bare "0", so a reader got two different answers to
+        # "is the billing data missing?". Pin the shared phrase, not each wording -
+        # the two full lines differ by design (the Health block pads for column
+        # alignment), so only the cause phrase is common to both.
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -InvocationParameters @{ SkipConsumption = [switch]$true }
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $false -RunTag 'a3'
+        $Summary | Should -Match ([regex]::Escape($script:SkipCausePhrase))
+        $Diag | Should -Match ([regex]::Escape($script:SkipCausePhrase))
+    }
+
+    It 'Both surfaces fall through to the count when the skip was passed but records arrived' {
+        # The anomalous case must be reported identically on both surfaces, or the
+        # bundle again says two different things about the same run.
+        $Summary = script:GetSummaryText -RecordCount 5 -Processed 1 -InvocationParameters @{ SkipConsumption = [switch]$true }
+        $Diag = script:GetDiagText -RecordCount 5 -Requested $false -RunTag 'a4'
+        $Summary | Should -Match 'Consumption records collected\s*:\s*5'
+        $Diag | Should -Match 'Consumption records collected:\s*5'
+        $Summary | Should -Not -Match $script:SummaryAnyNaPattern
+        $Diag | Should -Not -Match $script:DiagAnyNaPattern
     }
 
     It 'Does not describe the query window as UTC (the consumption phase uses host local time)' {

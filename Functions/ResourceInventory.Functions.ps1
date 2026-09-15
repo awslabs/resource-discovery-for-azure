@@ -1019,18 +1019,20 @@ function Write-RdaShareableDiagnosticsLog
         # and printing 'n/a' over a non-zero figure would hide exactly the anomaly
         # worth seeing - so that case falls through to the numeric form.
         #
-        # This is logically equivalent to the INVERSE of Get-RunSummaryLogContent's
-        # gate in Functions/RunAllSubscriptions.Functions.ps1. The polarity differs
-        # on purpose and is not drift: that surface DERIVES $SkipConsumptionRequested
-        # from the wrapper's bound parameters and so tests (skip -and count -eq 0),
-        # whereas this one RECEIVES $ConsumptionRequested and tests its complement.
-        # The two lines ship in the SAME bundle and must never disagree about
-        # whether data is missing, so a cross-surface Pester assertion pins the
-        # shared phrase.
+        # Get-RunSummaryLogContent in Functions/RunAllSubscriptions.Functions.ps1
+        # now receives the SAME -ConsumptionRequested boolean and applies the same
+        # gate, so the two builders derive this fact identically instead of one of
+        # them re-deriving it from the wrapper's bound parameters. The two lines
+        # ship in the SAME bundle and must never disagree about whether data is
+        # missing, so a cross-surface Pester assertion pins the shared phrase.
         $DiagLines.Add('')
         if ($ConsumptionRequested -or $ConsumptionRecordCount -ne 0)
         {
-            $DiagLines.Add(('Consumption records collected: {0}' -f $ConsumptionRecordCount))
+            # N0 + InvariantCulture to match the RunSummary.log Health line exactly.
+            # This figure SHIPS in the bundle, and the same count rendered grouped in
+            # one artifact and ungrouped in the other reads as a formatting bug in
+            # whichever one the reader looked at second.
+            $DiagLines.Add(('Consumption records collected: {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
         }
         else
         {

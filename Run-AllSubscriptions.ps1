@@ -1144,7 +1144,7 @@ if ($Plan)
         Write-Host "================ Inventory Plan (assessment only - nothing was inventoried) ================" -ForegroundColor Green
         Write-Host ("Eligible subscriptions   : {0}" -f $WeightedPlan.SubscriptionCount) -ForegroundColor Cyan
         Write-Host ("This machine             : {0} vCPU / {1}  ->  -ParallelStreams {2} ({3}) -ConcurrencyLimit {4} ({5})" -f $PlanRec.VCpu, $RamLabelPlan, $PlanStreams, $StreamsSrcPlan, $PlanConcurrency, $ConcSrcPlan) -ForegroundColor Cyan
-        Write-Host  "Sizing basis             : live metric-query volume (Resource Graph)" -ForegroundColor Cyan
+        Write-Host "Sizing basis             : live metric-query volume (Resource Graph)" -ForegroundColor Cyan
         if ($UseMetricsBatch)
         {
             Write-Host ("Per-metric-query cost    : ~{0}s per-call, ~{1}s batched types [{2}]" -f $PlanCallPerQuery, $PlanBatchPerQuery, $CostSource) -ForegroundColor Cyan
@@ -2833,7 +2833,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                 if (Test-Path -LiteralPath $M.Zip -PathType Leaf)
                 {
                     Write-Host ("      archive is present but EMPTY (0 bytes): {0}" -f $M.Zip) -ForegroundColor Red
-                    Write-Host  "      -> a truncating quarantine or a write cut off mid-flush; it is not a usable report." -ForegroundColor Red
+                    Write-Host "      -> a truncating quarantine or a write cut off mid-flush; it is not a usable report." -ForegroundColor Red
                 }
                 else
                 {
@@ -2858,12 +2858,12 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                         # already said whether it is absent or empty, and saying "only
                         # the archive is gone" contradicted the empty case.
                         Write-Host ("      report folder IS present: {0}" -f $MissingDir) -ForegroundColor Yellow
-                        Write-Host  "      -> the uncompressed report files in it can be zipped by hand instead of re-collecting." -ForegroundColor Yellow
+                        Write-Host "      -> the uncompressed report files in it can be zipped by hand instead of re-collecting." -ForegroundColor Yellow
                     }
                     else
                     {
                         Write-Host ("      report folder is ALSO gone: {0}" -f $MissingDir) -ForegroundColor Red
-                        Write-Host  "      -> the whole folder was removed after the run wrote it; re-collect this subscription." -ForegroundColor Red
+                        Write-Host "      -> the whole folder was removed after the run wrote it; re-collect this subscription." -ForegroundColor Red
                     }
                 }
             }
@@ -3456,6 +3456,8 @@ try
         -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
         -ConsumptionRecordCount $ConsumptionRecordTotal `
         -MetricsApiCallCount $MetricsApiCallTotal `
+        -ConsumptionRequested (-not $SkipConsumption.IsPresent) `
+        -MetricsRequested (-not $SkipMetrics.IsPresent) `
         -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
         -Streams $ParallelStreams -StreamsSource $StreamsSrc `
         -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `

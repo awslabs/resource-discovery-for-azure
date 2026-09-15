@@ -1911,6 +1911,21 @@ function Get-RunSummaryLogContent
         $ConsumptionFailedSubs = @(),
         [int]$ConsumptionRecordCount = 0,
         [int]$MetricsApiCallCount = 0,
+        # Was each optional phase actually REQUESTED (i.e. its -Skip* switch NOT
+        # passed)? Taken from the caller rather than re-derived from
+        # $InvocationParameters. Digging a switch back out of a bound-parameter bag
+        # means guessing which membership method the caller's dictionary type
+        # supports, and that guess shipped a bundle containing no RunSummary.log at
+        # all: PSBoundParametersDictionary has no one-argument Contains(), and
+        # [ordered]@{} has no ContainsKey(). Write-RdaShareableDiagnosticsLog already
+        # receives -ConsumptionRequested this way, so both builders now derive the
+        # same fact the same way - from the caller, once.
+        #
+        # Default $true means "requested", which is the safe reading: the real count
+        # is reported and the zero-record warning stays armed, rather than a forgotten
+        # argument silently claiming a skip the operator never asked for.
+        [bool]$ConsumptionRequested = $true,
+        [bool]$MetricsRequested = $true,
         # Host size and resolved parallelism (run-environment metadata, not
         # identifiers). Emitted in both modes. Defaults mean "not supplied" and
         # the whole section is omitted (keeps standalone/offline callers clean).
@@ -2065,47 +2080,41 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  0 resources - undetermined: {0}' -f $Undetermined.Count))
 
     # --- Health --------------------------------------------------------------
-    #
-    # Was -SkipConsumption passed? Derived HERE, above the Health block, because
-    # the consumption record line below reports it - not just the zero-record
-    # warning further down. A bare "Consumption records collected : 0" on a run
-    # that never called the billing API reads as a billing-access failure, and it
-    # contradicted the Diagnostics_*.log in the SAME bundle, which already says
-    # "n/a (-SkipConsumption was passed)" (Write-RdaShareableDiagnosticsLog in
-    # Functions/ResourceInventory.Functions.ps1). Two shipped artifacts disagreeing
-    # about whether requested data is missing costs more than either being terse.
-    $SkipConsumptionRequested = $false
-    # Key probe via .Keys -contains, because NEITHER method name is universal across the
-    # dictionary shapes this [System.Collections.IDictionary] parameter accepts:
-    #   - $PSBoundParameters (the real caller - Run-AllSubscriptions.ps1, where it
-    #     builds RunSummary.log) is a PSBoundParametersDictionary deriving from
-    #     Dictionary[string,object]; its public Contains() takes a KeyValuePair, so
-    #     .Contains('SkipConsumption') throws "Cannot find an overload ... argument count: 1".
-    #   - [ordered]@{} (OrderedDictionary) has Contains() but NO ContainsKey().
-    #   - Hashtable (what the tests pass) happens to have both, which is exactly why a
-    #     Hashtable-only fixture hid the Dictionary failure until an end-to-end run.
-    # .Keys is present on all three, so this is the one probe that binds for every caller.
-    if ($null -ne $InvocationParameters -and $InvocationParameters.Keys -contains 'SkipConsumption')
-    {
-        $SkipConsumptionValue = $InvocationParameters['SkipConsumption']
-        $SkipConsumptionRequested = if ($SkipConsumptionValue -is [switch]) { $SkipConsumptionValue.IsPresent } else { [bool]$SkipConsumptionValue }
-    }
-
     $Lines.Add('')
     $Lines.Add('Health:')
-    # N0 invariant to match the metric-query line below: both can exceed four digits,
-    # and a grouped figure beside an ungrouped one reads as a formatting bug.
+    # Both phase lines report a skip as such rather than as a bare 0. A zero under a
+    # Parameters block that names the matching -Skip* switch reads as a failure of the
+    # thing the operator deliberately turned off. Whether each phase was requested
+    # arrives as a parameter (see -ConsumptionRequested / -MetricsRequested in the
+    # param block) rather than being re-derived here from $InvocationParameters.
     #
-    # The n/a wording is deliberately verbatim-identical to the diagnostics log's,
-    # so the two artifacts cannot be read as saying different things.
-    #
-    # The n/a is gated on a ZERO count, not on the skip flag alone. Records arriving
-    # from a phase that was supposed to be skipped is a contradiction, and printing
-    # 'n/a' over a non-zero figure would hide exactly the anomaly worth seeing. That
-    # case falls through to the numeric form instead - matching the console gate in
+    # CONSUMPTION ONLY: the n/a wording is verbatim-identical to the diagnostics log's
+    # so the two artifacts, which ship in the SAME bundle, cannot be read as saying
+    # different things; and the numeric fall-through matches the console gate in
     # Run-AllSubscriptions.ps1, which also still prints the count when the skip was
-    # passed but records nonetheless arrived.
-    if ($SkipConsumptionRequested -and $ConsumptionRecordCount -eq 0)
+    # passed but records nonetheless arrived. The metric line has NEITHER counterpart -
+    # Write-RdaShareableDiagnosticsLog emits no metric-query figure and the console has
+    # no metric equivalent - so it is styled to match its sibling, not kept in step
+    # with anything.
+    #
+    # Each n/a is gated on a ZERO count, not on the requested flag alone. A count
+    # arriving from a phase that was supposed to be skipped is a contradiction, and
+    # printing 'n/a' over a non-zero figure would hide exactly the anomaly worth
+    # seeing, so that case falls through to the numeric form.
+    #
+    # Both gates are fully parenthesised. Precedence already makes the bare form parse
+    # correctly (-not binds tighter than -eq, which binds tighter than -and), but this
+    # block shipped an inverted-polarity regression once, so the grouping is spelled
+    # out rather than inferred - and it matches the warning gate further down, which
+    # brackets every comparison.
+    #
+    # InvariantCulture on both numeric branches: these lines SHIP in RunSummary.log
+    # inside the customer-bound bundle, and a bare '{0:N0}' formats with CURRENT
+    # culture - on an en-NL host 1234567 records as '1.234.567', misreadable by six
+    # orders of magnitude against the 10,000,000/month metric-query free-tier ceiling
+    # the metric figure exists to test. N0 on both so a grouped figure never sits
+    # beside an ungrouped one, which reads as a formatting bug.
+    if ((-not $ConsumptionRequested) -and ($ConsumptionRecordCount -eq 0))
     {
         $Lines.Add('  Consumption records collected : n/a (-SkipConsumption was passed)')
     }
@@ -2113,11 +2122,14 @@ function Get-RunSummaryLogContent
     {
         $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
     }
-    # InvariantCulture: this line SHIPS in RunSummary.log inside the customer-bound
-    # bundle, and a bare '{0:N0}' formats with CURRENT culture - on an en-NL host
-    # 1234567 recorded as '1.234.567', misreadable by six orders of magnitude against
-    # the 10,000,000/month metric-query free-tier ceiling this figure exists to test.
-    $Lines.Add(('  Metric-query API calls issued : {0}' -f $MetricsApiCallCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+    if ((-not $MetricsRequested) -and ($MetricsApiCallCount -eq 0))
+    {
+        $Lines.Add('  Metric-query API calls issued : n/a (-SkipMetrics was passed)')
+    }
+    else
+    {
+        $Lines.Add(('  Metric-query API calls issued : {0}' -f $MetricsApiCallCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+    }
     $Lines.Add(('  Failed subscriptions          : {0}' -f $Failed.Count))
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
@@ -2131,9 +2143,12 @@ function Get-RunSummaryLogContent
     # SHIPPED bundle is a bare "Consumption records collected : 0", which reads
     # like an idle tenant rather than a missing-data problem. The text carries no
     # identifiers, so it is emitted for obfuscated runs too.
-    # $SkipConsumptionRequested is derived above, with the Health block, because
-    # the consumption record line reports it as well as this warning gate.
-    if ((-not $SkipConsumptionRequested) -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0))
+    # Reads the same -ConsumptionRequested the Health line above uses, so the count
+    # and this warning can never disagree about whether the phase was asked for.
+    # Note the polarity: this fires when consumption WAS requested and still returned
+    # nothing. The predecessor variable meant "the SKIP was requested", so the old
+    # condition was negated; carrying that negation across the rename would invert it.
+    if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0))
     {
         $Lines.Add('')
         $Lines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')

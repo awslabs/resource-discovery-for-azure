@@ -3259,12 +3259,28 @@ elseif ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
 # response raises no exception (see Test-ConsumptionAccess). Call it out here
 # with the causes that actually produce it, because the operator otherwise has
 # no signal at all that the billing data they asked for is missing.
-# Gate matches the one in Get-RunSummaryLogContent's Health block so the console
-# and the SHIPPED RunSummary.log never disagree about whether to warn. Both
-# require that at least one subscription actually completed a consumption phase
-# in THIS invocation: $SubResourceCounts is appended only on the inner script's
-# successful return, and $Processed (passed to the summary builder) is derived
-# from the same eligible-minus-skipped arithmetic.
+# Gate CLOSELY MIRRORS the one in Get-RunSummaryLogContent's Health block so the
+# console and the SHIPPED RunSummary.log do not disagree about whether to warn. Both
+# require that at least one subscription was ATTEMPTED and that at least one of those
+# actually COMPLETED - the second half is the part that is easy to lose. Here it is
+# @($SubResourceCounts).Count -gt 0, which has three producers: appended per
+# subscription on the inner script's successful return in the sequential path, the same
+# per-subscription append in the inline path taken when -ParallelStreams collapses to a
+# single stream, and in MULTI-STREAM mode rebuilt from each stream's summary JSON
+# ResourceCounts. The builder cannot see that list, so it APPROXIMATES the same
+# condition with ($Processed - $Failed.Count) -gt 0.
+#
+# The two halves are NOT interchangeable: $Processed is eligible-minus-skipped, so
+# it still counts subscriptions that were attempted and then failed. Gating on it
+# alone would warn about billing causes on a run whose zero record count is fully
+# explained by those failures.
+#
+# THIS gate is never the looser of the two - at least as strict, and in most modes
+# exactly equal - so the mirror is close but not guaranteed exact. Where it diverges: a
+# stream whose summary file is missing or unparsable adds ONE $FailedSubscriptions entry
+# for the K subscriptions it owned, so for K > 1 the builder's arithmetic can still open
+# while this gate correctly stays quiet. That residual gap is recorded at the builder
+# too; closing it needs a real completed count passed into the builder.
 if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
 {
     Write-Host ""
@@ -3405,9 +3421,23 @@ Write-Host "=========================================" -ForegroundColor Green
 # The run summary (parameters + sub tally + health) is the ONE artefact we must
 # never lose: it is how a shared bundle is triaged, and a customer has already
 # received a zip that was missing it. So its generation and on-disk write are
-# UNCONDITIONAL and decoupled from both the outer zip and the best-effort
-# MainSummary/HTML bundling below - a failure in any later step can no longer
-# suppress it. Three independent stages, each in its own try/catch:
+# decoupled from both the outer zip and the best-effort MainSummary/HTML bundling
+# below - a failure in any later step can no longer suppress it.
+#
+# THE EXCEPTION THAT MATTERS, stated because the guarantee is otherwise easy to
+# over-read: the per-subscription zip-verification hard stop earlier in this script
+# calls Exit-Wrapper -Code 2 and returns BEFORE this block, so that path produces no
+# RunSummary.log at all. Of this script's many Exit-Wrapper and bare-exit sites it is
+# the only one that PRE-EMPTS this block after subscriptions have been inventoried - the
+# earlier aborts (argument validation, the access and coverage gates, -Plan, an empty
+# shard) emit no summary either, but at that point there is genuinely nothing to
+# summarise, and the final exit sits downstream of this block. Making
+# the Code 2 path emit one would be a real improvement - a run declared broken is
+# exactly when triage matters - but it needs the health aggregation this block depends
+# on, including the parallel-mode $SkippedCount derivation and $BundleVer, to be
+# available that much earlier, so it is a separate change rather than a comment.
+#
+# Three independent stages, each in its own try/catch:
 #   1. Generate RunSummary content and write it to disk (always).
 #   2. Fold RunSummary.log into the consolidated zip as its OWN operation, then
 #      verify it actually persisted (a silent Compress-Archive -Update failure
@@ -3456,8 +3486,8 @@ try
         -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
         -ConsumptionRecordCount $ConsumptionRecordTotal `
         -MetricsApiCallCount $MetricsApiCallTotal `
-        -ConsumptionRequested (-not $SkipConsumption.IsPresent) `
-        -MetricsRequested (-not $SkipMetrics.IsPresent) `
+        -ConsumptionRequested:(-not $SkipConsumption.IsPresent) `
+        -MetricsRequested:(-not $SkipMetrics.IsPresent) `
         -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
         -Streams $ParallelStreams -StreamsSource $StreamsSrc `
         -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `

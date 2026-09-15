@@ -2148,7 +2148,31 @@ function Get-RunSummaryLogContent
     # Note the polarity: this fires when consumption WAS requested and still returned
     # nothing. The predecessor variable meant "the SKIP was requested", so the old
     # condition was negated; carrying that negation across the rename would invert it.
-    if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0))
+    #
+    # ($Processed - $Failed.Count) -gt 0 requires that at least one attempted
+    # subscription did NOT record a failure. In the sequential path that is exactly
+    # "at least one COMPLETED", because each non-skipped subscription yields either one
+    # $SubResourceCounts entry or one $FailedSubscriptions entry and never both.
+    # $Processed alone is eligible-minus-skipped, so it still counts subscriptions that
+    # were attempted and then failed: if every attempted subscription hard-failed
+    # without recording a per-sub consumption failure, a zero record count is explained
+    # by those failures, not by the billing causes this warning goes on to name, and
+    # emitting it would send the operator after the wrong thing.
+    #
+    # ($Processed -gt 0) is IMPLIED by the term above - a count is never negative - and
+    # is retained only so these terms map one-to-one onto the console gate's in
+    # Run-AllSubscriptions.ps1, whose corresponding pair is computed from independent
+    # sources (a list length versus a subtraction), so neither is arithmetically implied
+    # by the other there.
+    #
+    # This CLOSELY MIRRORS that console gate rather than matching it. Known residual
+    # gap: in parallel-streams mode a stream whose summary file is missing or unparsable
+    # is recorded as ONE "stream-N" entry covering the K subscriptions it owned, so for
+    # K > 1 this gate can still open while the console's @($SubResourceCounts).Count
+    # -gt 0 correctly stays quiet. Closing that needs a real completed count passed in,
+    # which widens the signature, so it is a separate change - deliberately NOT implied
+    # to be handled here.
+    if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0))
     {
         $Lines.Add('')
         $Lines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')
@@ -2173,7 +2197,35 @@ function Get-RunSummaryLogContent
         {
             $Lines.Add('')
             $Lines.Add('Failed subscriptions (detail):')
-            foreach ($FailedSub in $Failed) { $Lines.Add(('  - {0} ({1})' -f [string]$FailedSub.Name, [string]$FailedSub.Id)) }
+            # Every wrapper append site puts a plain STRING in this list, in three
+            # flavours: a bare subscription name (the two per-subscription catch blocks),
+            # a "stream-N (no summary)" / "(corrupt summary)" marker for a stream that
+            # died wholesale, and a name-first "<name> (stream-N: <reason>)" for a
+            # per-subscription failure reported inside a stream summary. Test fixtures and
+            # any future object-shaped caller supply .Name / .Id instead. Reading only
+            # .Name / .Id rendered every line of a shipped non-obfuscated RunSummary.log
+            # as "  - ()", telling the operator nothing. Render whichever shape actually
+            # arrived, and omit the parenthesised id when there is none rather than
+            # printing an empty pair. Deliberately no line numbers here - they drift.
+            foreach ($FailedSub in $Failed)
+            {
+                if ($FailedSub -is [string])
+                {
+                    $FailedName = $FailedSub
+                    $FailedId = ''
+                }
+                else
+                {
+                    $FailedName = [string]$FailedSub.Name
+                    $FailedId = [string]$FailedSub.Id
+                    # An object with neither field would otherwise render blank; its own
+                    # ToString() is strictly more informative than nothing.
+                    if ([string]::IsNullOrWhiteSpace($FailedName)) { $FailedName = [string]$FailedSub }
+                }
+
+                if ([string]::IsNullOrWhiteSpace($FailedId)) { $Lines.Add(('  - {0}' -f $FailedName)) }
+                else { $Lines.Add(('  - {0} ({1})' -f $FailedName, $FailedId)) }
+            }
         }
         if ($NoAccess.Count -gt 0)
         {

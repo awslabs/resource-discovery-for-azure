@@ -4,6 +4,16 @@
 # gate on the "consumption requested but ZERO records collected" warning. Makes
 # NO Azure calls and needs no generated zip.
 #
+# SCOPE NOTE. The suite is named for the consumption warning, which is still its
+# centre of gravity, but it has grown two neighbours that share the same machinery
+# and belong with it: the skip-aware "n/a (-SkipConsumption was passed)" rendering
+# on both shipped surfaces, and the equivalent skip-aware handling of the
+# "Metric-query API calls issued" line (-MetricsRequested). The Describe names below
+# are likewise consumption-worded. Renaming them is deliberately NOT done here: it
+# would be churn unrelated to the change that added the metric assertions, and the
+# names are what a reader greps for. Read "consumption" in those names as "the
+# phase-skip reporting these two builders share".
+#
 # Why this suite exists. A partner submitted a report whose Consumption CSV held
 # only its header row. Nothing flagged it:
 #   - The up-front access gate (Test-ConsumptionAccess) classifies the billing
@@ -16,13 +26,17 @@
 #     "Consumption records collected : 0", which reads like an idle tenant.
 # These tests pin the gate so that regression cannot return silently.
 #
-# The warning must fire ONLY when all of these hold, because each guard prevents
-# a specific false positive:
+# The warning must fire ONLY when all FIVE of these hold, because each guard
+# prevents a specific false positive:
 #   requested (no -SkipConsumption) - a skipped phase legitimately has 0 records
 #   record count == 0               - obviously
 #   zero consumption failures       - a reported failure is already surfaced
 #   at least one subscription ran   - a -Resume run where everything was already
 #                                     completed must not claim the CSV is empty
+#   at least one of those did not   - $Processed counts ATTEMPTED subs, failed ones
+#   record a failure                  included; on a run where nothing got through,
+#                                     the failures explain the zero count and the
+#                                     billing causes named in the warning do not
 #
 # Run with: Invoke-Pester ./Tests/ConsumptionZeroRecordWarning.Tests.ps1 -Output Detailed
 
@@ -50,10 +64,12 @@ BeforeAll {
     # The skip cause, shared verbatim by BOTH surfaces. Declared once here so the
     # phrase has a single owner and the assertions below cannot drift from each
     # other. Deliberately does NOT include the label or its column padding: the
-    # Health block is hand-aligned to its longest label, and an approved pending
-    # addition ($Global:ConsumptionRowsFetchedCount adds a 'Consumption rows
-    # fetched' row) will re-pad every line in it. Pinning the padding would break
-    # these tests on a benign re-alignment with no real regression.
+    # Health block is hand-aligned to its longest label, so ANY future row carrying a
+    # LONGER label re-pads every line in it. (The specific approved pending addition,
+    # $Global:ConsumptionRowsFetchedCount's 'Consumption rows fetched' row, is shorter
+    # than the current longest label and so would not itself re-pad anything - but the
+    # label of an unimplemented row is not something to bet a test on.) Pinning the
+    # padding would break these tests on a benign re-alignment with no real regression.
     $script:SkipCausePhrase = 'n/a (-SkipConsumption was passed)'
 
     # Line-anchored patterns. Anchoring to the label matters for the NEGATIVE
@@ -151,7 +167,10 @@ Describe 'RunSummary.log consumption zero-record warning' {
         # Retitled from 'Always reports...': the count is now conditional, so the
         # old title described a contract the code no longer offers.
         $Text = script:GetSummaryText -RecordCount 0 -Processed 1
-        $Text | Should -Match 'Consumption records collected\s*:\s*0'
+        # \b right-anchor, matching the sibling assertions. Deliberately NOT added to the
+        # -Not -Match negative below: narrowing a negative pattern WEAKENS it, so that one
+        # stays broad on purpose.
+        $Text | Should -Match 'Consumption records collected\s*:\s*0\b'
     }
 
     It 'Reports n/a instead of a bare 0 when consumption was not requested' {
@@ -224,23 +243,63 @@ Describe 'RunSummary.log consumption zero-record warning' {
         $Text | Should -Not -Match 'Metric-query API calls issued\s*:\s*n/a'
     }
 
+    # Both source guards below exist because the '(-not $SkipConsumption.IsPresent)'
+    # conversion lives in a script BODY, not in a function, so no behavioural test can
+    # reach it. A source guard is the idiomatic answer in this repo (see the equivalent
+    # in Tests/WeightedInventoryPlan.Tests.ps1). Of the two possible regressions only
+    # one is dangerous: omitting the argument fails SAFE via the $true default, whereas
+    # inverting the polarity would put a false skip claim in a shipped log. That
+    # inversion is what these catch.
+    #
+    # Split across two Its, one per file, so a failure names WHICH call site drifted
+    # rather than making the reader diff two scripts to find out.
     It 'The wrapper derives both requested flags from the skip switches (source guard)' {
-        # The '(-not $SkipConsumption.IsPresent)' conversion lives in the script BODY of
-        # Run-AllSubscriptions.ps1, not in a function, so no behavioural test can reach
-        # it. A source guard is the idiomatic answer in this repo (see the equivalent in
-        # Tests/WeightedInventoryPlan.Tests.ps1). Of the two possible regressions only
-        # one is dangerous: omitting the argument fails SAFE via the $true default,
-        # whereas inverting the polarity would put a false skip claim in a shipped log.
-        # That inversion is exactly what this catches.
+        # Accepts either bind form. The COLON form is what the wrapper uses and is the
+        # better choice, because with the space form correctness depends on the builder
+        # keeping [bool]. Get-RunSummaryLogContent is a SIMPLE function - no
+        # [CmdletBinding()], no [Parameter()] - and every argument at this call site is
+        # already bound by name, so were those params ever retyped to [switch] the
+        # consequence is SILENT, not loud. Measured, not reasoned:
+        #     space form -> ConsumptionRequested = True,  $args = (False, True), no error
+        #     colon form -> ConsumptionRequested = False, $args = (),            no error
+        # A simple function collects extra arguments into $args instead of raising the
+        # "positional parameter cannot be found" error an advanced function would, so the
+        # switch binds as PRESENT and the real value is swallowed. $ConsumptionRequested
+        # would then be unconditionally $true and a -SkipConsumption run would print a
+        # bare "0" again - the exact defect this suite exists to prevent, reintroduced
+        # with nothing in any log to show for it. That silence is why the form is pinned.
+        #
+        # For the avoidance of doubt about a DIFFERENT incident: the run that shipped
+        # with no RunSummary.log at all was caused by the $InvocationParameters
+        # membership-method defect (see the COVERAGE NOTE further down and the builder's
+        # own param-block comment), not by argument binding. Both are real; they are not
+        # the same failure.
+        # Anchored to a NON-COMMENT line. These guards read the whole file with -Raw, so
+        # without the (?m)^[^#] anchor a commented-out or quoted occurrence would satisfy
+        # them even after the live call site drifted. All live call sites are ordinary
+        # indented code lines, so the anchor costs nothing today and closes the only
+        # remaining way to pass without real code.
         $WrapperSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
-        $WrapperSrc | Should -Match '-ConsumptionRequested \(-not \$SkipConsumption\.IsPresent\)'
-        $WrapperSrc | Should -Match '-MetricsRequested \(-not \$SkipMetrics\.IsPresent\)'
+        $WrapperSrc | Should -Match '(?m)^[^#\r\n]*-ConsumptionRequested:?\s*\(-not \$SkipConsumption\.IsPresent\)'
+        $WrapperSrc | Should -Match '(?m)^[^#\r\n]*-MetricsRequested:?\s*\(-not \$SkipMetrics\.IsPresent\)'
+    }
 
-        # The same conversion feeds Write-RdaShareableDiagnosticsLog from the inner
-        # script, and has run unpinned there all along. Cover both sites so the two
-        # surfaces cannot drift apart at the call site either.
+    It 'The inner script derives the requested flag the same way (source guard)' {
+        # The same conversion feeds Write-RdaShareableDiagnosticsLog from
+        # ResourceInventory.ps1, once per packaging branch. Pinning it keeps the two
+        # shipped surfaces from drifting apart at the call site.
+        #
+        # Form-agnostic on purpose. These sites currently use the space form while the
+        # wrapper uses the colon form; pinning the space form here would turn this guard
+        # RED the moment someone applied the very improvement the wrapper guard above
+        # argues for. Polarity and presence are what matter, not the separator.
+        # Write-RdaShareableDiagnosticsLog has no -MetricsRequested parameter, so there
+        # is deliberately no metrics half to this guard.
+        #
+        # Non-comment anchored for the same reason as the wrapper guard above: counting
+        # raw occurrences would let two commented-out lines satisfy the >= 2.
         $InnerSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'ResourceInventory.ps1') -Raw
-        @([regex]::Matches($InnerSrc, '-ConsumptionRequested \(-not \$SkipConsumption\.IsPresent\)')).Count |
+        @([regex]::Matches($InnerSrc, '(?m)^[^#\r\n]*-ConsumptionRequested:?\s*\(-not \$SkipConsumption\.IsPresent\)')).Count |
             Should -BeGreaterOrEqual 2 -Because 'both packaging branches pass the flag the same way'
     }
 
@@ -333,6 +392,53 @@ Describe 'RunSummary.log consumption zero-record warning' {
     It 'Stays silent when records were collected' {
         $Text = script:GetSummaryText -RecordCount 42 -Processed 1
         $Text | Should -Not -Match $script:WarnMarker
+    }
+
+    It 'Stays silent when every attempted subscription failed' {
+        # A zero record count on a run where nothing got through is explained by those
+        # failures, not by the billing causes this warning names, so emitting it would
+        # send the operator after the wrong thing. $Processed counts attempted subs,
+        # including failed ones, so the gate also requires ($Processed - $Failed) > 0.
+        # That brings it CLOSE to the console gate's stricter
+        # @($SubResourceCounts).Count -gt 0 without matching it: in parallel-streams
+        # mode one dead stream contributes a single $FailedSubscriptions entry for the K
+        # subscriptions it owned, so for K > 1 this gate can still open where the console
+        # stays quiet. That residual gap is recorded at the gate and is not tested here
+        # because closing it needs a real completed count in the signature.
+        $AllFailed = @(
+            [pscustomobject]@{ Name = 's1'; Id = 'i1'; Message = 'boom' }
+            [pscustomobject]@{ Name = 's2'; Id = 'i2'; Message = 'boom' }
+        )
+        $Lines = Get-RunSummaryLogContent -Version '0.0.0-test' -Processed 2 `
+            -ConsumptionRecordCount 0 -ConsumptionRequested $true -FailedSubscriptions $AllFailed
+        $Text = $Lines -join [Environment]::NewLine
+
+        $Text | Should -Not -Match $script:WarnMarker
+        # ARMS the negative above. On its own it would also pass if the document failed
+        # to generate at all, or if -ConsumptionRequested had quietly become $false -
+        # and a silently-missing RunSummary.log is a failure mode this suite exists
+        # because of. Proving the count line rendered proves the absence above is a real
+        # gate decision rather than an empty string. Right-anchored with \b so a future
+        # non-zero count whose first digit is 0 cannot satisfy it.
+        $Text | Should -Match 'Consumption records collected\s*:\s*0\b'
+    }
+
+    It 'Still warns when only SOME attempted subscriptions failed' {
+        # The complement of the case above: one sub got through, so the billing causes
+        # remain a live explanation for the zero count and the warning must still fire.
+        #
+        # WHY THIS EARNS ITS PLACE, since it does NOT fail if the gate term it
+        # accompanies is deleted: it is the only test that rules out ($Failed.Count -eq
+        # 0) as a substitute for the arithmetic. That cheaper-looking condition would
+        # pass every other test in this suite while silently suppressing the warning for
+        # any run with even one failed subscription out of fifty. Do not remove it on the
+        # reasoning that it cannot fail for the term it documents.
+        $SomeFailed = @([pscustomobject]@{ Name = 's1'; Id = 'i1'; Message = 'boom' })
+        $Lines = Get-RunSummaryLogContent -Version '0.0.0-test' -Processed 2 `
+            -ConsumptionRecordCount 0 -ConsumptionRequested $true -FailedSubscriptions $SomeFailed
+        $Text = $Lines -join [Environment]::NewLine
+
+        $Text | Should -Match $script:WarnMarker
     }
 
     It 'Stays silent when a consumption failure was already reported' {

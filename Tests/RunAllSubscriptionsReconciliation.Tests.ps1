@@ -443,6 +443,74 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Match 'no usable token'
     }
 
+    It 'renders STRING-shaped failed subscriptions, the shape production actually passes' {
+        # REGRESSION GUARD for a shipped defect. Every -FailedSubscriptions append site in
+        # Run-AllSubscriptions.ps1 pushes a plain STRING - a bare subscription name from
+        # the two per-sub catch blocks, a 'stream-N (no summary)' / '(corrupt summary)'
+        # marker, or a name-first '<name> (stream-N: <reason>)'. Every fixture that reached
+        # THIS renderer, however, was a [pscustomobject]: $script:Failed above, and
+        # $AllFailed / $SomeFailed in Tests/ConsumptionZeroRecordWarning.Tests.ps1.
+        # (Tests/AllSubHtmlSummary.Tests.ps1 does drive the real string shape, but into a
+        # different consumer - New-RdaAllSubHtmlSummary - which already handled it.)
+        #
+        # The renderer used to read only .Name / .Id, which on a string resolve to $null,
+        # so a shipped non-obfuscated RunSummary.log rendered EVERY failed subscription as
+        # the literal '  - ()'. The object-shaped fixtures kept this suite green while the
+        # artefact an operator actually reads said nothing. This test pins the branch
+        # production takes, so reverting the renderer fails here.
+        #
+        # The last element is an OBJECT carrying an Id but no Name, covering the renderer's
+        # other new branch - the ToString() fallback that stops such an element rendering
+        # as a blank line.
+        $StringShaped = @(
+            'Contoso-Prod-Sub'
+            'stream-2 (no summary)'
+            'Fabrikam-Locked (stream-1: boom)'
+            [pscustomobject]@{ Id = '44444444-4444-4444-4444-444444444444' }
+        )
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 4 -Skipped 0 `
+            -FailedSubscriptions $StringShaped
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Match 'Failed subscriptions\s+:\s+4'
+        # Each must appear on its own detail line. The inner separators are [^\S\r\n]*
+        # rather than \s* on purpose: \s* matches a newline, which would let a bare '-' on
+        # one line and the name on the next satisfy these. The trailing \s*$ is kept - it
+        # cannot swallow a same-line '(id)' and it keeps the assertion CRLF-safe.
+        $Text | Should -Match '(?m)^[^\S\r\n]*-[^\S\r\n]*Contoso-Prod-Sub\s*$'
+        $Text | Should -Match '(?m)^[^\S\r\n]*-[^\S\r\n]*stream-2 \(no summary\)\s*$'
+        $Text | Should -Match '(?m)^[^\S\r\n]*-[^\S\r\n]*Fabrikam-Locked \(stream-1: boom\)\s*$'
+        # The no-Name object falls back to its own ToString() rather than rendering blank.
+        $Text | Should -Match '(?m)^[^\S\r\n]*-[^\S\r\n]*\S.*44444444-4444-4444-4444-444444444444'
+        # And the defect itself must be gone. Widened to \(\s*\) so a near-miss variant of
+        # the empty pair is caught too, though the positives above are what actually fail
+        # on a revert.
+        $Text | Should -Not -Match '(?m)^\s*-\s*\(\s*\)\s*$' -Because 'a failed-subscription line must never render as an empty pair'
+        # No detail line may be blank either - the other way the fallback could regress.
+        $Text | Should -Not -Match '(?m)^[^\S\r\n]*-[^\S\r\n]*$' -Because 'a failed-subscription line must always name something'
+    }
+
+    It 'keeps string-shaped failed subscriptions out of an OBFUSCATED run' {
+        # The string shape carries a real subscription name directly rather than behind a
+        # .Name property, so the fix above must not have opened a leak: the detail block
+        # is gated on -not $Obfuscated, and only the COUNT may survive.
+        $StringShaped = @('Contoso-Prod-Sub', 'Fabrikam-Locked (stream-1: boom)')
+        $Lines = Get-RunSummaryLogContent -Obfuscated `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions $StringShaped
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Not -Match 'Contoso'
+        $Text | Should -Not -Match 'Fabrikam'
+        $Text | Should -Not -Match 'stream-1'
+        # Pins the -not $Obfuscated gate DIRECTLY rather than inferring it from three
+        # substrings: shape-independent, and immune to a future name colliding with
+        # unrelated summary wording.
+        $Text | Should -Not -Match 'Failed subscriptions \(detail\):'
+        $Text | Should -Match 'Failed subscriptions\s+:\s+2'
+    }
+
     It 'drops target identifiers from the parameter list but keeps allowlisted tuning knobs' {
         $Params = @{
             TenantID               = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'

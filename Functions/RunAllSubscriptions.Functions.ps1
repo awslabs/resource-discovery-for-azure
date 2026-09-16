@@ -2088,14 +2088,17 @@ function Get-RunSummaryLogContent
     # arrives as a parameter (see -ConsumptionRequested / -MetricsRequested in the
     # param block) rather than being re-derived here from $InvocationParameters.
     #
-    # CONSUMPTION ONLY: the n/a wording is verbatim-identical to the diagnostics log's
-    # so the two artifacts, which ship in the SAME bundle, cannot be read as saying
-    # different things; and the numeric fall-through matches the console gate in
+    # BOTH lines now have a diagnostics-log counterpart: their labels and n/a wording are
+    # verbatim-identical to Write-RdaShareableDiagnosticsLog's, so the two artifacts,
+    # which ship in the SAME bundle, cannot be read as saying different things. A
+    # cross-surface Pester assertion pins each shared phrase, so a reword on one side
+    # alone fails rather than drifting. (The metric counterpart was added later than the
+    # consumption one; before it existed a -SkipMetrics run had this line saying 'n/a'
+    # beside a diagnostics log that mentioned metrics nowhere at all.)
+    #
+    # The consumption numeric fall-through additionally matches the console gate in
     # Run-AllSubscriptions.ps1, which also still prints the count when the skip was
-    # passed but records nonetheless arrived. The metric line has NEITHER counterpart -
-    # Write-RdaShareableDiagnosticsLog emits no metric-query figure and the console has
-    # no metric equivalent - so it is styled to match its sibling, not kept in step
-    # with anything.
+    # passed but records nonetheless arrived. The metric line has no console equivalent.
     #
     # Each n/a is gated on a ZERO count, not on the requested flag alone. A count
     # arriving from a phase that was supposed to be skipped is a contradiction, and

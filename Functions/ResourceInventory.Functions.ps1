@@ -882,6 +882,14 @@ function Write-RdaShareableDiagnosticsLog
         # makes a zero record count expected rather than a problem.
         [int]$ConsumptionRecordCount = 0,
         [bool]$ConsumptionRequested = $true,
+        # Metric-query outcome for THIS run, on the same contract as the consumption
+        # pair above: passed in rather than read from $Global:MetricsApiCallCount so
+        # the builder stays self-contained and unit-testable offline, AND so the
+        # caller can hand over a per-subscription figure instead of that global's
+        # run-cumulative one. $MetricsRequested is $false when -SkipMetrics was
+        # passed, which makes a zero call count expected rather than a problem.
+        [int]$MetricsApiCallCount = 0,
+        [bool]$MetricsRequested = $true,
         [switch]$Obfuscated
     )
 
@@ -1057,6 +1065,38 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('      help - the partner must enable it in Partner Center.')
             $DiagLines.Add('    - Subscription not transitioned to the Azure plan.')
             $DiagLines.Add('    - A subscription offer the legacy usage API does not serve.')
+        }
+
+        # Metric-query counterpart to the consumption count above, and it exists for the
+        # same reason. A -SkipMetrics run previously left NO trace of the metrics phase
+        # in this shareable log: the auth-skipped count read 0 (nothing failed - the
+        # phase never ran) and the call count was not reported at all, so the log looked
+        # healthy while the metric data the operator asked for was simply absent. The
+        # count is a plain integer, no identifier, so it is safe in an obfuscated bundle.
+        #
+        # Deliberately matches the consumption block in three ways, because the two
+        # figures ship in the same log and any divergence reads as a bug in whichever the
+        # reader saw second: the same gate SHAPE (n/a only when the phase was not
+        # requested AND the count is zero, so calls arriving from a supposedly skipped
+        # phase fall through to the numeric form rather than being hidden behind 'n/a'),
+        # the same N0 + InvariantCulture formatting, and a label matching the RunSummary
+        # Health block's 'Metric-query API calls issued' verbatim so a reader comparing
+        # the two artifacts never has to work out whether two labels mean one thing.
+        #
+        # Placed AFTER the consumption warning, not between it and its count. That
+        # warning has no leading blank line and is two-space indented because it is a
+        # hanging continuation of 'Consumption records collected'; splitting the pair
+        # made a shipped log read 'Metric-query API calls issued: 34' followed by an
+        # indented 'WARNING - consumption was requested but ZERO usage records...',
+        # which scans as a METRICS warning.
+        $DiagLines.Add('')
+        if ($MetricsRequested -or ($MetricsApiCallCount -ne 0))
+        {
+            $DiagLines.Add(('Metric-query API calls issued: {0}' -f $MetricsApiCallCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+        }
+        else
+        {
+            $DiagLines.Add('Metric-query API calls issued: n/a (-SkipMetrics was passed)')
         }
 
         $DiagnosticsFile = ($DefaultPath + "Diagnostics_" + $ReportName + "_" + $RunDateTime + ".log")

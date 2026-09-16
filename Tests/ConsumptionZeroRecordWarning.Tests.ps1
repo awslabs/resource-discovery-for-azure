@@ -72,6 +72,12 @@ BeforeAll {
     # padding would break these tests on a benign re-alignment with no real regression.
     $script:SkipCausePhrase = 'n/a (-SkipConsumption was passed)'
 
+    # The metric-query equivalent, now that BOTH surfaces carry a 'Metric-query API
+    # calls issued' line. Same single-owner reasoning as the phrase above: the
+    # cross-surface test asserts this exact string against both artifacts, so a reword
+    # on one side alone fails rather than silently drifting.
+    $script:MetricsSkipCausePhrase = 'n/a (-SkipMetrics was passed)'
+
     # Line-anchored patterns. Anchoring to the label matters for the NEGATIVE
     # assertions: a bare 'n/a' negative is a whole-document match, and both
     # builders interpolate caller-supplied strings (valued parameters, phase-timing
@@ -83,6 +89,16 @@ BeforeAll {
     $script:SummaryAnyNaPattern = 'Consumption records collected\s*:\s*n/a'
     $script:DiagAnyNaPattern = 'Consumption records collected:\s*n/a'
 
+    # The metric-query equivalents, hoisted here for the same reason as the consumption
+    # four above: one owner per pattern, so the metric assertions cannot drift from each
+    # other. Note the padding asymmetry is real and intentional - the RunSummary Health
+    # block hand-pads to its longest label ('... issued : '), the diagnostics log is
+    # flush ('... issued: ').
+    $script:SummaryMetricNaPattern = 'Metric-query API calls issued\s*:\s*' + [regex]::Escape($script:MetricsSkipCausePhrase)
+    $script:DiagMetricNaPattern = 'Metric-query API calls issued:\s*' + [regex]::Escape($script:MetricsSkipCausePhrase)
+    $script:SummaryAnyMetricNaPattern = 'Metric-query API calls issued\s*:\s*n/a'
+    $script:DiagAnyMetricNaPattern = 'Metric-query API calls issued:\s*n/a'
+
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
     $script:DiagDir = Join-Path $TmpBase ('ConsumpWarn_' + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:DiagDir -Force | Out-Null
@@ -90,11 +106,16 @@ BeforeAll {
 
     # Build a diagnostics log and return its text. $RunTag keeps each call's file
     # distinct so cases cannot read each other's output.
+    # $MetricsRequested / $MetricsApiCallCount mirror the builder's own booleans and
+    # default to its safe defaults, so existing cases that care only about consumption
+    # keep exercising the requested-metrics path unchanged.
     function script:GetDiagText
     {
         param(
             [int]$RecordCount,
             [bool]$Requested,
+            [bool]$MetricsRequested = $true,
+            [int]$MetricsApiCallCount = 0,
             [switch]$Obfuscated,
             [string]$RunTag
         )
@@ -106,6 +127,8 @@ BeforeAll {
             PhaseTimings           = $null
             ConsumptionRecordCount = $RecordCount
             ConsumptionRequested   = $Requested
+            MetricsRequested       = $MetricsRequested
+            MetricsApiCallCount    = $MetricsApiCallCount
         }
         if ($Obfuscated) { $Params.Obfuscated = $true }
         $File = Write-RdaShareableDiagnosticsLog @Params
@@ -196,14 +219,14 @@ Describe 'RunSummary.log consumption zero-record warning' {
         # Same defect one line down: a bare 0 under a Parameters block naming
         # -SkipMetrics reads as a metrics failure rather than a deliberate skip.
         $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -MetricsRequested $false
-        $Text | Should -Match ('Metric-query API calls issued\s*:\s*' + [regex]::Escape('n/a (-SkipMetrics was passed)'))
+        $Text | Should -Match $script:SummaryMetricNaPattern
         $Text | Should -Not -Match 'Metric-query API calls issued\s*:\s*0'
     }
 
     It 'Still prints the metric count when metrics were skipped but calls were nonetheless issued' {
         $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -MetricsRequested $false -MetricsApiCallCount 12
-        $Text | Should -Match 'Metric-query API calls issued\s*:\s*12\b'
-        $Text | Should -Not -Match 'Metric-query API calls issued\s*:\s*n/a'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued\s*:\s*12\s*$'
+        $Text | Should -Not -Match $script:SummaryAnyMetricNaPattern
     }
 
     It 'Prints a real 0 for the metric count when metrics WERE requested and issued none' {
@@ -213,8 +236,8 @@ Describe 'RunSummary.log consumption zero-record warning' {
         # 'n/a (-SkipMetrics was passed)' - a false claim about the operator's own
         # flags, in a shipped RunSummary.log.
         $Text = script:GetSummaryText -RecordCount 0 -Processed 1 -MetricsRequested $true -MetricsApiCallCount 0
-        $Text | Should -Match 'Metric-query API calls issued\s*:\s*0\b'
-        $Text | Should -Not -Match 'Metric-query API calls issued\s*:\s*n/a'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued\s*:\s*0\s*$'
+        $Text | Should -Not -Match $script:SummaryAnyMetricNaPattern
     }
 
     It 'Groups both Health figures with InvariantCulture at four digits and above' {
@@ -223,7 +246,7 @@ Describe 'RunSummary.log consumption zero-record warning' {
         # this case a revert to a bare -f would leave the whole suite green.
         $Text = script:GetSummaryText -RecordCount 1234567 -Processed 1 -MetricsApiCallCount 89012
         $Text | Should -Match 'Consumption records collected\s*:\s*1,234,567\b'
-        $Text | Should -Match 'Metric-query API calls issued\s*:\s*89,012\b'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued\s*:\s*89,012\s*$'
         # The en-NL separator must never appear: that is what CurrentCulture would give
         # on this host, and it misreads 1234567 by six orders of magnitude.
         $Text | Should -Not -Match '1\.234\.567'
@@ -238,9 +261,9 @@ Describe 'RunSummary.log consumption zero-record warning' {
         $Text = $Lines -join [Environment]::NewLine
 
         $Text | Should -Match 'Consumption records collected\s*:\s*0\b'
-        $Text | Should -Match 'Metric-query API calls issued\s*:\s*0\b'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued\s*:\s*0\s*$'
         $Text | Should -Not -Match $script:SummaryAnyNaPattern
-        $Text | Should -Not -Match 'Metric-query API calls issued\s*:\s*n/a'
+        $Text | Should -Not -Match $script:SummaryAnyMetricNaPattern
     }
 
     # Both source guards below exist because the '(-not $SkipConsumption.IsPresent)'
@@ -289,18 +312,23 @@ Describe 'RunSummary.log consumption zero-record warning' {
         # ResourceInventory.ps1, once per packaging branch. Pinning it keeps the two
         # shipped surfaces from drifting apart at the call site.
         #
-        # Form-agnostic on purpose. These sites currently use the space form while the
-        # wrapper uses the colon form; pinning the space form here would turn this guard
-        # RED the moment someone applied the very improvement the wrapper guard above
-        # argues for. Polarity and presence are what matter, not the separator.
-        # Write-RdaShareableDiagnosticsLog has no -MetricsRequested parameter, so there
-        # is deliberately no metrics half to this guard.
+        # Form-agnostic on purpose, so this guard cannot go RED merely because a site
+        # adopted the safer colon form. Polarity and presence are what matter, not the
+        # separator. Both sites now DO use the colon form, for the measured reason given
+        # in the wrapper guard above - Write-RdaShareableDiagnosticsLog is a simple
+        # function too, so the space form carries the same silent hazard there.
         #
         # Non-comment anchored for the same reason as the wrapper guard above: counting
         # raw occurrences would let two commented-out lines satisfy the >= 2.
         $InnerSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'ResourceInventory.ps1') -Raw
         @([regex]::Matches($InnerSrc, '(?m)^[^#\r\n]*-ConsumptionRequested:?\s*\(-not \$SkipConsumption\.IsPresent\)')).Count |
             Should -BeGreaterOrEqual 2 -Because 'both packaging branches pass the flag the same way'
+
+        # Metrics half. It exists now because the diagnostics builder GAINED a
+        # -MetricsRequested parameter when its 'Metric-query API calls issued' line was
+        # added; before that there was genuinely no metrics flag here to pin.
+        @([regex]::Matches($InnerSrc, '(?m)^[^#\r\n]*-MetricsRequested:?\s*\(-not \$SkipMetrics\.IsPresent\)')).Count |
+            Should -BeGreaterOrEqual 2 -Because 'both packaging branches pass the metrics flag the same way'
     }
 
     It 'Renders the Parameters block for every dictionary shape a caller can pass' {
@@ -504,6 +532,58 @@ Describe 'Diagnostics_*.log consumption zero-record warning' {
         $Text | Should -Not -Match $script:DiagAnyNaPattern
     }
 
+    It 'Reports n/a for the metric-query line when -SkipMetrics was passed' {
+        # The gap this closes: a -SkipMetrics run left NO trace of the metrics phase in
+        # the shareable log at all. The auth-skipped count read 0 (nothing failed, the
+        # phase never ran) and the call count was absent, so the log read as healthy
+        # while the metric data the operator asked for was simply missing - the same
+        # class of silence the consumption line above was added for.
+        $Text = script:GetDiagText -RecordCount 3 -Requested $true -MetricsRequested $false -RunTag 'd10'
+        $Text | Should -Match $script:DiagMetricNaPattern
+        # The consumption line must be unaffected by the metrics flag.
+        $Text | Should -Match 'Consumption records collected:\s*3\b'
+    }
+
+    It 'Reports the metric-query count when metrics were requested' {
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -MetricsRequested $true -MetricsApiCallCount 34 -RunTag 'd11'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued:\s*34\s*$'
+        $Text | Should -Not -Match $script:DiagAnyMetricNaPattern
+    }
+
+    It 'Still prints the metric count when metrics were skipped but calls were nonetheless issued' {
+        # Same anomaly rule as the consumption line: 'n/a' must never mask a non-zero
+        # figure, because calls issued by a phase that was supposed to be skipped are
+        # exactly what an operator needs to see.
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -MetricsRequested $false -MetricsApiCallCount 12 -RunTag 'd12'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued:\s*12\s*$'
+        $Text | Should -Not -Match $script:DiagAnyMetricNaPattern
+    }
+
+    It 'Never invents the metrics skip cause when -MetricsRequested was not supplied' {
+        # Mirrors the consumption safe-default test below. The builder declares
+        # [bool]$MetricsRequested = $true, so a caller that omits it must get the
+        # numeric form rather than a false '-SkipMetrics was passed' claim about the
+        # operator's own flags. Bypasses the helper so the BUILDER's default is what
+        # gets exercised, not the helper's.
+        $File = Write-RdaShareableDiagnosticsLog -DefaultPath $script:DiagPathPrefix `
+            -ReportName 'R' -RunDateTime 'd13' -Version '0.0.0-test' -PhaseTimings $null `
+            -ConsumptionRecordCount 0 -ConsumptionRequested $true
+        $Text = Get-Content -LiteralPath $File -Raw
+
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued:\s*0\s*$'
+        $Text | Should -Not -Match $script:DiagAnyMetricNaPattern
+    }
+
+    It 'Groups large metric counts with N0 and InvariantCulture' {
+        # Guards the same formatting contract the consumption count has. Without a
+        # four-digit-plus fixture a revert to a bare -f would leave the suite green,
+        # and this figure SHIPS next to the RunSummary one - the same number grouped in
+        # one artifact and ungrouped in the other reads as a bug in whichever the
+        # reader saw second.
+        $Text = script:GetDiagText -RecordCount 0 -Requested $true -MetricsApiCallCount 89012 -RunTag 'd14'
+        $Text | Should -Match '(?m)^\s*Metric-query API calls issued:\s*89,012\s*$'
+    }
+
     It 'Never invents the skip cause when -ConsumptionRequested was not supplied' {
         # The builder declares [bool]$ConsumptionRequested = $true - a deliberately
         # SAFE default, so a caller that forgets the parameter gets the numeric form
@@ -579,6 +659,39 @@ Describe 'The two surfaces agree' {
         $Diag | Should -Match 'Consumption records collected:\s*5'
         $Summary | Should -Not -Match $script:SummaryAnyNaPattern
         $Diag | Should -Not -Match $script:DiagAnyNaPattern
+    }
+
+    It 'Uses the same n/a phrase on both surfaces when -SkipMetrics was passed' {
+        # Previously UNTESTABLE, and the reason is the point: the diagnostics log had no
+        # metric-query line at all, so a -SkipMetrics run produced a RunSummary saying
+        # 'n/a (-SkipMetrics was passed)' beside a diagnostics log that said nothing
+        # about metrics whatsoever. Now both carry the line, this pins the shared cause
+        # phrase exactly as its consumption counterpart above does.
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -MetricsRequested $false
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $true -MetricsRequested $false -RunTag 'a5'
+        $Summary | Should -Match $script:SummaryMetricNaPattern
+        $Diag | Should -Match $script:DiagMetricNaPattern
+    }
+
+    It 'Reports the same metric count on both surfaces, identically formatted' {
+        # The two figures ship together, so they must agree in VALUE and in FORMAT. A
+        # four-digit-plus fixture is required for the format half: below 1000 N0 emits no
+        # separator, so a revert to a bare -f on either side would pass unnoticed.
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -MetricsApiCallCount 89012
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $true -MetricsApiCallCount 89012 -RunTag 'a6'
+        $Summary | Should -Match '(?m)^\s*Metric-query API calls issued\s*:\s*89,012\s*$'
+        $Diag | Should -Match '(?m)^\s*Metric-query API calls issued:\s*89,012\s*$'
+    }
+
+    It 'Both surfaces fall through to the metric count when metrics were skipped but calls arrived' {
+        # The metrics twin of the consumption anomaly case above: neither surface may
+        # hide a non-zero call count behind 'n/a'.
+        $Summary = script:GetSummaryText -RecordCount 0 -Processed 1 -MetricsRequested $false -MetricsApiCallCount 7
+        $Diag = script:GetDiagText -RecordCount 0 -Requested $true -MetricsRequested $false -MetricsApiCallCount 7 -RunTag 'a7'
+        $Summary | Should -Match '(?m)^\s*Metric-query API calls issued\s*:\s*7\s*$'
+        $Diag | Should -Match '(?m)^\s*Metric-query API calls issued:\s*7\s*$'
+        $Summary | Should -Not -Match $script:SummaryAnyMetricNaPattern
+        $Diag | Should -Not -Match $script:DiagAnyMetricNaPattern
     }
 
     It 'Does not describe the query window as UTC (the consumption phase uses host local time)' {

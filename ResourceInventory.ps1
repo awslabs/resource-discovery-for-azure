@@ -2321,9 +2321,26 @@ function ExecuteInventoryProcessing()
     # clear breakdown so an operator can see which phase dominates a long run.
     $script:PhaseTimings = [ordered]@{}
 
+    # Metric-query API calls issued by THIS invocation, for the shareable
+    # Diagnostics_*.log. Extension/Metrics.ps1 accumulates into
+    # $Global:MetricsApiCallCount, which is deliberately RUN-cumulative - the wrapper
+    # reports a whole-run (or per-stream-slice) total from it. The Diagnostics log is
+    # PER-SUBSCRIPTION, so handing that global straight over would make the third
+    # subscription's log claim sub1 + sub2 + sub3 calls. Take the delta across this
+    # invocation's metrics phase instead, which mirrors how
+    # $script:ConsumptionRecordsThisRun keeps a per-invocation consumption figure and
+    # relies on the same fresh-script-scope-per-& property noted above.
+    $MetricsApiCallsBefore = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
+
     $MetricsPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     CreateMetricsJob
     $MetricsPhaseTimer.Stop()
+
+    # Clamped at 0: the only writer is Metrics.ps1's '+=' so the delta cannot normally
+    # go negative, but the parallel worker resets the global to 0 for its slice, and a
+    # diagnostics figure must never render as a negative count if that ever moves.
+    $MetricsApiCallsAfter = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
+    $script:MetricsApiCallsThisRun = [Math]::Max(0, $MetricsApiCallsAfter - $MetricsApiCallsBefore)
 
     $CollectorPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     CreateResourceJobs
@@ -2903,7 +2920,7 @@ if ($Obfuscate.IsPresent)
     # the obfuscated and default packaging branches. Returns $null on any
     # build/write failure (downgraded to a warning inside), so the guard below
     # cannot inject a missing path into the archive list and break packaging.
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested (-not $SkipConsumption.IsPresent) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     # Exclude the obfuscation dictionary and transcript from the obfuscated zip.
     # The dictionary maps obfuscated values back to REAL identifiers, and the
@@ -2942,7 +2959,7 @@ else
     # by Protect-DiagnosticText; the surrounding report already carries real
     # names, so shipping the log here adds no new exposure. Guarded like the
     # obfuscate path so a build/write failure cannot break packaging.
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested (-not $SkipConsumption.IsPresent)
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 

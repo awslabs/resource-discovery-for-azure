@@ -83,6 +83,19 @@ Describe '-Service advisory: per-phase accuracy (source guard)' {
     It 'no longer claims -ResourceGroup "also scopes metrics" without qualification' {
         $script:InvSrc | Should -Not -Match 'which also scopes metrics'
     }
+
+    # BINDING GUARD. The tests above prove the two lists are state-derived and the
+    # count gate exists, but none of them touches the emitted string. A regression
+    # that keeps $UnscopedPhases/$SuggestedSkips and the gate yet hardcodes the
+    # message body (placeholders replaced by a literal 'metrics, consumption' /
+    # '-SkipMetrics -SkipConsumption') would reintroduce the exact wrong-for-state
+    # claim this file exists to prevent, and every assertion above would still pass.
+    # Bind the emitted Warning to the -f interpolation of BOTH derived lists so a
+    # static body fails here. Single-quoted regex: '$' is literal, per the sigil
+    # trap documented on the derivation test above.
+    It 'interpolates the derived phase and skip lists into the emitted advisory (not a hardcoded body)' {
+        $script:InvSrc | Should -Match '(?s)-Service scopes the INVENTORY phase only[\s\S]*?\{0\}[\s\S]*?\{1\}[\s\S]*?-f\s*\(\$UnscopedPhases\s*-join[\s\S]{0,40}?\),\s*\(\$SuggestedSkips\s*-join'
+    }
 }
 
 Describe '-Service advisory: emitted once per run, not once per subscription' {
@@ -105,6 +118,14 @@ Describe '-Service advisory: emitted once per run, not once per subscription' {
     It 'the wrapper advisory is also per-phase accurate' {
         $script:WrapSrc | Should -Match '\$UnscopedPhases\s*=\s*@\(\)'
         $script:WrapSrc | Should -Match '@\(\$UnscopedPhases\)\.Count\s*-gt\s*0'
+    }
+
+    # BINDING GUARD (wrapper copy). Same class of regression as the inner one: the
+    # wrapper derives both lists and gates on the count, but a hardcoded Write-Warning
+    # body would pass the two assertions above while re-shipping the wrong-for-state
+    # string. Bind the emitted text to the -f interpolation of both derived lists.
+    It 'interpolates the derived phase and skip lists into the wrapper advisory (not a hardcoded body)' {
+        $script:WrapSrc | Should -Match '(?s)-Service scopes the INVENTORY phase only[\s\S]*?\{0\}[\s\S]*?\{1\}[\s\S]*?-f\s*\(\$UnscopedPhases\s*-join[\s\S]{0,40}?\),\s*\(\$SuggestedSkips\s*-join'
     }
 
     # The wrapper has no -ResourceGroup parameter, so its copy must not suggest one.

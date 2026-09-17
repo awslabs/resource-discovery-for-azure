@@ -245,6 +245,10 @@ $Unmatched = 0
 # because it was previously incremented without ever being declared: under no
 # StrictMode '$null++' silently becomes 1, so the count was wrong AND unreported.
 $FlexibleCount = 0
+# Scale sets whose Instances cell is left EMPTY because a join miss left their
+# orchestration mode UNKNOWN, so counting instances could double-count a Flexible
+# set whose members were already emitted as VM rows (see the guard below).
+$UnknownOrchestrationCount = 0
 
 foreach ($Vm in $Vms)
 {
@@ -338,7 +342,17 @@ foreach ($Ss in $ScaleSets)
     # Uniform sets are unaffected: their members are the CHILD ARM type
     # (.../virtualmachinescalesets/virtualmachines), never matched by the VM filter,
     # so Instances is the only place their capacity is represented.
-    $InstanceValue = if ($IsFlexible) { $null } else { (Get-PlacementNumber -Value $Ss.Instances -AllowZero) }
+    #
+    # A join miss makes orchestration UNKNOWN, not Uniform: on a miss $Placement is
+    # null, so $Orchestration defaulted to '' and $IsFlexible is false. Trusting that
+    # default would count the Instances of a set that might really be Flexible - whose
+    # members were already emitted as VirtualMachine rows - and re-introduce the exact
+    # double-count this guard exists to prevent. So Instances is counted ONLY when the
+    # row matched AND is known not to be Flexible; an unmatched set is left EMPTY (a
+    # missing figure over a wrong total, per the EMPTY VS ZERO note in the header) and
+    # named in the unmatched-instances Warning below.
+    $InstanceValue = if ($null -ne $Placement -and -not $IsFlexible) { (Get-PlacementNumber -Value $Ss.Instances -AllowZero) } else { $null }
+    if ($null -eq $Placement) { $UnknownOrchestrationCount++ }
 
     $Rows += [PSCustomObject]@{
         'ResourceKind'      = 'VirtualMachineScaleSet'
@@ -411,4 +425,16 @@ if ($Unmatched -gt 0)
 if ($FlexibleCount -gt 0)
 {
     Write-Log -Message ("VM placement CSV: {0} Flexible-orchestration scale set(s) have an EMPTY Instances cell BY DESIGN - their member VMs are first-class resources and are already counted as individual VirtualMachine rows, so counting the set's instances too would double-count that capacity. The rows remain visible for SKU and zone, and their ParentScaleSet column links the member VMs back to them." -f $FlexibleCount) -Severity 'Warning' -ToDebugLog
+}
+
+# A scale set that missed the Resource Graph join has an UNKNOWN orchestration mode,
+# so its Instances cannot be counted safely: were it Flexible, its member VMs were
+# already emitted as VirtualMachine rows and counting the set too would double-count.
+# Its Instances cell is therefore left EMPTY (already reported as unmatched above),
+# and the consequence for the capacity total is named here rather than left to be
+# inferred - without this, a genuinely Flexible unmatched set would silently re-open
+# the double-count the guard prevents.
+if ($UnknownOrchestrationCount -gt 0)
+{
+    Write-Log -Message ("VM placement CSV: {0} scale set(s) could not be matched to the Resource Graph payload, so their orchestration mode is UNKNOWN and their Instances cell is left EMPTY - counting instances for a set that might be Flexible would double-count member VMs already emitted as individual rows. SUM(CPU * Instances) therefore excludes these set(s)." -f $UnknownOrchestrationCount) -Severity 'Warning' -ToDebugLog
 }

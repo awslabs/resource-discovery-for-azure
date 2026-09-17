@@ -572,4 +572,30 @@ Describe 'Merge-RecoveryData dictionary merge and packaging' {
         (Get-Content -Path $GapInvPath -Raw) | Should -Be $GapBefore -Because 'the merge writes to OutputPath only, never back into the gap bundle'
         (Get-Content -Path $RecInvPath -Raw) | Should -Be $RecBefore -Because 'the recovery bundle is read-only input'
     }
+
+    It 'zips only the files this merge wrote, never stale JSON left in a reused output folder' {
+        # Regression guard: the re-zip once globbed $OutputPath/*.json, and the
+        # output folder is only ensured to exist (never cleaned), so a merge into
+        # a REUSED output folder silently bundled stale/foreign JSON from an
+        # earlier run. Pre-create the output folder and plant a stale inventory
+        # and a stale metrics file, then assert neither survives into the zip
+        # while the real members still do.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        New-Item -ItemType Directory -Path $C.Output -Force | Out-Null
+        '{"stale":"inventory"}' | Out-File -FilePath (Join-Path $C.Output 'Inventory_STALE_from_previous_run.json') -Encoding utf8
+        '{"stale":"metrics"}' | Out-File -FilePath (Join-Path $C.Output 'Metrics_STALE.json') -Encoding utf8
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
+
+        $Entries = Get-ZipEntryNames -ZipPath $Result.OutputZip
+        $Entries | Should -Not -Contain 'Inventory_STALE_from_previous_run.json' -Because 'a stale inventory left in a reused output folder must not be packaged'
+        $Entries | Should -Not -Contain 'Metrics_STALE.json' -Because 'a stale metrics file left in a reused output folder must not be packaged'
+        ($Entries | Where-Object { $_ -eq ('Inventory_{0}.json' -f $script:GapBase) }) | Should -Not -BeNullOrEmpty -Because 'the real merged inventory must still be packaged'
+        ($Entries | Where-Object { $_ -like '*.html' }) | Should -Not -BeNullOrEmpty -Because 'the regenerated HTML must still be packaged'
+        ($Entries | Where-Object { $_ -like 'Consumption_*.csv' }) | Should -Not -BeNullOrEmpty -Because 'the consumption CSV must still be packaged'
+        ($Entries | Where-Object { $_ -eq ('Metrics_{0}__0.json' -f $script:GapBase) }) | Should -Not -BeNullOrEmpty -Because 'the real gap metrics batch must still be packaged'
+    }
 }

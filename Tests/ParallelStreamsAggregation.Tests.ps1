@@ -182,10 +182,27 @@ BeforeAll {
         # if both subs happen to have identical type sets.
         '{0}|{1}' -f $a.ResourceCount, ($a.PopulatedTypes -join ',')
     }
+    # Group per-sub artifacts by signature into LISTS, not single values: two
+    # subs with an identical (ResourceCount, PopulatedTypes) signature collide
+    # on the same key (e.g. two empty subs both key to '0|'), and assigning
+    # into a scalar-valued hashtable would silently overwrite all but the last,
+    # dropping the rest from the signature-matched comparisons below. Keeping a
+    # list per key preserves every colliding sub so the parity tests compare
+    # all of them.
     $script:SeqBySig = @{}
-    foreach ($a in $script:SeqArtifacts) { $script:SeqBySig[(Get-SignatureKey $a)] = $a }
+    foreach ($a in $script:SeqArtifacts)
+    {
+        $Key = Get-SignatureKey $a
+        if (-not $script:SeqBySig.ContainsKey($Key)) { $script:SeqBySig[$Key] = @() }
+        $script:SeqBySig[$Key] += $a
+    }
     $script:ParBySig = @{}
-    foreach ($a in $script:ParArtifacts) { $script:ParBySig[(Get-SignatureKey $a)] = $a }
+    foreach ($a in $script:ParArtifacts)
+    {
+        $Key = Get-SignatureKey $a
+        if (-not $script:ParBySig.ContainsKey($Key)) { $script:ParBySig[$Key] = @() }
+        $script:ParBySig[$Key] += $a
+    }
 }
 
 AfterAll {
@@ -285,9 +302,12 @@ Describe 'HTML section equivalence' {
         {
             $script:ParBySig.ContainsKey($key) | Should -BeTrue `
                 -Because "no parallel-side counterpart found for sequential sub with signature '$key'"
-            $SeqSections = Get-HtmlSectionSlugs $script:SeqBySig[$key].HtmlPath
-            $ParSections = Get-HtmlSectionSlugs $script:ParBySig[$key].HtmlPath
-            ($ParSections -join ',') | Should -Be ($SeqSections -join ',') `
+            # A signature can match more than one sub per side (e.g. two empty
+            # subs). Compare the multiset of per-sub slug sets so every colliding
+            # sub is checked and a differing count between sides is caught too.
+            $SeqSlugSets = @($script:SeqBySig[$key] | ForEach-Object { (Get-HtmlSectionSlugs $_.HtmlPath) -join ',' }) | Sort-Object
+            $ParSlugSets = @($script:ParBySig[$key] | ForEach-Object { (Get-HtmlSectionSlugs $_.HtmlPath) -join ',' }) | Sort-Object
+            ($ParSlugSets -join '|') | Should -Be ($SeqSlugSets -join '|') `
                 -Because "HTML service-section set diverged for sub signature '$key'"
         }
     }
@@ -326,11 +346,17 @@ Describe 'Inventory JSON key parity' {
         foreach ($key in $script:SeqBySig.Keys)
         {
             if (-not $script:ParBySig.ContainsKey($key)) { continue }
-            $SeqInv = Get-Content $script:SeqBySig[$key].InventoryPath -Raw | ConvertFrom-Json
-            $ParInv = Get-Content $script:ParBySig[$key].InventoryPath -Raw | ConvertFrom-Json
-            $SeqKeys = @($SeqInv.PSObject.Properties.Name) | Sort-Object
-            $ParKeys = @($ParInv.PSObject.Properties.Name) | Sort-Object
-            ($ParKeys -join ',') | Should -Be ($SeqKeys -join ',') `
+            # A signature can match more than one sub per side; compare the
+            # multiset of per-sub key sets so every colliding sub is checked.
+            $SeqKeySets = @($script:SeqBySig[$key] | ForEach-Object {
+                    $Inv = Get-Content $_.InventoryPath -Raw | ConvertFrom-Json
+                    (@($Inv.PSObject.Properties.Name) | Sort-Object) -join ','
+                }) | Sort-Object
+            $ParKeySets = @($script:ParBySig[$key] | ForEach-Object {
+                    $Inv = Get-Content $_.InventoryPath -Raw | ConvertFrom-Json
+                    (@($Inv.PSObject.Properties.Name) | Sort-Object) -join ','
+                }) | Sort-Object
+            ($ParKeySets -join '|') | Should -Be ($SeqKeySets -join '|') `
                 -Because "Inventory JSON top-level keys must be identical for sub signature '$key'"
         }
     }

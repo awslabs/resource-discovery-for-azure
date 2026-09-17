@@ -98,16 +98,20 @@ Describe 'The naive shared-destination extract loses shard placement data' {
     # Negative control. If this ever stops clobbering, the per-shard-subfolder step in
     # the documented sequence is no longer load-bearing and the docs should say so.
 
-    It 'overwrites all but one shard copy when every shard extracts to the same folder' {
-        $Staging = Join-Path $script:Root 'naive'
-        New-Item -ItemType Directory -Path $Staging -Force | Out-Null
+    BeforeAll {
+        # Shared naive extract: every shard into ONE folder, so both It blocks are
+        # independent of each other's execution and order.
+        $script:NaiveStaging = Join-Path $script:Root 'naive'
+        New-Item -ItemType Directory -Path $script:NaiveStaging -Force | Out-Null
 
         foreach ($Shard in Get-ChildItem -LiteralPath $script:ShardDir -Filter 'AllSubscriptions_ResourcesReport_*.zip')
         {
-            Expand-Archive -LiteralPath $Shard.FullName -DestinationPath $Staging -Force
+            Expand-Archive -LiteralPath $Shard.FullName -DestinationPath $script:NaiveStaging -Force
         }
+    }
 
-        $Rows = @(Import-Csv -LiteralPath (Join-Path $Staging 'VMPlacement.csv'))
+    It 'overwrites all but one shard copy when every shard extracts to the same folder' {
+        $Rows = @(Import-Csv -LiteralPath (Join-Path $script:NaiveStaging 'VMPlacement.csv'))
         $Subs = @($Rows | ForEach-Object { $_.Subscription } | Select-Object -Unique)
 
         # 3 rows across 2 subscriptions exist in total; a clobbered merge sees only one
@@ -117,9 +121,8 @@ Describe 'The naive shared-destination extract loses shard placement data' {
     }
 
     It 'and the *.zip-only re-zip then excludes even the survivor' {
-        $Staging = Join-Path $script:Root 'naive'
         $Merged = Join-Path $script:Root 'naive-merged.zip'
-        Compress-Archive -Path (Join-Path $Staging '*.zip') -DestinationPath $Merged -Force
+        Compress-Archive -Path (Join-Path $script:NaiveStaging '*.zip') -DestinationPath $Merged -Force
 
         $RootEntries = script:Get-ZipRootEntry -ZipPath $Merged
         @($RootEntries | Where-Object { $_ -like '*.csv' }).Count |

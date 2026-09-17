@@ -276,6 +276,18 @@ Describe 'Get-ConsumptionAccessOutcome classification' {
         Get-ConsumptionAccessOutcome -ErrorMessage 'A task was canceled (timeout)' | Should -Be 'Unavailable'
         Get-ConsumptionAccessOutcome -ErrorMessage 'The remote name could not be resolved' | Should -Be 'Unavailable'
     }
+
+    It 'Falls through to Unavailable (warn + continue, not a hard fail) for an error matching NEITHER the denial nor the transient patterns' {
+        # Pins the default branch decision (dossier invariant 4): an unclassified
+        # probe error - a 5xx server error or an entirely unrecognised message -
+        # is NOT a Denied authorization failure, so it must NOT hard-fail the run.
+        # It falls through to 'Unavailable', which warns and continues. Only an
+        # explicit denial signature may escalate to the up-front hard fail.
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 500 (InternalServerError)' | Should -Be 'Unavailable' -Because 'a 5xx server error is not an authorization denial and must not hard-fail the run'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 502 (BadGateway)' | Should -Be 'Unavailable'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'Response status code 503 (ServiceUnavailable)' | Should -Be 'Unavailable'
+        Get-ConsumptionAccessOutcome -ErrorMessage 'An unexpected error of a kind this gate has never seen before' | Should -Be 'Unavailable' -Because 'an unrecognised probe error defaults to warn + continue, never to the Denied hard fail'
+    }
 }
 
 Describe 'Interrupted-parallel-run stream-state fold-in (F2)' {

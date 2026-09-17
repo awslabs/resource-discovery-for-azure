@@ -192,6 +192,8 @@ You might get more than one authentication request due to different collector pr
 
 ### Basic Execution
 
+The entry scripts carry a `#!/usr/bin/env pwsh` shebang and are executable, so from Cloud Shell's **Bash** (or any POSIX shell) you can run them directly - `./Run-AllSubscriptions.ps1 ...` - without switching to PowerShell first.
+
 1. **Navigate to the script directory:**
    ```powershell
    cd resource-discovery-for-azure
@@ -284,6 +286,27 @@ If you *intentionally* have access to only a subset of the tenant, pass `-AllowP
 ```
 
 On `-Resume`, only the subscriptions that still need processing are probed. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs.
+
+#### Checking permissions before a run (`-Preflight`)
+
+The access check above proves *Reader*. The two data phases need two more roles - **Cost Management Reader** (consumption) and **Monitoring Reader** (metrics) - and without them a run only discovers the gap partway through, sometimes hours in. `-Preflight` runs the normal sign-in, tenant, coverage and Reader checks, then probes **every** in-scope subscription for both data-phase permissions, prints a per-subscription matrix with the exact role to grant, and stops without collecting anything:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Preflight
+```
+
+```
+Permission matrix (per subscription):
+  Subscription                             Reader        Cost Mgmt        Monitoring
+  --------------------------------------------------------------------------------------
+  Production                               Ok            Ok               Ok
+  Sandbox                                  Ok            Denied           NoResource
+
+To fix before running:
+  - Grant Cost Management Reader on Sandbox (<id>) (or Billing Reader on the billing scope), or run with -SkipConsumption.
+```
+
+`Ok` is verified, `Denied` is an RBAC denial and makes the preflight exit 1, `Unavailable` means the probe could not run (token or transient; the real run retries per subscription), `NoResource` means the subscription holds nothing metric-eligible to probe, and `Skipped` means you passed the matching `-Skip*` switch. Your Az context is restored afterwards.
 
 #### Resuming an interrupted run
 

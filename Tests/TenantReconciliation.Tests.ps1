@@ -211,9 +211,14 @@ Describe "Inventory structural integrity" {
     It "Every consumption ResourceId belongs to the run's subscription" {
         if (-not $script:StructuralOK) { Set-ItResult -Skipped -Because $script:StructuralSkip; return }
         if ($script:Consumption.Count -eq 0) { Set-ItResult -Skipped -Because "no consumption rows in this fixture"; return }
+        # Scope against the inventory's OWN subscription(s), not $script:TargetSub:
+        # $script:TargetSub becomes $env:TEST_SUBSCRIPTION_ID when set, so an
+        # externally-supplied id would false-fail this drift-immune structural
+        # check on a harness mis-configuration rather than a real code bug (same
+        # self-referential rationale as the single-subscription check above).
         $Foreign = @($script:Consumption |
                 Where-Object { ![string]::IsNullOrEmpty($_.ResourceId) -and $_.ResourceId -match '^/subscriptions/([0-9a-fA-F-]{36})/' } |
-                Where-Object { ($_.ResourceId -split '/')[2] -ne $script:TargetSub })
+                Where-Object { $script:InvSubs -notcontains ($_.ResourceId -split '/')[2] })
         $Foreign.Count | Should -Be 0 -Because "consumption must not attribute cost from another subscription (cross-attribution)"
     }
 }

@@ -129,17 +129,17 @@ try
     }
     Write-RdaProgress -Activity 'Revealing reports' -Completed
 
-    # -- Scenario 5: High-frequency BAR-ONLY loop (collectors) -------------
-    Write-ScenarioHeader -Number '5' -Title 'Bar-only collector loop (line suppressed)' -Caller 'ResourceInventory.ps1 Service Processing (-BarOnly + heartbeat)'
-    Write-Host '       (BarOnly: NO per-item text line - only the live bar + heartbeat file.' -ForegroundColor DarkGray
-    Write-Host '        Nothing prints below on purpose; see the heartbeat tail at the end.)' -ForegroundColor DarkGray
-    $Collectors = 'Compute', 'Storage', 'Networking', 'Data', 'Containers', 'Analytics'
-    for ($i = 0; $i -lt $Collectors.Count; $i++)
+    # -- Scenario 5: Heartbeat-forwarding read loop (durable heartbeat file) ----
+    Write-ScenarioHeader -Number '5' -Title 'Heartbeat-forwarding read loop (durable heartbeat file)' -Caller 'FindResource.Functions.ps1 (-HeartbeatLogFile forwarded)'
+    Write-Host '       (This caller forwards -HeartbeatLogFile so a long, non-interactive find' -ForegroundColor DarkGray
+    Write-Host '        stays observable via the durable heartbeat file tailed at the end.)' -ForegroundColor DarkGray
+    $Reports = 1..6 | ForEach-Object { 'Inventory_Sub-Prod-{0:D2}.json' -f $_ }
+    for ($i = 0; $i -lt $Reports.Count; $i++)
     {
-        Write-RdaProgress -Activity 'Service Processing' -CurrentItem $Collectors[$i] -Index ($i + 1) -Total $Collectors.Count -BarOnly -HeartbeatLogFile $HeartbeatFile
+        Write-RdaProgress -Activity 'Reading subscription inventories' -CurrentItem $Reports[$i] -Index ($i + 1) -Total $Reports.Count -HeartbeatLogFile $HeartbeatFile
         if ($SleepMs) { Start-Sleep -Milliseconds $SleepMs }
     }
-    Write-RdaProgress -Activity 'Service Processing' -Completed -HeartbeatLogFile $HeartbeatFile
+    Write-RdaProgress -Activity 'Reading subscription inventories' -Completed
 
     # -- Scenario 6: Metrics batch loop (bar-only, large total) ------------
     Write-ScenarioHeader -Number '6' -Title 'Metrics batch loop (bar-only, large total)' -Caller 'Extension/Metrics.ps1 (-BarOnly)'
@@ -154,7 +154,7 @@ try
 
     # -- Heartbeat evidence ------------------------------------------------
     Write-Host ''
-    Write-Host '----- Durable heartbeat file (Scenario 5, bar-only phase) -----' -ForegroundColor Green
+    Write-Host '----- Durable heartbeat file (Scenario 5, heartbeat-forwarding phase) -----' -ForegroundColor Green
     Write-Host ('       file: {0}' -f $HeartbeatFile) -ForegroundColor DarkGray
     if (Test-Path $HeartbeatFile)
     {

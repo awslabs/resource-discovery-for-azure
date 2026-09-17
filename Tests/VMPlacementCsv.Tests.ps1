@@ -360,6 +360,24 @@ Describe 'VM placement CSV' {
             $Rows = script:Invoke-Placement -Vms @() -ScaleSets @() -GraphRows @() -Dictionary $null
             $Rows | Should -BeNullOrEmpty
         }
+
+        It 'fails loud with an Error when Resource Graph reports VMs or scale sets but the collectors returned no rows' {
+            # The empty-collector result has TWO causes that must NOT report identically:
+            # a subscription genuinely without VMs (the benign Info skip asserted above),
+            # versus a collector that THREW and left $Result = @() while Resource Graph
+            # still shows the resources. The extension distinguishes them by asking the
+            # Graph payload, and the second case is a fail-loud Severity 'Error' - not a
+            # silent Info skip. Supplying both a VM and a VMSS Graph row against empty
+            # collector output exercises that Error branch (checked for BOTH types), so a
+            # regression collapsing the collector-failure signal back into an Info skip is
+            # caught here.
+            $Rows = script:Invoke-Placement -Vms @() -ScaleSets @() `
+                -GraphRows @((script:New-GraphVm -Id 'v1'), (script:New-GraphVmss -Id 's1')) -Dictionary $null
+
+            $Rows | Should -BeNullOrEmpty -Because 'no CSV is written on the collector-failure signal, just as on the benign skip'
+            $Errors = @($Global:PlacementLogLines | Where-Object { $_ -match '^\[Error\]' })
+            $Errors.Count | Should -BeGreaterThan 0 -Because 'a collector returning no rows while Resource Graph reports capacity must be reported loudly, not skipped as Info'
+        }
     }
 }
 

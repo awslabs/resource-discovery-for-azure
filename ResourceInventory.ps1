@@ -1954,7 +1954,6 @@ function ExecuteInventoryProcessing()
                     $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
-                    $ConsumptionRecordsThisSub += $UsageDataExport.Count
 
                     $NewUsageDataExport = [System.Collections.ArrayList]::new()
 
@@ -2247,6 +2246,15 @@ function ExecuteInventoryProcessing()
                     }
 
                     $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+
+                    # Count rows actually WRITTEN to Consumption_*.csv this page - i.e. after
+                    # the null-InstanceData skip and the -ResourceGroup filter above - NOT the
+                    # rows FETCHED from the billing API. $Global:ConsumptionRecordCount is the
+                    # documented "rows written" figure (surfaced as "Consumption records
+                    # collected"); accumulating the pre-filter $UsageDataExport.Count overstated
+                    # the CSV row count in a -ResourceGroup-scoped run. The per-page fetched
+                    # count is still visible in the "Records found" log line above.
+                    $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
 
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
             }

@@ -699,6 +699,21 @@ Describe "Cross-Reference Field Obfuscation" {
         if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots had a non-null SourceResourceId in this fixture" }
     }
 
+    It "ComputeSnapshots: DiskEncryptionSet should be obfuscated or null" {
+        $Resources = @($script:Inventory.ComputeSnapshots) | Where-Object { $null -ne $_ }
+        if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots resources in this fixture"; return }
+        $Checked = 0
+        foreach ($r in $Resources)
+        {
+            if ($null -ne $r -and ![string]::IsNullOrEmpty($r.DiskEncryptionSet))
+            {
+                $r.DiskEncryptionSet | Should -Not -Match $script:AzureIdPattern -Because "DiskEncryptionSet should not contain raw Azure resource ID"
+                $Checked++
+            }
+        }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no ComputeSnapshots had a non-null DiskEncryptionSet in this fixture" }
+    }
+
     It "AVD: HostId should be obfuscated or null" {
         $Resources = @($script:Inventory.AVD) | Where-Object { $null -ne $_ }
         if ($Resources.Count -eq 0) { Set-ItResult -Skipped -Because "no AVD resources in this fixture"; return }

@@ -70,6 +70,7 @@ Describe "Dictionary Structure" {
     It "ResourceIdMap keys should be obfuscated values" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         $Keys = $script:Dictionary.ResourceIdMap.PSObject.Properties.Name
+        $Keys | Should -Not -BeNullOrEmpty -Because "an empty ResourceIdMap runs zero per-key assertions and would pass vacuously; a valid -Obfuscate dictionary must have entries"
         foreach ($key in $Keys)
         {
             $key | Should -Match $script:ObfuscationPattern -Because "Dictionary key '$key' should be an obfuscated ID"
@@ -79,6 +80,7 @@ Describe "Dictionary Structure" {
     It "ResourceIdMap values should be real Azure resource IDs" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available"; return }
         $Values = $script:Dictionary.ResourceIdMap.PSObject.Properties.Value
+        $Values | Should -Not -BeNullOrEmpty -Because "an empty ResourceIdMap runs zero per-value assertions and would pass vacuously; a valid -Obfuscate dictionary must have entries"
         foreach ($val in $Values)
         {
             $val | Should -Match $script:AzureIdPattern -Because "Dictionary value should be a real Azure resource ID"

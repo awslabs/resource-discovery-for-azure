@@ -53,7 +53,7 @@ Describe 'LoginSession restores the caller''s $DebugPreference, not a literal' {
     It 'restores the SAVED value and never a hardcoded Continue' {
         # THE regression. A literal here forces debug on for a caller who opted out.
         $script:LoginText | Should -Match '\$DebugPreference\s*=\s*\$SavedDebugPref'
-        $script:LoginText | Should -Not -Match '\$DebugPreference\s*=\s*"Continue"' -Because 'restoring to a literal overrides -Debug:$false'
+        $script:LoginText | Should -Not -Match '\$DebugPreference\s*=\s*[''"]Continue[''"]' -Because 'restoring to a literal (single OR double quoted) overrides -Debug:$false'
     }
 
     It 'saves BEFORE it suppresses, so the captured value is the caller''s' {
@@ -69,25 +69,32 @@ Describe 'LoginSession restores the caller''s $DebugPreference, not a literal' {
 
 Describe 'No hardcoded Continue restore survives anywhere in the script' {
 
-    It 'has no $DebugPreference = "Continue" assignment left' {
+    It 'has no hardcoded $DebugPreference = Continue assignment left (single or double quoted)' {
         # The other occurrence was the LAST statement of GetResourceConsumption, so it
         # could never affect anything - dead code that read like a safeguard. Both are
         # gone; only the comment describing why remains.
         $CodeLines = @($script:InvLines | Where-Object { $_ -notmatch '^\s*#' })
-        @($CodeLines | Where-Object { $_ -match '\$DebugPreference\s*=\s*"Continue"' }).Count |
-            Should -Be 0 -Because 'a literal Continue anywhere re-introduces the opt-out override'
+        @($CodeLines | Where-Object { $_ -match '\$DebugPreference\s*=\s*[''"]Continue[''"]' }).Count |
+            Should -Be 0 -Because 'a literal Continue anywhere (single or double quoted) re-introduces the opt-out override'
     }
 }
 
 Describe 'The save/restore round-trip honours every state the binder can produce' {
 
-    # Pure logic over the same three-line idiom the function uses, so the invariant is
-    # checked behaviourally rather than only as text.
+    # Illustrates, over the same three-line idiom the function uses, WHY the source shape
+    # asserted in the first two Describes is the correct one. On its own the round-trip is
+    # pure logic that would pass regardless of ResourceInventory.ps1, so each case FIRST
+    # couples to the code under test: it asserts the LIVE source restores the saved value and
+    # never a literal, so a regression in LoginSession fails here too, not only in Describe 1.
     It 'round-trips <Label> unchanged' -ForEach @(
         @{ Label = 'SilentlyContinue (no -Debug, the production default)'; Incoming = 'SilentlyContinue' }
         @{ Label = 'Continue (-Debug passed)'; Incoming = 'Continue' }
         @{ Label = 'SilentlyContinue (-Debug:$false, an explicit opt-out)'; Incoming = 'SilentlyContinue' }
     ) {
+        # Couple to the code under test - without this the round-trip below is pure logic.
+        $script:LoginText | Should -Match '\$DebugPreference\s*=\s*\$SavedDebugPref' -Because 'the round-trip only reflects LoginSession if the source restores the saved value'
+        $script:LoginText | Should -Not -Match '\$DebugPreference\s*=\s*[''"]Continue[''"]' -Because 'a literal restore (single or double quoted) would break the opt-out'
+
         $DebugPreference = $Incoming
 
         $SavedDebugPref = $DebugPreference
@@ -100,8 +107,11 @@ Describe 'The save/restore round-trip honours every state the binder can produce
     }
 
     It 'the OLD idiom demonstrably broke the opt-out (regression witness)' {
-        # Shows what the literal restore did, so the reason for the change is executable
-        # rather than only described in a comment.
+        # Illustrates what the literal restore did, so the reason for the change is executable
+        # rather than only described in a comment. Coupled to the code under test: the live
+        # source must NOT contain that literal restore any more.
+        $script:LoginText | Should -Not -Match '\$DebugPreference\s*=\s*[''"]Continue[''"]' -Because 'the literal restore is the bug and must be gone from LoginSession'
+
         $DebugPreference = 'SilentlyContinue'   # caller passed -Debug:$false
         $DebugPreference = 'SilentlyContinue'   # suppress
         $DebugPreference = 'Continue'           # the OLD restore: a literal
@@ -113,9 +123,14 @@ Describe 'The save/restore round-trip honours every state the binder can produce
 Describe 'A preference assignment inside a function does not leak to script scope' {
 
     It 'confirms the blast radius that made this easy to miss' {
-        # Measured, not assumed. This is why the defect was bounded to the remainder of
-        # LoginSession instead of corrupting the whole run - and therefore why nothing
-        # downstream ever surfaced it.
+        # The local-function demonstration below documents the LANGUAGE invariant - a
+        # function-scoped preference assignment does not leak to script scope. To couple the
+        # blast-radius claim to THIS repo, first assert LoginSession's suppress and restore
+        # actually live inside the function's extent ($script:LoginText is that extent only);
+        # were they moved to script scope the blast radius would widen and these Matches fail.
+        $script:LoginText | Should -Match '\$DebugPreference\s*=\s*"SilentlyContinue"' -Because 'the suppression is scoped inside LoginSession'
+        $script:LoginText | Should -Match '\$DebugPreference\s*=\s*\$SavedDebugPref' -Because 'the restore is scoped inside LoginSession'
+
         $DebugPreference = 'SilentlyContinue'
         function script:Set-PrefLocally { $DebugPreference = 'Continue'; return $DebugPreference }
 

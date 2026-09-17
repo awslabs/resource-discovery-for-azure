@@ -183,3 +183,50 @@ Describe "Protect-DiagnosticText preserves already-obfuscated tokens and edge ca
         $Out | Should -Not -Match ([regex]::Escape($script:Email))
     }
 }
+
+Describe "Protect-DiagnosticText redacts connection-string secrets while preserving readable segments" {
+
+    # The widened auth alternation now masks the connection-string secret keys
+    # Azure storage / Service Bus / SQL / AAD exception text carries, and its
+    # value class ([^&;...]) terminates at ';' or '&' so the NEXT segment - and
+    # the readable key NAME - survive. Each secret is built at runtime (a fresh
+    # GUID 'N' form, like the file's other fixtures) so no literal secret lives
+    # in this source and the pre-commit leak scan stays clean.
+
+    It "redacts an AccountKey value while EndpointSuffix survives readable" {
+        $Secret = [guid]::NewGuid().ToString('N') + '=='
+        $Conn = "AccountName=acct;AccountKey=$Secret;EndpointSuffix=core.windows.net"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'AccountKey=<redacted>'
+        $Out | Should -Match 'EndpointSuffix=core\.windows\.net'
+    }
+
+    It "redacts a SharedAccessKey value while the SharedAccessKeyName key name survives" {
+        $Secret = [guid]::NewGuid().ToString('N') + '='
+        $Conn = "SharedAccessKeyName=RootManage;SharedAccessKey=$Secret"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'SharedAccessKey=<redacted>'
+        $Out | Should -Match 'SharedAccessKeyName=RootManage'
+    }
+
+    It "redacts a Password value while the following Encrypt segment survives readable" {
+        $Secret = [guid]::NewGuid().ToString('N')
+        $Conn = "User ID=u;Password=$Secret;Encrypt=true"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'Password=<redacted>'
+        $Out | Should -Match 'Encrypt=true'
+    }
+
+    It "redacts a client_secret value while client_id and scope survive readable" {
+        $Secret = [guid]::NewGuid().ToString('N')
+        $Conn = "client_id=id&client_secret=$Secret&scope=x"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'client_secret=<redacted>'
+        $Out | Should -Match 'client_id=id'
+        $Out | Should -Match 'scope=x'
+    }
+}

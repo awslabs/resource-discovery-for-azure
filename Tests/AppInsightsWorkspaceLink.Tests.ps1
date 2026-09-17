@@ -246,6 +246,7 @@ Describe 'Emitted contract' {
         $Rec = Invoke-Collector -Path $script:AiCollector -Resources @(New-ComponentRecord -WorkspaceResourceId $script:WsId) -Dictionary $null
 
         $Rec.ID | Should -BeExactly $script:AiId
+        $Rec.Subscription | Should -BeExactly "prod_sub_$($script:DocGuid)" -Because 'the collector joins the subscription name via $SUB | Where-Object { $_.id -eq $1.subscriptionId }'
         $Rec.Name | Should -BeExactly 'appi-web01'
         $Rec.ResourceGroup | Should -BeExactly 'rg-obs'
         $Rec.Location | Should -BeExactly 'westeurope'

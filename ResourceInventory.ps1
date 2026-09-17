@@ -377,6 +377,7 @@ function RunInventorySetup()
 
             $Global:PlatformOS = 'PowerShell Desktop'
             $CloudShell = try { Get-CloudDrive }catch {}
+
             if ($CloudShell)
             {
                 Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'

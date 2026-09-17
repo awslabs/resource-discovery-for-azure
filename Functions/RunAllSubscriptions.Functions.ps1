@@ -1940,11 +1940,12 @@ function Format-PreflightMatrix
         if ($Name.Length -gt 40) { $Name = $Name.Substring(0, 37) + '...' }
         $Lines.Add(('  {0,-40} {1,-13} {2,-16} {3,-13}' -f $Name, $R.Reader, $R.CostManagement, $R.Monitoring))
         if ($R.Reader -eq 'Denied') { $Blocking = $true; $Hints.Add(('Grant Reader on {0} ({1}) - or Reader at the tenant-root management group, which inherits to every subscription.' -f $R.Name, $R.Id)) }
+        if ($R.Reader -eq 'Unavailable') { $Blocking = $true; $Hints.Add(('Reader on {0} ({1}) could not be verified; the real run stops on this unless -AllowPartialAccess is passed. Re-check the sign-in/token and re-run.' -f $R.Name, $R.Id)) }
         if ($R.CostManagement -eq 'Denied') { $Blocking = $true; $Hints.Add(('Grant Cost Management Reader on {0} ({1}) (or Billing Reader on the billing scope), or run with -SkipConsumption.' -f $R.Name, $R.Id)) }
         if ($R.Monitoring -eq 'Denied') { $Blocking = $true; $Hints.Add(('Grant Monitoring Reader on {0} ({1}), or run with -SkipMetrics.' -f $R.Name, $R.Id)) }
     }
     $Lines.Add('')
-    $Lines.Add('  Ok = verified   Denied = RBAC denial (blocks the run)   Unavailable = could not verify (token/transient; the run will retry per subscription)')
+    $Lines.Add('  Ok = verified   Denied = RBAC denial (blocks the run)   Unavailable = could not verify (token/transient): Cost Mgmt / Monitoring retry per subscription in a real run, an unverifiable Reader stops it')
     $Lines.Add('  NoResource = nothing metric-eligible to probe   Skipped = phase not requested (-SkipMetrics / -SkipConsumption)')
     if ($Hints.Count -gt 0)
     {

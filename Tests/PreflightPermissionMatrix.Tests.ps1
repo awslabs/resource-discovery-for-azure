@@ -98,6 +98,18 @@ Describe 'Format-PreflightMatrix' {
         ($M.Lines -join "`n") | Should -Match 'Monitoring Reader on sub-a.*-SkipMetrics'
     }
 
+    It 'an unverifiable Reader (Unavailable) is blocking, because the real run stops on it' {
+        $M = Format-PreflightMatrix -Rows @((& $script:Row 'sub-a' 'Unavailable' 'Skipped' 'Skipped'))
+        $M.Blocking | Should -BeTrue
+        ($M.Lines -join "`n") | Should -Match 'Reader on sub-a .* could not be verified'
+    }
+
+    It 'a Reader-denied subscription with Skipped data columns is blocking and hints Reader' {
+        $M = Format-PreflightMatrix -Rows @((& $script:Row 'sub-a' 'Denied' 'Skipped' 'Skipped'))
+        $M.Blocking | Should -BeTrue
+        ($M.Lines -join "`n") | Should -Match 'Grant Reader on sub-a'
+    }
+
     It 'Skipped phases render as Skipped and never block' {
         $M = Format-PreflightMatrix -Rows @((& $script:Row 'sub-a' 'Ok' 'Skipped' 'Skipped'))
         $M.Blocking | Should -BeFalse

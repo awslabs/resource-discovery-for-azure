@@ -1594,15 +1594,19 @@ if ($ScopeForProbe.Count -gt 0)
             $Label = if ($NA.State -eq 'Unknown') { 'access probe inconclusive after retries' } else { 'no role on the subscription' }
             Write-Host ("    - {0} ({1}) - {2}" -f $NA.Name, $NA.Id, $Label) -ForegroundColor Red
         }
-        if ($AccessDecision.ShouldBlock)
+        if ($AccessDecision.ShouldBlock -and -not $Preflight)
         {
             Write-Host "  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
             Write-Host "  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)" -ForegroundColor Red
             Exit-Wrapper -Code 1
         }
-        Write-Host "  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow
+        if ($Preflight) { Write-Host "  -Preflight: continuing so the permission matrix can report these subscriptions." -ForegroundColor Yellow }
+        else { Write-Host "  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow }
+        # Remembered for the -Preflight matrix: these are removed from $Subscriptions
+        # below, but the matrix must still show them (Reader Denied / Unavailable).
+        $PreflightInaccessible = @($AccessDecision.Inaccessible)
         $Subscriptions = @($Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains $_.Id })
-        if ($Subscriptions.Count -eq 0)
+        if ($Subscriptions.Count -eq 0 -and -not $Preflight)
         {
             Write-Host "No accessible subscriptions remain in scope; nothing to process." -ForegroundColor Yellow
             Exit-Wrapper -Code 1
@@ -1626,9 +1630,22 @@ if ($Preflight)
     # The probes switch the Az context per subscription; put it back afterwards so
     # a preflight leaves the operator's session exactly as it found it.
     $PreflightOriginalContext = Get-AzContext -ErrorAction SilentlyContinue
-    $MatrixRows = foreach ($PfSub in $Subscriptions)
+    # Subscriptions the Reader gate rejected are not in $Subscriptions any more;
+    # list them first so the matrix shows WHY they are absent from a real run. An
+    # inconclusive probe ('Unknown') renders as Unavailable, and the real run
+    # hard-stops on it too (Resolve-AccessPreflight), so it blocks here as well.
+    $MatrixRows = @()
+    if ($PreflightInaccessible)
     {
-        $ReaderState = if ($AccessDecision -and ($AccessDecision.InaccessibleIds -contains $PfSub.Id)) { 'Denied' } else { 'Ok' }
+        $MatrixRows += foreach ($NA in $PreflightInaccessible)
+        {
+            $ReaderState = if ($NA.State -eq 'Unknown') { 'Unavailable' } else { 'Denied' }
+            [pscustomobject]@{ Name = $NA.Name; Id = $NA.Id; Reader = $ReaderState; CostManagement = 'Skipped'; Monitoring = 'Skipped' }
+        }
+    }
+    $MatrixRows += foreach ($PfSub in $Subscriptions)
+    {
+        $ReaderState = 'Ok'
         $CostState = 'Skipped'
         if (-not $SkipConsumption)
         {
@@ -1647,6 +1664,7 @@ if ($Preflight)
     }
     if ($PreflightOriginalContext) { try { $null = Set-AzContext -Context $PreflightOriginalContext -ErrorAction Stop } catch { Write-Verbose "[preflight] could not restore the original Az context" } }
     $Matrix = Format-PreflightMatrix -Rows @($MatrixRows)
+    if ($Subscriptions.Count -eq 0) { Write-Host "  (no subscription passed the Reader gate, so the data-phase columns could not be probed)" -ForegroundColor Yellow }
     Write-Host ""
     foreach ($Line in $Matrix.Lines) { Write-Host $Line -ForegroundColor $(if ($Line -match 'Denied') { 'Red' } else { 'Gray' }) }
     Write-Host ""

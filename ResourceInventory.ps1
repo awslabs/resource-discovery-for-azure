@@ -376,12 +376,7 @@ function RunInventorySetup()
             Write-Log -Message ('Checking PowerShell...') -Severity 'Info'
 
             $Global:PlatformOS = 'PowerShell Desktop'
-            # Cloud Shell is identified by the PRESENCE of Get-CloudDrive (Az.CloudShell
-            # ships only there); its return value says whether storage is mounted. An
-            # unmounted Cloud Shell used to fall through to 'PowerShell Unix' here, so the
-            # ephemeral-storage warning further down could not fire. Same probe as the
-            # wrapper's Invoke-PreFlightChecks.
-            $CloudShell = [bool](Get-Command Get-CloudDrive -ErrorAction SilentlyContinue)
+            $CloudShell = try { Get-CloudDrive }catch {}
             if ($CloudShell)
             {
                 Write-Log -Message ('Identified Environment as Azure CloudShell') -Severity 'Success'

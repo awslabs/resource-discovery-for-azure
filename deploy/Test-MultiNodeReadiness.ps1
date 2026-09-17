@@ -113,8 +113,12 @@ if (-not $AzCli)
 else
 {
     Add-Result -Name 'Azure CLI installed' -Status 'PASS' -Detail $AzCli.Source
-    # `az account show` returns non-zero when not logged in.
-    $null = az account show 2>$null
+    # `az account show` returns non-zero when not logged in. With
+    # $ErrorActionPreference = 'Stop' on PowerShell 7.4+, a non-zero native exit
+    # is itself terminating ($PSNativeCommandUseErrorActionPreference defaults on),
+    # which would abort the whole preflight instead of recording a FAIL row -
+    # so the call runs with that preference off and the exit code is read after.
+    $null = & { $PSNativeCommandUseErrorActionPreference = $false; az account show 2>$null }
     if ($LASTEXITCODE -eq 0)
     {
         Add-Result -Name 'Azure CLI signed in' -Status 'PASS' -Detail 'az account show succeeded.'
@@ -161,12 +165,34 @@ foreach ($Module in 'Az.Accounts', 'Az.ResourceGraph', 'Az.Resources', 'Az.Compu
     }
 }
 
-# Resolve the target subscription for the remaining checks.
+# Resolve the target subscription for the remaining checks. When -SubscriptionId
+# names a subscription other than the active context's, select it: the provider
+# and node-size checks below run against the CURRENT context, and silently
+# checking the wrong subscription would report a false PASS.
 if (-not $SubscriptionId -and $Context) { $SubscriptionId = $Context.Subscription.Id }
+$TargetSubscriptionReady = $true
+if ($Context -and $SubscriptionId -and $Context.Subscription.Id -ne $SubscriptionId)
+{
+    try
+    {
+        $Context = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
+        Add-Result -Name 'Target subscription selected' -Status 'PASS' -Detail ("Az context switched to {0}." -f $SubscriptionId)
+    }
+    catch
+    {
+        Add-Result -Name 'Target subscription selected' -Status 'FAIL' -Detail ("Cannot select subscription {0}: {1}" -f $SubscriptionId, $_.Exception.Message)
+        $TargetSubscriptionReady = $false   # the provider / node-size checks below must not run against the wrong subscription
+    }
+}
 
 # 4. Resource providers AKS + ACR require.
 foreach ($Provider in 'Microsoft.ContainerService', 'Microsoft.ContainerRegistry')
 {
+    if (-not $TargetSubscriptionReady)
+    {
+        Add-Result -Name ("Provider {0}" -f $Provider) -Status 'FAIL' -Detail ("Not checked: target subscription {0} could not be selected." -f $SubscriptionId)
+        continue
+    }
     try
     {
         $State = (Get-AzResourceProvider -ProviderNamespace $Provider -ErrorAction Stop |
@@ -195,6 +221,7 @@ foreach ($Provider in 'Microsoft.ContainerService', 'Microsoft.ContainerRegistry
 #    offered AND not restricted before the AKS create.
 try
 {
+    if (-not $TargetSubscriptionReady) { throw ("target subscription {0} could not be selected" -f $SubscriptionId) }
     $Sku = Get-AzComputeResourceSku -Location $Location -ErrorAction Stop |
         Where-Object { $_.ResourceType -eq 'virtualMachines' -and $_.Name -eq $NodeVmSize } |
         Select-Object -First 1

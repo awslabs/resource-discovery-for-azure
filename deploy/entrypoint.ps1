@@ -79,7 +79,7 @@ Import-Module Az.Accounts -ErrorAction Stop
 #      injects the projected volume, so this is an annotation, NOT an
 #      expirationSeconds edit in job.yaml. See deploy/AKS-WorkloadIdentity-Setup.md
 #      section 10.
-#   3. Re-run the affected shard with -Resume; completed subscriptions are
+#   3. Re-run the affected shard with RESUME=true (forwarded as -Resume); completed subscriptions are
 #      skipped, so a token expiry costs only the unfinished remainder.
 #
 # A code fix (re-reading $TokenFile and re-authenticating on token expiry) is a
@@ -101,6 +101,12 @@ $WrapperArgs = @{
 if ($HeadRoom -gt 0) { $WrapperArgs.HeadRoom = $HeadRoom }
 if ("$($env:SKIP_METRICS)" -eq 'true') { $WrapperArgs.SkipMetrics = $true }
 if ("$($env:SKIP_CONSUMPTION)" -eq 'true') { $WrapperArgs.SkipConsumption = $true }
+# RESUME=true re-runs a shard skipping subscriptions already completed in the
+# shared state blob - the recovery path the token-expiry NOTE above (and
+# AKS-WorkloadIdentity-Setup.md) tells operators to use. RESUME_FAILED_ONLY=true
+# narrows that to the subscriptions that previously failed.
+if ("$($env:RESUME)" -eq 'true') { $WrapperArgs.Resume = $true }
+if ("$($env:RESUME_FAILED_ONLY)" -eq 'true') { $WrapperArgs.ResumeFailedOnly = $true }
 # Coverage / access gate override. By default the wrapper HARD-STOPS a shard if
 # it cannot verify full subscription coverage (identity can read every
 # subscription under the tenant-root management group) or cannot read a

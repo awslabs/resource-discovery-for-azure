@@ -47,7 +47,7 @@ Describe 'Report Schema Validation' {
         # name to its expected section id.
         function script:Get-ServiceSlug([string]$Name)
         {
-            return ($Name -replace '[^a-zA-Z0-9]', '-').ToLower()
+            return ($Name -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
         }
 
         $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -71,8 +71,10 @@ Describe 'Report Schema Validation' {
         if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
         $script:HtmlContent | Should -Match '<!DOCTYPE html>' -Because 'the report must be a complete HTML document'
         # No external resource references - the report must render offline.
-        $script:HtmlContent | Should -Not -Match 'src\s*=\s*"https?://' -Because 'no external script/image sources allowed'
-        $script:HtmlContent | Should -Not -Match '<link[^>]+href\s*=\s*"https?://' -Because 'no external stylesheet links allowed'
+        $script:HtmlContent | Should -Not -Match 'src\s*=\s*["'']?(https?:)?//' -Because 'no external script/image sources allowed (any quoting, incl. protocol-relative)'
+        $script:HtmlContent | Should -Not -Match '<link[^>]+href\s*=\s*["'']?(https?:)?//' -Because 'no external stylesheet links allowed (any quoting, incl. protocol-relative)'
+        $script:HtmlContent | Should -Not -Match 'url\(\s*["'']?(https?:)?//' -Because 'no external CSS url() references (e.g. web fonts) allowed'
+        $script:HtmlContent | Should -Not -Match '@import\s+["''](https?:)?//' -Because 'no external CSS @import references allowed'
     }
 
     It 'HTML report should not reference Excel/EPPlus artifacts' {
@@ -82,7 +84,7 @@ Describe 'Report Schema Validation' {
 
     It 'HTML report should declare a Total Resources figure' {
         if (-not $script:HtmlContent) { Set-ItResult -Skipped -Because 'no HTML in fixture'; return }
-        $script:HtmlContent | Should -Match 'Total Resources' -Because 'the header summarises the run'
+        $script:HtmlContent | Should -Match 'Total Resources[^0-9]*[0-9]' -Because 'the header summarises the run with a numeric total'
     }
 }
 

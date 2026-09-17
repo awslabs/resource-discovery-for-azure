@@ -210,11 +210,21 @@ Describe 'The retry loop abandons a denial and keeps retrying transients' {
 Describe 'Cost of the defect this fixes' {
 
     It 'would have burned about 26 minutes per subscription on a 403' {
-        # Documents WHY this matters, using the loop's real backoff formula.
+        # Derive BOTH inputs from source so this stays a guard, not documentation:
+        # the budget and the backoff cap are read out of the live loop, so shrinking
+        # either in ResourceInventory.ps1 changes the computed wall time here (and,
+        # for a large enough shrink, fails this assertion) instead of leaving a
+        # hard-coded ~26 that passes regardless of the implementation.
+        $MaxRetries = [int]([regex]::Match($script:InvSrc, '\$ConsumptionMaxRetries = (\d+)').Groups[1].Value)
+        $BackoffCap = [int]([regex]::Match($script:InvSrc, '\[math\]::Min\(\[math\]::Pow\(2,\s*\$ConsumptionAttempt\),\s*(\d+)\)').Groups[1].Value)
+
+        $MaxRetries | Should -BeGreaterThan 0 -Because 'the retry budget must be read out of the loop, not assumed'
+        $BackoffCap | Should -BeGreaterThan 0 -Because 'the exponential backoff cap must be read out of the loop, not assumed'
+
         $Total = 0
-        for ($Attempt = 1; $Attempt -le 30; $Attempt++)
+        for ($Attempt = 1; $Attempt -le $MaxRetries; $Attempt++)
         {
-            $Total += [math]::Min([math]::Pow(2, $Attempt), 60)
+            $Total += [math]::Min([math]::Pow(2, $Attempt), $BackoffCap)
         }
         [math]::Round($Total / 60, 0) | Should -BeGreaterThan 20 -Because 'this is the wasted wall time the fast-fail removes, per subscription'
     }

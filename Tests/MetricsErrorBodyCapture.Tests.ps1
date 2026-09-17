@@ -14,7 +14,7 @@
                                                      -MetricsIntervalMinutes)
       - resource deleted after discovery            (resource-side, benign)
     Without it a tool-side 400 is indistinguishable from a benign one, which is
-    how 219 Linux function apps burned ~2.5 hours before the cause was visible.
+    how a few hundred Linux function apps burned hours of a run before the cause was visible.
 
     DIAGNOSTICS ONLY. The body is never read to make a retry or skip decision and
     never reaches Metrics_*.json. Two tests below assert that separation directly,

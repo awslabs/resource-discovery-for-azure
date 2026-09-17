@@ -26,7 +26,7 @@ if ($Task -eq 'Processing')
                 foreach ($1 in $Rbs)
                 {
                     $Data = $1.PROPERTIES
-                    $LastModified = try { if ($null -ne $Data.lastModifiedTime) { ([datetime]$Data.lastModifiedTime).ToString('MM/dd/yyyy hh:mm') } else { 'Unknown' } } catch { 'Unknown' }
+                    $LastModified = try { if ($null -ne $Data.lastModifiedTime) { ([datetime]$Data.lastModifiedTime).ToString('MM/dd/yyyy HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) } else { 'Unknown' } } catch { 'Unknown' }
 
                     $Obj = @{
                         'ID'                            = $1.id;

@@ -370,13 +370,17 @@ Describe 'FindResource.ps1 entry point' {
         $Err | Should -Match 'VMWare'
     }
 
-    It 'accepts every collector name that actually exists' {
-        # Guards against the validator drifting from the Services tree.
-        $Valid = @(Get-ChildItem -LiteralPath (Join-Path $Script:RepoRoot 'Services') -Recurse -File -Filter '*.ps1' | ForEach-Object { $_.BaseName })
-        $Valid.Count | Should -BeGreaterThan 0
+    It 'accepts a real collector name through the entry point validator' {
+        # Binds valid names THROUGH FindResource.ps1's ValidateScript, the way
+        # the sibling 'rejects a mistyped' test does. Re-deriving the Services
+        # list here and asserting membership would still pass if the validator
+        # were broken or replaced by a hardcoded list that drifted; only driving
+        # the real binding guards against that drift.
         foreach ($Name in @('VMWare', 'VirtualMachines', 'StorageAcc'))
         {
-            $Valid | Should -Contain $Name
+            $Out = pwsh -NoProfile -File $Script:EntryPoint -Path $Script:EntryRoot -ResourceType $Name 2>&1 | Out-String
+            $Out | Should -Not -Match 'Unknown resource type'
+            $Out | Should -Not -Match 'ParameterArgumentValidationError'
         }
     }
 
@@ -405,6 +409,28 @@ Describe 'FindResource.ps1 entry point' {
 
         pwsh -NoProfile -File $Script:EntryPoint -Path $Partial -ResourceType 'VMWare' > $null 2>&1
         $LASTEXITCODE | Should -Be 3
+    }
+
+    It 'exits 2 when an inventory could not be read' {
+        # A malformed inventory is a read failure, not a clean read - and like
+        # exit 3, that has to reach a caller reading only $LASTEXITCODE, since the
+        # summary already refuses to call an incomplete read a confirmed zero.
+        $BadEntry = Join-Path $Script:TestRoot 'entry-badjson'
+        New-Item -ItemType Directory -Path $BadEntry -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $BadEntry 'Inventory_ResourcesReport_202601010000000000081.json') -Value '[]' -Encoding UTF8
+
+        pwsh -NoProfile -File $Script:EntryPoint -Path $BadEntry -ResourceType 'VMWare' > $null 2>&1
+        $LASTEXITCODE | Should -Be 2
+    }
+
+    It 'exits 4 when a matched result could not be written' {
+        # A complete scan that matched rows but whose -CsvPath cannot be written
+        # is an output-path problem, distinct from "nothing was scanned" (1) and
+        # from scope loss (3). The path is a file under a directory that does not
+        # exist, so the write fails while the scan itself is clean and complete.
+        $BadCsv = Join-Path (Join-Path $Script:TestRoot 'entry-nowhere') 'out.csv'
+        pwsh -NoProfile -File $Script:EntryPoint -Path $Script:EntryRoot -ResourceType 'VMWare' -CsvPath $BadCsv > $null 2>&1
+        $LASTEXITCODE | Should -Be 4
     }
 
     It 'writes a CSV whose header is the UNION of fields across rows of differing schemas' {

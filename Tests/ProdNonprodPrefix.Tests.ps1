@@ -32,6 +32,7 @@ AfterAll {
 
 Describe "Prefix Consistency Per Resource" {
     It "ID and Name should have the same prefix for each resource" {
+        $Checked = 0
         foreach ($r in $script:AllResources)
         {
             # Only check ID and Name — Subscription/ResourceGroup are shared across
@@ -42,34 +43,45 @@ Describe "Prefix Consistency Per Resource" {
             $UniquePrefixes = $Prefixes | Select-Object -Unique
             if ($UniquePrefixes.Count -gt 0)
             {
+                $Checked++
                 $UniquePrefixes.Count | Should -Be 1 -Because "Resource '$($r.ID)' should have consistent prefix on ID and Name (got: $($UniquePrefixes -join ', '))"
             }
         }
+        # Precondition: an empty (or all prefix-less) $script:AllResources - as a
+        # broken or zero-record run would produce - otherwise lets this foreach
+        # pass green having asserted nothing. Fail loud instead of vacuously.
+        $Checked | Should -BeGreaterThan 0 -Because "at least one prefixed resource must be present to validate prefix consistency"
     }
 }
 
 Describe "Prefix Format Validation" {
     It "All obfuscated IDs should start with exactly 'prod_' or 'nonprod_'" {
+        $Checked = 0
         foreach ($r in $script:AllResources)
         {
             if ($null -ne $r.ID)
             {
+                $Checked++
                 # Type-tagged variants (databricks_, aks_, vmss_) are legitimate
                 # output for resources whose IDs do not fit the standard ARM shape;
-                # see ResourceInventory.ps1 lines 650-655 and 1030-1034.
+                # see ResourceInventory.ps1 lines 961-969.
                 $r.ID | Should -Match '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-' -Because "ID should have valid prefix format"
             }
         }
+        $Checked | Should -BeGreaterThan 0 -Because "at least one resource ID must be present to validate ID prefix format"
     }
 
     It "No resource should have an empty prefix (just underscore + GUID)" {
+        $Checked = 0
         foreach ($r in $script:AllResources)
         {
             if ($null -ne $r.ID)
             {
+                $Checked++
                 $r.ID | Should -Not -Match '^_[0-9a-f]{8}-' -Because "ID should not start with bare underscore"
             }
         }
+        $Checked | Should -BeGreaterThan 0 -Because "at least one resource ID must be present to validate the no-bare-underscore guard"
     }
 }
 
@@ -106,19 +118,20 @@ Describe "Consumption Prefix Consistency" {
 #   1. Classifier-logic assertions that exercise the EXACT prefix regex the
 #      source uses, so the full non-prod set (3.1) and the prod default (3.2)
 #      are verified independently of fixture contents. The same regex literal is
-#      used per class in ResourceInventory.ps1 (resource name L639, subscription
-#      L659, resource group L668, tag value L1011), which is Requirement 3.3.
+#      used per class in ResourceInventory.ps1 (resource name L951, subscription
+#      L977, resource group L987, tag value L1630), which is Requirement 3.3.
 #   2. Fixture-content assertions that lock the type-hint contract (3.4): the
 #      databricks/aks/vmss hints appear only on the obfuscated NAME, never on the
-#      obfuscated ID (source L643 builds the ID with no hint; L647-654 apply the
+#      obfuscated ID (source L958 builds the ID with no hint; L961-969 apply the
 #      hint to the name only).
 # ---------------------------------------------------------------------------
 
 Describe "Classifier Fidelity — non-prod set and prod default (P7)" {
     BeforeAll {
         # Mirror of the prod/nonprod classifier used identically across all four
-        # classes in ResourceInventory.ps1 (L639 name, L659 subscription,
-        # L668 resource group, L1011 tag value; also Protect-FreeTextValue L107).
+        # classes in ResourceInventory.ps1 (L951 name, L977 subscription,
+        # L987 resource group, L1630 tag value; also Protect-FreeTextValue at
+        # Functions/ResourceInventory.Functions.ps1 L74).
         # Replicated here because a prod-only fixture cannot supply non-prod
         # sample data to drive the classification through the ZIP.
         function script:Get-ExpectedObfuscationPrefix([string]$Value)
@@ -177,17 +190,20 @@ Describe "Classifier Fidelity — non-prod set and prod default (P7)" {
 
 Describe "Type Hint Fidelity — name only, never ID (P7 / Req 3.4)" {
     It "obfuscated IDs never carry a databricks/aks/vmss type hint" {
-        # Source L643 builds the ID as '<prefix><guid>' with no type hint; the
-        # hint is only ever appended to the obfuscated NAME (L647-654). Assert
+        # Source L958 builds the ID as '<prefix><guid>' with no type hint; the
+        # hint is only ever appended to the obfuscated NAME (L961-969). Assert
         # the ID never picks one up. Runs across every resource regardless of
         # fixture composition.
+        $Checked = 0
         foreach ($r in $script:AllResources)
         {
             if ($null -ne $r.ID)
             {
+                $Checked++
                 $r.ID | Should -Not -Match '^(prod|nonprod)_(databricks|aks|vmss)_' -Because "type hints belong on the obfuscated Name, not the ID ('$($r.ID)')"
             }
         }
+        $Checked | Should -BeGreaterThan 0 -Because "at least one resource ID must be present to validate that IDs stay type-hint free"
     }
 
     It "any databricks/aks/vmss type hint present in the fixture sits on the Name only" {

@@ -453,4 +453,39 @@ Describe 'The Flexible-orchestration double-counting guard' {
         $InitIdx | Should -BeGreaterThan -1
         $IncIdx | Should -BeGreaterThan $InitIdx -Because 'the initialiser must precede the increment'
     }
+
+    It 'leaves Instances EMPTY on an UNMATCHED scale set and names the excluded count in a WARNING' {
+        # A join miss leaves $Placement null, so the orchestration mode is UNKNOWN - the
+        # set could really be Flexible, whose member VMs are already emitted as
+        # VirtualMachine rows. Trusting the '' default and counting its Instances would
+        # re-open the exact double-count the guard prevents, so the cell is left EMPTY
+        # (a missing figure over a wrong total) and the excluded count is named in a
+        # Warning rather than left to be inferred from an empty cell.
+        $Rows = script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/orphan'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'orphanset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 7; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @()
+
+        $Ss = @($Rows | Where-Object { $_.ResourceKind -eq 'VirtualMachineScaleSet' })
+        $Ss.Count | Should -Be 1 -Because 'the row stays VISIBLE for SKU and zone even though its capacity cannot be counted'
+        $Ss[0].Instances | Should -BeNullOrEmpty -Because 'an unmatched set could be Flexible, so counting its instances risks the double-count'
+
+        $Warned = @($Global:PlacementLogLines | Where-Object { $_ -match '^\[Warning\]' -and $_ -match 'orchestration mode is UNKNOWN' })
+        $Warned.Count | Should -BeGreaterThan 0 -Because 'excluding a scale set from SUM(CPU * Instances) silently must never happen'
+        # The COUNT must be right, exactly as for the Flexible warning: an undeclared
+        # counter would read 1 for any number of unmatched sets, so assert it here.
+        ($Warned -join ' ') | Should -Match '\b1\b' -Because 'exactly one scale set was unmatched, so the count must read 1'
+    }
+
+    It 'the UnknownOrchestrationCount counter is initialised, not incremented from undeclared' {
+        # Source guard, mirroring the $FlexibleCount check above. '$null++' silently
+        # becomes 1 with no StrictMode, so an undeclared counter would always report 1
+        # regardless of how many sets missed the join - the count would be wrong AND
+        # unreported.
+        $Src = Get-Content -LiteralPath $script:Extension -Raw
+        $Src | Should -Match '\$UnknownOrchestrationCount = 0' -Because 'an undeclared counter reads as 1 for any number of unmatched sets'
+        $InitIdx = $Src.IndexOf('$UnknownOrchestrationCount = 0')
+        $IncIdx = $Src.IndexOf('$UnknownOrchestrationCount++')
+        $InitIdx | Should -BeGreaterThan -1
+        $IncIdx | Should -BeGreaterThan $InitIdx -Because 'the initialiser must precede the increment'
+    }
 }

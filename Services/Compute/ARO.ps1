@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'MasterSKU'            = $Data.masterProfile.vmSize;
                 'WorkerSKU'            = $Data.workerProfiles.vmSize | Select-Object -Unique;
                 'WorkerDiskSize'       = $Data.workerProfiles.diskSizeGB | Select-Object -Unique;
-                'TotalWorkerNodes'     = $Data.workerProfiles.count;
+                'TotalWorkerNodes'     = [int](($Data.workerProfiles | Measure-Object -Property count -Sum).Sum);
             }
 
             $Tmp += $Obj

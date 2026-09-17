@@ -196,6 +196,28 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
+    # A CSV that HAS data rows but NONE in the 'Virtual Machines' meter (only
+    # the Storage/Bandwidth noise) is a legitimate real zero, distinct from the
+    # header-only 'coverage unknown' case above: Summary.ps1 treats billed == 0
+    # against running > 0 as a genuine ~100% coverage gap and DOES render the
+    # banner. Without this case a regression that conflated real-zero VM billing
+    # with unknown coverage (no banner) would pass every other test silently.
+    It 'renders the banner (~100%) for a data-bearing CSV with zero VM-meter rows' {
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_novm.csv'
+        # BilledVms 0 -> no 'Virtual Machines'-meter rows, but the helper still
+        # writes the Storage/Bandwidth noise rows, so the CSV is data-bearing.
+        New-TestConsumptionCsv -Path $Csv -BilledVms 0
+
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'VM billing-coverage check'
+        # 10 running, 0 billed -> gap 10 -> 100%
+        $Html | Should -Match '10 running VMs'
+        $Html | Should -Match 'only 0 VMs'
+        $Html | Should -Match '100%'
+    }
+
     It 'respects the VmBillingGapThreshold (suppresses small gaps)' {
         $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
         $Csv = Join-Path $script:WorkDir 'con_thresh.csv'

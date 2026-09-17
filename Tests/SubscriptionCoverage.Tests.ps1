@@ -167,14 +167,14 @@ Describe 'Get-TenantSubscriptionId (side-effecting fetch)' {
             [pscustomobject]@{ Type = 'Microsoft.Management/managementGroups'; Name = 'root'; Children = @() }
         }
         $Result = Get-TenantSubscriptionId -TenantId '12345678-1234-1234-1234-123456789012'
-        $Result.Ids | Should -BeNullOrEmpty
+        $null -eq $Result.Ids | Should -BeTrue
         $Result.Detail | Should -Not -BeNullOrEmpty
     }
 
     It 'returns Ids=$null and surfaces the exception message when the read is denied' {
         Mock Get-AzManagementGroup { throw 'AuthorizationFailed: does not have authorization to perform action Microsoft.Management/managementGroups/read' }
         $Result = Get-TenantSubscriptionId -TenantId '12345678-1234-1234-1234-123456789012'
-        $Result.Ids | Should -BeNullOrEmpty
+        $null -eq $Result.Ids | Should -BeTrue
         $Result.Detail | Should -Match 'AuthorizationFailed'
     }
 }

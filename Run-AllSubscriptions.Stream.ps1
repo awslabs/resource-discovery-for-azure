@@ -110,6 +110,34 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 $Tag = "[stream-$StreamId]"
 
 
+# SubscriptionIds and SubscriptionNames are paired positionally by the parent,
+# which is expected to pass equal-length arrays. The param comment above states
+# the worker must NOT silently depend on that guarantee: if the arrays arrive
+# mismatched, the empty-slice guard (which keys only on Ids.Count) and the
+# per-sub loop (which bounds on [Math]::Min of the two counts) would silently
+# drop the unpaired subs and still report Status 'ok'. Fail loud here, before
+# the empty-slice guard and the Az import, writing a 'failed-to-start' summary
+# so the parent sees the stream could not begin rather than a missing summary.
+if ($SubscriptionIds.Count -ne $SubscriptionNames.Count)
+{
+    $MismatchReason = "SubscriptionIds count ({0}) does not match SubscriptionNames count ({1}); parent must pass equal-length, positionally-paired arrays" -f $SubscriptionIds.Count, $SubscriptionNames.Count
+    Write-Stream ("FATAL: {0}" -f $MismatchReason) 'Red'
+    @{
+        StreamId      = $StreamId
+        Tenant        = $TenantID
+        Status        = 'failed-to-start'
+        Reason        = $MismatchReason
+        Completed     = @()
+        Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
+                $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
+                $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
+                [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: SubscriptionIds/SubscriptionNames length mismatch' }
+            })
+        ResourceCounts = @()
+    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    exit 1
+}
+
 # Empty slice = nothing to do. Write a minimal "ok with zero subs" summary so
 # the parent's aggregation step (which expects a summary file from every
 # stream) does not flag this as a missing-summary failure, and exit cleanly.

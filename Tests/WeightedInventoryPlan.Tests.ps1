@@ -114,6 +114,7 @@ Describe 'Get-PlanWeightKql' {
     It 'drops the storage term under -SkipStorageMetrics' {
         $kql = Get-PlanWeightKql -SkipStorageMetrics
         $kql | Should -Not -Match 'microsoft.storage/storageaccounts'
+        $kql | Should -Match 'microsoft.compute/virtualmachines'
     }
 
     # SOURCE GUARD. The Storage Account UsedCapacity metric is opt-in, so -Plan must

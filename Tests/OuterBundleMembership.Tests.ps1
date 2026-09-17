@@ -199,6 +199,16 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
                 $Entry = $Archive.Entries | Where-Object { $_.FullName -eq 'VMPlacement.csv' } | Select-Object -First 1
                 $Reader = New-Object System.IO.StreamReader($Entry.Open())
                 try { $Content = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+
+                # RunSummary.log (a required outer-root member) is the independent
+                # obfuscation-mode signal used below, read here from the same archive.
+                $SummaryEntry = $Archive.Entries | Where-Object { $_.FullName -eq 'RunSummary.log' } | Select-Object -First 1
+                $RunSummary = ''
+                if ($null -ne $SummaryEntry)
+                {
+                    $SummaryReader = New-Object System.IO.StreamReader($SummaryEntry.Open())
+                    try { $RunSummary = $SummaryReader.ReadToEnd() } finally { $SummaryReader.Dispose() }
+                }
             }
             finally
             {
@@ -212,11 +222,15 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
                 return
             }
 
-            # Mode is inferred from the data itself rather than from an env var, so the
-            # rule holds for whatever bundle a human points this at. Extension/VMPlacement.ps1
-            # sources identifier columns from $Global:SmaResources, which is already
-            # obfuscated under -Obfuscate, so tokens are what an obfuscated run must show.
-            $IsObfuscated = @($Rows | Where-Object { $_.Subscription -match '^(prod|nonprod)_' }).Count -gt 0
+            # Mode comes from RunSummary.log's header, an independent signal, rather
+            # than the Subscription column this test validates. Get-RunSummaryLogContent
+            # writes 'Non-obfuscated run: ...' only for a non-obfuscated run and
+            # 'Obfuscated run: ...' otherwise. Deriving the mode from the Subscription
+            # column would let a whole-column obfuscation failure - every value a raw
+            # name, so nothing matching ^(prod|nonprod)_ - masquerade as a non-obfuscated
+            # bundle and skip the very leak this test exists to catch. Absent or
+            # ambiguous header: fail closed to obfuscated, the stricter rule.
+            $IsObfuscated = $RunSummary -notmatch 'Non-obfuscated run'
             if (-not $IsObfuscated)
             {
                 Set-ItResult -Skipped -Because 'this is a non-obfuscated bundle, whose report already carries real names by design'

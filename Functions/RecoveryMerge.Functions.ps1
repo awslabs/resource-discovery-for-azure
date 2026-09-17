@@ -408,6 +408,10 @@ function Merge-RecoveryData
     #    via the seeded ResourceIdMap, so a recovery run seeded with the gap
     #    dictionary yields metrics tokens that match the merged inventory. Write a
     #    canonical empty file only if the chosen source has none.
+    # Every Metrics_*.json this merge writes is recorded here so the re-zip below
+    # packages exactly what THIS run produced. Globbing $OutputPath instead would
+    # silently bundle stale or foreign JSON left in a reused output folder.
+    $WrittenMetricsFiles = [System.Collections.Generic.List[string]]::new()
     if ($RecoverMetrics)
     {
         $RecoveryMetricsFiles = @(Get-ChildItem -Path $RecoveryBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
@@ -421,7 +425,9 @@ function Merge-RecoveryData
         {
             $Suffix = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
             $RebasedName = 'Metrics_' + $BundleBase + $Suffix + '.json'
-            Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $RebasedName) -Force
+            $RebasedPath = Join-Path $OutputPath $RebasedName
+            Copy-Item -Path $MetricsFile.FullName -Destination $RebasedPath -Force
+            $WrittenMetricsFiles.Add($RebasedPath)
         }
         $MetricsSource = 'recovery'
         # Advisory: the regenerated HTML does not render metrics (Summary.ps1
@@ -438,12 +444,15 @@ function Merge-RecoveryData
         {
             foreach ($MetricsFile in $GapMetricsFiles)
             {
-                Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $MetricsFile.Name) -Force
+                $CopiedPath = Join-Path $OutputPath $MetricsFile.Name
+                Copy-Item -Path $MetricsFile.FullName -Destination $CopiedPath -Force
+                $WrittenMetricsFiles.Add($CopiedPath)
             }
         }
         else
         {
             @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -FilePath $OutMetricsFile -Encoding utf8
+            $WrittenMetricsFiles.Add($OutMetricsFile)
         }
         $MetricsSource = 'gap'
     }
@@ -492,13 +501,11 @@ function Merge-RecoveryData
     $ReportVersion = if ($GapInventory.PSObject.Properties.Name -contains 'Version') { $GapInventory.Version } else { $null }
     & $SummaryScript -JsonFile $OutInventoryFile -HtmlFile $OutHtmlFile -Title 'Azure Resource Inventory' -Version $ReportVersion -ConsumptionFile $OutConsumptionFile | Out-Null
 
-    # -- Re-zip, mirroring ResourceInventory.ps1's packaging filter: HTML +
-    #    Consumption CSV + every *.json EXCEPT the local-only dictionary/Full/
-    #    Heartbeat/ErrorLog files. The dictionary is deliberately NOT zipped. ---
-    $ZipJsonFiles = Get-ChildItem -Path $OutputPath -Filter '*.json' |
-        Where-Object { $_.Name -notlike 'ObfuscationDictionary_*' -and $_.Name -notlike 'Full_*' -and $_.Name -notlike 'Heartbeat_*' -and $_.Name -notlike 'ErrorLog_*' } |
-        Select-Object -ExpandProperty FullName
-    $ZipPaths = @($OutHtmlFile, $OutConsumptionFile) + $ZipJsonFiles
+    # -- Re-zip, mirroring ResourceInventory.ps1's packaging: HTML + Consumption
+    #    CSV + the inventory + the Metrics_*.json files THIS merge wrote. The
+    #    dictionary is deliberately NOT zipped. Only files produced above are
+    #    packaged, never whatever else the (possibly reused) output folder holds. --
+    $ZipPaths = @($OutHtmlFile, $OutConsumptionFile, $OutInventoryFile) + @($WrittenMetricsFiles)
     if (Test-Path -Path $OutZipFile) { Remove-Item -Path $OutZipFile -Force }
     Compress-Archive -Path $ZipPaths -CompressionLevel Fastest -DestinationPath $OutZipFile
 

@@ -9,9 +9,10 @@
 # EXACT seed / skip / append / persist expressions and assert the observable
 # resume behaviour:
 #
-#   - a fresh run seeds an empty completed list with the wrapper's own
-#     @(if...else @()) idiom, so the first append is a real array push (never a
-#     $null-collapse -> string concatenation),
+#   - a fresh run seeds an empty completed list by projecting through the
+#     wrapper's own Get-CompletedSubscriptionIds -State $SeedState reader (which
+#     returns @() by construction), so the first append is a real array push
+#     (never a $null-collapse -> string concatenation),
 #   - completing a subset persists a real multi-element completed set,
 #   - a -Resume run skips exactly the already-completed subs and processes the
 #     remainder,
@@ -53,8 +54,8 @@ BeforeAll {
     # Model the wrapper's sequential loop over an ordered subscription list,
     # exactly mirroring its seed / skip / append / persist expressions so the
     # test fails if any of them regress:
-    #   seed:    $s = Get-ResumeStateObject -Path $f -Tenant $t
-    #            $CompletedIds = @(if ($s -and $s.CompletedSubscriptionIds) { $s.CompletedSubscriptionIds } else { @() })
+    #   seed:    $SeedState = Get-ResumeStateObject -Path $f -Tenant $t
+    #            $CompletedIds = @(Get-CompletedSubscriptionIds -Path $f -Tenant $t -State $SeedState)
     #   skip:    if ($Resume -and ($CompletedIds -contains $Sub.Id)) { skip }
     #   append:  if (-not ($CompletedIds -contains $Sub.Id)) { $CompletedIds += $Sub.Id }
     #   persist: Save-CompletedSubscriptionIds -Ids $CompletedIds ...

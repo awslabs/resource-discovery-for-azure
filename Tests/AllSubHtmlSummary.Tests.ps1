@@ -268,6 +268,50 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
         Test-Path -Path ($OutDir + '.zip') | Should -BeTrue -Because '-PackageZip zips the reconstructed folder'
     }
 
+    It 'reconstructs self-contained reports and a self-contained -PackageZip bundle (no external CDN/js/css references)' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run
+        $OutDir = Join-Path $Run 'rebuilt_selfcontained'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+
+        # Self-containment is a per-file contract on the shareable artefact: the
+        # aggregate MainSummary AND every re-rendered per-sub report must carry no
+        # EXTERNAL reference (no external src/href, no cdn/googleapis/jsdelivr). A
+        # per-sub report legitimately carries an INLINE <script> block (Summary.ps1),
+        # so - unlike the aggregate-only guard - '<script' is deliberately NOT
+        # asserted here; only external dependencies are.
+        $ReconstructedHtml = @(Get-ChildItem -Path $OutDir -Recurse -Filter '*.html' -File)
+        $ReconstructedHtml.Count | Should -BeGreaterThan 0
+        foreach ($Hf in $ReconstructedHtml)
+        {
+            $Content = Get-Content -Path $Hf.FullName -Raw
+            ($Content -match '(?i)src="https?://' -or $Content -match '(?i)href="https?://' -or $Content -match '(?i)cdn|googleapis|jsdelivr') |
+                Should -BeFalse -Because "reconstructed report '$($Hf.Name)' must be self-contained"
+        }
+
+        # ...and the same holds for every html carried INSIDE the -PackageZip bundle
+        # (the artefact an operator actually shares), read from the archive itself.
+        $Bundle = $OutDir + '.zip'
+        Test-Path -Path $Bundle | Should -BeTrue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Bundle)
+        try
+        {
+            $HtmlEntries = @($Archive.Entries | Where-Object { $_.FullName -like '*.html' })
+            $HtmlEntries.Count | Should -BeGreaterThan 0
+            foreach ($Entry in $HtmlEntries)
+            {
+                $Reader = New-Object System.IO.StreamReader($Entry.Open())
+                try { $EntryText = $Reader.ReadToEnd() }
+                finally { $Reader.Dispose() }
+                ($EntryText -match '(?i)src="https?://' -or $EntryText -match '(?i)href="https?://' -or $EntryText -match '(?i)cdn|googleapis|jsdelivr') |
+                    Should -BeFalse -Because "bundle entry '$($Entry.FullName)' must carry no external reference"
+            }
+        }
+        finally { $Archive.Dispose() }
+    }
+
     It 'throws on an archive that holds no per-subscription reports' {
         $Run = New-Run
         $Junk = Join-Path $Run 'junk.zip'

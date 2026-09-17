@@ -276,6 +276,25 @@ Describe 'Merge-RecoveryData metrics handling' {
         (Get-Content -Path $OutMetrics -Raw) | Should -Match 'gap-metric'
     }
 
+    It 'carries EVERY gap metrics batch forward, not just the newest (default = gap)' {
+        # The metrics phase writes one file per batch (Metrics_<base>__<idx>.json).
+        # Carrying only the newest would silently drop a batch, so drive the
+        # default path with TWO batches and assert both survive.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-batch-0"]}'; '__1' = '{"Metrics":["gap-batch-1"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
+
+        $Result.MetricsSource | Should -Be 'gap'
+        $Batch0 = Join-Path $C.Output ('Metrics_{0}__0.json' -f $script:GapBase)
+        $Batch1 = Join-Path $C.Output ('Metrics_{0}__1.json' -f $script:GapBase)
+        Test-Path -Path $Batch0 | Should -BeTrue -Because 'the first metrics batch must be carried forward'
+        Test-Path -Path $Batch1 | Should -BeTrue -Because 'a second metrics batch must NOT be dropped by a newest-wins regression'
+        (Get-Content -Path $Batch0 -Raw) | Should -Match 'gap-batch-0'
+        (Get-Content -Path $Batch1 -Raw) | Should -Match 'gap-batch-1'
+    }
+
     It 'replaces and rebases metrics to the gap base under -RecoverMetrics (MetricsSource = recovery)' {
         $C = New-Case
         New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
@@ -288,6 +307,26 @@ Describe 'Merge-RecoveryData metrics handling' {
         Test-Path -Path $Rebased | Should -BeTrue -Because 'recovery metrics are rebased to the output bundle base'
         (Get-Content -Path $Rebased -Raw) | Should -Match 'rec-metric'
         Test-Path -Path (Join-Path $C.Output ('Metrics_{0}__0.json' -f $script:RecBase)) | Should -BeFalse -Because 'the recovery base name must not survive into the output'
+    }
+
+    It 'rebases EVERY recovery metrics batch to the gap base, not just the newest (-RecoverMetrics)' {
+        # As above but for the recovery path: -RecoverMetrics must rebase EACH
+        # batch to the output base. Two recovery batches guard against a
+        # newest-wins regression that would rebase only one and drop the rest.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["rec-batch-0"]}'; '__1' = '{"Metrics":["rec-batch-1"]}' }
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverMetrics
+
+        $Result.MetricsSource | Should -Be 'recovery'
+        $Batch0 = Join-Path $C.Output ('Metrics_{0}__0.json' -f $script:GapBase)
+        $Batch1 = Join-Path $C.Output ('Metrics_{0}__1.json' -f $script:GapBase)
+        Test-Path -Path $Batch0 | Should -BeTrue -Because 'the first recovery batch must be rebased to the output base'
+        Test-Path -Path $Batch1 | Should -BeTrue -Because 'a second recovery batch must NOT be dropped by a newest-wins regression'
+        (Get-Content -Path $Batch0 -Raw) | Should -Match 'rec-batch-0'
+        (Get-Content -Path $Batch1 -Raw) | Should -Match 'rec-batch-1'
+        Test-Path -Path (Join-Path $C.Output ('Metrics_{0}__1.json' -f $script:RecBase)) | Should -BeFalse -Because 'no recovery base name may survive for any batch'
     }
 
     It 'throws when -RecoverMetrics is set but the recovery bundle has no metrics' {

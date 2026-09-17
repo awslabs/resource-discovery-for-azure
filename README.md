@@ -306,7 +306,7 @@ To fix before running:
   - Grant Cost Management Reader on Sandbox (<id>) (or Billing Reader on the billing scope), or run with -SkipConsumption.
 ```
 
-`Ok` is verified, `Denied` is an RBAC denial and makes the preflight exit 1, `Unavailable` means the probe could not run (token or transient; the real run retries per subscription), `NoResource` means the subscription holds nothing metric-eligible to probe, and `Skipped` means you passed the matching `-Skip*` switch. Your Az context is restored afterwards.
+If the tenant-root management group cannot be read (so full coverage cannot be verified), the preflight reports that too and still probes the subscriptions it can see, instead of stopping at the coverage gate. `Ok` is verified, `Denied` is an RBAC denial and makes the preflight exit 1 (as does unverifiable coverage), `Unavailable` means the probe could not run (token or transient; the real run retries per subscription), `NoResource` means the subscription holds nothing metric-eligible to probe, and `Skipped` means you passed the matching `-Skip*` switch. Your Az context is restored afterwards.
 
 #### Resuming an interrupted run
 

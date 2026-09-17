@@ -1511,11 +1511,12 @@ if ($ResumeFailedOnly)
 # hashes over the whole tenant, so an incomplete enumeration would blind every
 # shard).
 Write-Host "Verifying full subscription coverage (tenant-root management group)..." -ForegroundColor Cyan
+$PreflightCoverageMsg = $null
 $Coverage = Get-TenantSubscriptionId -TenantId $TenantID
 if ($null -eq $Coverage.Ids)
 {
-    $CoverageMsg = ("Could not verify full subscription coverage: the tenant-root management group (GroupName = tenant id) could not be read by this identity, so there is no way to confirm the {0} enumerated subscription(s) are ALL of them." -f $AllSubscriptions.Count)
-    if ($AllowPartialAccess)
+    $PreflightCoverageMsg = $CoverageMsg = ("Could not verify full subscription coverage: the tenant-root management group (GroupName = tenant id) could not be read by this identity, so there is no way to confirm the {0} enumerated subscription(s) are ALL of them." -f $AllSubscriptions.Count)
+    if ($AllowPartialAccess -or $Preflight)
     {
         Write-Host ("WARNING: {0}" -f $CoverageMsg) -ForegroundColor Yellow
         if (-not [string]::IsNullOrWhiteSpace($Coverage.Detail)) { Write-Host ("  Reason: {0}" -f $Coverage.Detail) -ForegroundColor DarkYellow }
@@ -1547,8 +1548,8 @@ else
         # access gate below lists each inaccessible subscription id.
         $ShownMissed = @($MissedIds | Select-Object -First 10)
         $MoreNote = if ($MissedIds.Count -gt $ShownMissed.Count) { (' (+{0} more)' -f ($MissedIds.Count - $ShownMissed.Count)) } else { '' }
-        $CoverageMsg = ("Subscription coverage shortfall: the tenant-root management group contains {0} subscription(s) but this identity can enumerate only {1} - {2} would be SILENTLY MISSED from the inventory." -f $Coverage.Ids.Count, $AllSubscriptions.Count, $MissedIds.Count)
-        if ($AllowPartialAccess)
+        $PreflightCoverageMsg = $CoverageMsg = ("Subscription coverage shortfall: the tenant-root management group contains {0} subscription(s) but this identity can enumerate only {1} - {2} would be SILENTLY MISSED from the inventory." -f $Coverage.Ids.Count, $AllSubscriptions.Count, $MissedIds.Count)
+        if ($AllowPartialAccess -or $Preflight)
         {
             Write-Host ("WARNING: {0}" -f $CoverageMsg) -ForegroundColor Yellow
             Write-Host ("  Missed: {0}{1}" -f ($ShownMissed -join ', '), $MoreNote) -ForegroundColor DarkYellow
@@ -1664,13 +1665,21 @@ if ($Preflight)
     }
     if ($PreflightOriginalContext) { try { $null = Set-AzContext -Context $PreflightOriginalContext -ErrorAction Stop } catch { Write-Verbose "[preflight] could not restore the original Az context" } }
     $Matrix = Format-PreflightMatrix -Rows @($MatrixRows)
+    $CoverageBlocking = $false
+    if ($PreflightCoverageMsg)
+    {
+        $CoverageBlocking = $true
+        Write-Host ""
+        Write-Host ("Coverage: {0}" -f $PreflightCoverageMsg) -ForegroundColor Red
+        Write-Host "  A real run stops here unless -AllowPartialAccess is passed. Grant Reader at the tenant-root management group to make coverage verifiable." -ForegroundColor Red
+    }
     if ($Subscriptions.Count -eq 0) { Write-Host "  (no subscription passed the Reader gate, so the data-phase columns could not be probed)" -ForegroundColor Yellow }
     Write-Host ""
     foreach ($Line in $Matrix.Lines) { Write-Host $Line -ForegroundColor $(if ($Line -match 'Denied') { 'Red' } else { 'Gray' }) }
     Write-Host ""
-    if ($Matrix.Blocking)
+    if ($Matrix.Blocking -or $CoverageBlocking)
     {
-        Write-Host "Preflight result: at least one requested permission is DENIED. Fix the roles above (or pass the matching -Skip* switch), then run without -Preflight." -ForegroundColor Red
+        Write-Host "Preflight result: at least one requested permission is DENIED or coverage could not be verified. Fix the roles above (or pass the matching -Skip* switch), then run without -Preflight." -ForegroundColor Red
         Exit-Wrapper -Code 1
     }
     Write-Host "Preflight result: no denials. Nothing was collected; run again without -Preflight to start the inventory." -ForegroundColor Green

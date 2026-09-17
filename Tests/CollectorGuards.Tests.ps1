@@ -280,3 +280,33 @@ Describe 'Get-AzComputeResourceSku failure guard (VM / VMSS)' {
         $Rec['RAM'] | Should -Be '0'
     }
 }
+
+Describe 'ARO worker-profile derivations' {
+    # A cluster with two worker profiles of 3 nodes each: TotalWorkerNodes is the
+    # SUM of the profiles' count values (6), never the number of profiles; and the
+    # approved WorkerProfileCount column carries that number of profiles (2).
+    It 'TotalWorkerNodes sums per-profile counts and WorkerProfileCount counts the profiles' {
+        $Profiles = @(
+            [pscustomobject]@{ name = 'w1'; count = 3; vmSize = 'Standard_D4s_v3' },
+            [pscustomobject]@{ name = 'w2'; count = 3; vmSize = 'Standard_D8s_v3' }
+        )
+        $Res = New-Res -Type 'microsoft.redhatopenshift/openshiftclusters' -Props @{ workerProfiles = $Profiles }
+        $Rec = @(Invoke-Collector -RelPath 'Compute/ARO.ps1' -Resources @($Res))[0]
+        $Rec['TotalWorkerNodes'] | Should -Be 6
+        $Rec['WorkerProfileCount'] | Should -Be 2
+    }
+
+    It 'a single 5-node profile reports 5 nodes, not 1' {
+        $Res = New-Res -Type 'microsoft.redhatopenshift/openshiftclusters' -Props @{ workerProfiles = @([pscustomobject]@{ name = 'w1'; count = 5; vmSize = 'Standard_D4s_v3' }) }
+        $Rec = @(Invoke-Collector -RelPath 'Compute/ARO.ps1' -Resources @($Res))[0]
+        $Rec['TotalWorkerNodes'] | Should -Be 5
+        $Rec['WorkerProfileCount'] | Should -Be 1
+    }
+
+    It 'no worker profiles yields 0 for both, not null' {
+        $Res = New-Res -Type 'microsoft.redhatopenshift/openshiftclusters' -Props @{ workerProfiles = @() }
+        $Rec = @(Invoke-Collector -RelPath 'Compute/ARO.ps1' -Resources @($Res))[0]
+        $Rec['TotalWorkerNodes'] | Should -Be 0
+        $Rec['WorkerProfileCount'] | Should -Be 0
+    }
+}

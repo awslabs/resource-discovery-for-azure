@@ -13,18 +13,29 @@
 # inventory completed but consumption was silently truncated, ONLY under
 # -Obfuscate.
 #
-# This test is SELF-CONTAINED: it replicates the obfuscation guard
-# logic exactly as it appears in ResourceInventory.ps1 and proves a null/empty
-# resourceUri does not throw and yields the 'obfuscated' fallback token, while a
-# normal ARM-shaped uri still obfuscates deterministically. It does NOT need a
-# live Azure run or an output zip. If the guard logic in ResourceInventory.ps1
-# changes, update the helper below to match.
+# This test is SELF-CONTAINED: it uses a SIMPLIFIED MODEL of the obfuscate-branch
+# resourceUri logic in ResourceInventory.ps1 - focused on the null/empty guard
+# (this suite's regression) and on the ARM-path structure, determinism and
+# no-leak properties. It proves a null/empty resourceUri does not throw and
+# yields the 'obfuscated' fallback token, while a normal ARM-shaped uri still
+# obfuscates deterministically and preserves structure. It does NOT need a live
+# Azure run or an output zip. The model deliberately OMITS production's
+# inventory-dictionary leaf-token cross-dataset link ($InventoryLeafToken /
+# $LeafNameIndex), which reuses the $Global:ResourceIdDictionary token for the
+# leaf resource-name segment; that link does not change any property asserted
+# here (the reused token is itself an obfuscated prod_/nonprod_ token). If the
+# null-guard path in ResourceInventory.ps1 changes, update the helper below to
+# match.
 
 BeforeAll {
-    # Faithful copy of the consumption resourceUri obfuscation block from
-    # ResourceInventory.ps1 GetResourceConsumption() (obfuscate branch). The test
-    # replicates the logic rather than calling production code, so it stays
-    # self-contained (no live Azure, no output zip).
+    # Simplified model of the consumption resourceUri obfuscation block from
+    # ResourceInventory.ps1 GetResourceConsumption() (obfuscate branch). It mirrors
+    # the null/empty guard faithfully and reproduces the ARM-path structure,
+    # determinism and no-leak behaviour, but deliberately OMITS the inventory
+    # leaf-token cross-dataset link ($InventoryLeafToken / $LeafNameIndex) that
+    # production adds for the leaf name segment. The test models the logic rather
+    # than calling production code, so it stays self-contained (no live Azure, no
+    # output zip).
     function Get-ObfuscatedConsumptionUriForTest
     {
         param($RawUri)

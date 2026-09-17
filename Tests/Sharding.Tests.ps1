@@ -87,19 +87,36 @@ Describe 'Horizontal sharding partition helpers' {
 
         It 'is STABLE to a drifting subscription set - removing one sub does not move any other' {
             $n = 5
-            # Baseline: which shard each surviving sub lands in.
+            # Baseline: which shard SLICE each sub actually lands in, resolved
+            # through Select-ShardSubscriptions itself (not just the key helper)
+            # so an unstable/positional split would be caught here - the raw key
+            # helper never sees the subscription set, so it cannot.
             $baseline = @{}
-            foreach ($s in $script:Subs) { $baseline[$s.Id] = Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount $n }
+            for ($i = 0; $i -lt $n; $i++)
+            {
+                foreach ($s in @(Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex $i -ShardCount $n))
+                {
+                    $baseline[$s.Id] = $i
+                }
+            }
 
             # Drop one sub and add a brand-new one (simulates tenant drift between
             # two machines' Get-AzSubscription snapshots).
             $drifted = @($script:Subs | Select-Object -Skip 1)
             $drifted += [pscustomobject]@{ Id = [guid]::NewGuid().ToString() }
 
-            foreach ($s in $drifted) {
-                if ($baseline.ContainsKey($s.Id)) {
-                    # A surviving sub must map to the SAME shard as before.
-                    (Get-ShardKeyForSubscription -SubscriptionId $s.Id -ShardCount $n) | Should -Be $baseline[$s.Id]
+            # Re-slice the DRIFTED set the same way: every surviving sub must land
+            # in the SAME shard slice as before the drift (the added sub, absent
+            # from the baseline, is ignored). A positional split would move most
+            # subs by one slice once the first sub is dropped, and fail here.
+            for ($i = 0; $i -lt $n; $i++)
+            {
+                foreach ($s in @(Select-ShardSubscriptions -Subscriptions $drifted -ShardIndex $i -ShardCount $n))
+                {
+                    if ($baseline.ContainsKey($s.Id))
+                    {
+                        $i | Should -Be $baseline[$s.Id]
+                    }
                 }
             }
         }

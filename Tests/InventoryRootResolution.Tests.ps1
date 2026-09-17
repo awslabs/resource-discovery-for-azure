@@ -70,6 +70,7 @@ Describe 'Get-RdaInventoryRoot: explicit -OutputDirectory' {
     # Silently writing somewhere else is worse than failing.
     It 'FAILS rather than silently redirecting when the explicit path is unwritable' {
         if ($IsWindows) { Set-ItResult -Skipped -Because 'chmod-based read-only setup is POSIX-only'; return }
+        if ((& id -u) -eq 0) { Set-ItResult -Skipped -Because 'chmod 500 does not deny writes to root (common in CI containers), so the resolver would stay writable and the failure expectation would be spurious'; return }
 
         $Ro = Join-Path $script:Sandbox 'readonly-explicit'
         New-Item -Path $Ro -ItemType Directory -Force | Out-Null
@@ -193,6 +194,7 @@ Describe 'Get-RdaInventoryRoot: degraded default falls back loudly' {
 
     It 'falls back to temp and names where the output went' {
         if ($IsWindows) { Set-ItResult -Skipped -Because 'chmod-based read-only setup is POSIX-only'; return }
+        if ((& id -u) -eq 0) { Set-ItResult -Skipped -Because 'chmod 500 does not deny writes to root (common in CI containers), so the preferred candidate would stay creatable and no fallback would occur'; return }
 
         # Point HOME at a read-only directory so the preferred candidate
         # ($HOME/InventoryReports) cannot be created, leaving temp as the fallback.

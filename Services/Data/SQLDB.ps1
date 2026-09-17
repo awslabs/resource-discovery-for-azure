@@ -31,7 +31,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'              = $1.RESOURCEGROUP;
                 'Name'                       = $1.NAME;
                 'Location'                   = $1.LOCATION;
-                'StorageAccountType'         = $Data.storageAccountType;
+                'StorageAccountType'         = if ($null -ne $Data.currentBackupStorageRedundancy) { $Data.currentBackupStorageRedundancy } else { $Data.storageAccountType };
                 'DatabaseServer'             = $DBServer;
                 'SecondaryLocation'          = $Data.defaultSecondaryLocation;
                 'Status'                     = $Data.status;

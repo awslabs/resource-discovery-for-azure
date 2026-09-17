@@ -130,8 +130,12 @@ function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
 
     # Auth artifacts first (highest severity): a SAS signature / token value in a
     # URL or error must never ship even to the ingestion party. Mask the VALUE of
-    # sig=/signature=/sas=/(access|bearer)token=... and a 'Bearer <token>' header.
-    $Result = [regex]::Replace($Result, '(?i)\b(sig|signature|sas|accesstoken|access_token|bearertoken)=[^&\s"''<>]+', '$1=<redacted>')
+    # sig=/signature=/sas=/(access|bearer)token=..., the connection-string secrets
+    # Azure storage / Service Bus / SQL / AAD exception text commonly carries
+    # (AccountKey=, SharedAccessKey=, Password=/pwd=, client_secret=, and any
+    # *key=/*secret=/*token= form), and a 'Bearer <token>' header. ';' terminates
+    # a value so a connection string's next segment survives readable.
+    $Result = [regex]::Replace($Result, '(?i)\b(sig|signature|sas|accesstoken|access_token|bearertoken|accountkey|sharedaccesskey|sharedaccesssignature|password|pwd|client_secret|clientsecret|[a-z0-9_\-]*(?:key|secret|token))=[^&;\s"''<>]+', '$1=<redacted>')
     $Result = [regex]::Replace($Result, '(?i)\bBearer\s+[A-Za-z0-9._\-]+', 'Bearer <redacted>')
 
     $Result = [regex]::Replace($Result, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '<email>')

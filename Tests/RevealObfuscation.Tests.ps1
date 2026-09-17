@@ -495,9 +495,11 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
     }
 
     It "FreeTextMap resolves each token to a real value (not a token, null, or the 'obfuscated' sentinel)" {
-        foreach ($tok in @($script:P3TokShared, $script:P3TokOther))
+        # Assert on the reveal engine's OUTPUT ($script:P3Revealed), not the
+        # fixture dictionary: each revealed free-text field must be a real value,
+        # proving the engine resolved every token via FreeTextMap (Req 5.2).
+        foreach ($Real in @($script:P3Revealed.VirtualMachines[0].CreatedBy, $script:P3Revealed.VirtualMachines[1].CreatedBy, $script:P3Revealed.VirtualMachines[2].RoleName))
         {
-            $Real = $script:P3Dict.FreeTextMap[$tok]
             $Real | Should -Not -BeNullOrEmpty
             $Real | Should -Not -Match $script:P3TokenRegex
             $Real | Should -Not -Be 'obfuscated'
@@ -505,9 +507,12 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
     }
 
     It "a real value seen more than once carries a single shared token in the obfuscated ZIP (Req 5.3)" {
-        # vmA and vmB shared one real free-text value -> one shared token.
-        $script:P3Inventory.VirtualMachines[0].CreatedBy | Should -Be $script:P3Inventory.VirtualMachines[1].CreatedBy
-        $script:P3Inventory.VirtualMachines[0].CreatedBy | Should -Be $script:P3TokShared
+        # Read the pre-reveal obfuscated bundle content ($script:P3RawObfuscated),
+        # not the in-memory fixture: vmA and vmB shared one real free-text value,
+        # so the obfuscated ZIP must carry ONE shared token for both.
+        $Obf = $script:P3RawObfuscated | ConvertFrom-Json
+        $Obf.VirtualMachines[0].CreatedBy | Should -Be $Obf.VirtualMachines[1].CreatedBy
+        $Obf.VirtualMachines[0].CreatedBy | Should -Be $script:P3TokShared
     }
 
     It "every occurrence of the shared token round-trips to the same real value (P3)" {
@@ -801,12 +806,14 @@ Describe "Reveal-Obfuscation -All overrides -Fields and warns of lossy fields (R
 # =============================================================================
 # Structural preservation (P5) — Task 9.1 | Requirements 7.4 | Property: P5
 # -----------------------------------------------------------------------------
-# Reveal-Obfuscation.ps1 preserves structure by extracting the input ZIP
-# (Expand-Archive, line 304), rewriting each member IN PLACE under its original
-# filename through the format-correct writer (CSV via Export-Csv line 365,
-# JSON/HTML via Set-Content line 385 after the escapeMode switch at line 374),
-# and re-zipping the same temp tree (Compress-Archive line 397) — so member
-# names never change and every member stays valid in its own format.
+# Invoke-RdaReveal (Functions/RevealObfuscation.Functions.ps1), which Reveal.ps1
+# single mode delegates to, preserves structure by extracting the input ZIP
+# (System.IO.Compression.ZipFile.ExtractToDirectory), rewriting each member IN
+# PLACE under its original filename through the format-correct writer (CSV via
+# Export-Csv, JSON/HTML via Set-Content after the EscapeMode switch, each only
+# when that member had token hits), and re-zipping the same temp tree
+# (System.IO.Compression.ZipFile.CreateFromDirectory) - so member names never
+# change and every member stays valid in its own format.
 #
 # These assertions close the P5 gap left by the rest of this file: the default
 # "produces valid JSON that re-parses" check is incidental (it only inspects the

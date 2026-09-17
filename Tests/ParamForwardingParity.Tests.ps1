@@ -43,8 +43,18 @@ BeforeAll {
     }
 
     # Keys the wrapper puts into the hashtable it splats at the parallel worker.
-    $script:WorkerArgKeys = @([regex]::Matches($script:WrapperSrc, '\$WorkerArgs(?:\.|\['')([A-Za-z]+)') |
-            ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
+    # Two sources, both required: the accessor forms ($WorkerArgs.Foo /
+    # $WorkerArgs['Foo']) added after the literal, AND the keys declared in the
+    # $WorkerArgs = @{ ... } literal itself. The accessor regex alone silently
+    # omits every literal key (TenantID, StreamId, InventoryRoot, ScriptRoot,
+    # AzContextPath, ConcurrencyLimit, and the rest), so an unbindable literal key
+    # would slip past the binding assertion below.
+    $script:WorkerArgAccessorKeys = @([regex]::Matches($script:WrapperSrc, '\$WorkerArgs(?:\.|\['')([A-Za-z]+)') |
+            ForEach-Object { $_.Groups[1].Value })
+    $script:WorkerArgLiteralBody = [regex]::Match($script:WrapperSrc, '\$WorkerArgs\s*=\s*@\{([\s\S]*?)\}').Groups[1].Value
+    $script:WorkerArgLiteralKeys = @([regex]::Matches($script:WorkerArgLiteralBody, '(?m)^\s*([A-Za-z]+)\s*=') |
+            ForEach-Object { $_.Groups[1].Value })
+    $script:WorkerArgKeys = @($script:WorkerArgAccessorKeys + $script:WorkerArgLiteralKeys) | Sort-Object -Unique
 
     # Keys each script puts into the hashtable it splats at ResourceInventory.ps1.
     $script:WrapperPassKeys = @([regex]::Matches($script:WrapperSrc, '\$InventoryPassthrough\[''([A-Za-z]+)''\]') |

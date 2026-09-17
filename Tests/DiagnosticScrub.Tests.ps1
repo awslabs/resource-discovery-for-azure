@@ -66,6 +66,13 @@ BeforeAll {
     # rules still fire. Keep the sig/jwt values to assert they are gone afterward.
     $script:SigValue = (& $NewRand 32)
     $script:SasUrl = 'https://example-host/container/blob?sv=2021-08-06&ss=b&' + 'sig=' + $script:SigValue
+    # Non-sig query-param forms from the SAME shared auth alternation
+    # (sig|signature|sas|accesstoken|...). The sig= assertion only catches a
+    # wholesale regex break; these catch the removal of a single alternative
+    # (e.g. signature= or sas=) that would otherwise ship untested. Values are
+    # runtime-random like the sig fixture, so no literal secret lives in source.
+    $script:SignatureValue = (& $NewRand 32)
+    $script:SasValue = (& $NewRand 24)
     $script:JwtValue = 'eyJ' + (& $NewRand 12) + '.' + (& $NewRand 16) + '.' + (& $NewRand 16)
     $script:Bearer = 'Bearer ' + $script:JwtValue
 
@@ -77,6 +84,7 @@ BeforeAll {
         "host $script:Fqdn ($script:Ip);",
         "log $script:HomeNix / $script:HomeWin;",
         "download $script:SasUrl;",
+        "sas params: signature=$script:SignatureValue sas=$script:SasValue;",
         "auth: $script:Bearer"
     ) -join ' '
 
@@ -137,6 +145,16 @@ Describe "Protect-DiagnosticText masks structured identifier classes" {
     It "redacts a SAS signature value" {
         $script:Scrubbed | Should -Not -Match ('sig=' + [regex]::Escape($script:SigValue))
         $script:Scrubbed | Should -Match 'sig=<redacted>'
+    }
+
+    It "redacts a 'signature=' query-param value" {
+        $script:Scrubbed | Should -Not -Match ('signature=' + [regex]::Escape($script:SignatureValue))
+        $script:Scrubbed | Should -Match 'signature=<redacted>'
+    }
+
+    It "redacts a 'sas=' query-param value" {
+        $script:Scrubbed | Should -Not -Match ('sas=' + [regex]::Escape($script:SasValue))
+        $script:Scrubbed | Should -Match 'sas=<redacted>'
     }
 
     It "redacts a Bearer token" {

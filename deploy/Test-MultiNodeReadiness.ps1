@@ -166,17 +166,24 @@ foreach ($Module in 'Az.Accounts', 'Az.ResourceGraph', 'Az.Resources', 'Az.Compu
 }
 
 # Resolve the target subscription for the remaining checks. When -SubscriptionId
-# names a subscription other than the active context's, select it: the provider
-# and node-size checks below run against the CURRENT context, and silently
-# checking the wrong subscription would report a false PASS.
+# names a subscription other than the active context's, the provider and
+# node-size checks (which read the CURRENT context) would silently check the
+# wrong subscription and report a false PASS. So the context is switched for the
+# DURATION OF THIS PROCESS ONLY (-Scope Process: never written to ~/.Azure, so
+# the operator's default subscription in other sessions is untouched) and the
+# original context is restored in the finally below, keeping the script's
+# "changes nothing" contract - the only mutation is transient session state.
 if (-not $SubscriptionId -and $Context) { $SubscriptionId = $Context.Subscription.Id }
 $TargetSubscriptionReady = $true
+$OriginalContext = $Context
+$ContextSwitched = $false
 if ($Context -and $SubscriptionId -and $Context.Subscription.Id -ne $SubscriptionId)
 {
     try
     {
-        $Context = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
-        Add-Result -Name 'Target subscription selected' -Status 'PASS' -Detail ("Az context switched to {0}." -f $SubscriptionId)
+        $Context = Set-AzContext -SubscriptionId $SubscriptionId -Scope Process -ErrorAction Stop
+        $ContextSwitched = $true
+        Add-Result -Name 'Target subscription selected' -Status 'PASS' -Detail ("Checks run against {0} (process-scoped; original context restored on exit)." -f $SubscriptionId)
     }
     catch
     {
@@ -184,134 +191,147 @@ if ($Context -and $SubscriptionId -and $Context.Subscription.Id -ne $Subscriptio
         $TargetSubscriptionReady = $false   # the provider / node-size checks below must not run against the wrong subscription
     }
 }
-
-# 4. Resource providers AKS + ACR require.
-foreach ($Provider in 'Microsoft.ContainerService', 'Microsoft.ContainerRegistry')
-{
-    if (-not $TargetSubscriptionReady)
-    {
-        Add-Result -Name ("Provider {0}" -f $Provider) -Status 'FAIL' -Detail ("Not checked: target subscription {0} could not be selected." -f $SubscriptionId)
-        continue
-    }
-    try
-    {
-        $State = (Get-AzResourceProvider -ProviderNamespace $Provider -ErrorAction Stop |
-            Select-Object -First 1).RegistrationState
-        if ($State -eq 'Registered')
-        {
-            Add-Result -Name ("Provider {0}" -f $Provider) -Status 'PASS' -Detail 'Registered'
-        }
-        else
-        {
-            Add-Result -Name ("Provider {0}" -f $Provider) -Status 'FAIL' `
-                -Detail ("State '{0}'. Register with: az provider register -n {1}" -f $State, $Provider)
-        }
-    }
-    catch
-    {
-        Add-Result -Name ("Provider {0}" -f $Provider) -Status 'WARN' `
-            -Detail ("Could not query ({0}). Check manually: az provider show -n {1}" -f $_.Exception.Message, $Provider)
-    }
-}
-
-# 5. An x64 node VM size is actually available in the target region.
-#    WHY: some subscriptions/regions only offer Arm64 B-series (e.g. Standard_B2s
-#    was rejected as "not allowed" in testing) and the amd64 PowerShell container
-#    image cannot be scheduled on Arm64 nodes. Confirm the chosen x64 size is
-#    offered AND not restricted before the AKS create.
 try
 {
-    if (-not $TargetSubscriptionReady) { throw ("target subscription {0} could not be selected" -f $SubscriptionId) }
-    $Sku = Get-AzComputeResourceSku -Location $Location -ErrorAction Stop |
-        Where-Object { $_.ResourceType -eq 'virtualMachines' -and $_.Name -eq $NodeVmSize } |
-        Select-Object -First 1
-    if (-not $Sku)
-    {
-        Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'FAIL' `
-            -Detail 'Not offered in this region. List options: az vm list-skus --location <loc> --resource-type virtualMachines -o table'
-    }
-    else
-    {
-        # Distinguish restriction SCOPE. A 'Location'-type restriction means the
-        # size is not available for this subscription in the region at all (this is
-        # what blocked Standard_B2s in testing) -> FAIL. A 'Zone'-type restriction
-        # only removes some availability zones; the size is still creatable (AKS
-        # lands it in an available zone or non-zonally, as Standard_D2s_v3 did in
-        # testing) -> WARN, not a blocker.
-        $LocationRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Location' }).Count -gt 0
-        $ZoneRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Zone' }).Count -gt 0
-        if ($LocationRestricted)
-        {
-            Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'FAIL' `
-                -Detail 'Not available for this subscription in this region (region-level restriction). Pick another x64 size or request quota.'
-        }
-        elseif ($ZoneRestricted)
-        {
-            Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'WARN' `
-                -Detail 'Available, but restricted in some availability zones. Creatable (AKS selects an available zone); pin zones only if you require specific ones.'
-        }
-        else
-        {
-            Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'PASS' -Detail 'Available and unrestricted.'
-        }
-    }
-}
-catch
-{
-    Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'WARN' `
-        -Detail ("Could not query SKUs ({0})." -f $_.Exception.Message)
-}
 
-# 6. Can the signed-in caller create the infra and wire up workload identity?
-#    Creating AKS/ACR needs Contributor (or Owner) on the subscription/RG.
-#    Creating role assignments + federated credentials for workload identity needs
-#    Owner or User Access Administrator. We check the caller's role assignments at
-#    subscription scope - a WARN (not FAIL) when absent, since the rights may be
-#    granted at a management-group or resource-group scope this check can't see.
-if ($Context -and $SubscriptionId)
-{
+    # 4. Resource providers AKS + ACR require.
+    foreach ($Provider in 'Microsoft.ContainerService', 'Microsoft.ContainerRegistry')
+    {
+        if (-not $TargetSubscriptionReady)
+        {
+            Add-Result -Name ("Provider {0}" -f $Provider) -Status 'FAIL' -Detail ("Not checked: target subscription {0} could not be selected." -f $SubscriptionId)
+            continue
+        }
+        try
+        {
+            $State = (Get-AzResourceProvider -ProviderNamespace $Provider -ErrorAction Stop |
+                Select-Object -First 1).RegistrationState
+            if ($State -eq 'Registered')
+            {
+                Add-Result -Name ("Provider {0}" -f $Provider) -Status 'PASS' -Detail 'Registered'
+            }
+            else
+            {
+                Add-Result -Name ("Provider {0}" -f $Provider) -Status 'FAIL' `
+                    -Detail ("State '{0}'. Register with: az provider register -n {1}" -f $State, $Provider)
+            }
+        }
+        catch
+        {
+            Add-Result -Name ("Provider {0}" -f $Provider) -Status 'WARN' `
+                -Detail ("Could not query ({0}). Check manually: az provider show -n {1}" -f $_.Exception.Message, $Provider)
+        }
+    }
+
+    # 5. An x64 node VM size is actually available in the target region.
+    #    WHY: some subscriptions/regions only offer Arm64 B-series (e.g. Standard_B2s
+    #    was rejected as "not allowed" in testing) and the amd64 PowerShell container
+    #    image cannot be scheduled on Arm64 nodes. Confirm the chosen x64 size is
+    #    offered AND not restricted before the AKS create.
     try
     {
-        $Scope = "/subscriptions/$SubscriptionId"
-        # A service-principal context (e.g. a CI identity) does not resolve via
-        # -SignInName (that is for user UPNs); query by -ApplicationId instead so
-        # the RBAC check is meaningful for both user and SP callers.
-        if ($Context.Account.Type -eq 'ServicePrincipal')
+        if (-not $TargetSubscriptionReady) { throw ("target subscription {0} could not be selected" -f $SubscriptionId) }
+        $Sku = Get-AzComputeResourceSku -Location $Location -ErrorAction Stop |
+            Where-Object { $_.ResourceType -eq 'virtualMachines' -and $_.Name -eq $NodeVmSize } |
+            Select-Object -First 1
+        if (-not $Sku)
         {
-            $MyRoles = @(Get-AzRoleAssignment -ApplicationId $Context.Account.Id -Scope $Scope -ErrorAction Stop |
-                Select-Object -ExpandProperty RoleDefinitionName)
+            Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'FAIL' `
+                -Detail 'Not offered in this region. List options: az vm list-skus --location <loc> --resource-type virtualMachines -o table'
         }
         else
         {
-            $MyRoles = @(Get-AzRoleAssignment -SignInName $Context.Account.Id -Scope $Scope -ErrorAction Stop |
-                Select-Object -ExpandProperty RoleDefinitionName)
-        }
-        $CanCreate = $MyRoles -contains 'Owner' -or $MyRoles -contains 'Contributor'
-        $CanAssign = $MyRoles -contains 'Owner' -or $MyRoles -contains 'User Access Administrator'
-
-        if ($CanCreate)
-        {
-            Add-Result -Name 'Rights to create AKS/ACR' -Status 'PASS' -Detail (($MyRoles | Sort-Object -Unique) -join ', ')
-        }
-        else
-        {
-            Add-Result -Name 'Rights to create AKS/ACR' -Status 'WARN' `
-                -Detail 'No Owner/Contributor seen at subscription scope (may be granted at MG/RG scope).'
-        }
-
-        if ($CanAssign)
-        {
-            Add-Result -Name 'Rights to grant workload-identity RBAC' -Status 'PASS' -Detail 'Owner or User Access Administrator.'
-        }
-        else
-        {
-            Add-Result -Name 'Rights to grant workload-identity RBAC' -Status 'WARN' `
-                -Detail 'Need Owner or User Access Administrator to create role assignments + federated credentials.'
+            # Distinguish restriction SCOPE. A 'Location'-type restriction means the
+            # size is not available for this subscription in the region at all (this is
+            # what blocked Standard_B2s in testing) -> FAIL. A 'Zone'-type restriction
+            # only removes some availability zones; the size is still creatable (AKS
+            # lands it in an available zone or non-zonally, as Standard_D2s_v3 did in
+            # testing) -> WARN, not a blocker.
+            $LocationRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Location' }).Count -gt 0
+            $ZoneRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Zone' }).Count -gt 0
+            if ($LocationRestricted)
+            {
+                Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'FAIL' `
+                    -Detail 'Not available for this subscription in this region (region-level restriction). Pick another x64 size or request quota.'
+            }
+            elseif ($ZoneRestricted)
+            {
+                Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'WARN' `
+                    -Detail 'Available, but restricted in some availability zones. Creatable (AKS selects an available zone); pin zones only if you require specific ones.'
+            }
+            else
+            {
+                Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'PASS' -Detail 'Available and unrestricted.'
+            }
         }
     }
     catch
     {
-        Add-Result -Name 'Caller RBAC' -Status 'WARN' -Detail ("Could not read role assignments ({0})." -f $_.Exception.Message)
+        Add-Result -Name ("Node size {0} in {1}" -f $NodeVmSize, $Location) -Status 'WARN' `
+            -Detail ("Could not query SKUs ({0})." -f $_.Exception.Message)
+    }
+
+    # 6. Can the signed-in caller create the infra and wire up workload identity?
+    #    Creating AKS/ACR needs Contributor (or Owner) on the subscription/RG.
+    #    Creating role assignments + federated credentials for workload identity needs
+    #    Owner or User Access Administrator. We check the caller's role assignments at
+    #    subscription scope - a WARN (not FAIL) when absent, since the rights may be
+    #    granted at a management-group or resource-group scope this check can't see.
+    if ($Context -and $SubscriptionId)
+    {
+        try
+        {
+            $Scope = "/subscriptions/$SubscriptionId"
+            # A service-principal context (e.g. a CI identity) does not resolve via
+            # -SignInName (that is for user UPNs); query by -ApplicationId instead so
+            # the RBAC check is meaningful for both user and SP callers.
+            if ($Context.Account.Type -eq 'ServicePrincipal')
+            {
+                $MyRoles = @(Get-AzRoleAssignment -ApplicationId $Context.Account.Id -Scope $Scope -ErrorAction Stop |
+                    Select-Object -ExpandProperty RoleDefinitionName)
+            }
+            else
+            {
+                $MyRoles = @(Get-AzRoleAssignment -SignInName $Context.Account.Id -Scope $Scope -ErrorAction Stop |
+                    Select-Object -ExpandProperty RoleDefinitionName)
+            }
+            $CanCreate = $MyRoles -contains 'Owner' -or $MyRoles -contains 'Contributor'
+            $CanAssign = $MyRoles -contains 'Owner' -or $MyRoles -contains 'User Access Administrator'
+
+            if ($CanCreate)
+            {
+                Add-Result -Name 'Rights to create AKS/ACR' -Status 'PASS' -Detail (($MyRoles | Sort-Object -Unique) -join ', ')
+            }
+            else
+            {
+                Add-Result -Name 'Rights to create AKS/ACR' -Status 'WARN' `
+                    -Detail 'No Owner/Contributor seen at subscription scope (may be granted at MG/RG scope).'
+            }
+
+            if ($CanAssign)
+            {
+                Add-Result -Name 'Rights to grant workload-identity RBAC' -Status 'PASS' -Detail 'Owner or User Access Administrator.'
+            }
+            else
+            {
+                Add-Result -Name 'Rights to grant workload-identity RBAC' -Status 'WARN' `
+                    -Detail 'Need Owner or User Access Administrator to create role assignments + federated credentials.'
+            }
+        }
+        catch
+        {
+            Add-Result -Name 'Caller RBAC' -Status 'WARN' -Detail ("Could not read role assignments ({0})." -f $_.Exception.Message)
+        }
+    }
+
+}
+finally
+{
+    # Restore the operator's original context even if a check threw. Process-scoped
+    # only, so nothing on disk changed; this puts the SESSION back exactly as found.
+    if ($ContextSwitched -and $OriginalContext)
+    {
+        try { $null = Set-AzContext -Context $OriginalContext -Scope Process -ErrorAction Stop } catch { Write-Warning ("Could not restore the original Az context: {0}" -f $_.Exception.Message) }
     }
 }
 

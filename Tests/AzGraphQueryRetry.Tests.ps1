@@ -134,6 +134,13 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
 
         It 'returns lowercased keys and values' {
             $Result = Invoke-AzGraphQuerySafe -Query 'resources' -Lowercase
+            # PowerShell property access is case-insensitive, so $Result.data.name
+            # alone resolves the original 'Name' key whether or not keys were
+            # lowercased - a regression that lowercased values but left keys
+            # uppercased would still pass. Assert the actual key set with a
+            # case-sensitive comparison to pin the KEY-lowercasing the test name promises.
+            $Row = @($Result.data)[0]
+            $Row.PSObject.Properties.Name | Should -BeExactly 'name'
             $Result.data.name | Should -Be 'myresource'
         }
     }

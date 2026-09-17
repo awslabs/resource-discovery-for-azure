@@ -1,3 +1,4 @@
+#!/usr/bin/env pwsh
 param (
     # NOT Mandatory, deliberately - see the -TenantID guard immediately after this
     # param block. Mandatory made PowerShell PROMPT for a missing value, which any
@@ -117,6 +118,16 @@ param (
     # loudly in the summary) and the run proceeds with the accessible ones. Use
     # this only when you intentionally have Reader on a subset of the tenant.
     [switch]$AllowPartialAccess,
+
+    # Check permissions and stop - collect nothing. Runs the normal sign-in,
+    # tenant, coverage and Reader gates, then probes EVERY in-scope subscription
+    # for the two data-phase permissions the run needs (Cost Management Reader
+    # for consumption, Monitoring Reader for metrics) and prints a per-subscription
+    # matrix with the exact role to grant. Today those two gaps otherwise surface
+    # only mid-run (consumption is probed on one subscription; metrics not at
+    # all). Exit 0 when nothing requested is denied, 1 otherwise. Honours
+    # -SkipMetrics / -SkipConsumption (a skipped phase is not probed).
+    [switch]$Preflight,
 
     # DEPRECATED / no-op: the aggregate "main" HTML summary (run-wide totals, a
     # per-subscription table with links to each per-sub report, and run-health
@@ -1601,6 +1612,51 @@ if ($ScopeForProbe.Count -gt 0)
     {
         Write-Host ("  Access verified: all {0} in-scope subscription(s) are readable." -f $ScopeForProbe.Count) -ForegroundColor Green
     }
+}
+
+# ---------------------------------------------------------------------------
+# -Preflight: permission matrix, then stop. Everything above (sign-in, tenant,
+# coverage gate, Reader probe) has already run, so each remaining subscription
+# is known to be control-plane readable; what is left to prove is the two
+# data-phase permissions, per subscription rather than on a single sample.
+if ($Preflight)
+{
+    Write-Host ""
+    Write-Host ("Preflight: probing data-phase permissions on {0} subscription(s)..." -f $Subscriptions.Count) -ForegroundColor Cyan
+    # The probes switch the Az context per subscription; put it back afterwards so
+    # a preflight leaves the operator's session exactly as it found it.
+    $PreflightOriginalContext = Get-AzContext -ErrorAction SilentlyContinue
+    $MatrixRows = foreach ($PfSub in $Subscriptions)
+    {
+        $ReaderState = if ($AccessDecision -and ($AccessDecision.InaccessibleIds -contains $PfSub.Id)) { 'Denied' } else { 'Ok' }
+        $CostState = 'Skipped'
+        if (-not $SkipConsumption)
+        {
+            $CostProbe = Test-ConsumptionAccess -SubscriptionId $PfSub.Id
+            $CostState = $CostProbe.Outcome
+            if ($CostProbe.Detail) { Write-Verbose ("[preflight] consumption {0}: {1}" -f $PfSub.Name, $CostProbe.Detail) }
+        }
+        $MonState = 'Skipped'
+        if (-not $SkipMetrics)
+        {
+            $MonProbe = Test-MetricsAccess -SubscriptionId $PfSub.Id
+            $MonState = $MonProbe.Outcome
+            if ($MonProbe.Detail) { Write-Verbose ("[preflight] metrics {0}: {1}" -f $PfSub.Name, $MonProbe.Detail) }
+        }
+        [pscustomobject]@{ Name = $PfSub.Name; Id = $PfSub.Id; Reader = $ReaderState; CostManagement = $CostState; Monitoring = $MonState }
+    }
+    if ($PreflightOriginalContext) { try { $null = Set-AzContext -Context $PreflightOriginalContext -ErrorAction Stop } catch { Write-Verbose "[preflight] could not restore the original Az context" } }
+    $Matrix = Format-PreflightMatrix -Rows @($MatrixRows)
+    Write-Host ""
+    foreach ($Line in $Matrix.Lines) { Write-Host $Line -ForegroundColor $(if ($Line -match 'Denied') { 'Red' } else { 'Gray' }) }
+    Write-Host ""
+    if ($Matrix.Blocking)
+    {
+        Write-Host "Preflight result: at least one requested permission is DENIED. Fix the roles above (or pass the matching -Skip* switch), then run without -Preflight." -ForegroundColor Red
+        Exit-Wrapper -Code 1
+    }
+    Write-Host "Preflight result: no denials. Nothing was collected; run again without -Preflight to start the inventory." -ForegroundColor Green
+    Exit-Wrapper -Code 0
 }
 
 # ---------------------------------------------------------------------------

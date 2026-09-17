@@ -1872,6 +1872,89 @@ function Test-ConsumptionAccess
     }
 }
 
+# Probe whether the signed-in identity can READ metrics (Monitoring Reader) for
+# a subscription, by fetching the metric DEFINITIONS of one metric-eligible
+# resource - the cheapest call on the same permission the metrics phase needs.
+# The resource is found with the same Resource Graph path the inventory uses.
+#
+# Returns a [pscustomobject] with:
+#   Outcome - 'Ok' / 'Denied' / 'Unavailable' / 'NoResource'.
+#             'NoResource' means the subscription holds nothing metric-eligible,
+#             so there is nothing to prove either way; it is not a failure.
+#   Detail  - $null on success, otherwise the reason (exception message, or which
+#             resource was probed).
+# Denial is classified with Test-RdaConsumptionDenial: the RBAC denial signatures
+# (403 / AuthorizationFailed / does not have authorization) are the same for the
+# Monitor API, and keeping one definition avoids drift.
+function Test-MetricsAccess
+{
+    param([Parameter(Mandatory = $true)][string]$SubscriptionId)
+
+    $Query = "resources | where subscriptionId =~ '{0}' and type in~ ('microsoft.compute/virtualmachines','microsoft.storage/storageaccounts','microsoft.sql/servers/databases','microsoft.web/sites','microsoft.network/publicipaddresses') | project id | take 1" -f $SubscriptionId
+    try
+    {
+        $Probe = @(Search-AzGraph -Query $Query -Subscription $SubscriptionId -First 1 -ErrorAction Stop)
+    }
+    catch
+    {
+        return [pscustomobject]@{ Outcome = 'Unavailable'; Detail = ('could not locate a metric-eligible resource: {0}' -f $_.Exception.Message) }
+    }
+    if ($Probe.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$Probe[0].id))
+    {
+        return [pscustomobject]@{ Outcome = 'NoResource'; Detail = 'no VM, storage account, SQL database, web app or public IP to probe' }
+    }
+    $ResourceId = [string]$Probe[0].id
+    try
+    {
+        $null = Get-AzMetricDefinition -ResourceId $ResourceId -ErrorAction Stop -WarningAction SilentlyContinue | Select-Object -First 1
+        return [pscustomobject]@{ Outcome = 'Ok'; Detail = $null }
+    }
+    catch
+    {
+        $Outcome = if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message) { 'Denied' } else { 'Unavailable' }
+        return [pscustomobject]@{ Outcome = $Outcome; Detail = ('{0} (probed {1})' -f $_.Exception.Message, $ResourceId) }
+    }
+}
+
+# Render the -Preflight permission matrix. Pure (no Azure calls) so the layout
+# and the role hints are unit-testable offline. Takes the per-subscription rows
+# the wrapper assembled - each with Name, Id, Reader, CostManagement, Monitoring
+# where every outcome is one of Ok / Denied / Unavailable / NoResource / Skipped -
+# and returns the text lines to print. Also returns a Blocking flag: any 'Denied'
+# on a phase that was REQUESTED (not Skipped) is blocking, mirroring the run-time
+# gates, because a run with a known denial would silently miss requested data.
+function Format-PreflightMatrix
+{
+    param([Parameter(Mandatory = $true)]$Rows)
+
+    $Rows = @($Rows)
+    $Lines = [System.Collections.Generic.List[string]]::new()
+    $Lines.Add('Permission matrix (per subscription):')
+    $Lines.Add(('  {0,-40} {1,-13} {2,-16} {3,-13}' -f 'Subscription', 'Reader', 'Cost Mgmt', 'Monitoring'))
+    $Lines.Add('  ' + ('-' * 86))
+    $Blocking = $false
+    $Hints = [System.Collections.Generic.List[string]]::new()
+    foreach ($R in $Rows)
+    {
+        $Name = [string]$R.Name
+        if ($Name.Length -gt 40) { $Name = $Name.Substring(0, 37) + '...' }
+        $Lines.Add(('  {0,-40} {1,-13} {2,-16} {3,-13}' -f $Name, $R.Reader, $R.CostManagement, $R.Monitoring))
+        if ($R.Reader -eq 'Denied') { $Blocking = $true; $Hints.Add(('Grant Reader on {0} ({1}) - or Reader at the tenant-root management group, which inherits to every subscription.' -f $R.Name, $R.Id)) }
+        if ($R.CostManagement -eq 'Denied') { $Blocking = $true; $Hints.Add(('Grant Cost Management Reader on {0} ({1}) (or Billing Reader on the billing scope), or run with -SkipConsumption.' -f $R.Name, $R.Id)) }
+        if ($R.Monitoring -eq 'Denied') { $Blocking = $true; $Hints.Add(('Grant Monitoring Reader on {0} ({1}), or run with -SkipMetrics.' -f $R.Name, $R.Id)) }
+    }
+    $Lines.Add('')
+    $Lines.Add('  Ok = verified   Denied = RBAC denial (blocks the run)   Unavailable = could not verify (token/transient; the run will retry per subscription)')
+    $Lines.Add('  NoResource = nothing metric-eligible to probe   Skipped = phase not requested (-SkipMetrics / -SkipConsumption)')
+    if ($Hints.Count -gt 0)
+    {
+        $Lines.Add('')
+        $Lines.Add('To fix before running:')
+        foreach ($H in ($Hints | Select-Object -Unique)) { $Lines.Add('  - ' + $H) }
+    }
+    return [pscustomobject]@{ Lines = @($Lines); Blocking = $Blocking }
+}
+
 # Build the run-level "RunSummary.log" content for the consolidated
 # AllSubscriptions zip. Pure and deterministic apart from the generation
 # timestamp (no file I/O, no Azure calls) so it is unit-testable offline: the

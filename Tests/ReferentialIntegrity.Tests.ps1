@@ -164,15 +164,15 @@ Describe "ResourceGroup Consistency" {
                 }
             }
         }
-        # Each RG should have at least one resource. (The Count check alone is
-        # trivially >=1 because the key was created by appending an ID; when
-        # obfuscated, also prove the RG key itself is a deterministic pseudonym
-        # rather than a raw name - a raw RG key would mean the RG dictionary
-        # failed to map it. Count-independent, so it holds regardless of how many
-        # RGs the fixture has.)
+        # The RG key itself is what matters here: when obfuscated, prove the RG
+        # key is a deterministic pseudonym rather than a raw name - a raw RG key
+        # would mean the RG dictionary failed to map it. Count-independent, so it
+        # holds regardless of how many RGs the fixture has. (A former per-group
+        # 'Count | Should -BeGreaterThan 0' assertion was dropped: each key is
+        # created only by appending an ID, so it was trivially >=1 and could
+        # never fail.)
         foreach ($rg in $RgGroups.Keys)
         {
-            $RgGroups[$rg].Count | Should -BeGreaterThan 0 -Because "ResourceGroup '$rg' should have at least one resource"
             if ($script:IsObfuscated -and -not [string]::IsNullOrEmpty($rg))
             {
                 $rg | Should -Match '^(prod|nonprod)_' -Because "obfuscated ResourceGroup keys must be deterministic pseudonyms, not raw names"

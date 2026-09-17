@@ -135,7 +135,10 @@ Describe "PII Leak Scan" {
         {
             if ([string]::IsNullOrEmpty($script:AllContent[$fileName])) { continue }
             $script:AllContent[$fileName] | Should -Not -Match '/home/[a-zA-Z]' -Because "File '$fileName' should not contain Unix home paths"
-            $script:AllContent[$fileName] | Should -Not -Match 'C:\\Users\\[a-zA-Z]' -Because "File '$fileName' should not contain Windows user paths"
+            # Match one-or-more backslashes on each side so a JSON-embedded Windows
+            # path (doubled backslashes in Inventory_*.json / Metrics_*.json) is caught
+            # too, not just single-backslash HTML/CSV text.
+            $script:AllContent[$fileName] | Should -Not -Match 'C:\\+Users\\+[a-zA-Z]' -Because "File '$fileName' should not contain Windows user paths"
         }
     }
 }
@@ -305,46 +308,66 @@ Describe "Non-Sensitive Fields Preserved" {
 # ============================================================
 Describe "No Null Obfuscated Fields" {
     It "No resource should have a null ID" {
-        $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_)
-                {
-                    $_.ID | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated ID"
-                }
-            }
+        $Examined = @($script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object { @($_.Value) } |
+            Where-Object { $null -ne $_ })
+        if ($Examined.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because "this bundle contains no resources, so there is no ID to check"
+            return
+        }
+        foreach ($res in $Examined)
+        {
+            $res.ID | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated ID"
         }
     }
 
     It "No resource should have a null Name" {
-        $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Name')
-                {
-                    $_.Name | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated Name"
-                }
-            }
+        $Examined = @($script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object { @($_.Value) } |
+            Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'Name' })
+        if ($Examined.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because "this bundle contains no resources with a Name property, so there is nothing to check"
+            return
+        }
+        foreach ($res in $Examined)
+        {
+            $res.Name | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated Name"
         }
     }
 
     It "No resource should have a null Subscription" {
-        $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'Subscription')
-                {
-                    $_.Subscription | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated Subscription"
-                }
-            }
+        $Examined = @($script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object { @($_.Value) } |
+            Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'Subscription' })
+        if ($Examined.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because "this bundle contains no resources with a Subscription property, so there is nothing to check"
+            return
+        }
+        foreach ($res in $Examined)
+        {
+            $res.Subscription | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated Subscription"
         }
     }
 
     It "No resource should have a null ResourceGroup" {
-        $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'ResourceGroup')
-                {
-                    $_.ResourceGroup | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated ResourceGroup"
-                }
-            }
+        $Examined = @($script:Inventory.PSObject.Properties |
+            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+            ForEach-Object { @($_.Value) } |
+            Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'ResourceGroup' })
+        if ($Examined.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because "this bundle contains no resources with a ResourceGroup property, so there is nothing to check"
+            return
+        }
+        foreach ($res in $Examined)
+        {
+            $res.ResourceGroup | Should -Not -BeNullOrEmpty -Because "Every resource should have an obfuscated ResourceGroup"
         }
     }
 }

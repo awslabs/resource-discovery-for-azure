@@ -17,8 +17,6 @@ if ($Task -eq 'Processing')
             $Vhub = $VirtualHub | Where-Object { $_.ID -in $Data.virtualHubs.id }
             $Vpn = $VPNSite | Where-Object { $_.ID -in $Data.vpnSites.id }
 
-            # Normalize hub/VPN-site collections to at least one (null) entry so every Virtual WAN emits a row
-            # (empty ones were dropped) with a CONSISTENT 10-key shape; detail fields are null when the entry is absent.
             $Hubs = @($Vhub)
             if ($Hubs.Count -eq 0) { $Hubs = @($null) }
             $Vpns = @($Vpn)
@@ -49,3 +47,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

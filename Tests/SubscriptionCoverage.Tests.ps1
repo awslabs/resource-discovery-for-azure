@@ -1,29 +1,5 @@
-# Subscription-coverage helper tests
-#
-# Unit-tests the two coverage-gate helpers in
-# Functions/RunAllSubscriptions.Functions.ps1 in isolation, offline (no live
-# Azure, no tenant):
-#
-#   - Get-RdaMgSubscriptionId: PURE recursive collector. Walks a management-group
-#     tree shaped like Get-AzManagementGroup -Expand -Recurse output (nodes with
-#     a .Type and .Children; subscription children carry Type '/subscriptions' and
-#     their .Name is the subscription GUID; nested management groups carry a
-#     'managementGroups' Type and their own .Children). Returns the flat list of
-#     subscription ids under the tree. Exercised here against synthetic trees, so
-#     it needs no Azure at all - this is the whole point of the pure/side-effecting
-#     split.
-#   - Get-TenantSubscriptionId: SIDE-EFFECTING fetch. Calls Get-AzManagementGroup
-#     and feeds the tree to the pure collector, returning { Ids; Detail } with
-#     Ids = distinct id string[] or $null when unverifiable. Exercised via a
-#     mocked Get-AzManagementGroup so the success / empty / throw paths are
-#     covered without a live tenant.
-#
-# Run with: Invoke-Pester ./Tests/SubscriptionCoverage.Tests.ps1 -Output Detailed
-#
-# The functions live in Functions/RunAllSubscriptions.Functions.ps1, a
-# definitions-only file with NO top-level side effects, so we dot-source it
-# wholesale - the same file both Run-AllSubscriptions.ps1 and its stream worker
-# dot-source at runtime, so this test exercises the exact shipping code.
+# Offline unit tests for the two coverage-gate helpers in Functions/RunAllSubscriptions.Functions.ps1:
+# Get-RdaMgSubscriptionId (pure MG-tree collector) and side-effecting Get-TenantSubscriptionId (mocked; Ids is $null, not empty, when coverage is unverifiable).
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'

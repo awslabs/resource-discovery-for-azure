@@ -17,13 +17,8 @@ if ($Task -eq 'Processing')
             $Vhub = $VirtualHub | Where-Object { $_.ID -in $Data.virtualHubs.id }
             $Vpn = $VPNSite | Where-Object { $_.ID -in $Data.vpnSites.id }
 
-            # Normalize the hub and VPN-site collections to at least one (null)
-            # entry each. This guarantees every Virtual WAN emits at least one row
-            # even when it has no hubs and/or no VPN sites (previously such a WAN
-            # was dropped from inventory entirely), and it lets the single loop
-            # below emit one CONSISTENT 10-key record shape for every case (the
-            # old no-VPN path emitted only 5 keys). Hub/VPN detail fields are null
-            # when the corresponding entry is absent.
+            # Normalize hub/VPN-site collections to at least one (null) entry so every Virtual WAN emits a row
+            # (empty ones were dropped) with a CONSISTENT 10-key shape; detail fields are null when the entry is absent.
             $Hubs = @($Vhub)
             if ($Hubs.Count -eq 0) { $Hubs = @($null) }
             $Vpns = @($Vpn)

@@ -1,34 +1,5 @@
 # Blob-backed resume-state helper tests (offline / pure)
-#
-# Unit-tests the PURE helpers added for AKS blob-backed resume state and the
-# "moving target" subscription reconciliation, in isolation - no Azure session,
-# no blob account, no wrapper run:
-#
-#   - Split-BlobContainerUri : parses a blob container URL into
-#     { Account; Container; Prefix }, prefix normalised to '' or 'x/y/'.
-#   - Get-StateBlobName      : builds the shard-namespaced blob NAME for the
-#     unified (StreamId < 0) and per-stream (StreamId >= 0) state files, under
-#     the container's optional prefix + a dedicated _state/ area.
-#   - Get-StateBlobShardSegment : single owner of the 'shard-<i>of<n>/' segment
-#     that keeps two shard pods sharing one container from colliding.
-#   - Get-StateBlobStreamPrefix : single owner of the per-stream blob-name prefix
-#     that the WRITE path (Get-StateBlobName) and the DISCOVERY path
-#     (Get-StateBlobNames) must agree on exactly.
-#   - Get-SubscriptionDelta  : classifies how the subscription universe moved
-#     between the start snapshot and an end re-enumeration into disjoint
-#     Vanished / New / Incomplete sets.
-#
-# These carry NO Azure calls, so - like Tests/RunAllSubscriptionsReconciliation.Tests.ps1
-# - the shared definitions file is dot-sourced wholesale and the functions are
-# exercised directly. The blob I/O functions (New-StateBlobContext,
-# Save-StateBlob, Read-StateBlob, Get-StateBlobNames) are intentionally NOT
-# unit-tested here: per the project's testing convention we do not mock Azure
-# cmdlets; they are validated end-to-end against a live sandbox storage account.
-# Get-StateBlobNames is inspected STRUCTURALLY in one It below (its body must build
-# its list prefix from the shared owner) because that coupling has a silent failure
-# mode and cannot be reached behaviourally without Azure.
-#
-# Run with: Invoke-Pester ./Tests/BlobStateReconciliation.Tests.ps1 -Output Detailed
+# Unit-tests the PURE helpers for AKS blob-backed resume state and subscription reconciliation (Split-BlobContainerUri, Get-StateBlobName, Get-StateBlobShardSegment, Get-StateBlobStreamPrefix, Get-SubscriptionDelta) with no Azure. The blob I/O functions are NOT unit-tested (project convention: don't mock Azure cmdlets; validated live); Get-StateBlobNames is only inspected STRUCTURALLY here because its coupling has a silent failure mode unreachable offline.
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'
@@ -106,23 +77,8 @@ Describe 'Get-StateBlobName' {
     }
 
     It 'produces a per-stream name whose path is under the same prefix Get-StateBlobNames lists on (naming coupling)' {
-        # The parent lists per-stream blobs via Get-StateBlobNames using a list
-        # prefix; each stream writes to a Get-StateBlobName path. If these two
-        # diverged, a rescheduled pod would never discover the per-stream state and
-        # would silently redo finished work.
-        #
-        # The list prefix comes from Get-StateBlobStreamPrefix - the function BOTH
-        # production paths now build from. This assertion used to re-derive the
-        # prefix with its own copy of the format string, which meant it would have
-        # kept passing if Get-StateBlobNames changed its layout: the test verified
-        # its own copy, not the code.
-        #
-        # What this does and does NOT close: the drift is narrowed to the ARGUMENT
-        # surface, not eliminated. This test substitutes Get-StateBlobStreamPrefix for
-        # the discovery path and never invokes Get-StateBlobNames (which needs Azure).
-        # So reintroducing an inline prefix there, or calling the helper with the wrong
-        # -ShardIndex / -ShardCount, would still leave this green. The structural
-        # assertion in the following It is what covers that residue offline.
+        # Discovery (Get-StateBlobNames) lists per-stream blobs by a list prefix; each stream writes a Get-StateBlobName path. If they diverge, a rescheduled pod never finds the per-stream state and silently redoes finished work. Assert against the shared Get-StateBlobStreamPrefix, not a re-derived copy (which would verify the test's own copy, not the code).
+        # Residue: this only narrows drift to the ARGUMENT surface - it substitutes the helper and never calls Get-StateBlobNames (needs Azure), so an inline prefix there, or a wrong -ShardIndex/-ShardCount, stays green; the structural It below covers that offline.
         $Prefix = 'p/'
         $Tenant = 'T'
         $ShardIndex = 1
@@ -136,17 +92,8 @@ Describe 'Get-StateBlobName' {
     }
 
     It 'the DISCOVERY path builds its prefix from the shared owner, not its own copy' {
-        # Closes the residue the It above cannot: Get-StateBlobNames calls
-        # Get-AzStorageBlob, so it cannot be invoked in this offline suite. Inspect its
-        # body instead. Structural rather than behavioural, and therefore weaker in
-        # kind - but it fails the moment discovery grows a second copy of the layout,
-        # which is exactly the regression that would silently make a rescheduled pod
-        # find nothing.
-        # Comments are excised before matching. A guard that reads comments traps
-        # itself: '_state/' is discussed in the prose around this very function, so a
-        # future clarifying comment written INSIDE it would fail the ban below with a
-        # completely misleading message. Fails loud rather than matching on an empty
-        # string, because an empty body would satisfy the ban without checking anything.
+        # Get-StateBlobNames calls Get-AzStorageBlob (no offline run), so inspect its body instead: structural and weaker, but fails the moment discovery grows a second copy of the layout - the regression that makes a rescheduled pod find nothing.
+        # Excise comments before matching (prose here discusses '_state/', so a clarifying comment inside the function would trip the ban with a misleading message) and fail loud rather than match an empty body, which would satisfy the ban vacuously.
         $Raw = (Get-Command Get-StateBlobNames).ScriptBlock.ToString()
         $Tokens = $null
         $ParseErrors = $null
@@ -218,29 +165,8 @@ Describe 'Get-StateBlobShardSegment' {
     }
 
     It 'no segment is a string PREFIX of another, even across different shard counts' {
-        # Defence-in-depth on this helper IN ISOLATION, and the comment needs to be
-        # precise about that because the obvious justification is wrong:
-        #
-        # Dropping the trailing '/' would NOT currently cause a cross-run fold-in.
-        # Get-StateBlobNames lists on the FULL Get-StateBlobStreamPrefix string, where
-        # '.resume-state-' immediately follows the segment, so a 3-shard listing
-        # ('shard-1of3.resume-state-...') still cannot match a stale 30-shard blob
-        # ('shard-1of30.resume-state-...') - they diverge at '.' vs '0'. The literal
-        # suffix already precludes it.
-        #
-        # What this pins is that the SEGMENT is prefix-free on its own, so a future
-        # caller that uses it WITHOUT that suffix cannot be bitten. Blob discovery
-        # lists by prefix, so a segment that prefixes another segment would match
-        # another shard's blobs.
-        #
-        # Deliberately keep this at SEGMENT level. Moving the matrix onto full
-        # Get-StateBlobStreamPrefix outputs would be weaker, not stronger - it would
-        # stop detecting a dropped trailing slash, for exactly the reason above.
-        #
-        # ShardCount 1 is deliberately EXCLUDED: its segment is '', and the empty
-        # string is a prefix of every string, so including it would fail this test even
-        # though the production layout is safe (an unsharded run has no sibling shard
-        # to collide with). Do not "complete" the matrix by adding 1.
+        # Pins that each shard SEGMENT is prefix-free on its own, so a future caller that uses it WITHOUT the '.resume-state-' suffix cannot match another shard's blobs (discovery lists by prefix). It is NOT guarding a current cross-run fold-in - the literal suffix already precludes that.
+        # Keep this at SEGMENT level (full-prefix outputs would stop detecting a dropped trailing slash) and EXCLUDE ShardCount 1: its segment is '' (a prefix of everything) yet the unsharded layout is safe, so do not "complete" the matrix by adding it.
         $Segments = @()
         foreach ($Count in @(2, 3, 5, 30, 300))
         {

@@ -1,18 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# PreflightPermissionMatrix.Tests.ps1
-#
-# OFFLINE unit tests for the -Preflight permission matrix added to the wrapper:
-#   - Test-MetricsAccess (Functions/RunAllSubscriptions.Functions.ps1): the
-#     Monitoring Reader probe. Search-AzGraph and Get-AzMetricDefinition are
-#     Pester Mocks (stubbed first when the Az modules are absent, the same idiom
-#     as Tests/CollectorGuards.Tests.ps1), so every outcome branch - Ok, Denied,
-#     Unavailable, NoResource - is exercised deterministically with no session.
-#   - Format-PreflightMatrix: the pure renderer. Layout, the Skipped state, and
-#     the Blocking verdict (any Denied on a REQUESTED phase blocks; Unavailable
-#     and NoResource never do) are asserted on its returned lines.
-# No Azure calls, no zip fixture, no environment coupling.
-# =============================================================================
+# Offline unit tests for the -Preflight permission matrix: Test-MetricsAccess (mocked Az) across all
+# outcome branches, and Format-PreflightMatrix's verdict - only a Denied on a REQUESTED phase blocks.
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent

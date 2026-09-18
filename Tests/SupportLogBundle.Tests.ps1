@@ -1,18 +1,5 @@
-# Support-log bundle collection tests (New-RdaSupportLogBundle)
-#
-# Offline, self-contained unit tests for the support-log collector that gathers
-# the LOCAL diagnostic logs a run leaves behind into one zip to hand to support.
-# It lives in Functions/RunAllSubscriptions.Functions.ps1 - a definitions-only
-# file with NO top-level side effects - so we dot-source it wholesale (same as
-# RunAllSubscriptionsReconciliation.Tests.ps1). No Azure, no wrapper run: each
-# test builds a synthetic InventoryRoot on disk, invokes the function, and
-# inspects the produced zip with the cross-platform System.IO.Compression API.
-#
-# The single most important assertion is the SECURITY one: the obfuscation
-# dictionary (ObfuscationDictionary_* / Full_*) - the de-obfuscation reveal key -
-# must NEVER be collected into a bundle that is meant to be handed to support.
-#
-# Run with: Invoke-Pester ./Tests/SupportLogBundle.Tests.ps1 -Output Detailed
+# Offline unit tests for New-RdaSupportLogBundle: build a synthetic InventoryRoot, zip it, inspect via
+# System.IO.Compression. Load-bearing: the obfuscation dictionary (reveal key) must NEVER enter a support bundle.
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'

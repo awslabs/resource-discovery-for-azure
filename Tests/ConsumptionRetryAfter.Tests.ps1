@@ -1,23 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# ConsumptionRetryAfter.Tests.ps1
-#
-# Unit tests for Get-RdaRetryAfterSeconds (Functions/ResourceInventory.Functions.ps1)
-# - the helper that lets the consumption billing-pull retry HONOR Azure's
-# server-directed wait instead of guessing with blind backoff.
-#
-# The consumption/Cost Management 429 carries the exact delay on
-# 'x-ms-ratelimit-microsoft.consumption-retry-after' (and ARM generally on
-# 'Retry-After'). Get-UsageAggregates surfaces the failure as a
-# Microsoft.Rest.Azure.CloudException whose .Response.Headers is an
-# IDictionary[string, IEnumerable[string]]. These tests build a REAL
-# CloudException with a REAL populated header dictionary (the same types the
-# live cmdlet throws) and assert the helper reads the delay correctly.
-#
-# No Azure calls, no network. Az.Billing is imported only to make the
-# Microsoft.Rest.* types available; the whole real-type suite is skipped
-# gracefully if they cannot be loaded (e.g. a minimal CI image).
-# =============================================================================
+# Offline unit tests for Get-RdaRetryAfterSeconds: build REAL Microsoft.Rest CloudException
+# header dictionaries (no network) to assert server-directed Retry-After parsing.
 
 # Detect whether the real Microsoft.Rest.Azure.CloudException type can be loaded.
 # This MUST run at DISCOVERY time (top-level, not in BeforeAll) so the Context

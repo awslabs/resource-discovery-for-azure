@@ -19,6 +19,8 @@ param (
     [switch]$SkipDiskMetrics,
     # -MetricsDetailed restores the native (finer) metric grain: VM/disk 15 min, SQL 30 min; default is hourly (upstream parity), 4x fewer VM data points.
     [switch]$MetricsDetailed,
+    # OPT-IN (default OFF), forwarded to every sub as ResourceInventory.ps1 -CapacityPlan: produce the tenant-wide capacity-planning VM placement CSV. Without it no VMPlacement*.csv is produced, aggregated, or folded into the outer bundle.
+    [switch]$CapacityPlan,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     # Deliberately NO default so an omitted value leaves ResourceInventory.ps1's own 31-day default as the single authority (a visible 31 here would pin a second copy and drift when the inner one changes).
     # ValidateRange is essential, not cosmetic: the inner param is untyped and run through [math]::Abs, so a negative would flip positive and a 0 would give a zero-width window that reports Success while shipping every trend metric as a measured 0.
@@ -660,6 +662,7 @@ if ($Plan)
     if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
     if ($MetricsDetailed) { $ExtraFlags += '-MetricsDetailed' }
+    if ($CapacityPlan) { $ExtraFlags += '-CapacityPlan' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
     if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $ExtraFlags += ('-MetricsLookbackDays {0}' -f $MetricsLookbackDays) }
     if ($HeadRoom -gt 0) { $ExtraFlags += ('-HeadRoom {0}' -f $HeadRoom) }
@@ -1372,6 +1375,7 @@ if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsDetailed) { $InventoryPassthrough['MetricsDetailed'] = $true }
+if ($CapacityPlan) { $InventoryPassthrough['CapacityPlan'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
 # ContainsKey rather than a value sentinel: 0 is a REAL (and harmful) lookback
 # value, not "unset", so -gt 0 would silently swallow it. Omitted -> the key is
@@ -1786,6 +1790,7 @@ else
                 if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
                 if ($MetricsDetailed) { $WorkerArgs.MetricsDetailed = $true }
+                if ($CapacityPlan) { $WorkerArgs.CapacityPlan = $true }
                 if ($MetricsIntervalMinutes -gt 0) { $WorkerArgs.MetricsIntervalMinutes = $MetricsIntervalMinutes }
                 # NOT a key in the $WorkerArgs literal above: this form is what
                 # Tests/ParamForwardingParity.Tests.ps1 harvests, and widening the
@@ -2336,53 +2341,56 @@ if ($null -ne $OuterZipFile)
 # Tenant-wide VM placement CSV, written next to MainSummary. Concatenates each per-sub VMPlacementPart_*.csv here (rather than having every run append to one shared file) so parallel streams cannot interleave writes into one CSV. Deliberately NOT an Inventory_*.json change: the zone identity this file carries would otherwise have to enter the VM collector's output object, which is the server-ingestion contract (see Extension/VMPlacement.ps1). Only parts from THIS run ($RunStartTime) are consumed.
 # TIMESTAMPED to match its sibling MainSummary_<stamp>.html, and load-bearing rather than cosmetic: a fixed name would be overwritten in place, so on a -Resume run (skipped subs write no new part, and their earlier parts were already consumed) it would silently replace a COMPLETE tenant-wide file with one covering only this invocation's subs. Best-effort (a failure here is a warning), and nil-initialised so stage 3 below always has a defined variable to test.
 $VmPlacementFile = $null
-try
+if ($CapacityPlan)
 {
-    # -LiteralPath on the container: $InventoryRoot is a user-supplied-ish path and
-    # a '[' or ']' in it would otherwise be treated as a wildcard and match nothing.
-    $PlacementParts = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter 'VMPlacementPart_*.csv' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } | Sort-Object Name)
-
-    $PlacementRows = @()
-    foreach ($Part in $PlacementParts)
+    try
     {
-        $PlacementRows += @(Import-Csv -LiteralPath $Part.FullName)
-    }
+        # -LiteralPath on the container: $InventoryRoot is a user-supplied-ish path and
+        # a '[' or ']' in it would otherwise be treated as a wildcard and match nothing.
+        $PlacementParts = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter 'VMPlacementPart_*.csv' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } | Sort-Object Name)
 
-    if ($PlacementRows.Count -gt 0)
+        $PlacementRows = @()
+        foreach ($Part in $PlacementParts)
+        {
+            $PlacementRows += @(Import-Csv -LiteralPath $Part.FullName)
+        }
+
+        if ($PlacementRows.Count -gt 0)
+        {
+            $VmPlacementFile = Join-Path $InventoryRoot ("VMPlacement_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+            $PlacementRows | Export-Csv -LiteralPath $VmPlacementFile -Encoding utf8 -NoTypeInformation
+
+            $ZonalRows = @($PlacementRows | Where-Object { $_.Zone -ne 'Regional' -and $_.Zone -ne 'Unknown' }).Count
+            Write-Host ("VM placement CSV: {0} VM(s) across {1} subscription(s) written to {2} ({3} zonal)." -f `
+                    $PlacementRows.Count, $PlacementParts.Count, (Split-Path -Path $VmPlacementFile -Leaf), $ZonalRows) -ForegroundColor Green
+        }
+        else
+        {
+            # State the zero rather than saying nothing, and name its scope, so the
+            # operator does not have to guess whether the phase ran. A tenant with no
+            # VMs at all is a legitimate outcome; so is every subscription being
+            # skipped on a -Resume run.
+            Write-Host ("VM placement CSV: not written - no VM rows were produced by this run (parts found: {0}). A tenant with no virtual machines, or a -Resume run whose remaining subscriptions have none, both land here." -f $PlacementParts.Count) -ForegroundColor Yellow
+        }
+
+        # Remove the parts unconditionally once read: they are an implementation detail
+        # of the aggregation, and skipping the delete when the merge produced no rows
+        # would leave orphans accumulating in InventoryRoot run after run.
+        foreach ($Part in $PlacementParts)
+        {
+            Remove-Item -LiteralPath $Part.FullName -Force -ErrorAction SilentlyContinue
+        }
+
+        # Deliberately NOT an error when parts are fewer than subscriptions processed:
+        # a subscription with no VMs legitimately writes none, and the inner run
+        # already logs loudly when a VM collector failed. The subscription count in the
+        # line above is what lets the operator judge coverage; claiming completeness we
+        # have not verified would be the actual mistake.
+    }
+    catch
     {
-        $VmPlacementFile = Join-Path $InventoryRoot ("VMPlacement_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
-        $PlacementRows | Export-Csv -LiteralPath $VmPlacementFile -Encoding utf8 -NoTypeInformation
-
-        $ZonalRows = @($PlacementRows | Where-Object { $_.Zone -ne 'Regional' -and $_.Zone -ne 'Unknown' }).Count
-        Write-Host ("VM placement CSV: {0} VM(s) across {1} subscription(s) written to {2} ({3} zonal)." -f `
-                $PlacementRows.Count, $PlacementParts.Count, (Split-Path -Path $VmPlacementFile -Leaf), $ZonalRows) -ForegroundColor Green
+        Write-Host ("WARNING: Could not build the tenant-wide VM placement CSV: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
     }
-    else
-    {
-        # State the zero rather than saying nothing, and name its scope, so the
-        # operator does not have to guess whether the phase ran. A tenant with no
-        # VMs at all is a legitimate outcome; so is every subscription being
-        # skipped on a -Resume run.
-        Write-Host ("VM placement CSV: not written - no VM rows were produced by this run (parts found: {0}). A tenant with no virtual machines, or a -Resume run whose remaining subscriptions have none, both land here." -f $PlacementParts.Count) -ForegroundColor Yellow
-    }
-
-    # Remove the parts unconditionally once read: they are an implementation detail
-    # of the aggregation, and skipping the delete when the merge produced no rows
-    # would leave orphans accumulating in InventoryRoot run after run.
-    foreach ($Part in $PlacementParts)
-    {
-        Remove-Item -LiteralPath $Part.FullName -Force -ErrorAction SilentlyContinue
-    }
-
-    # Deliberately NOT an error when parts are fewer than subscriptions processed:
-    # a subscription with no VMs legitimately writes none, and the inner run
-    # already logs loudly when a VM collector failed. The subscription count in the
-    # line above is what lets the operator judge coverage; claiming completeness we
-    # have not verified would be the actual mistake.
-}
-catch
-{
-    Write-Host ("WARNING: Could not build the tenant-wide VM placement CSV: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
 }
 
 # Clean up resume state on a fully successful run (all subs processed, no failures

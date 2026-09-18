@@ -434,13 +434,8 @@ Describe 'FindResource.ps1 entry point' {
     }
 
     It 'writes a CSV whose header is the UNION of fields across rows of differing schemas' {
-        # Export-Csv takes its header from the first object only. With rows
-        # arriving in parallel completion order, an unprojected export would drop
-        # columns nondeterministically.
-        #
-        # Invoked via -Command rather than -File because this case needs an ARRAY
-        # bound to -ResourceType, and -File passes every argument as a literal
-        # string.
+        # Export-Csv headers off the first object only, so unprojected parallel rows drop columns nondeterministically.
+        # Invoked via -Command (not -File) because this case binds an ARRAY to -ResourceType.
         $MixRoot = Join-Path $Script:TestRoot 'schema-mix'
         New-Item -ItemType Directory -Path $MixRoot -Force | Out-Null
         New-PerSubZip -ZipPath (Join-Path $MixRoot 'ResourcesReport_202601010000000000051.zip') -Stamp '202601010000000000051' -AvsCount 1

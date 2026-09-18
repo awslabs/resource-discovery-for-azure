@@ -1275,3 +1275,35 @@ $b = 2
     # Structure-only guard: no behavioural equivalence test, because its oracle would be character-identical to
     # Split-BlobContainerUri (comparing an expression with itself, never failing). Its behaviour is pinned in Tests/BlobStateReconciliation.Tests.ps1.
 }
+
+Describe 'Resume-state completed-ids seed array-ness (regression: null-collapse -> string concat)' {
+
+    # An empty array captured from a FUNCTION CALL collapses to $null on assignment,
+    # so an unwrapped `$CompletedIds = Get-CompletedSubscriptionIds ...` left $null on
+    # a fresh run; the loop's `$CompletedIds += $Sub.Id` then string-concatenated
+    # instead of array-appending, mashing every id into one string and silently
+    # breaking -Resume (its -contains never matched). The @(...) wrap fixes it; these
+    # lock in both the behaviour and the source form.
+
+    It 'seeds a fresh-run (absent-file) completed list as an array so += appends instead of concatenating' {
+        $AbsentPath = Join-Path $script:TestRoot ('no-such-state-' + [guid]::NewGuid().ToString('N') + '.json')
+        # Mirror the wrapper's FIXED seed expression.
+        $CompletedIds = @(Get-CompletedSubscriptionIds -Path $AbsentPath -Tenant 'tenant-fresh')
+        $CompletedIds += 'sub-a'
+        $CompletedIds += 'sub-b'
+        @($CompletedIds).Count | Should -Be 2 -Because 'each += must append a distinct element, not concatenate a string'
+        ($CompletedIds -join '|') | Should -Be 'sub-a|sub-b'
+        ($CompletedIds -contains 'sub-a') | Should -BeTrue -Because '-Resume relies on -contains matching each completed id'
+    }
+
+    It 'keeps the @(...) wrap on the completed-ids seed in Run-AllSubscriptions.ps1 (guards against reverting the fix)' {
+        $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
+        Test-Path -LiteralPath $WrapperPath | Should -BeTrue
+        # Match CODE lines only (drop whole-line comments) so an explanatory comment
+        # showing the unwrapped form can't false-fail the negative guard. The prefix
+        # anchor accepts the seed's trailing args (@StateBlobArgs -State $SeedState).
+        $CodeText = ((Get-Content -LiteralPath $WrapperPath) | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        ($CodeText -match '\$CompletedIds\s*=\s*@\(\s*Get-CompletedSubscriptionIds') | Should -BeTrue -Because 'the completed-ids seed must be @()-wrapped so an empty result stays an array'
+        ($CodeText -match '\$CompletedIds\s*=\s*Get-CompletedSubscriptionIds') | Should -BeFalse -Because 'an unwrapped seed collapses @() to $null on a fresh run and breaks -Resume'
+    }
+}

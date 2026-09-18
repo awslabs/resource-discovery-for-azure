@@ -1,92 +1,5 @@
-# =============================================================================
-# VM Placement CSV - capacity-planning view of virtual machine placement
-# =============================================================================
-# WHY THIS EXISTS
-#
-# Capacity planning needs to know WHICH Availability Zone each VM sits in, not
-# just whether it is zonal. The VM collector deliberately does NOT carry the zone
-# identity: Services/Compute/VirtualMachines.ps1 emits 'Zones' = $vm.zones.count,
-# a 0/1 flag, and adding a zone field to that object would change the
-# Inventory_*.json field set that server ingestion binds on (see
-# .kiro/steering/no-json-schema-changes.md).
-#
-# This phase sidesteps that entirely. It writes a SEPARATE CSV and touches no
-# existing output, so the ingestion contract is unchanged and no schema approval
-# is required. The Inventory JSON, the Metrics JSON, the Consumption CSV and the
-# HTML report are all byte-for-byte unaffected by this file.
-#
-# WHERE THE DATA COMES FROM (no additional Azure calls)
-#
-#   $Global:SmaResources.VirtualMachines - everything the VM collector already
-#       computed: Size, CPU, Memory, PowerState, AvailabilitySet, OS fields and
-#       the OS disk. Reused rather than recomputed specifically so this phase does
-#       NOT repeat the collector's Get-AzComputeResourceSku lookups, which would
-#       double that API cost for no new information.
-#
-#   $Global:Resources - the Azure Resource Graph payload, which is the ONLY place
-#       the zone lives ('zones') along with the data-disk profile.
-#
-# THE JOIN, AND WHY IT IS KEYED THE WAY IT IS
-#
-# ResourceInventory.ps1's CreateResourceJobs applies obfuscation to each
-# collector's output as soon as the collector returns, BEFORE storing it on
-# $Global:SmaResources. So under -Obfuscate those records carry OBFUSCATED ids,
-# while $Global:Resources still carries REAL ids. Joining the two on id directly
-# would match nothing in an obfuscated run - and would do so silently, producing
-# a CSV with every Zone blank exactly in the mode that gets shared.
-#
-# The zone map is therefore keyed by the id the OUTPUT record will carry: the
-# real id normally, or its token from $Global:ResourceIdDictionary when
-# obfuscating. That reuses the run's existing deterministic mapping instead of
-# introducing a second one.
-#
-# OBFUSCATION POSTURE
-#
-# Every identifier column is taken from $Global:SmaResources, which is already
-# obfuscated when -Obfuscate is set, so this file inherits the run's posture and
-# adds no new identifier class. Location and Zone are preserved verbatim, exactly
-# as Location already is throughout the report: an Azure region and a zone number
-# (1-3) are not customer identifiers, and masking them would defeat the purpose of
-# a placement file.
-#
-# WHAT IS COUNTED, AND HOW TO TOTAL IT
-#
-# One row per virtual machine AND one row per virtual machine SCALE SET. A scale
-# set is real capacity sitting in a real zone, so omitting it would understate the
-# estate with nothing in the file to signal the gap. ResourceKind distinguishes
-# the two.
-#
-# CPU and MemoryGB are PER INSTANCE for both kinds, and Instances is the
-# multiplier (always 1 for a plain VM, sku.capacity for a scale set). So the
-# correct total across the whole file is:
-#
-#     SUM(CPU * Instances)  and  SUM(MemoryGB * Instances)
-#
-# That works uniformly over both row kinds rather than needing the consumer to
-# special-case scale sets.
-#
-# EMPTY VS ZERO IN NUMERIC COLUMNS
-#
-# Numeric columns are left EMPTY when the value is genuinely unavailable, never
-# filled with a placeholder word or a misleading 0. Two reasons, both learned the
-# hard way:
-#
-#   - A word like 'Unknown' in a numeric column makes the column mixed-type. Excel
-#     SUM() silently skips it and pandas coerces the column to object, so a file
-#     whose entire purpose is totalling capacity produces a wrong total instead of
-#     an obviously missing one.
-#   - The VM and VMSS collectors both fall back to 0 vCPUs/RAM when the
-#     Get-AzComputeResourceSku lookup fails (see the catch in Services/Compute/
-#     VirtualMachines.ps1 and Services/Containers/VMSS.ps1, and the coverage in
-#     Tests/CollectorGuards.Tests.ps1). No real VM size has 0 vCPUs or 0 GB RAM, so
-#     0 there means "lookup failed", and reporting it as 0 understates capacity
-#     silently. It is emitted as empty instead.
-#
-# Zone is the ONE column that keeps a categorical sentinel, because it is
-# categorical rather than numeric: 'Regional' (not zonal) and 'Unknown' (the join
-# found nothing) are different facts, and an empty cell would read as "not zonal",
-# which is a claim we cannot make.
-# =============================================================================
+# VM Placement CSV: capacity-planning view joining $Global:SmaResources against the Resource Graph payload ($Global:Resources), the only source of 'zones' and data-disk profile.
+# A SEPARATE CSV touching no existing output, so the Inventory/Metrics JSON ingestion schema contract is unchanged and no schema approval is needed; makes no extra Azure calls.
 
 param(
     [Parameter(Mandatory = $true)][string]$CsvFile
@@ -110,26 +23,8 @@ if (-not $HasVmKey -and -not $HasVmssKey)
 $Vms = if ($HasVmKey) { @($Global:SmaResources.VirtualMachines) } else { @() }
 $ScaleSets = if ($HasVmssKey) { @($Global:SmaResources.VMSS) } else { @() }
 
-# Numeric-column normaliser. Returns $null (an EMPTY csv cell) for anything that is
-# not a usable number, so a mixed-type column can never reach the file.
-#
-# -AllowZero distinguishes the two cases:
-#   omitted : 0 means "unavailable". Used for vCPU/RAM, because no real VM size has
-#             0 of either, so a 0 there is the collectors' SKU-lookup fallback
-#             rather than a fact (see the EMPTY VS ZERO note in the header).
-#   present : 0 is a legitimate value. Used for counts and sizes, because a VM
-#             genuinely can have zero data disks.
-#
-# Parsing is INVARIANT-culture on purpose. [double]::TryParse(string, [ref]double)
-# uses the CURRENT culture, where '.' is a group separator on a de-DE / fr-FR /
-# nl-NL host - so an invariantly-rendered '3.5' GB would parse as 35 and write a
-# MemoryGB ten times too large. That is a wrong total rather than a missing one,
-# which is the specific outcome this whole normaliser exists to prevent.
-#
-# A real function rather than a scriptblock: a scriptblock returns its entire
-# pipeline, so a future edit that drops a 'return' or leaves a stray expression
-# would silently emit an array into a numeric cell and reintroduce the mixed-type
-# column. A function with a single typed return path cannot drift that way.
+# Numeric-column normaliser: returns $null (an EMPTY cell) for anything not a usable number so a column never goes mixed-type (Excel SUM skips it / pandas coerces to object = wrong total, not a visible gap). Parses InvariantCulture on purpose - a current-culture TryParse reads '3.5' as 35 on a de-DE/fr-FR/nl-NL host.
+# -AllowZero omitted: 0 means "unavailable" (no real VM size has 0 vCPU/RAM, so a 0 is the collectors' SKU-lookup fallback). -AllowZero present: 0 is legitimate (a VM can have zero data disks). A function with one typed return, not a scriptblock, so a stray expression cannot leak an array into a cell.
 function Get-PlacementNumber
 {
     param(
@@ -156,13 +51,7 @@ function Get-PlacementNumber
 
 if ($Vms.Count -eq 0 -and $ScaleSets.Count -eq 0)
 {
-    # An empty collector result has TWO very different causes and they must not
-    # report identically. CreateResourceJobs' circuit breaker sets $Result = @()
-    # when a collector THREW, so "no rows" can mean "collection failed" as easily
-    # as "this subscription genuinely has none". Ask the Resource Graph payload
-    # which one it is: resources present there but absent from the collector
-    # output means the collector failed, and that is an Error, not an Info.
-    # Checked for BOTH types, so a VMSS-only collector failure is not silent.
+    # Distinguish the two empty causes, fail-loud: CreateResourceJobs' circuit breaker sets $Result=@() when a collector THREW, so "no rows" can mean "collection failed". Ask the Resource Graph payload - resources present there but absent here means a collector failed (Error), not a genuinely empty subscription (Info). Both types checked so a VMSS-only failure is not silent.
     $GraphVmCount = @($Global:Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }).Count
     $GraphVmssCount = @($Global:Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachinescalesets' }).Count
 
@@ -299,15 +188,8 @@ foreach ($Vm in $Vms)
     }
 }
 
-# Scale-set rows. A scale set is capacity in a zone just as much as a VM is, so
-# leaving it out understated the estate with nothing in the file to say so.
-# CPU/MemoryGB stay PER INSTANCE, matching the VM rows, with Instances carrying the
-# multiplier - so SUM(CPU * Instances) is correct over the whole file without the
-# consumer special-casing anything.
-#
-# PowerState and AvailabilitySet are left EMPTY rather than filled with a
-# placeholder: a scale set has no single power state (its instances each have one)
-# and cannot be in an availability set. An empty cell is the honest answer.
+# Scale-set rows: a scale set is real zone capacity like a VM, so include it; CPU/MemoryGB stay PER INSTANCE with Instances the multiplier, keeping SUM(CPU * Instances) uniform across both row kinds.
+# PowerState/AvailabilitySet left EMPTY (a scale set has no single power state and cannot be in an availability set) rather than filled with a placeholder.
 foreach ($Ss in $ScaleSets)
 {
     if ($null -eq $Ss) { continue }
@@ -327,30 +209,8 @@ foreach ($Ss in $ScaleSets)
     $IsFlexible = ($Orchestration -eq 'Flexible')
     if ($IsFlexible) { $FlexibleCount++ }
 
-    # THE DOUBLE-COUNTING GUARD. A Flexible scale set's members are first-class
-    # microsoft.compute/virtualmachines resources, so they have ALREADY been emitted
-    # as individual VirtualMachine rows above. Multiplying this row's per-instance
-    # CPU by Instances would count that same capacity a second time and overstate a
-    # Flexible estate by up to 2x - silently, in the exact total the header tells the
-    # consumer to compute.
-    #
-    # So Instances is left EMPTY for a Flexible set: the row stays VISIBLE (the
-    # planner can see the scale set exists, its SKU and its zones) but contributes
-    # nothing to SUM(CPU * Instances), because its members already did. The count is
-    # named in a Warning below rather than left to be inferred.
-    #
-    # Uniform sets are unaffected: their members are the CHILD ARM type
-    # (.../virtualmachinescalesets/virtualmachines), never matched by the VM filter,
-    # so Instances is the only place their capacity is represented.
-    #
-    # A join miss makes orchestration UNKNOWN, not Uniform: on a miss $Placement is
-    # null, so $Orchestration defaulted to '' and $IsFlexible is false. Trusting that
-    # default would count the Instances of a set that might really be Flexible - whose
-    # members were already emitted as VirtualMachine rows - and re-introduce the exact
-    # double-count this guard exists to prevent. So Instances is counted ONLY when the
-    # row matched AND is known not to be Flexible; an unmatched set is left EMPTY (a
-    # missing figure over a wrong total, per the EMPTY VS ZERO note in the header) and
-    # named in the unmatched-instances Warning below.
+    # DOUBLE-COUNTING GUARD: leave Instances EMPTY for a Flexible set - its members are first-class microsoft.compute/virtualmachines already emitted as VM rows above, so counting them again overstates a Flexible estate up to 2x. The row stays visible for SKU/zone. Uniform members are the child ARM type, never matched by the VM filter, so Instances is their only representation.
+    # A join miss is UNKNOWN, not Uniform ($Placement null -> $Orchestration '' -> $IsFlexible false), so count Instances ONLY when matched AND not Flexible; trusting the empty default would re-open the double-count for a set that might really be Flexible.
     $InstanceValue = if ($null -ne $Placement -and -not $IsFlexible) { (Get-PlacementNumber -Value $Ss.Instances -AllowZero) } else { $null }
     if ($null -eq $Placement) { $UnknownOrchestrationCount++ }
 
@@ -416,24 +276,13 @@ if ($Unmatched -gt 0)
     Write-Log -Message ("VM placement CSV: {0} row(s) (VM or scale set) could not be matched to the Resource Graph payload; their Zone reads 'Unknown' and their data-disk cells are EMPTY." -f $Unmatched) -Severity 'Error' -ToDebugLog
 }
 
-# The warning the double-counting guard's comment promises. It was missing, so the
-# ONE thing a capacity planner must know about this file - that some scale-set rows
-# contribute nothing to SUM(CPU * Instances) on purpose - was left to be inferred
-# from an empty cell. Without it, an operator reconciling the CSV against the portal
-# sees a shortfall and cannot tell whether it is the guard working correctly or the
-# SKU lookup having failed (which the warning above reports separately).
+# Name the Flexible-set count in a Warning: without it the ONE fact a capacity planner needs - that some scale-set rows contribute nothing to SUM(CPU * Instances) by design - is left to be inferred from an empty cell and misread as a shortfall or SKU-lookup failure.
 if ($FlexibleCount -gt 0)
 {
     Write-Log -Message ("VM placement CSV: {0} Flexible-orchestration scale set(s) have an EMPTY Instances cell BY DESIGN - their member VMs are first-class resources and are already counted as individual VirtualMachine rows, so counting the set's instances too would double-count that capacity. The rows remain visible for SKU and zone, and their ParentScaleSet column links the member VMs back to them." -f $FlexibleCount) -Severity 'Warning' -ToDebugLog
 }
 
-# A scale set that missed the Resource Graph join has an UNKNOWN orchestration mode,
-# so its Instances cannot be counted safely: were it Flexible, its member VMs were
-# already emitted as VirtualMachine rows and counting the set too would double-count.
-# Its Instances cell is therefore left EMPTY (already reported as unmatched above),
-# and the consequence for the capacity total is named here rather than left to be
-# inferred - without this, a genuinely Flexible unmatched set would silently re-open
-# the double-count the guard prevents.
+# Name the unknown-orchestration count: an unmatched scale set has UNKNOWN orchestration, so its Instances stay EMPTY (were it Flexible, its members were already emitted as VM rows and counting the set too would double-count) - report why SUM(CPU * Instances) excludes it rather than leaving it inferred.
 if ($UnknownOrchestrationCount -gt 0)
 {
     Write-Log -Message ("VM placement CSV: {0} scale set(s) could not be matched to the Resource Graph payload, so their orchestration mode is UNKNOWN and their Instances cell is left EMPTY - counting instances for a set that might be Flexible would double-count member VMs already emitted as individual rows. SUM(CPU * Instances) therefore excludes these set(s)." -f $UnknownOrchestrationCount) -Severity 'Warning' -ToDebugLog

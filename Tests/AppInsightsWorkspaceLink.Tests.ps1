@@ -1,40 +1,5 @@
-# App Insights -> Log Analytics workspace cross-reference tests
-# Run with: Invoke-Pester ./Tests/AppInsightsWorkspaceLink.Tests.ps1 -Output Detailed
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# A workspace-based Application Insights component stores its telemetry in a Log
-# Analytics workspace, and properties.WorkspaceResourceId is the ARM id of that
-# workspace. The collector emits it as 'WorkspaceResourceId'.
-#
-# Two things have to hold and neither is self-evident:
-#
-#   1. The value is a full ARM id carrying the real subscription GUID and the
-#      real resource group name, so an obfuscated run MUST route it through
-#      $ResourceIdDictionary. Emitting it raw would leak both, and the generic
-#      whole-file GUID scan in Tests/Obfuscation.Tests.ps1 is the only other net.
-#
-#   2. The workspace is itself a collected resource (Services/Analytics/
-#      WrkSpace.ps1), so the token must be the SAME one that collector's row
-#      carries - otherwise the link is decoration rather than a usable join. The
-#      cross-collector test below invokes BOTH real collectors against one shared
-#      dictionary, seeding the component's link in a DIFFERENT CASE from the
-#      workspace row's id, so the two sides can only agree if neither collector
-#      does its own casing work and the dictionary really is case-insensitive.
-#
-# A CLASSIC (non-workspace-based) component has no workspace at all and gets
-# 'None' - the sentinel SQLVM, SQLDB and PublicIP already use for an absent
-# cross-reference. The live sandbox contains no classic component, so that path
-# can only be covered here.
-#
-# Live-confirmed shapes: on a workspace-based component the key is present and
-# lowercased ('workspaceresourceid') with a fully lowercased ARM id value,
-# because every data-fetch call site passes -Lowercase to
-# Invoke-AzGraphQuerySafe, which lowercases KEYS AND VALUES. Property reads in
-# PowerShell are case-insensitive, so the collector's PascalCase read works.
-#
-# No live Azure. No StrictMode - production never sets it, and under StrictMode
-# reading an ABSENT property throws instead of yielding $null.
+# App Insights -> Log Analytics workspace cross-reference tests. WorkspaceResourceId is a full ARM id, so an obfuscated run MUST route it through $ResourceIdDictionary; the linked token must be the SAME one WrkSpace.ps1's row resolves to (a usable join), and a classic component with no workspace gets the 'None' sentinel.
+# Runs with NO StrictMode on purpose: production never sets it, and under StrictMode reading an ABSENT property throws instead of yielding $null.
 
 BeforeAll {
     $script:AiCollector = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Integration', 'AppInsights.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
@@ -171,12 +136,8 @@ Describe 'Workspace-based App Insights component' {
             # Without this, an absent or null field satisfies every -Not -Match
             # below and the check passes without checking anything.
             $Rec.WorkspaceResourceId | Should -Not -BeNullOrEmpty -Because 'a no-leak assertion on an empty value proves nothing'
-            # Deliberately a LOOSER shape check than $script:ObfuscationPattern in
-            # Tests/Obfuscation.Tests.ps1, which remains the single owner of the exact
-            # token contract and is the gate applied to a real generated bundle. This is
-            # a unit fixture, so it only needs to distinguish "a token" from "a real
-            # identifier"; duplicating the full anchored pattern here is what let a
-            # second, drifted copy of it exist in the past.
+            # Deliberately a LOOSER shape check than the ObfuscationPattern in
+            # Tests/Obfuscation.Tests.ps1 (the single owner of the exact token contract): a unit fixture only needs to tell "a token" from "a real identifier", and duplicating the full pattern here caused a drifted copy before.
             $Rec.WorkspaceResourceId | Should -Match '^((prod|nonprod)_[0-9a-f]{8}-|obfuscated$)' -Because 'the value must be a token or the obfuscated sentinel, not merely non-leaking'
 
             $Rec.WorkspaceResourceId | Should -Not -Match '/subscriptions/' -Because 'the value carries a real subscription GUID and RG name'

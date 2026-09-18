@@ -42,13 +42,8 @@ BeforeAll {
         return @($Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
     }
 
-    # Keys the wrapper puts into the hashtable it splats at the parallel worker.
-    # Two sources, both required: the accessor forms ($WorkerArgs.Foo /
-    # $WorkerArgs['Foo']) added after the literal, AND the keys declared in the
-    # $WorkerArgs = @{ ... } literal itself. The accessor regex alone silently
-    # omits every literal key (TenantID, StreamId, InventoryRoot, ScriptRoot,
-    # AzContextPath, ConcurrencyLimit, and the rest), so an unbindable literal key
-    # would slip past the binding assertion below.
+    # Keys the wrapper splats at the parallel worker, from BOTH sources: the $WorkerArgs accessor forms AND the @{...} literal keys.
+    # The accessor regex alone omits every literal key, so an unbindable literal key would slip past the binding assertion below.
     $script:WorkerArgAccessorKeys = @([regex]::Matches($script:WrapperSrc, '\$WorkerArgs(?:\.|\['')([A-Za-z]+)') |
             ForEach-Object { $_.Groups[1].Value })
     $script:WorkerArgLiteralBody = [regex]::Match($script:WrapperSrc, '\$WorkerArgs\s*=\s*@\{([\s\S]*?)\}').Groups[1].Value
@@ -96,12 +91,8 @@ Describe 'Sequential and parallel paths reach ResourceInventory.ps1 with the sam
     }
 
     It 'the RECEIVING script also reads the value, not just the key' {
-        # The two forwarding sites above were fixed while ResourceInventory.ps1's own
-        # $DebugMode still used a bare ContainsKey, so -Debug:$false arrived correctly and
-        # was then re-inverted on arrival - flipping $ErrorActionPreference to 'Continue'
-        # for the whole run. Forwarding parity is worthless if the destination disagrees,
-        # so assert the destination too. Without this, reverting that one line passes the
-        # entire suite.
+        # Forwarding parity is worthless if the destination disagrees: a bare ContainsKey on $DebugMode once re-inverted
+        # -Debug:$false on arrival (flipping $ErrorActionPreference for the whole run), so assert the receiving script reads the value too.
         $InvPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'
         $InvSrc = Get-Content -LiteralPath $InvPath -Raw
 
@@ -134,12 +125,8 @@ Describe 'Sequential and parallel paths reach ResourceInventory.ps1 with the sam
 Describe 'Every key forwarded actually binds on the receiving script' {
 
     It 'sends the worker nothing Run-AllSubscriptions.Stream.ps1 cannot bind' {
-        # Debug is a COMMON parameter, so it binds on any advanced script without
-        # being declared. Run-AllSubscriptions.Stream.ps1 is advanced by virtue of
-        # its [Parameter(Mandatory)] attributes (it has no [CmdletBinding()]), so
-        # a splatted Debug key binds there. Verified through a real Start-Job
-        # boundary: Debug=$true yields $DebugPreference 'Continue' with Write-Debug
-        # live and no prompt; Debug=$false yields 'SilentlyContinue'.
+        # Debug is a COMMON parameter, so it binds on Run-AllSubscriptions.Stream.ps1 (advanced via its [Parameter(Mandatory)] attributes)
+        # without being declared - hence it is exempt from the unbindable-key check. Verified across a real Start-Job boundary.
         $Common = @('Debug')
         $Unbindable = @($script:WorkerArgKeys | Where-Object { $_ -notin $script:StreamParams -and $_ -notin $Common })
         $Unbindable -join ', ' | Should -BeNullOrEmpty -Because 'a key with no matching parameter is a binding error at runtime, not a no-op'
@@ -171,12 +158,8 @@ Describe 'Every key forwarded actually binds on the receiving script' {
 Describe 'Wrapper-only options are deliberately not forwarded' {
 
     It 'does not forward options the inner script has no parameter for' {
-        # These are genuinely wrapper-scoped: subscription selection, the up-front
-        # access gate, run-wide output aggregation, upload, and -Plan sizing. None
-        # exists as a parameter on ResourceInventory.ps1, so forwarding any of them
-        # would be a binding error. Asserted so that if one is ever ADDED to the
-        # inner script, this test points at the decision instead of leaving it
-        # quietly unforwarded - the same class of gap as the -Debug drift.
+        # These options are genuinely wrapper-scoped - none is a parameter on ResourceInventory.ps1, so forwarding any would be a binding error.
+        # Asserted so that if one is ever ADDED to the inner script this test flags the decision instead of leaving it quietly unforwarded.
         $WrapperOnly = @(
             'IncludeDisabled'
             'AllowPartialAccess'

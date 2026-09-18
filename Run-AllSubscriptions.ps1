@@ -1,16 +1,7 @@
 #!/usr/bin/env pwsh
 param (
-    # NOT Mandatory, deliberately - see the -TenantID guard immediately after this
-    # param block. Mandatory made PowerShell PROMPT for a missing value, which any
-    # non-interactive caller (CI, a scheduled task, the AKS entrypoint, a run whose
-    # output is redirected) experiences as a silent indefinite hang with no output.
-    # The guard below fails loudly with a non-zero exit instead.
-    #
-    # The bare [Parameter()] MUST stay: it is the only [Parameter()] attribute in
-    # this file and there is no [CmdletBinding()], so it is what makes this an
-    # ADVANCED script. Dropping it would silently turn unrecognized arguments into
-    # $args instead of an error - the same class of failure the equivalent guard in
-    # ResourceInventory.ps1 exists to prevent.
+    # -TenantID NOT Mandatory: Mandatory made PowerShell PROMPT for a missing value, which hangs any non-interactive caller silently; the -TenantID guard below fails loud with a non-zero exit instead.
+    # The bare [Parameter()] MUST stay - it is the only attribute here and there is no [CmdletBinding()], so it is what makes this an ADVANCED script; dropping it turns unknown args into $args instead of an error.
     [Parameter()]
     [string]$TenantID,
     [switch]$DeviceLogin,
@@ -18,123 +9,38 @@ param (
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
 
-    # EXPERIMENTAL (default OFF). Forwarded to ResourceInventory.ps1's
-    # -UseMetricsBatch (and on to Extension/Metrics.ps1) for every subscription,
-    # in both the sequential and parallel-streams paths. When set, VM/disk/storage
-    # metrics are collected via the Azure Monitor metrics:getBatch data-plane API
-    # (one request per <=50 resources) instead of one Get-AzMetric per
-    # (resource, metric), which is faster and lowers the metric-query API-call
-    # count. The tool will attempt to register the Microsoft.Insights provider if
-    # needed, and falls back to the per-call path on any batch failure (no data
-    # lost). See the -UseMetricsBatch notes in Extension/Metrics.ps1.
+    # EXPERIMENTAL (default OFF), forwarded to ResourceInventory.ps1 -UseMetricsBatch for every sub: collect VM/disk/storage metrics via the Azure Monitor metrics:getBatch API (one request per <=50 resources) instead of one Get-AzMetric per (resource, metric).
+    # Registers Microsoft.Insights if needed and falls back to the per-call path on any batch failure (no data lost).
     [switch]$UseMetricsBatch,
 
-    # Metric-volume controls for very large tenants. Forwarded to every
-    # subscription in both the sequential and parallel-streams paths, and honoured
-    # by -Plan when it sizes the run - except -MetricsIntervalMinutes and
-    # -MetricsLookbackDays, which -Plan cannot size from because neither changes
-    # the metric-query COUNT.
-    #   -IncludeStorageMetrics : OPT-IN to the Storage Account 'UsedCapacity'
-    #                         metric (1 Azure Monitor call per storage account).
-    #                         NOT collected by default: on a tenant with a very
-    #                         large storage estate that one capacity figure can
-    #                         dominate the metrics phase. Pass it when storage
-    #                         capacity is actually wanted.
-    #   -SkipDiskMetrics    : skip the four Managed Disk composite I/O metrics
-    #                         (4 calls per attached disk - the biggest call source).
-    #   -MetricsIntervalMinutes : override the sampling grain of the high-frequency
-    #                         VM / Azure SQL DB / OSS-DB (MariaDB, MySQL, PostgreSQL
-    #                         + Flexible) utilization series. 0 = each series' native
-    #                         cadence (15 min VM, 30 min SQL, 60 min OSS-DB). Reduces
-    #                         data-point volume / memory / JSON size; does NOT reduce
-    #                         API-call count. Limited to Azure Monitor's supported
-    #                         sub-hourly grains. See the notes in Extension/Metrics.ps1.
-    #   -MetricsLookbackDays : how many days of history to request for the
-    #                         lookback-bound trend / utilization series (VM +
-    #                         VMSS CPU/memory, the Managed Disk composite I/O
-    #                         metrics, SQL DB, OSS-DB, Functions execution
-    #                         counts). Omit to leave the inner script's 31-day
-    #                         default in force. Like -MetricsIntervalMinutes it
-    #                         does NOT reduce the API-call count - it changes the
-    #                         data points each query returns, so it trades
-    #                         right-sizing sample depth for run time / memory /
-    #                         Metrics_*.json size, and it MULTIPLIES with the
-    #                         grain knob. Capacity and limit metrics (including
-    #                         storage UsedCapacity) use a fixed 24h window and are
-    #                         NOT affected. Note the Managed Disk grain is fixed
-    #                         at 15 min, so -MetricsIntervalMinutes cannot offset
-    #                         a long window there - only -SkipDiskMetrics can.
-    #                         Upper bound is Azure Monitor's 93-day platform-metric
-    #                         retention. See the notes in Extension/Metrics.ps1.
+    # Metric-volume controls for very large tenants, forwarded to every sub: -IncludeStorageMetrics opts in to the 1-call-per-account UsedCapacity metric; -SkipDiskMetrics drops the 4-calls-per-attached-disk composite I/O metrics (the biggest call source).
+    # -MetricsIntervalMinutes / -MetricsLookbackDays change data-point volume only, NOT the API-call COUNT (which is why -Plan cannot size from them); omit -MetricsLookbackDays to keep ResourceInventory.ps1's 31-day default as the single authority.
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
-    # Deliberately NO default: an omitted value must leave ResourceInventory.ps1's
-    # own 31-day default as the single authority, so it is forwarded below only
-    # when the operator actually passed it. A visible 31 here would pin a second
-    # copy of that default and drift the day the inner one changes. Validation is
-    # essential rather than cosmetic: the inner param is untyped and unvalidated,
-    # and Extension/Metrics.ps1 runs the value through [math]::Abs, so a negative
-    # would silently become positive and a 0 would produce a zero-width window
-    # that reports Success while shipping every trend metric as a measured 0.
+    # Deliberately NO default so an omitted value leaves ResourceInventory.ps1's own 31-day default as the single authority (a visible 31 here would pin a second copy and drift when the inner one changes).
+    # ValidateRange is essential, not cosmetic: the inner param is untyped and run through [math]::Abs, so a negative would flip positive and a 0 would give a zero-width window that reports Success while shipping every trend metric as a measured 0.
     [ValidateRange(1, 93)][int]$MetricsLookbackDays,
 
-    # Re-collect ONLY these inventory collectors (by their Services/*.ps1
-    # BaseName, e.g. VirtualMachines, Streamanalytics), across every in-scope
-    # subscription. Forwarded to ResourceInventory.ps1's own -Service filter.
-    # This scopes the INVENTORY phase ONLY - metrics and consumption still run for
-    # the whole subscription - so it is intended for RECOVERING a specific failed
-    # collector, and should be paired with -SkipMetrics -SkipConsumption for a
-    # clean inventory-only run. It is NOT a general workload filter: to target a
-    # single workload (and scope its metrics too) run ResourceInventory.ps1
-    # directly with -SubscriptionID + -ResourceGroup instead. Omit to collect all
-    # services (default). Accepts a comma list as one token
-    # (-Service VirtualMachines,Streamanalytics) or a PowerShell array; unknown
-    # names fail fast up front with the valid list.
+    # Re-collect ONLY these inventory collectors (Services/*.ps1 BaseName) across every in-scope sub, forwarded to ResourceInventory.ps1 -Service. Scopes the INVENTORY phase only (metrics/consumption still run whole-sub), so it is for RECOVERING a failed collector - pair with -SkipMetrics -SkipConsumption.
+    # Unknown names fail fast up front with the valid list.
     [string[]]$Service,
 
     [switch]$Resume,
-    # Retry only the subscriptions that failed on a previous run: the script
-    # processes exactly the failures recorded in the resume-state file and
-    # nothing else. Handy for troubleshooting - when a large run finishes with
-    # a few failures (e.g. transient throttling or an auth blip on specific
-    # subs), use this to re-run just those without walking the whole tenant
-    # again. (Use -Resume instead to continue an interrupted run - that covers
-    # both failures and subscriptions not yet reached.) If there are no recorded
-    # failures, prints "Nothing to retry" and exits 0. Works with
-    # -ParallelStreams; the failed-only filter is applied before the
-    # subscriptions are split across streams.
+    # Retry ONLY the subscriptions recorded as failed on a previous run (vs -Resume, which also continues subs not yet reached). No recorded failures -> prints "Nothing to retry" and exits 0.
+    # Works with -ParallelStreams; the failed-only filter is applied before the subs are split across streams.
     [switch]$ResumeFailedOnly,
     [switch]$IncludeDisabled,
 
-    # By DEFAULT the wrapper verifies control-plane read access to EVERY in-scope
-    # subscription up front (one cheap native ARM resource-group read per sub)
-    # and HARD-STOPS
-    # before doing any work if the signed-in identity cannot read one or more of
-    # them - so an auth/permission gap is surfaced and fixed up front instead of
-    # producing a report silently missing subscriptions (and risking the
-    # consumption cross-attribution class of bug). Pass -AllowPartialAccess to
-    # override that gate: the inaccessible subscriptions are SKIPPED (listed
-    # loudly in the summary) and the run proceeds with the accessible ones. Use
-    # this only when you intentionally have Reader on a subset of the tenant.
+    # By DEFAULT the wrapper verifies control-plane read access to EVERY in-scope sub up front and HARD-STOPS on any gap, so a missing sub is caught before it silently drops from the report (and risks the consumption cross-attribution bug).
+    # -AllowPartialAccess overrides that gate: inaccessible subs are SKIPPED (listed loudly) and the run proceeds - use only when you intentionally hold Reader on a subset of the tenant.
     [switch]$AllowPartialAccess,
 
-    # Check permissions and stop - collect nothing. Runs the normal sign-in,
-    # tenant, coverage and Reader gates, then probes EVERY in-scope subscription
-    # for the two data-phase permissions the run needs (Cost Management Reader
-    # for consumption, Monitoring Reader for metrics) and prints a per-subscription
-    # matrix with the exact role to grant. Today those two gaps otherwise surface
-    # only mid-run (consumption is probed on one subscription; metrics not at
-    # all). Exit 0 when nothing requested is denied, 1 otherwise. Honours
-    # -SkipMetrics / -SkipConsumption (a skipped phase is not probed).
+    # Check permissions and stop, collecting nothing: probe EVERY in-scope sub for Cost Management Reader (consumption) and Monitoring Reader (metrics) and print a per-sub matrix with the exact role to grant - gaps that otherwise surface only mid-run.
+    # Exit 0 when nothing requested is denied, 1 otherwise. Honours -SkipMetrics / -SkipConsumption (a skipped phase is not probed).
     [switch]$Preflight,
 
-    # DEPRECATED / no-op: the aggregate "main" HTML summary (run-wide totals, a
-    # per-subscription table with links to each per-sub report, and run-health
-    # banners) is now produced on EVERY run and folded into the consolidated
-    # AllSubscriptions zip as MainSummary.html, so the single bundle the customer
-    # receives is self-contained. This switch is retained only for backward
-    # compatibility with existing callers/scripts and has no effect.
+    # DEPRECATED / no-op: the aggregate MainSummary.html is now produced on EVERY run and folded into the consolidated zip. Retained only for backward compatibility with existing callers and has no effect.
     [switch]$MainSummary,
 
     # Also parse each per-subscription inventory to render a run-wide by-service
@@ -142,166 +48,43 @@ param (
     # slower on very large tenants (one JSON parse per subscription).
     [switch]$Detailed,
 
-    # Forwarded to ResourceInventory.ps1's -ConcurrencyLimit. Default of 6 matches
-    # the inner script's own default. The inner script uses this as the throttle
-    # for its metrics-collection runspace pool (Get-AzMetric calls in
-    # Extension/Metrics.ps1). Tenants with metric-heavy subscriptions (many VMs,
-    # SQL DBs, Storage Accounts, Scale Sets, Container Registries) bottleneck on
-    # this phase; raising the limit to 12-24 typically cuts that phase 30-50%
-    # without hitting Azure Monitor's 12,000 reads/hour/subscription ceiling.
-    # Don't go above ~24 in a single tenant - tenant-scoped Resource Graph
-    # rate limits start to bite.
-    #
-    # When OMITTED, this is AUTO-TUNED from the host's CPU/RAM (see
-    # Get-RecommendedParallelism in Functions/RunAllSubscriptions.Functions.ps1):
-    # typically 2x vCPU bounded to [6,16]. The 6 here is only the fallback the
-    # auto path clamps to; passing -ConcurrencyLimit explicitly always overrides
-    # auto-tuning.
+    # Forwarded to ResourceInventory.ps1 -ConcurrencyLimit: the throttle for its metrics-collection runspace pool. Raising to 12-24 typically cuts the metrics phase 30-50%; don't exceed ~24 in one tenant (tenant Resource Graph rate limits bite).
+    # When OMITTED it is AUTO-TUNED from CPU/RAM (Get-RecommendedParallelism, ~2x vCPU clamped [6,16]); the 6 here is only the fallback, and an explicit value always overrides auto-tuning.
     [int]$ConcurrencyLimit = 6,
 
-    # Number of parallel "streams" that process subscriptions concurrently.
-    # When OMITTED, this is AUTO-TUNED from the host's CPU/RAM (see
-    # Get-RecommendedParallelism in Functions/RunAllSubscriptions.Functions.ps1):
-    # small boxes run sequentially (1), larger boxes scale to one stream per
-    # ~2 vCPUs (RAM-capped), never above 6. Passing -ParallelStreams explicitly
-    # always overrides auto-tuning; pass 1 to force sequential. Each stream is a
-    # separate `pwsh` background process with its own Az PowerShell context
-    # and its own resume-state file (.resume-state-<TenantID>-stream-<N>.json),
-    # so they cannot race on the shared Az static state or the resume file.
-    # The wrapper splits the eligible subscription list into N approximately
-    # equal chunks at the start and assigns one chunk per stream.
-    #
-    # Practical guidance:
-    #   1   = sequential (default, lowest memory, easiest to debug)
-    #   2   = Cloud Shell (3.5 GB RAM / 2 vCPU). Saturates both vCPUs without
-    #         OOM-killing workers.
-    #   3-4 = local laptop / VM with 16+ GB RAM and 4+ vCPUs.
-    #   5+  = only if you have validated memory headroom (each stream loads
-    #         its own Az module set, roughly 400 MB resident).
-    #
-    # Tenant-scoped Azure Resource Graph rate limits (~15 req/sec/tenant) are
-    # the hard ceiling - more than ~6 parallel streams in one tenant will
-    # start to throttle and provide no further wall-time benefit.
+    # Number of parallel streams processing subscriptions concurrently, each a separate `pwsh` process with its own Az context and its own resume-state file (.resume-state-<TenantID>-stream-<N>.json), so they cannot race on shared Az state or the resume file.
+    # When OMITTED it is AUTO-TUNED from CPU/RAM (Get-RecommendedParallelism: 1 on small boxes up to ~1 per 2 vCPUs, never above 6); explicit always overrides (pass 1 to force sequential). Tenant Resource Graph limits (~15 req/s) are the hard ceiling above ~6 streams.
     [int]$ParallelStreams = 1,
 
-    # API headroom: leave this PERCENTAGE of the host's chosen metrics-collection
-    # concurrency unused, so the run intentionally consumes less of the shared
-    # Azure API throttle budget and leaves room for the customer's other/production
-    # workloads. 0 (default) = no reduction (full concurrency). Example:
-    # -HeadRoom 20 keeps ~20% of the concurrency in reserve (the effective
-    # -ConcurrencyLimit is scaled to 80% of its chosen value, floored, minimum 1).
-    #
-    # NOTE on scope: Azure Resource Manager throttles PER security principal PER
-    # subscription/tenant, plus a shared tenant-wide/global ceiling and per-
-    # resource-provider limits. Running under a dedicated identity already isolates
-    # most of RDA's per-principal budget from production; -HeadRoom additionally
-    # lowers RDA's peak request rate (it reduces the concurrent Get-AzMetric call
-    # count - the run's heaviest ARM / Azure Monitor consumer) so it competes less
-    # for the SHARED limits. It is a proportional throttle, not a hard reservation
-    # of a fixed fraction of the hourly request bucket. Scaling ONLY concurrency
-    # (not stream count) keeps the aggregate rate reduction predictable.
+    # API headroom: leave this PERCENTAGE of the chosen metrics concurrency unused so the run consumes less of the shared Azure throttle budget (e.g. -HeadRoom 20 scales the effective -ConcurrencyLimit to 80%, floored, min 1). 0 (default) = full concurrency.
+    # A proportional throttle, not a hard reservation; scaling concurrency only (not stream count) keeps the aggregate rate reduction predictable.
     [ValidateRange(0, 90)]
     [int]$HeadRoom = 0,
 
-    # --- Horizontal scale-out (sharding) ------------------------------------
-    # Split the tenant's subscriptions across N INDEPENDENT machines. Run the
-    # same command on each machine with the SAME -ShardCount and a distinct
-    # -ShardIndex (0..ShardCount-1); each machine processes ONLY its own shard of
-    # the subscriptions. Assignment is a deterministic hash of each subscription
-    # id, so the shards are disjoint and collectively cover every subscription
-    # with NO coordination between machines - and a subscription added/removed
-    # (or an access difference) on one machine only affects its own shard.
-    #
-    # This is orthogonal to -ParallelStreams: sharding scales ACROSS machines,
-    # -ParallelStreams scales ACROSS cores within one machine. A typical 10k-sub
-    # run uses one shard per machine, each still using parallel streams locally.
-    # Each shard keeps its own resume-state file
-    # (.resume-state-<TenantID>-shard-<Index>of<Count>.json) so shards never race
-    # on progress. Default ShardCount=1 (no sharding) is byte-identical to a
-    # non-sharded run. Each shard produces its OWN consolidated
-    # AllSubscriptions_ResourcesReport_*.zip covering only its slice; because the
-    # slices are disjoint they can be uploaded to the ingestion server separately
-    # (recommended - spreads load, no merge step). To instead build ONE
-    # tenant-wide MainSummary locally, extract the inner per-subscription zips out
-    # of every shard's outer zip into one folder, re-zip them into a single outer
-    # zip, then run Build-MainSummaryFromZip.ps1 -InputZip on that. See
-    # docs/horizontal-sharding.md and the README "Horizontal scaling" section.
+    # --- Horizontal scale-out (sharding): split subscriptions across N INDEPENDENT machines (same -ShardCount, distinct -ShardIndex 0..N-1). Assignment is a deterministic per-sub-id hash, so shards are disjoint and exhaustive with NO cross-machine coordination.
+    # Orthogonal to -ParallelStreams (which scales within a machine). Each shard keeps its own resume-state file and produces its own consolidated zip covering only its slice; ShardCount=1 (default) is byte-identical to a non-sharded run. See docs/horizontal-sharding.md.
     [int]$ShardIndex = 0,
     [int]$ShardCount = 1,
 
-    # After the run, upload THIS machine's consolidated report zip to an Azure
-    # Blob container, so a multi-node / AKS operator does not have to SSH into
-    # every worker to collect output - each node ships its own zip. Pass the
-    # container URL, e.g. https://<account>.blob.core.windows.net/<container>
-    # (an optional path after the container becomes a blob-name prefix).
-    #
-    # The upload uses the CURRENT signed-in identity (Connect-AzAccount, or the
-    # AKS workload identity in a pod) via Azure AD - NO account key or SAS token -
-    # so that identity needs the "Storage Blob Data Contributor" role on the
-    # target account/container. When sharding (ShardCount > 1) the blob name is
-    # prefixed with the shard index (shard-<i>of<N>-), so the disjoint shards
-    # never collide; the report zip name also carries the run timestamp. The
-    # upload is best-effort: if it fails, the run still succeeds and the zip
-    # remains on the local disk (a loud WARNING is printed). Omit to skip upload
-    # (default).
+    # After the run, upload THIS machine's consolidated zip to an Azure Blob container (URL https://<account>.blob.core.windows.net/<container>[/<prefix>]) so a multi-node/AKS operator need not SSH into each worker.
+    # Uses the CURRENT signed-in identity via Azure AD (NO key/SAS), so it needs "Storage Blob Data Contributor"; shard runs prefix the blob with the shard index so disjoint shards never collide. Best-effort - a failure warns, the run still succeeds and the zip stays on local disk.
     [string]$UploadToBlobContainerUri,
 
-    # Mirror the resume/state file to an Azure Blob container so a run survives
-    # the loss of local disk - the case that matters on AKS, where a pod's
-    # emptyDir is destroyed on eviction/reschedule/node-reclaim (exactly when
-    # -Resume is needed). Same URL shape as -UploadToBlobContainerUri
-    # (https://<account>.blob.core.windows.net/<container>[/<prefix>]); state
-    # lives under a dedicated _state/ subfolder (shard-namespaced) so it never
-    # collides with the report zips in the same container. Uses the SAME
-    # passwordless identity as the upload (Storage Blob Data Contributor). Writes
-    # are write-through (local atomic write first, then a best-effort blob PUT);
-    # reads on start are blob-first with a local fallback. Omit to keep state
-    # local-only (default) - behaviour is then byte-identical to before.
+    # Mirror the resume/state file to an Azure Blob container so a run survives loss of local disk - the AKS case, where a pod's emptyDir dies on eviction/reschedule (exactly when -Resume is needed); state lives under a shard-namespaced _state/ subfolder so it never collides with the report zips.
+    # Same passwordless identity as the upload. Writes are write-through (local atomic first, then a best-effort blob PUT); start reads are blob-first with a local fallback. Omit to keep state local-only (byte-identical to before).
     [string]$StateBlobContainerUri,
 
-    # Assess-only "getting started" bootstrap. When set, the wrapper authenticates,
-    # enumerates the tenant's eligible subscriptions, and sizes the run against
-    # THIS machine (CPU/RAM -> recommended parallel streams), then PRINTS a
-    # recommendation and EXITS without inventorying anything. For a tenant that one
-    # machine can finish within a ~2-hour wall-time ceiling it recommends a single
-    # run with concrete -ParallelStreams/-ConcurrencyLimit; for a larger tenant it
-    # recommends how many machines (shards) to split across and prints the ready-
-    # to-paste per-node command (same command, distinct -ShardIndex). The per-
-    # subscription time is a rough estimate (auto-picked from the -Skip* switches),
-    # so treat the output as guidance, not a guarantee.
+    # Assess-only bootstrap: authenticate, enumerate eligible subs, size the run against THIS machine's CPU/RAM, then PRINT a recommendation and EXIT without inventorying - a single run (concrete parallelism flags) or, for a larger tenant, a shard count plus ready-to-paste per-node commands.
+    # Per-sub time is a rough estimate (auto-picked from the -Skip* switches) - guidance, not a guarantee.
     [switch]$Plan,
 
-    # -Plan only: override the estimated wall-time cost, in seconds, of a single
-    # Azure Monitor metric query. -Plan sizes shards from each subscription's
-    # projected metric-query volume (counted live via Resource Graph: attached
-    # disks x4, VMs x2, SQL databases x8, storage accounts x1, scale sets x2,
-    # Cosmos x4, etc.) multiplied by this per-query cost. When 0 (default) the
-    # cost is auto-picked: a small value when -UseMetricsBatch is set (getBatch
-    # amortizes up to 50 resources per REST call) and a larger throttled per-call
-    # value otherwise. These defaults are deliberately rough - for an accurate
-    # estimate on your tenant/config, pass a value measured from a prior run's
-    # Diagnostics phase timings (metrics seconds / metric-query count).
+    # -Plan only: override the estimated wall-time cost (seconds) of a single Azure Monitor metric query, which -Plan multiplies by each sub's projected query volume (counted live via Resource Graph). 0 (default) auto-picks: small under -UseMetricsBatch, larger throttled per-call otherwise.
+    # Defaults are deliberately rough; for accuracy pass a value measured from a prior run's Diagnostics timings (metrics seconds / metric-query count).
     [double]$PlanPerQuerySeconds = 0
 )
 
-# ---------------------------------------------------------------------------
-# -TenantID guard: fail loudly instead of prompting.
-#
-# -TenantID used to be Mandatory, so PowerShell prompted when it was missing. A
-# prompt is invisible to a non-interactive caller - CI, a scheduled task, the AKS
-# entrypoint, or any run whose output is redirected - so the run simply hung with
-# no output and no exit code, indistinguishable from work in progress. Failing
-# here turns that into an immediate, diagnosable error.
-#
-# Placed BEFORE the PowerShell 7 bootstrap below on purpose: there is no point
-# re-launching (or offering to INSTALL) PowerShell 7 for an invocation that cannot
-# succeed either way. For the same reason this block stays inside the 5.1 + 7
-# common language subset the bootstrap documents - no ternary, no ?? / ??=, no
-# && / ||, no -Parallel - so Windows PowerShell 5.1 reaches it and reports the
-# same error rather than choking at parse time.
-#
-# exit 1 (not throw) matches how the other entry points reject bad input, so a
-# wrapper-driven or CI-driven run sees a non-zero exit code it can act on.
+# -TenantID guard: fail loud (exit 1) instead of prompting - a prompt is invisible to a non-interactive caller (CI, scheduled task, AKS, redirected output) and would hang the run silently with no exit code.
+# Placed BEFORE the PS7 bootstrap (no point relaunching/installing PS7 for a run that cannot succeed) and kept in the 5.1+7 common syntax subset (no ternary, ??/??=, &&/||, -Parallel) so Windows PowerShell 5.1 reaches it instead of failing at parse time.
 if ([string]::IsNullOrWhiteSpace($TenantID))
 {
     Write-Host "ERROR: -TenantID is required." -ForegroundColor Red
@@ -311,19 +94,8 @@ if ([string]::IsNullOrWhiteSpace($TenantID))
     exit 1
 }
 
-# ---------------------------------------------------------------------------
-# PowerShell 7 bootstrap. This MUST run before the dot-source below: the helper
-# files this script loads declare "#requires -Version 7.0", which Windows
-# PowerShell 5.1 cannot load. Rather than fail with a blunt version error, this
-# block (written in the 5.1 + 7 common language subset, so 5.1 reaches it
-# instead of choking at parse time) re-launches the run under PowerShell 7,
-# installing it first with consent if it is missing. On PS7+ it is a no-op and
-# the script continues normally.
-#
-# KEEP THIS BLOCK FREE OF PS7-ONLY SYNTAX (no ternary ? :, no ?? / ??=, no
-# && / ||, no ForEach-Object -Parallel). Adding any of those makes 5.1 fail to
-# parse the whole script, and this bootstrap never runs.
-# ---------------------------------------------------------------------------
+# PowerShell 7 bootstrap: MUST run before the dot-sources below - the helpers declare #requires -Version 7.0, which Windows PowerShell 5.1 cannot load. Re-launches the run under PS7, installing it first with consent if missing; a no-op on PS7+.
+# KEEP FREE OF PS7-ONLY SYNTAX (no ternary ? :, no ??/??=, no &&/||, no ForEach-Object -Parallel) - any of those makes 5.1 fail to parse the whole script and this bootstrap never runs.
 if ($PSVersionTable.PSVersion.Major -lt 7)
 {
     Write-Host ("Detected Windows PowerShell {0}. This tool requires PowerShell 7." -f $PSVersionTable.PSVersion) -ForegroundColor Yellow
@@ -449,31 +221,8 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
     exit $LASTEXITCODE
 }
 
-# ---------------------------------------------------------------------------
-# Az PowerShell module bootstrap. The wrapper (Connect-AzAccount, Get-AzSubscription)
-# and the inner script (Get-AzMetric, consumption) all require the Az module.
-# Detect it, and if missing offer to install it when interactive, or fail loud
-# when non-interactive - the same pre-flight treatment as PowerShell 7.
-#
-# Why the verify step (below) matters: an earlier version installed Az from
-# INSIDE the inventory run, mid-collection. That produced a half-installed module
-# whose manifests were present (so a naive Get-Module -ListAvailable looked fine)
-# but whose bundled MSAL/Azure.Core assemblies were missing - so the run limped on
-# for ~an hour and silently produced zero consumption records. The safe pattern,
-# used here, is: install BEFORE any Az call, then VERIFY by actually importing
-# Az.Accounts (which loads those assemblies) and fail loud if it cannot load.
-#
-# 5.1 + 7 common syntax subset (only executes under 7, but must parse under 5.1).
-# ---------------------------------------------------------------------------
-# This tool only calls cmdlets from five Az submodules (Accounts / Compute /
-# Monitor / Billing / ResourceGraph - the same set the ResourceInventory.ps1
-# preflight validates), so install and check ONLY those, NOT the full `Az`
-# rollup. Installing `Az` pulls in ~80 submodules (hundreds of DLLs) and takes
-# several minutes plus a 20-40s import on every run; the slim set installs in a
-# fraction of the time and cannot cause "command not found" because nothing
-# outside these five is ever called.
-# Check per-submodule (a slim install has no `Az` meta-module, so the old
-# Get-Module -Name Az check would have false-negatived a perfectly good install).
+# Az PowerShell module bootstrap: detect the Az module the wrapper and inner script need; if missing, offer to install when interactive or fail loud when non-interactive (same preflight as PS7). 5.1+7 common syntax subset - executes only under 7 but must parse under 5.1.
+# Install BEFORE any Az call, then VERIFY by actually importing Az.Accounts and fail loud if it cannot load: a past mid-run install left a half-installed module (manifests present, MSAL/Azure.Core DLLs missing) that limped on ~an hour and silently produced zero consumption records. Install ONLY the five slim submodules (Accounts/Compute/Monitor/Billing/ResourceGraph), checked per-submodule since a slim install has no `Az` meta-module.
 $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
 $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 if ($MissingAzSubModules.Count -gt 0)
@@ -569,13 +318,7 @@ Disable-ConsoleQuickEdit
 
 $RunStartTime = Get-Date
 
-# -MainSummary is accepted for backward compatibility and has NO effect: the
-# aggregate MainSummary.html is now produced on every run and folded into the
-# consolidated bundle regardless. Say so when it is actually passed, rather than
-# only documenting it at the param block - an operator who passes a flag and sees
-# nothing acknowledge it has no way to tell "retained no-op" from "silently
-# ignored because I typo'd the intent". The operator still gets what they asked
-# for, so this is Info, not a warning.
+# -MainSummary is a retained no-op: acknowledge it here when it is actually passed (not just at the param block) so an operator can tell "retained no-op" from "silently ignored a typo". Info, not a warning - they still get the summary they asked for.
 if ($PSBoundParameters.ContainsKey('MainSummary'))
 {
     Write-Host "Note: -MainSummary is a retained no-op. The aggregate MainSummary.html is produced on EVERY run and folded into the consolidated bundle, so you already get it without this flag." -ForegroundColor DarkGray
@@ -583,59 +326,19 @@ if ($PSBoundParameters.ContainsKey('MainSummary'))
 
 $FailedSubscriptions = @()
 
-# Subscriptions whose inner script could not write its report archive
-# (ResourceInventory.ps1 exit code 2). Tracked separately from
-# $FailedSubscriptions because it is the one failure class that means "a report
-# is MISSING from the bundle" rather than "this subscription did not collect",
-# and that is exactly what the wrapper's exit code 2 already signals. Without
-# this the run would exit 0: the sub is correctly excluded from the expected
-# archive count, so the per-subscription output verification gate has nothing to
-# compare and stays silent, leaving a human-visible failure that automation
-# checking only the exit code would read as success.
+# Subscriptions whose inner script could not write its report archive (ResourceInventory.ps1 exit code 2). Tracked separately from $FailedSubscriptions because it is the one failure class meaning "a report is MISSING from the bundle", which is exactly what the wrapper's own exit code 2 signals.
+# Without this the run would exit 0: the sub is correctly excluded from the expected archive count, so the output-verification gate has nothing to compare and stays silent, leaving a failure that exit-code-only automation reads as success.
 $ArchiveWriteFailures = @()
 
-# Per-subscription metrics-phase auth health, aggregated across the whole run.
-# This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
-# same way: a list of { Name, Id, Message } objects, one per subscription whose
-# metrics phase was skipped because Azure auth was unavailable (no valid
-# context/token) even though the user did NOT pass -SkipMetrics.
-#   - Sequential run: ResourceInventory.ps1 appends entries directly (it runs in
-#     this wrapper's scope).
-#   - Parallel run: each stream worker collects its own list and reports it in
-#     its summary JSON; the aggregation loop below concatenates them, so the
-#     run-level list names every affected subscription regardless of which
-#     stream processed it.
-# The final summary reads this list to print which subscriptions had metrics
-# skipped, and to set the non-zero wrapper exit code. Empty list = no problem.
+# Per-sub metrics-phase auth health aggregated across the run: a list of {Name,Id,Message}, one per sub whose metrics phase was skipped for missing Azure auth despite no -SkipMetrics. Sequential runs append directly; parallel streams report their own summary JSON that the aggregation loop concatenates.
+# The final summary reads this to list metrics-skipped subs and set the non-zero exit code. Empty = no problem.
 $Global:MetricsFailedSubs = @()
 
-# Per-subscription collector failures (#22), aggregated across the whole run.
-# Same pattern and lifecycle as $Global:MetricsFailedSubs above: a list of
-# { Id, Module, Message } objects, one per (subscription, collector) pair
-# where a Services/*/*.ps1 collector threw and was caught by
-# ResourceInventory.ps1's circuit breaker.
-#   - Sequential run: ResourceInventory.ps1 appends entries directly (it runs
-#     in this wrapper's scope).
-#   - Parallel run: each stream worker collects its own list and reports it
-#     in its summary JSON; the aggregation loop below concatenates them.
+# Per-sub collector failures aggregated across the run: a list of {Id,Module,Message}, one per (sub,collector) where a Services/*.ps1 collector threw and was caught by ResourceInventory.ps1's circuit breaker. Same lifecycle as $Global:MetricsFailedSubs above (sequential appends directly; parallel concatenates per-stream summary JSON).
 $Global:CollectorFailures = @()
 
-# Inventory root (used for resume state, consolidated output, and the wrapper
-# transcript). Computed up front so the transcript can be started before
-# anything else writes to the host.
-# Get-RdaInventoryRoot (Functions/Common.Functions.ps1) is the SINGLE resolver for
-# this path. It creates the directory, PROVES it writable with a real write, and
-# degrades to a writable fallback (naming it loudly) rather than letting the run
-# continue toward a directory it cannot use. The previous inline computation
-# swallowed a creation failure to Write-Verbose, so on a machine where the path was
-# not writable the run carried on and failed later somewhere unrelated.
-#
-# -NoInherit because this is the process that ESTABLISHES the root for the whole
-# run: a stale RDA_INVENTORY_ROOT left in the operator's shell from an earlier run
-# must not be trusted. The resolved value is then pinned for children, so the inner
-# script and every -ParallelStreams worker write under the SAME root instead of
-# each re-deriving it - which is what keeps the consolidation step below looking in
-# the directory the subscriptions actually wrote to.
+# Inventory root (resume state, consolidated output, wrapper transcript), computed up front so the transcript can start before anything else writes. Get-RdaInventoryRoot is the SINGLE resolver: it creates the dir, PROVES it writable with a real write, and degrades loudly to a fallback rather than continuing toward an unusable dir (the old inline path swallowed the failure and failed later elsewhere).
+# -NoInherit because this process ESTABLISHES the root: a stale RDA_INVENTORY_ROOT left in the operator's shell must not be trusted. The resolved value is then pinned for children, so the inner script and every stream write under the SAME root the consolidation step reads.
 $RootResult = Get-RdaInventoryRoot -NoInherit
 if (-not $RootResult.Ok)
 {
@@ -649,24 +352,8 @@ if ($RootResult.IsFallback)
 }
 Set-RdaInventoryRootForChildren -Path $InventoryRoot
 
-# Wrapper-level transcript.
-#
-# ResourceInventory.ps1 already records a per-subscription transcript inside
-# each subscription's output folder. That captures everything inside a single
-# sub's run, but it does not capture the wrapper's own output: tenant
-# resolution, the auth gate's decisions, resume-state messages, the
-# Processing/Completed/ERROR cross-iteration narration, the consolidation
-# step, or the final summary. For multi-subscription runs that bookkeeping is
-# the most useful diagnostic signal of all - which sub failed, why, what came
-# before, and how the wrapper proceeded.
-#
-# This transcript runs at the wrapper level for every invocation (single sub
-# or many) and lands at:
-#   <InventoryRoot>/RunAllSubscriptions_transcript_<timestamp>.txt
-# It also catches everything Write-Host'd by the inner script into the same
-# console session, so the file is a complete record of one wrapper invocation.
-# Start-Transcript is idempotent in the sense that we Stop it on every exit
-# path via Exit-Wrapper.
+# Wrapper-level transcript. ResourceInventory.ps1 records a per-sub transcript, but not the wrapper's own output (tenant resolution, auth-gate decisions, resume messages, the cross-iteration narration, consolidation, the final summary) - the most useful multi-sub diagnostic of which sub failed and why.
+# Runs for every invocation, lands at <InventoryRoot>/RunAllSubscriptions_transcript_<timestamp>.txt, and is Stop'd on every exit path via Exit-Wrapper.
 $WrapperTranscriptStarted = $false
 $WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 try
@@ -714,12 +401,7 @@ if ($ShardIndex -lt 0 -or $ShardIndex -ge $ShardCount)
     Exit-Wrapper -Code 1
 }
 
-# Validate the blob-upload request up front (before the multi-hour run). The
-# operator EXPLICITLY asked to upload, so a malformed URL or a missing Az.Storage
-# module must fail LOUD here rather than silently degrading to a warning at the
-# very end - otherwise a whole run's output would be stranded on an ephemeral
-# node with no way to collect it. (The upload itself, later, stays best-effort
-# for transient/RBAC issues.)
+# Validate the blob-upload request up front (before the multi-hour run): the operator EXPLICITLY asked to upload, so a malformed URL or a missing Az.Storage module must fail LOUD here rather than stranding a whole run's output on an ephemeral node with only an end-of-run warning. (The upload itself later stays best-effort for transient/RBAC issues.)
 if ($UploadToBlobContainerUri)
 {
     $UploadUriValid = $false
@@ -745,16 +427,8 @@ if ($UploadToBlobContainerUri)
     }
 }
 
-# Resume state helpers. When sharding (ShardCount>1) each shard keeps its OWN
-# unified resume-state file so shards never clobber each other's completed/failed
-# progress. NOTE the intended topology is ONE shard per machine (each with its own
-# InventoryRoot): the PER-STREAM artefacts used by -ParallelStreams (the
-# .resume-state-<Tenant>-stream-<N>.json files, stream summaries and stream
-# failure logs) are keyed by tenant + stream index only, NOT by shard, so running
-# two shards concurrently on the SAME host with the SAME InventoryRoot and
-# -ParallelStreams>1 would collide on those. Run each shard on its own machine (or,
-# for same-box testing, give each a distinct InventoryRoot). The non-sharded
-# filename is unchanged, so a normal run resumes exactly as before.
+# Resume state helpers. When sharding (ShardCount>1) each shard keeps its OWN unified resume-state file so shards never clobber each other. NOTE the intended topology is ONE shard per machine: the per-stream artefacts are keyed by tenant+stream index only (NOT by shard), so two shards on the SAME host + InventoryRoot with -ParallelStreams>1 would collide - run each shard on its own machine (or give each a distinct InventoryRoot).
+# The non-sharded filename is unchanged, so a normal run resumes exactly as before.
 $ResumeStateFile = if ($ShardCount -gt 1)
 {
     Join-Path $InventoryRoot (".resume-state-{0}-shard-{1}of{2}.json" -f $TenantID, $ShardIndex, $ShardCount)
@@ -764,13 +438,8 @@ else
     Join-Path $InventoryRoot (".resume-state-{0}.json" -f $TenantID)
 }
 
-# Blob-backed resume state (AKS pod-reschedule durability). Validate the URL
-# shape + Az.Storage module up front - mirroring the -UploadToBlobContainerUri
-# preflight - so a malformed URL / missing module fails LOUD here rather than
-# after a multi-hour run. The passwordless storage CONTEXT is built later (after
-# authentication + enumeration), just before the state is first read/written.
-# $StateBlobParts is $null when the feature is off, keeping every downstream
-# blob step a no-op and the run byte-identical to a local-only run.
+# Blob-backed resume state (AKS pod-reschedule durability): validate the URL shape + Az.Storage up front (mirroring the -UploadToBlobContainerUri preflight) so a bad URL / missing module fails LOUD here, not after a multi-hour run. The passwordless context is built later, just before state is first read/written.
+# $StateBlobParts is $null when the feature is off, keeping every downstream blob step a no-op and the run byte-identical to a local-only run.
 $StateBlobParts = $null
 if ($StateBlobContainerUri)
 {
@@ -806,26 +475,8 @@ if ($StateBlobContainerUri)
 
 
 
-# Authenticate, but only if needed.
-#
-# In environments like Azure Cloud Shell the shell already has a valid Az
-# PowerShell session for the signed-in user. Unconditionally calling
-# Connect-AzAccount from the wrapper produces a redundant browser/device-code
-# prompt every run.
-#
-# Two things have to be true to skip the interactive login:
-#   1. The cached context must be on the requested tenant.
-#   2. That cached context must still be able to *acquire a token* silently.
-# Condition 1 alone is not enough: a context can persist on disk (e.g. in
-# ~/.Azure/AzureRmContext.json) with the right tenant ID but an expired or
-# revoked refresh token. In that state Azure AD requires user interaction
-# (typically driven by Conditional Access or MFA), so any data-plane call
-# from inside the script will emit a warning like "Unable to acquire token
-# for tenant ... User interaction is required" and silently return nothing -
-# producing an empty inventory rather than failing loudly.
-#
-# Therefore the gate probes token acquisition for the requested tenant. Only
-# if that probe succeeds do we skip the login.
+# Authenticate, but only if needed: skip the interactive Connect-AzAccount (which reprompts every run in e.g. Cloud Shell) only when the cached context is BOTH on the requested tenant AND can still acquire a token silently.
+# Tenant match alone is not enough - a persisted context can carry the right tenant with an expired/revoked refresh token, which then emits a warning and silently returns an empty inventory - so the gate actually probes token acquisition for the tenant and skips login only if that probe succeeds.
 
 
 
@@ -861,13 +512,8 @@ try
             Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
         }
 
-        # Do not launch an interactive sign-in in a non-interactive/headless session
-        # (e.g. an Azure DevOps agent, cron, or any redirected-stdin run):
-        # Connect-AzAccount would block on a browser/device-code prompt that no one
-        # can answer, hanging the run until it times out. Fail loud with actionable
-        # guidance and a non-zero exit instead. -DeviceLogin is an explicit opt-in to
-        # the device-code flow, so it is still honored. Uses the same interactivity
-        # test as the PowerShell 7 / Az module install prompts above.
+        # Do not launch an interactive sign-in in a non-interactive/headless session (an ADO agent, cron, or any redirected-stdin run): Connect-AzAccount would block on a browser/device-code prompt no one can answer and hang the run. Fail loud with actionable guidance and a non-zero exit instead.
+        # -DeviceLogin is an explicit opt-in to the device-code flow and is still honored. Uses the same interactivity test as the PS7 / Az module install prompts above.
         $SessionInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
         if (-not $SessionInteractive -and -not $DeviceLogin)
         {
@@ -895,20 +541,8 @@ catch
     Exit-Wrapper -Code 1
 }
 
-# ---------------------------------------------------------------------------
-# Identity banner. Print WHO this run is authenticated as, before any work.
-# Diagnostic aid: on AKS / workload identity the pod signs in as a service
-# principal / managed identity (Connect-AzAccount -ServicePrincipal
-# -FederatedToken), whereas an operator on a VM signs in as themselves. A run
-# that returns 0 resources for an identity that "should" see them is almost
-# always a DIFFERENT principal (Account.Type != 'User') than the interactive
-# user - the Account.Type line below surfaces that at a glance.
-#
-# Native Az only: the tool depends solely on the Az PowerShell context
-# (Search-AzGraph, Get-AzSubscription, Get-AzMetric, Get-UsageAggregates,
-# Invoke-AzRestMethod are all Az module cmdlets) and never invokes the az CLI at
-# runtime, so this banner reads the identity from Get-AzContext - no az shell-out
-# and no az.cmd/cmd.exe quoting boundary.
+# Identity banner: print WHO this run is authenticated as, before any work. On AKS / workload identity the pod signs in as a service principal / managed identity, whereas a VM operator signs in as themselves - a run returning 0 resources is almost always a DIFFERENT principal, which the Account.Type line surfaces at a glance.
+# Native Az only: identity is read from Get-AzContext (the tool never invokes the az CLI at runtime), so there is no az.cmd/cmd.exe quoting boundary.
 Write-Host ""
 Write-Host "Running identity:" -ForegroundColor Cyan
 $BannerCtx = Get-AzContext -ErrorAction SilentlyContinue
@@ -920,15 +554,8 @@ if ($BannerCtx -and $BannerCtx.Account)
     {
         Write-Host ("  Active sub    : {0}" -f $BannerCtx.Subscription.Id) -ForegroundColor Green
     }
-    # When the sign-in is a service principal / workload identity (type != 'User' -
-    # e.g. 'ClientAssertion' under an Azure DevOps AzurePowerShell@5 service
-    # connection), Account.Id is the Application (client) id. Azure DevOps' log
-    # scrubber masks that id as '***' in pipeline output because the service
-    # connection registered it as a secret - that is ADO masking the LOG, not the
-    # tool hiding it (Tenant / Active sub are not secrets, so they print normally).
-    # Explain it inline, since this masked principal is exactly the identity that
-    # must hold Reader (+ Cost Management / Monitoring Reader) for the run to see
-    # resources, and it differs from an interactive VM login.
+    # For a service-principal / workload identity (type != 'User'), Account.Id is the app (client) id, which Azure DevOps' log scrubber masks as '***' because the service connection registered it as a secret - that is ADO masking the LOG, not the tool hiding it (Tenant / Active sub are not secrets and print normally).
+    # Explain it inline because this masked principal is exactly the identity that must hold Reader (+ Cost Management / Monitoring Reader) for the run to see resources, and it differs from an interactive VM login.
     if ($BannerCtx.Account.Type -and $BannerCtx.Account.Type -ne 'User')
     {
         Write-Host "  Note          : running as a service principal / workload identity. If the id above shows as '***', that" -ForegroundColor DarkYellow
@@ -944,19 +571,8 @@ else
 }
 Write-Host ""
 
-# Get all Azure subscriptions.
-#
-# Get-AzSubscription emits warnings (rather than throwing) when token
-# acquisition for a tenant fails - typically due to CA/MFA gating. In that
-# state the cmdlet returns no subscriptions, which would otherwise cause
-# this wrapper to report "All subscriptions processed!" with an empty
-# inventory. Capture warnings and treat zero-results-with-warnings as a
-# loud failure instead of a silent one.
-# -WarningVariable names the variable WITHOUT the sigil and populates it itself, so it
-# is spelled to match the reads below. PowerShell variable names are case-insensitive,
-# so the previous lowercase 'subWarnings' did populate $SubWarnings - but it read as a
-# different, never-assigned variable, and a review pass duly flagged the block below as
-# dead code on that basis. Matching the case removes the misreading.
+# Get all subscriptions. Get-AzSubscription WARNS (does not throw) when token acquisition for a tenant fails (typically CA/MFA) and then returns nothing, which would otherwise let the wrapper report "All subscriptions processed!" over an empty inventory - so capture warnings and treat zero-results-with-warnings as a loud failure.
+# -WarningVariable names the variable WITHOUT the sigil; it is spelled to MATCH the reads below (a case mismatch still populated $SubWarnings but read as a different, never-assigned variable, which a review pass then flagged as dead code).
 $AllSubscriptions = Get-AzSubscription -TenantId $TenantID -WarningVariable SubWarnings -WarningAction SilentlyContinue
 if ($null -eq $AllSubscriptions) { $AllSubscriptions = @() }
 $AllSubscriptions = @($AllSubscriptions)
@@ -978,12 +594,7 @@ if ($AllSubscriptions.Count -eq 0)
     Exit-Wrapper -Code 1
 }
 
-# Filter out non-Enabled subscriptions by default. Disabled / Warned / Deleted
-# subscriptions return little-to-no data from Resource Graph and most ARM
-# data-plane calls, so processing them produces near-empty per-subscription
-# reports while still costing wall-clock time (which matters for environments
-# like Azure Cloud Shell where the session has a hard maximum lifetime).
-# Pass -IncludeDisabled to inventory every subscription regardless of state.
+# Filter out non-Enabled subscriptions by default: Disabled/Warned/Deleted subs return little-to-no data yet still cost wall-clock time (which matters where the session has a hard maximum lifetime, e.g. Azure Cloud Shell). Pass -IncludeDisabled to inventory every subscription regardless of state.
 if ($IncludeDisabled)
 {
     $Subscriptions = $AllSubscriptions
@@ -1002,22 +613,11 @@ if ($Excluded.Count -gt 0)
     Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $Excluded.Count, ($ByState -join ', ')) -ForegroundColor Yellow
 }
 
-# -Plan: assess-only "getting started" sizing. Reuses the just-computed eligible
-# subscription set and this host's CPU/RAM to recommend either a single-machine
-# run (with concrete parallelism flags) or a shard count + ready-to-paste per-node
-# commands, then EXITS without inventorying anything. Placed after the
-# eligible/disabled split (so it sizes the real workload) but before the shard
-# filter / access gate / consumption gate, since it is advice only and makes no
-# per-subscription calls.
+# -Plan assess-only sizing: reuse the just-computed eligible set and this host's CPU/RAM to recommend a single-machine run (with concrete parallelism flags) or a shard count + ready-to-paste per-node commands, then EXIT without inventorying. Placed after the eligible/disabled split (so it sizes the real workload) but before the shard/access/consumption gates, since it is advice only and makes no per-sub calls.
 if ($Plan)
 {
     $PlanRec = Get-RecommendedParallelism
-    # Honor an operator's EXPLICIT -ParallelStreams / -ConcurrencyLimit exactly as
-    # the real run does (the auto-tune block later only fills the ones NOT passed),
-    # so the plan sizes and prints the SAME parallelism the recommended command
-    # would actually use rather than always the auto-tuned recommendation.
-    # $PSBoundParameters is reliable here because the PS7 relaunch forwards only
-    # bound params.
+    # Honor an operator's EXPLICIT -ParallelStreams / -ConcurrencyLimit here (the auto-tune block later fills only the ones NOT passed) so -Plan sizes and prints the SAME parallelism the recommended command would actually use. $PSBoundParameters is reliable because the PS7 relaunch forwards only bound params.
     $PlanStreamsExplicit = $PSBoundParameters.ContainsKey('ParallelStreams')
     $PlanConcurrencyExplicit = $PSBoundParameters.ContainsKey('ConcurrencyLimit')
     $PlanStreams = if ($PlanStreamsExplicit) { $ParallelStreams } else { $PlanRec.Streams }
@@ -1067,12 +667,7 @@ if ($Plan)
     # RunAllSubscriptions_transcript_*.txt, which the support bundle collects.
     $RamLabelPlan = if ($PlanRec.RamGB -gt 0) { '{0} GB RAM' -f $PlanRec.RamGB.ToString([cultureinfo]::InvariantCulture) } else { 'RAM undetected' }
 
-    # Composition-aware sizing (preferred): count each subscription's projected
-    # metric-query volume live via Resource Graph, then size shards from the
-    # BUSIEST shard under the real runtime hash partition. Falls through to the
-    # flat per-sub estimate below (byte-identical to the previous behaviour) when
-    # metrics are skipped, the Graph query is unavailable/fails, or there are no
-    # eligible subscriptions.
+    # Composition-aware sizing (preferred): count each sub's projected metric-query volume live via Resource Graph, then size shards from the BUSIEST shard under the real runtime hash partition. Falls through to the flat per-sub estimate below (byte-identical to the previous behaviour) when metrics are skipped, the Graph query is unavailable/fails, or there are no eligible subs.
     $WeightedPlan = $null
     $PlanArgUnavailable = $false
     $PlanZeroWeightSubs = 0
@@ -1091,13 +686,7 @@ if ($Plan)
         # an EMPTY hashtable is a usable "no metric-eligible resources" answer.
         if ($null -ne $PlanSubWeights)
         {
-            # Rough, DELIBERATELY CONSERVATIVE per-metric-query costs (seconds).
-            # Per-call is the slow path; the batchable types (VM/disk/storage/SQL/
-            # VMSS/Cosmos) cost far less per query, so under -UseMetricsBatch only
-            # their portion of the weight gets the batch cost - the rest stays
-            # per-call. An operator-supplied -PlanPerQuerySeconds overrides both.
-            # These are throttling-dependent estimates, not measurements (see the
-            # note printed below), so the model rounds UP, never down.
+            # Rough, DELIBERATELY CONSERVATIVE per-metric-query costs (seconds): per-call is the slow path, so under -UseMetricsBatch only the batchable types' portion gets the cheaper batch cost and the rest stays per-call. These are throttling-dependent estimates, not measurements, so the model rounds UP, never down; -PlanPerQuerySeconds overrides both.
             $PlanCallPerQuery = if ($PlanPerQuerySeconds -gt 0) { $PlanPerQuerySeconds } else { 9.5 }
             $PlanBatchPerQuery = if ($PlanPerQuerySeconds -gt 0) { $PlanPerQuerySeconds } else { 0.5 }
             # Fixed per-subscription overhead the metric weight does NOT capture:
@@ -1299,14 +888,7 @@ if ($Plan)
     Exit-Wrapper -Code 0
 }
 
-# Horizontal scale-out: keep only THIS shard's slice of the eligible
-# subscriptions. Applied here - after the Enabled/disabled split but BEFORE
-# resume, the access gate, and the stream split - so every downstream phase
-# (resume skip, up-front access probe, parallel streams) operates only on this
-# shard's slice, not the whole tenant. Deterministic per-subscription-id hash
-# (Select-ShardSubscriptions) makes the N shards disjoint and exhaustive with no
-# cross-machine coordination. No-op when -ShardCount is 1 (returns the list
-# unchanged), so a non-sharded run is byte-identical.
+# Horizontal scale-out: keep only THIS shard's slice of the eligible subs. Applied here - after the Enabled/disabled split but BEFORE resume, the access gate, and the stream split - so every downstream phase operates on this shard's slice only. Deterministic per-sub-id hash (Select-ShardSubscriptions) makes the N shards disjoint and exhaustive; no-op and byte-identical when -ShardCount is 1.
 if ($ShardCount -gt 1)
 {
     $BeforeShard = $Subscriptions.Count
@@ -1322,12 +904,7 @@ if ($ShardCount -gt 1)
 
 Write-Host ("Subscriptions to process: {0}" -f $Subscriptions.Count) -ForegroundColor Cyan
 
-# Build the passwordless state-blob context now that we are authenticated and the
-# tenant is enumerated (New-StateBlobContext uses -UseConnectedAccount, which
-# needs a live Az context). $StateBlobArgs splats the { BlobContext; BlobContainer;
-# BlobName } trio into the state read/write helpers; it is EMPTY when blob state
-# is off, so those helpers take exactly the local-only path. The unified
-# (non-stream) blob name is shard-namespaced under the container's _state/ area.
+# Build the passwordless state-blob context now that we are authenticated and the tenant is enumerated (New-StateBlobContext uses -UseConnectedAccount, which needs a live Az context). $StateBlobArgs splats the {BlobContext;BlobContainer;BlobName} trio into the state read/write helpers and is EMPTY when blob state is off, so those helpers take exactly the local-only path.
 $StateBlobArgs = @{}
 if ($null -ne $StateBlobParts)
 {
@@ -1345,41 +922,12 @@ if ($null -ne $StateBlobParts)
 # the per-iteration writes below append to existing state instead of overwriting
 # it. -ResumeFailedOnly uses the failed list to filter the subscription list.
 $SeedState = Get-ResumeStateObject -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs
-# Project the three views through the shared readers, passing the state already
-# read above so the blob is fetched ONCE rather than once per projection.
-#
-# These used to be hand-rolled `@(if ($SeedState -and ...) { ... } else { @() })`
-# expressions. The outer @(...) was load-bearing: without it a bare `else { @() }`
-# captured from an if expression collapses to $null (PowerShell unrolls the empty
-# array on assignment), which makes the first `$CompletedIds += $Sub.Id` do STRING
-# concatenation instead of array append - silently corrupting the completed set
-# into one mashed-together string. That regression has happened, and parse, review
-# and the pure-helper unit tests all missed it.
-#
-# Get-CompletedSubscriptionIds and Get-FailedAttempts return @() by construction,
-# so the collapse is now prevented by the callee rather than by remembering to
-# wrap the call site. The @(...) is kept anyway as belt-and-braces, and a source
-# guard in Tests/ResumeCycle.Tests.ps1 still asserts it is here.
-#
-# -Path and the blob args are passed even though a supplied -State makes them
-# unused: if -State were ever dropped from these calls the readers would still
-# resolve the same state instead of silently reading nothing. -Tenant IS consulted
-# on this path - the readers re-assert the tenant guard on a supplied state.
-#
-# Get-FailedAttempts additionally strips a phantom null left by a version that
-# serialised an empty list as `[ null ]`. The inline expression did not, so state
-# written by that version put a null into the retry list; going through the reader
-# self-heals it.
+# Project the three resume views through the shared readers, passing the state already read above so the blob is fetched ONCE rather than once per projection.
+# Get-CompletedSubscriptionIds / Get-FailedAttempts return @() by construction so an empty result can no longer collapse to $null (which once turned the first `$CompletedIds += $Sub.Id` into STRING concatenation, silently corrupting the completed set); the outer @(...) is kept as belt-and-braces and Tests/ResumeCycle.Tests.ps1 asserts it. Get-FailedAttempts also strips a phantom null left by a version that serialised an empty list as `[ null ]`.
 $CompletedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs -State $SeedState)
 $FailedAttempts = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs -State $SeedState)
 
-# Start-of-run subscription universe, for the end-of-run reconciliation of a
-# MOVING target (another team creating/deleting subscriptions mid-run). Prefer a
-# snapshot already recorded in the state - a resumed / rescheduled run MUST keep
-# the ORIGINAL universe rather than re-capture an already-moved one - otherwise
-# capture the CURRENT full-tenant enumeration ($AllSubscriptions is state-agnostic,
-# taken before the Enabled/scope filters). $StateSaveArgs adds this snapshot to the
-# blob trio so every Save-CompletedSubscriptionIds call persists it.
+# Start-of-run subscription universe, for end-of-run reconciliation of a MOVING target (another team creating/deleting subs mid-run). Prefer a snapshot already in state - a resumed/rescheduled run MUST keep the ORIGINAL universe, not re-capture an already-moved one - otherwise capture the current full-tenant enumeration ($AllSubscriptions, taken before the Enabled/scope filters). $StateSaveArgs persists it on every Save-CompletedSubscriptionIds.
 $StartSnapshot = Get-StartSnapshot -Path $ResumeStateFile -Tenant $TenantID @StateBlobArgs -State $SeedState
 if ($null -eq $StartSnapshot)
 {
@@ -1387,18 +935,8 @@ if ($null -eq $StartSnapshot)
 }
 $StateSaveArgs = @{ StartSnapshot = $StartSnapshot } + $StateBlobArgs
 
-# Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
-# A parallel run persists each stream's Completed/FailedAttempts to its own
-# .resume-state-<tenant>-stream-<N>.json and only merges them into the unified
-# file at end-of-run. If that run was killed before the merge (Ctrl+C, SIGKILL,
-# Cloud Shell timeout), the failures live ONLY in the per-stream files while the
-# unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
-# sees no failures, and wrongly reports "Nothing to retry" - silently dropping
-# the retry set. Read (do NOT delete) the per-stream files here so BOTH -Resume
-# (skip-completed) and -ResumeFailedOnly (retry list) see the full picture; the
-# end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
-# cleanly-finished parallel run deletes its per-stream files, so this finds none.
-# Runs at startup before any stream is launched, so it cannot race live streams.
+# Fold in per-stream resume-state left by an INTERRUPTED parallel run: streams persist Completed/FailedAttempts to their own .resume-state-<tenant>-stream-<N>.json and only merge into the unified file at end-of-run, so a run killed before the merge (Ctrl+C, SIGKILL, Cloud Shell timeout) has failures ONLY in the per-stream files while the unified file is stale - without this -ResumeFailedOnly would read the unified file, see no failures, and wrongly report "Nothing to retry".
+# Read (do NOT delete) the per-stream files so both -Resume and -ResumeFailedOnly see the full picture; the end-of-run merge owns cleanup. Runs at startup before any stream launches, so it cannot race live streams.
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -1456,16 +994,7 @@ else
     }
 }
 
-# -ResumeFailedOnly narrows the eligible-subscription list to only those that
-# have a FailedAttempts entry from a prior run. This is the targeted-retry
-# workflow: a run had a handful of failures, the operator wants to re-run
-# JUST those instead of walking the whole tenant again with -Resume.
-#
-# Filter happens here, BEFORE the -Resume "skip completed" check below, because
-# in failed-only mode the resume list is the authority on what to do; the
-# completed list is only checked to defend against a sub that succeeded on a
-# previous retry but whose FailedAttempts entry was not yet pruned (shouldn't
-# happen if the catch/success paths are correct, but cheap to defend).
+# -ResumeFailedOnly narrows the eligible list to only subs with a FailedAttempts entry from a prior run (the targeted-retry workflow: re-run JUST the few failures instead of walking the whole tenant with -Resume). Filtered here BEFORE the -Resume "skip completed" check because in failed-only mode the resume list is the authority; the completed list is only consulted to defend against a sub that succeeded on an earlier retry whose FailedAttempts entry was not yet pruned.
 if ($ResumeFailedOnly)
 {
     if ($FailedAttempts.Count -eq 0)
@@ -1489,27 +1018,8 @@ if ($ResumeFailedOnly)
     }
 }
 
-# ---------------------------------------------------------------------------
-# Up-front subscription-COVERAGE gate. The access gate below proves the identity
-# can READ the subscriptions it enumerated; this proves it enumerated them ALL.
-# Get-AzSubscription returns ONLY subscriptions the identity holds a role on, so
-# an identity granted access per-subscription (rather than at the tenant-root
-# management group) SILENTLY MISSES the rest - a report that looks complete but
-# is not, at scale potentially hundreds of subscriptions. This tool's purpose is
-# to capture EVERY subscription, so a shortfall - or any inability to verify the
-# true total - HARD-STOPS by default. The robust fix is Reader at the tenant-root
-# management group (its GroupName/GroupId equals the TenantID), which inherits to
-# every subscription AND makes the true count verifiable. -AllowPartialAccess is
-# the conscious override (the SAME switch as the access gate): it downgrades the
-# shortfall/unverifiable case to a loud warning and proceeds with whatever the
-# identity can currently see.
-#
-# Compares the FULL-tenant enumeration ($AllSubscriptions - state-agnostic,
-# BEFORE the Enabled filter and before any shard/scope split) against the true
-# count under the tenant-root MG, so the verdict is identical on every shard
-# machine and independent of -Resume / -ParallelStreams scoping (each shard still
-# hashes over the whole tenant, so an incomplete enumeration would blind every
-# shard).
+# Up-front subscription-COVERAGE gate: the access gate below proves the identity can READ the subs it enumerated; this proves it enumerated them ALL. Get-AzSubscription returns only subs the identity holds a role on, so an identity granted access per-subscription (not at the tenant root) SILENTLY MISSES the rest - so a shortfall, or any inability to verify the true total, HARD-STOPS by default (robust fix: Reader at the tenant-root management group, which inherits everywhere and makes the count verifiable). -AllowPartialAccess downgrades it to a loud warning.
+# Compares the FULL-tenant enumeration ($AllSubscriptions - state-agnostic, before the Enabled filter and any shard/scope split) against the true count under the tenant-root MG, so the verdict is identical on every shard machine and independent of -Resume / -ParallelStreams scoping.
 Write-Host "Verifying full subscription coverage (tenant-root management group)..." -ForegroundColor Cyan
 $PreflightCoverageMsg = $null
 $Coverage = Get-TenantSubscriptionId -TenantId $TenantID
@@ -1533,12 +1043,7 @@ if ($null -eq $Coverage.Ids)
 }
 else
 {
-    # Compare the actual ID SETS, not just counts: the missed subscriptions are the
-    # ones present under the tenant-root MG but NOT enumerable by this identity.
-    # Using the id set (rather than a count delta) is immune to a transient count
-    # mismatch (e.g. a subscription mid-deletion still listed in the MG tree) and
-    # lets us NAME exactly which subscriptions would be silently missed. Compare
-    # case-insensitively - subscription ids are GUIDs but normalise to be safe.
+    # Compare the actual ID SETS, not just counts: the missed subs are those present under the tenant-root MG but NOT enumerable by this identity. Using the id set (rather than a count delta) is immune to a transient count mismatch (e.g. a sub mid-deletion still listed in the MG tree) and lets us NAME exactly which subs would be missed. Compare case-insensitively (GUIDs, but normalise to be safe).
     $AccessibleIdSet = @{}
     foreach ($S in $AllSubscriptions) { $AccessibleIdSet[([string]$S.Id).ToLowerInvariant()] = $true }
     $MissedIds = @($Coverage.Ids | Where-Object { -not $AccessibleIdSet.ContainsKey(([string]$_).ToLowerInvariant()) })
@@ -1570,17 +1075,8 @@ else
     }
 }
 
-# ---------------------------------------------------------------------------
-# Up-front access gate. Before ANY per-subscription work, verify the signed-in
-# identity can actually read every in-scope subscription. Azure Resource Graph
-# returns 0 rows (not a 403) for a subscription the identity has no role on, so a
-# permission gap is otherwise invisible until the report comes back silently
-# missing subscriptions - and can feed the consumption cross-attribution class of
-# bug. Catch it here instead. By default any inaccessible subscription HARD-STOPS
-# the run so the operator fixes access first; -AllowPartialAccess overrides that
-# to skip the inaccessible ones and continue. On -Resume only the subscriptions
-# this run will actually process (not already-completed ones) are probed. Runs
-# once in the parent, before the sequential/parallel split, so it gates both.
+# Up-front access gate: before ANY per-sub work, verify the signed-in identity can read every in-scope sub. Azure Resource Graph returns 0 rows (not a 403) for a sub the identity has no role on, so a permission gap is otherwise invisible until the report comes back missing subs (and can feed the consumption cross-attribution bug). By default any inaccessible sub HARD-STOPS the run; -AllowPartialAccess skips the inaccessible ones and continues.
+# On -Resume only the subs this run will actually process are probed. Runs once in the parent, before the sequential/parallel split, so it gates both.
 $ScopeForProbe = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
 if ($ScopeForProbe.Count -gt 0)
 {
@@ -1686,25 +1182,8 @@ if ($Preflight)
     Exit-Wrapper -Code 0
 }
 
-# ---------------------------------------------------------------------------
-# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
-# -SkipConsumption was passed. If the signed-in identity is not authorized to
-# read consumption data, every subscription's consumption phase would fail and
-# the run would produce reports silently missing the billing data the operator
-# explicitly asked for. That is a HARD failure - fail fast, before spending
-# time on inventory and metrics, rather than hand back an incomplete report.
-#
-# Runs AFTER the access gate above, so $Subscriptions[0] is already known to be
-# control-plane-readable (inaccessible subs have either hard-stopped the run or,
-# under -AllowPartialAccess, been removed from $Subscriptions) - a 403 here is
-# therefore a genuine BILLING-RBAC denial, not just "no role on that sub".
-# consumption/billing RBAC is usually uniform across a tenant, so we probe the
-# FIRST subscription as the access signal. We hard-fail ONLY on a clear
-# authorization denial; a transient/token error (Conditional Access, expired
-# token, throttling) is NOT treated as a hard failure here - that is the
-# recoverable class the per-subscription consumption phase already handles and
-# reports. Operators who genuinely have mixed per-subscription billing access
-# can use -SkipConsumption.
+# Up-front consumption (billing) access gate: consumption is REQUESTED unless -SkipConsumption, so if the identity cannot read it every sub's consumption phase would fail and the report would silently miss the billing data the operator asked for - a HARD failure, caught fast here before spending time on inventory and metrics.
+# Runs AFTER the access gate, so $Subscriptions[0] is already control-plane-readable and a 403 here is a genuine BILLING-RBAC denial (billing RBAC is usually tenant-uniform, so probe the FIRST sub). Hard-fail ONLY on a clear authorization denial; a transient/token error is NOT fatal here - that recoverable class is handled by the per-sub consumption phase. Mixed per-sub billing access -> use -SkipConsumption.
 if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
 {
     $ConsumptionProbeSub = $Subscriptions[0]
@@ -1736,19 +1215,8 @@ if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
     }
 }
 
-# ---------------------------------------------------------------------------
-# Up-front blob-upload WRITE probe. The URI-format + Az.Storage checks earlier
-# prove the request is well-formed, but NOT that this identity can actually write
-# to the target container. Without this, a missing "Storage Blob Data Contributor"
-# role is only discovered by the best-effort upload at the very END - after a
-# potentially multi-hour run - stranding the whole output on an ephemeral node.
-# So when an upload was requested, prove write+delete NOW (passwordless,
-# -UseConnectedAccount, the SAME path the real upload uses) and fail fast on a
-# genuine authorization denial. A transient/token error is NOT fatal here (mirrors
-# the consumption gate above): it warns and continues, and the end-of-run upload
-# and its warning still cover that recoverable class. The probe blob is namespaced
-# + GUID-suffixed and removed best-effort after the write, so it never collides
-# with a real shard artifact.
+# Up-front blob-upload WRITE probe: the earlier URI-format + Az.Storage checks prove the request is well-formed but NOT that this identity can WRITE to the target container. Without this, a missing "Storage Blob Data Contributor" role is only discovered by the best-effort upload at the very END - after a multi-hour run - stranding the whole output. So prove write+delete NOW (passwordless -UseConnectedAccount, the SAME path the real upload uses) and fail fast on a genuine authorization denial.
+# A transient/token error is NOT fatal here (mirrors the consumption gate): it warns and continues, since the end-of-run upload and its warning still cover that recoverable class. The probe blob is namespaced + GUID-suffixed and removed best-effort, so it never collides with a real shard artifact.
 if ($UploadToBlobContainerUri)
 {
     Write-Host "Verifying blob-upload write access..." -ForegroundColor Cyan
@@ -1772,12 +1240,7 @@ if ($UploadToBlobContainerUri)
         Set-Content -LiteralPath $BlobProbeFile -Value 'rda upload access probe' -Encoding UTF8
 
         $BlobProbeContext = New-AzStorageContext -StorageAccountName $BlobProbeAccount -UseConnectedAccount -ErrorAction Stop
-        # WRITE is the only capability the real upload uses, so it is the only
-        # thing the probe verifies. A successful write = access confirmed; the
-        # probe blob is then removed best-effort in the finally below. We do NOT
-        # require delete to succeed - the tool never deletes blobs in normal
-        # operation, so a delete-permission gap must not fail an otherwise-valid
-        # write-only identity.
+        # WRITE is the only capability the real upload uses, so it is the only thing the probe verifies (a successful write = access confirmed; the probe blob is then removed best-effort in the finally below). Do NOT require delete to succeed - the tool never deletes blobs in normal operation, so a delete-permission gap must not fail an otherwise-valid write-only identity.
         $null = Set-AzStorageBlobContent -File $BlobProbeFile -Container $BlobProbeContainer -Blob $BlobProbeName -Context $BlobProbeContext -Force -ErrorAction Stop
         $BlobProbeWritten = $true
         Write-Host ("Blob-upload access confirmed (wrote a probe blob in {0}/{1})." -f $BlobProbeAccount, $BlobProbeContainer) -ForegroundColor Green
@@ -1785,15 +1248,7 @@ if ($UploadToBlobContainerUri)
     catch
     {
         $BlobProbeErr = $_.Exception.Message
-        # Fatal up front on a DETERMINISTIC misconfiguration - an authorization
-        # denial (missing "Storage Blob Data Contributor" -> 403) OR a container
-        # that does not exist (mistyped container -> ContainerNotFound / 404). Both
-        # would fail the real upload identically, so catch them now rather than
-        # after a multi-hour run. A mistyped storage ACCOUNT surfaces as a name-
-        # resolution error, which falls into the transient class below (warn and
-        # continue) - the best-effort upload at the end will then surface it. Any
-        # other transient token/throttling error is likewise NOT fatal here
-        # (mirrors the consumption gate).
+        # Fatal up front on a DETERMINISTIC misconfiguration - an authorization denial (missing role -> 403) OR a container that does not exist (mistyped -> 404) - because both would fail the real upload identically. A mistyped storage ACCOUNT surfaces as a name-resolution error, which falls into the transient class below (warn and continue; the end-of-run upload surfaces it), as does any other transient token/throttling error (mirrors the consumption gate).
         if ($BlobProbeErr -match 'AuthorizationPermissionMismatch|AuthorizationFailure|AuthorizationFailed|\b403\b|Forbidden|not authorized|does not have|ContainerNotFound|\b404\b|does not exist')
         {
             Write-Host ""
@@ -1823,30 +1278,15 @@ if ($UploadToBlobContainerUri)
     }
 }
 
-# ---------------------------------------------------------------------------
-# Auto-tune parallelism to the host (dummy-proof defaults).
-#
-# When the operator does not pass -ParallelStreams / -ConcurrencyLimit, size them
-# from the detected CPU/RAM so an out-of-the-box run does the sensible thing on
-# this machine - e.g. a small 2 vCPU / 4 GB box runs sequentially, which is
-# faster there than two streams fighting over the cores. Advanced users keep
-# full control: any value passed explicitly is honored as-is and only the omitted
-# one is auto-filled. $PSBoundParameters is a reliable "did the operator set
-# this?" test here because the PS7 relaunch above forwards only bound params.
-# The existing clamp to the eligible subscription count still applies below.
+# Auto-tune parallelism to the host: when the operator passes neither -ParallelStreams nor -ConcurrencyLimit, size them from detected CPU/RAM so an out-of-the-box run does the sensible thing (e.g. a small 2 vCPU / 4 GB box runs sequentially, which is faster there than two streams fighting over the cores). Any value passed explicitly is honored as-is; only the omitted one is auto-filled.
+# $PSBoundParameters is a reliable "did the operator set this?" test here because the PS7 relaunch above forwards only bound params. The existing clamp to the eligible subscription count still applies below.
 $AutoTune = Get-RecommendedParallelism
 $StreamsAuto = -not $PSBoundParameters.ContainsKey('ParallelStreams')
 $ConcurrencyAuto = -not $PSBoundParameters.ContainsKey('ConcurrencyLimit')
 if ($StreamsAuto) { $ParallelStreams = $AutoTune.Streams }
 if ($ConcurrencyAuto) { $ConcurrencyLimit = $AutoTune.Concurrency }
 
-# API headroom: intentionally leave part of the shared Azure API throttle budget
-# for other/production workloads by scaling down the metrics-collection
-# concurrency (the run's heaviest ARM / Azure Monitor consumer). Applies on top of
-# whatever ConcurrencyLimit was chosen (auto-tuned OR explicit), and because
-# $ConcurrencyLimit is the single source forwarded to the inner script and to
-# every parallel-stream worker, one reduction here propagates everywhere. No-op
-# when -HeadRoom is 0 (the default).
+# API headroom: scale down the metrics-collection concurrency (the run's heaviest ARM / Azure Monitor consumer) to leave part of the shared Azure throttle budget for other/production workloads. Applies on top of whatever ConcurrencyLimit was chosen (auto-tuned OR explicit), and because $ConcurrencyLimit is the single value forwarded to the inner script and every stream, one reduction here propagates everywhere. No-op when -HeadRoom is 0.
 if ($HeadRoom -gt 0)
 {
     $ConcurrencyBeforeHeadroom = $ConcurrencyLimit
@@ -1864,18 +1304,8 @@ if ($HeadRoom -gt 0) { $ConcurrencySrc = '{0}, -HeadRoom {1}' -f $ConcurrencySrc
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
-# Background-job capability guard. The parallel-streams path below launches each
-# stream with Start-Job (a child pwsh process). On a Windows host under a
-# system-wide application-control policy (WDAC / AppLocker / __PSLockdownPolicy)
-# the interactive session can be FullLanguage while the machine enforces
-# ConstrainedLanguage system-wide; Start-Job then throws synchronously ("Cannot
-# start job. The language mode for this session is incompatible with the
-# system-wide language mode.") and NO stream process is ever created - the run
-# ends having produced nothing to consolidate. Detect that up front and fall
-# back to the sequential path (which never calls Start-Job) so a locked-down
-# host still gets a full report, just single-threaded. Only probe when we would
-# actually use parallelism (the auto-tuner can select >1 without the operator
-# asking, so this also covers the out-of-the-box case).
+# Background-job capability guard: the parallel-streams path below launches each stream with Start-Job (a child pwsh process). Under a system-wide application-control policy (WDAC/AppLocker/__PSLockdownPolicy) the session can be FullLanguage while the machine enforces ConstrainedLanguage, so Start-Job throws synchronously and NO stream process is ever created - the run ends having produced nothing. Detect that up front and fall back to the sequential path (which never calls Start-Job) so a locked-down host still gets a full report, just single-threaded.
+# Only probe when parallelism would actually be used (the auto-tuner can select >1 without the operator asking, so this also covers the out-of-the-box case).
 if ($ParallelStreams -gt 1 -and -not (Test-BackgroundJobSupport))
 {
     Write-Host ""
@@ -1906,21 +1336,8 @@ if ($Service.Count -gt 0)
     }
     Write-Host ("Service filter active: collecting ONLY [{0}] across all in-scope subscriptions." -f ($Service -join ', ')) -ForegroundColor Cyan
 
-    # -Service scopes the INVENTORY phase only; metrics and consumption still run
-    # for the WHOLE subscription. ResourceInventory.ps1 warns about this too, but
-    # suppresses it under -RunAllSubs because it is invoked once PER SUBSCRIPTION
-    # and the identical warning would repeat N times. This is the once-up-front
-    # copy, emitted here where the argument set is already known.
-    #
-    # Per-phase accurate for the same reason as the inner one: a run that already
-    # passed a skip must not be told that phase still runs, nor be told to add a
-    # switch it supplied. No -ResourceGroup tip here - this wrapper has no such
-    # parameter, so suggesting it would point at a switch this entry point cannot
-    # accept (the inner script offers it only on a standalone run).
-    #
-    # Advisory only. The skips are NOT enforced, because the recovery recipe that
-    # re-collects for a later Merge-RecoveryData -RecoverMetrics/-RecoverConsumption
-    # intentionally runs -Service WITHOUT them.
+    # -Service scopes the INVENTORY phase only; metrics and consumption still run for the WHOLE subscription. ResourceInventory.ps1 warns about this too but suppresses it under -RunAllSubs (it is invoked once per sub and the identical warning would repeat N times), so this is the once-up-front copy, emitted where the argument set is already known.
+    # Per-phase accurate for the same reason as the inner one: a run that already passed a skip must not be told that phase still runs. Advisory only - the skips are NOT enforced, because the recovery recipe for a later Merge-RecoveryData intentionally runs -Service WITHOUT them.
     $UnscopedPhases = @()
     $SuggestedSkips = @()
 
@@ -1975,19 +1392,8 @@ $DiagFile = $null
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
 
-# Capture the in-scope (eligible, post-shard, post-access-gate) subscription
-# COUNT now, before the first ResourceInventory.ps1 call, into a variable the
-# inner script cannot clobber. WHY: the inner script sets
-# $Global:Subscriptions = @(Get-AzSubscription | Where HomeTenantId -eq TenantID)
-# (the full tenant list) on every invocation. When THIS wrapper is the entry
-# script (pwsh -File ...), its top-level $Subscriptions IS the global, so the
-# first sequential inner call (invoked in-process via &) overwrites our
-# filtered/sharded list back to the whole tenant. The processing foreach is
-# unaffected (it snapshots its collection at loop start), but the POST-loop
-# summary/run-summary counts would otherwise read the clobbered global - e.g.
-# a shard that processed 2 of 3 subs would wrongly report "Eligible/Processed: 3".
-# (Parallel-streams mode runs the inner script in child processes, so the parent
-# global is never touched there; capturing here is correct for both paths.)
+# Capture the in-scope (eligible, post-shard, post-access-gate) subscription COUNT now, before the first ResourceInventory.ps1 call, into a variable the inner script cannot clobber: the inner script sets $Global:Subscriptions to the full tenant list on every invocation, and when this wrapper is the entry script its top-level $Subscriptions IS that global, so the first sequential in-process `&` call overwrites our filtered/sharded list back to the whole tenant.
+# The processing foreach is unaffected (it snapshots its collection at loop start), but the post-loop summary counts would otherwise read the clobbered global (e.g. a shard that processed 2 of 3 subs wrongly reporting 3). Parallel-streams mode runs the inner script in child processes, so the parent global is untouched there - capturing here is correct for both paths.
 $EligibleCount = @($Subscriptions).Count
 
 if ($ParallelStreams -le 1)
@@ -2014,23 +1420,8 @@ if ($ParallelStreams -le 1)
 
         try
         {
-            # Clear $LASTEXITCODE first. It is a SHARED, STICKY variable: the inner
-            # script is invoked with `&` in this same runspace, and a completion
-            # path that does not call `exit` leaves whatever the PREVIOUS
-            # subscription set still in place. Without this reset, one subscription
-            # exiting non-zero makes every LATER subscription in the loop look like
-            # it exited non-zero too - they get reported as failures even though
-            # their reports were written correctly. Resetting per iteration means
-            # the check below reflects only the invocation that just returned.
-            #
-            # $Global:ZipOutputFile is sticky in exactly the same way, and must be
-            # cleared for the same reason: the inner script has early gates that
-            # leave with a BARE `Exit` (exit code 0) before it ever computes an
-            # archive path, so without this reset such a subscription would be
-            # recorded as successful carrying the PREVIOUS subscription's archive
-            # path - and would then pass output verification "by exact path"
-            # against a file that belongs to a different subscription. Cleared to
-            # $null so the row is classed unverifiable rather than falsely verified.
+            # Clear $LASTEXITCODE first: it is SHARED and STICKY, and the inner script is invoked with `&` in this same runspace, so a completion path that never calls `exit` leaves the PREVIOUS sub's value in place - making one non-zero sub mark every LATER sub in the loop as failed too. Reset per iteration so the check reflects only the invocation that just returned.
+            # $Global:ZipOutputFile is sticky in exactly the same way and is cleared to $null for the same reason: the inner script has early gates that leave with a bare `Exit` (code 0) before computing an archive path, so without this reset such a sub would carry the PREVIOUS sub's archive path and pass output verification "by exact path" against another sub's file. $null classes the row unverifiable rather than falsely verified.
             $global:LASTEXITCODE = 0
             $Global:ZipOutputFile = $null
             & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
@@ -2068,12 +1459,7 @@ if ($ParallelStreams -le 1)
 
             if ($ResCount -eq 0)
             {
-                # Loud yellow signal so this stands out in the per-iteration narration
-                # and in the wrapper transcript. The most common cause is the signed-in
-                # identity not having Reader on the subscription; second is a sub that
-                # genuinely has no resources. Either way the user almost always wants
-                # to know immediately rather than discover it days later when the
-                # consolidated report turns out to be empty for some subs.
+                # Loud yellow signal so this stands out in the per-iteration narration and the wrapper transcript. The most common cause is the signed-in identity not having Reader on the subscription; second is a sub that genuinely has no resources. Either way the operator wants to know immediately rather than discover it when the consolidated report turns out empty for some subs.
                 Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: Search-AzGraph -Query 'resources | summarize count()' -Subscription {1}" -f $Sub.Name, $Sub.Id) -ForegroundColor Yellow
             }
             else
@@ -2210,34 +1596,8 @@ if ($ParallelStreams -le 1)
 }
 else
 {
-    # === PARALLEL-STREAMS PATH ================================================
-    #
-    # Each "stream" is a separate `pwsh` background job (Start-Job runs the
-    # provided ScriptBlock in a fresh process). Process-level isolation is
-    # what makes this safe: the inner script's `Set-AzContext -Subscription`
-    # call (in the consumption phase) mutates *process-global* Az PowerShell
-    # state, so two streams running in the same process would race each
-    # other's contexts and silently cross-contaminate consumption data.
-    # A separate process per stream sidesteps that entirely.
-    #
-    # Each stream owns:
-    #   - Its own slice of the eligible subscription list (round-robin split).
-    #   - Its own resume-state file at
-    #     $InventoryRoot/.resume-state-<TenantID>-stream-<N>.json
-    #     so concurrent state writes cannot race.
-    #   - Its own per-stream summary JSON (Stream_<N>_Summary.json) which the
-    #     parent aggregates at the end.
-    #   - Its own per-stream failures log (RunAllSubscriptions_failures_*_stream-<N>.log).
-    #
-    # All streams share:
-    #   - One Az context snapshot, written by the parent via Save-AzContext
-    #     and imported by every stream via Import-AzContext. This is the only
-    #     way to avoid an interactive sign-in prompt in each child process.
-    #     The snapshot is removed after all streams finish.
-    #
-    # Output is interleaved (each stream prints its own lines, prefixed
-    # `[stream-N]`). The final summary is consolidated from the per-stream
-    # summary JSON files.
+    # === PARALLEL-STREAMS PATH: each "stream" is a separate `pwsh` background job (Start-Job runs the ScriptBlock in a fresh process). Process-level isolation is what makes this safe - the inner script's Set-AzContext -Subscription (consumption phase) mutates PROCESS-GLOBAL Az state, so two streams in one process would race contexts and silently cross-contaminate consumption data.
+    # Each stream owns its own subscription slice, its own resume-state file (.resume-state-<TenantID>-stream-<N>.json), its own summary JSON (the parent aggregates), and its own failures log. All streams share ONE parent-written Az context snapshot (Save-/Import-AzContext) - the only way to avoid an interactive sign-in per child - removed after all streams finish. Output is interleaved, each line prefixed [stream-N].
 
     $StreamCount = [Math]::Min($ParallelStreams, $Subscriptions.Count)
     Write-Host ""
@@ -2328,12 +1688,7 @@ else
     if ($StreamCount -ge 2)
     {
 
-        # Snapshot the parent's Az context to a shared file so each stream can
-        # Import-AzContext without prompting. Save-AzContext writes a JSON file
-        # containing a token cache, so it MUST NOT be left on disk after the
-        # run completes - that's the responsibility of the `finally` block
-        # below, which guarantees cleanup even on stream-launch crash, on
-        # Receive-Job failure, or on Ctrl+C.
+        # Snapshot the parent's Az context to a shared file so each stream can Import-AzContext without prompting. Save-AzContext writes a JSON file containing a TOKEN CACHE, so it MUST NOT be left on disk after the run - that is the responsibility of the `finally` block below, which guarantees cleanup even on stream-launch crash, Receive-Job failure, or Ctrl+C.
         $AzContextSnapshot = Join-Path $InventoryRoot (".rda-stream-azcontext-{0}.json" -f ([guid]::NewGuid().ToString()))
         try
         {
@@ -2404,12 +1759,7 @@ else
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
 
-                # Pass arguments to the worker via a single hashtable so the worker
-                # script's named parameters bind correctly. Start-Job's -FilePath
-                # mode passes ArgumentList positionally which collides with our
-                # named-parameter contract. Switches are only included when they
-                # are set, since switch parameters bind correctly from a splatted
-                # hashtable when present with value $true.
+                # Pass worker arguments as a single hashtable so its named parameters bind correctly: Start-Job's -FilePath mode passes ArgumentList POSITIONALLY, which collides with our named-parameter contract. Switches are included only when set, since a switch binds correctly from a splatted hashtable when present with value $true.
                 $WorkerArgs = @{
                     TenantID           = $TenantID
                     StreamId           = [string]$S
@@ -2438,15 +1788,8 @@ else
                 # test's headroom-ordering probe.
                 if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $WorkerArgs.MetricsLookbackDays = $MetricsLookbackDays }
                 if ($Service.Count -gt 0) { $WorkerArgs.Service = $Service }
-                # -Debug must be forwarded EXPLICITLY. Background jobs do not inherit
-                # the parent's preference variables, so without this line the flag is
-                # accepted and silently dropped for every stream - which is exactly
-                # what happened: the sequential path forwarded it (see the matching
-                # line further down) while -ParallelStreams produced no inner debug
-                # output at all.
-                #
-                # [bool] rather than ContainsKey alone so an explicit -Debug:$false is
-                # honoured instead of being inverted into $true.
+                # -Debug must be forwarded EXPLICITLY: background jobs do not inherit the parent's preference variables, so without this line the flag is accepted and silently dropped for every stream (which is exactly what happened - the sequential path forwarded it while -ParallelStreams produced no inner debug output).
+                # [bool] rather than ContainsKey alone so an explicit -Debug:$false is honoured instead of being inverted into $true.
                 if ($PSBoundParameters.ContainsKey('Debug')) { $WorkerArgs.Debug = [bool]$PSBoundParameters['Debug'] }
                 # Forward the state-blob container + shard identity so each worker
                 # mirrors its per-stream resume state to a shard+stream-namespaced
@@ -2634,14 +1977,8 @@ else
                 }
             }
 
-            # When parallel streams have completed (clean or otherwise), merge each
-            # stream's resume-state file into the unified resume-state file so a
-            # subsequent -Resume run picks up correctly. The unified file is also
-            # what the existing "clean run -> remove resume state" logic below
-            # will look at.
-            # Discover every per-stream resume file on disk for this tenant. See
-            # Get-StreamResumeStateFiles for why this is a full-disk scan rather
-            # than an iteration over 0..($StreamCount-1).
+            # When parallel streams have completed (clean or otherwise), merge each stream's resume-state file into the unified resume-state file so a subsequent -Resume picks up correctly (the unified file is also what the "clean run -> remove resume state" logic below reads).
+            # Discover every per-stream resume file on disk for this tenant via a full-disk scan (see Get-StreamResumeStateFiles for why, rather than iterating over 0..StreamCount-1).
             $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
@@ -2655,12 +1992,7 @@ else
                     {
                         $AllCompletedFromStreams += @($Obj.Completed)
                     }
-                    # Per-stream files written by workers also carry their
-                    # FailedAttempts entries. Merge by Id so the unified
-                    # state file reflects every stream's failures, with the
-                    # most-recent attempt's Reason/LastFailedAt winning when
-                    # the same sub appears in multiple streams (which would
-                    # only happen across re-runs with different slicing).
+                    # Per-stream files written by workers also carry their FailedAttempts entries. Merge by Id so the unified state file reflects every stream's failures, with the most-recent attempt's Reason/LastFailedAt winning when the same sub appears in multiple streams (which happens only across re-runs with different slicing).
                     if ($null -ne $Obj.FailedAttempts)
                     {
                         $AllFailedFromStreams += @($Obj.FailedAttempts)
@@ -2700,24 +2032,13 @@ else
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }
-            # Also delete per-stream resume files now that the unified file holds
-            # the truth - this prevents drift if a future run uses a different
-            # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
-            # as the merge loop above, so every file that was just merged is also
-            # the one that gets cleaned up here - regardless of this run's
-            # -ParallelStreams value.
+            # Also delete the per-stream resume files now that the unified file holds the truth, to prevent drift if a future run uses a different stream count. Reuses the same on-disk discovery ($AllStreamFiles) as the merge loop above, so every file just merged is also the one cleaned up here - regardless of this run's -ParallelStreams value.
             foreach ($StreamFile in $AllStreamFiles)
             {
                 $PerStreamFile = $StreamFile.FullName
                 try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
             }
-            # Match the local cleanup for the per-stream BLOBS folded in above:
-            # once their progress is merged into the unified state (which IS
-            # preserved), remove the transient per-stream blobs so they do not
-            # accumulate under _state/ or resurrect stale FailedAttempts on a later
-            # run with a different stream count. Best-effort; the UNIFIED state
-            # blob is intentionally NOT deleted. $StreamBlobNames is in scope
-            # whenever $StateBlobParts is non-null (both set in the merge block).
+            # Match the local cleanup for the per-stream BLOBS folded in above: once their progress is merged into the unified state (which IS preserved), remove the transient per-stream blobs so they do not accumulate under _state/ or resurrect stale FailedAttempts on a later run with a different stream count. Best-effort; the UNIFIED state blob is intentionally NOT deleted. $StreamBlobNames is in scope whenever $StateBlobParts is non-null.
             if ($null -ne $StateBlobParts)
             {
                 foreach ($MergedStreamBlob in $StreamBlobNames)
@@ -2776,16 +2097,8 @@ else
     }
 }
 
-# === Moving-target subscription reconciliation ==============================
-#
-# Another team can create/delete subscriptions DURING a long run, so the single
-# start-of-run Get-AzSubscription is stale by now. Re-enumerate and classify the
-# delta against the ORIGINAL start snapshot ($StartSnapshot, preserved across
-# resume): subs deleted mid-run (Vanished) must NOT be reported as failures, and
-# subs created mid-run (New) would otherwise be SILENTLY MISSING from the report.
-# This is REPORT-ONLY and does not change the exit code - a moving tenant is
-# expected here, not a run fault. Best-effort: a re-enumeration blip must not fail
-# an otherwise-complete run. No-op unless a start snapshot was recorded.
+# === Moving-target subscription reconciliation: another team can create/delete subs DURING a long run, so the start-of-run Get-AzSubscription is stale by now. Re-enumerate and classify the delta against the ORIGINAL start snapshot ($StartSnapshot, preserved across resume) - subs deleted mid-run (Vanished) must NOT be reported as failures, and subs created mid-run (New) would otherwise be SILENTLY MISSING from the report.
+# REPORT-ONLY (does not change the exit code - a moving tenant is expected here, not a fault) and best-effort (a re-enumeration blip must not fail an otherwise-complete run). No-op unless a start snapshot was recorded.
 $StartIds = if ($StartSnapshot -and $StartSnapshot.SubscriptionIds) { @($StartSnapshot.SubscriptionIds) } else { @() }
 if ($StartIds.Count -gt 0)
 {
@@ -2794,13 +2107,7 @@ if ($StartIds.Count -gt 0)
         $EndSubs = @(Get-AzSubscription -TenantId $TenantID -WarningAction SilentlyContinue)
         $EndIds = @($EndSubs | ForEach-Object { $_.Id })
         $Delta = Get-SubscriptionDelta -StartIds $StartIds -EndIds $EndIds -CompletedIds $CompletedIds
-        # Scope Vanished + Incomplete to the subscriptions THIS run was responsible
-        # for (the eligible, post-Enabled, post-shard, post-resume slice in
-        # $Subscriptions). The start snapshot is the FULL tenant so New can still
-        # flag subs that NO shard will ever process, but "deleted that I owed" and
-        # "I did not finish" are only meaningful for this run's own slice -
-        # otherwise a default run would flag every Disabled sub, and a sharded run
-        # every OTHER shard's subs, as not-completed. New stays tenant-level.
+        # Scope Vanished + Incomplete to the subs THIS run was responsible for (the eligible, post-Enabled, post-shard, post-resume slice in $Subscriptions): the start snapshot is the FULL tenant so New can still flag subs that no shard will process, but "deleted that I owed" and "I did not finish" are only meaningful for this run's own slice - otherwise a default run flags every Disabled sub, and a sharded run every OTHER shard's subs, as not-completed. New stays tenant-level.
         $ResponsibleSet = @{}
         foreach ($ResponsibleSub in $Subscriptions) { $ResponsibleSet[([string]$ResponsibleSub.Id).ToLowerInvariant()] = $true }
         $VanishedMine = @($Delta.Vanished | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
@@ -2840,55 +2147,16 @@ if ($StartIds.Count -gt 0)
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green
 
-# === Per-subscription output verification (hard-stop) ========================
-#
-# Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if any
-# subscription that ran to completion this invocation did not leave a report
-# archive on disk.
-#
-# This checks IDENTITY first and count second. Every successful sub records the
-# exact archive path the inner script wrote (its $Global:ZipOutputFile), so a
-# missing report is reported BY SUBSCRIPTION - which is the thing the operator
-# actually needs. The count comparison is kept as a second, independent test: it
-# catches a sub whose recorded path is absent (a stream summary from an older
-# build) and an archive that was replaced rather than simply deleted.
-#
-# Why this matters. The consolidation step below globs `*.zip` under
-# $InventoryRoot. If a per-sub zip is missing for any reason - antivirus
-# quarantine, Cloud Shell ephemeral-storage eviction between worker exit and
-# wrapper consolidation, a worker that crashed after the inner script logged
-# completion but before its zip flushed, an out-of-disk-space write that the
-# inner script silently swallowed - the wrapper would silently consolidate
-# the smaller set and tell the operator everything succeeded. The downstream
-# consumer then discovers an incomplete archive days later.
-#
-# Invariant. ResourceInventory.ps1 always writes a per-sub zip on a
-# successful return, even when the sub holds zero resources (it still emits
-# the empty-shape report). So:
-#   expected zip count = number of subs in $SubResourceCounts
-# (which is appended to ONLY on the inner script's successful return path,
-# both in the sequential branch and after streaming aggregation).
-# Failed subs (in $FailedSubscriptions) are intentionally NOT counted -
-# their zip-or-no-zip state is unreliable and the wrapper already surfaces
-# them via the failure summary.
+# === Per-subscription output verification (hard-stop): fail with exit code 2 (distinct from auth/runtime exit code 1) if any sub that ran to completion this invocation left no report archive on disk. Checks IDENTITY first (every successful sub records the exact $Global:ZipOutputFile it wrote, so a missing report is reported BY SUBSCRIPTION) and count second (catches an absent recorded path or a replaced archive).
+# Why it matters: the consolidation step below globs *.zip, so a per-sub zip missing for any reason (AV quarantine, Cloud Shell eviction between worker exit and consolidation, a worker that crashed after logging completion but before the zip flushed, a swallowed out-of-disk write) would otherwise be silently consolidated and reported as success. Invariant: ResourceInventory.ps1 always writes a per-sub zip on a successful return (even for zero resources), so expected zip count = subs in $SubResourceCounts (appended ONLY on the successful return path); failed subs are intentionally NOT counted since their zip state is unreliable and already surfaced by the failure summary.
 $ExpectedZipCount = @($SubResourceCounts).Count
 if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
 {
     $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     $ActualZipCount = $ActualSubZips.Count
 
-    # A row with a recorded path that is no longer a usable archive on disk is a
-    # NAMED missing report. "Usable" deliberately means present AND non-empty, the
-    # same standard ResourceInventory.ps1 applies to its own archive before it
-    # reports success: a 0-byte file is not a report, and a truncating quarantine
-    # or an eviction mid-flush leaves exactly that. Testing only for presence
-    # would let the two halves disagree - the inner script rejecting an archive
-    # the wrapper would happily consolidate.
-    #
-    # A row with no recorded path cannot be checked this way; it is counted as
-    # unverifiable rather than missing, so an older stream summary can never
-    # produce a false accusation against a specific subscription - the count
-    # comparison below still covers it.
+    # A recorded path that is no longer a usable archive on disk is a NAMED missing report. "Usable" deliberately means present AND non-empty - the same standard ResourceInventory.ps1 applies to its own archive before reporting success - because a 0-byte file (a truncating quarantine or an eviction mid-flush) is not a report, and testing for presence only would let the two halves disagree.
+    # A row with no recorded path cannot be checked this way and is counted UNVERIFIABLE rather than missing, so an older stream summary can never produce a false accusation against a specific sub; the count comparison below still covers it.
     $MissingSubs = @($SubResourceCounts | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Zip) -and -not (Test-ReportArchiveUsable -Path $_.Zip) })
     $UnverifiableSubs = @($SubResourceCounts | Where-Object { [string]::IsNullOrWhiteSpace($_.Zip) })
 
@@ -2922,16 +2190,8 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
                 {
                     Write-Host ("      expected archive: {0}" -f $M.Zip) -ForegroundColor Red
                 }
-                # The uncompressed report files are the salvage path, so name the
-                # folder explicitly rather than making the operator derive it.
-                #
-                # [IO.Path]::GetDirectoryName rather than Split-Path: Split-Path's
-                # -Parent switch only pairs with -Path, never -LiteralPath (they are
-                # different parameter sets), so there is no literal-path form of it
-                # to reach for. The .NET call is literal by construction, which takes
-                # wildcard interpretation off the table entirely for a path that can
-                # contain '[' or ']'. Verified equivalent to Split-Path -Parent on
-                # both Windows and macOS for plain, bracketed and spaced paths.
+                # Name the uncompressed report folder explicitly (it is the salvage path) rather than making the operator derive it.
+                # [IO.Path]::GetDirectoryName rather than Split-Path: Split-Path's -Parent switch pairs only with -Path, never -LiteralPath, so there is no literal-path form of it; the .NET call is literal by construction, which takes wildcard interpretation off the table for a path that can contain '[' or ']'.
                 $MissingDir = try { [System.IO.Path]::GetDirectoryName($M.Zip) } catch { $null }
                 if (-not [string]::IsNullOrWhiteSpace($MissingDir))
                 {
@@ -2987,13 +2247,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         }
         Exit-Wrapper -Code 2
     }
-    # Report both numbers separately, and state how many subs were checked by
-    # path versus only by count. The previous message used {0} twice against a
-    # single argument, so it echoed the found count as if it were also the
-    # expected count and could never have shown a discrepancy. Naming the
-    # per-path total matters for the same reason: "no missing archives" is a
-    # much weaker statement when nothing could be checked individually, and the
-    # message must not read like a full pass in that case.
+    # Report the expected and found counts SEPARATELY and state how many subs were checked by path versus only by count: the previous message used {0} twice against a single argument, echoing found as expected so a discrepancy could never show. Naming the per-path total matters because "no missing archives" is much weaker when nothing could be checked individually, and must not read like a full pass in that case.
     $VerifiedByPathCount = $ExpectedZipCount - $UnverifiableSubs.Count
     Write-Host ("Per-subscription output verification: OK ({0} archive(s) on disk for {1} successful sub(s); {2} verified by exact path)" -f $ActualZipCount, $ExpectedZipCount, $VerifiedByPathCount) -ForegroundColor Green
     if ($UnverifiableSubs.Count -gt 0)
@@ -3017,14 +2271,7 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         # -LiteralPath (as Reveal.ps1 uses) so a report folder/zip name containing
         # [ ] is not treated as a wildcard glob and silently dropped.
         Compress-Archive -LiteralPath $SubZips.FullName -DestinationPath $OuterZipFile -Force
-        # Deliberately NOT labelled "Reporting Data File" - the inner
-        # per-subscription script prints that same label once PER SUBSCRIPTION for
-        # its own zip, so on a large tenant the operator saw the identical label N+1
-        # times naming N+1 different files and could not tell which one to send.
-        # This label names the bundle unambiguously. It is "created", not finished:
-        # stages 2 and 3 further below still fold in RunSummary.log, MainSummary.html,
-        # the VM placement CSV and the per-subscription HTML. The "What to send"
-        # block after stage 3 is what declares it the deliverable.
+        # Deliberately NOT labelled "Reporting Data File": the inner per-sub script prints that label once PER SUBSCRIPTION for its own zip, so on a large tenant the operator saw the identical label N+1 times naming N+1 different files and could not tell which to send. This label names the bundle unambiguously - "created", not finished, since stages 2 and 3 below still fold in RunSummary.log, MainSummary.html, the VM CSV and per-sub HTML; the "What to send" block after stage 3 declares it the deliverable.
         Write-Host ("Consolidated bundle created: {0}" -f $OuterZipFile) -ForegroundColor Green
     }
     else
@@ -3037,15 +2284,8 @@ else
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
 }
 
-# Aggregate "main" HTML summary across all per-subscription reports from
-# THIS run. Built on EVERY run that produced a consolidated zip (it was
-# previously opt-in via -MainSummary; that switch is now implied and the
-# summary is always produced + folded into the bundle below). -Detailed
-# still adds the run-wide by-service charts. Built purely from the on-disk
-# per-sub artefacts (Inventory_*.json + sibling .html) scoped to
-# $RunStartTime - no Azure calls. A failure here must never fail the run:
-# the per-sub reports and the consolidated zip are already written, so any
-# error is downgraded to a warning and $MainSummaryFile is left $null.
+# Aggregate "main" HTML summary across all per-sub reports from THIS run, built on EVERY run that produced a consolidated zip (previously opt-in via -MainSummary, now always produced and folded into the bundle below; -Detailed still adds the run-wide by-service charts). Built purely from on-disk per-sub artefacts (Inventory_*.json + sibling .html) scoped to $RunStartTime - no Azure calls.
+# A failure here must never fail the run (the per-sub reports and the zip are already written), so any error is downgraded to a warning and $MainSummaryFile is left $null.
 $MainSummaryFile = $null
 if ($null -ne $OuterZipFile)
 {
@@ -3088,40 +2328,8 @@ if ($null -ne $OuterZipFile)
     }
 }
 
-# ---------------------------------------------------------------------------
-# Tenant-wide VM placement CSV, written next to MainSummary.
-#
-# Each per-subscription run writes a VMPlacementPart_*.csv into InventoryRoot
-# (see the placement block in ResourceInventory.ps1). Concatenating them here -
-# rather than having every run append to one shared file - is what keeps parallel
-# streams from interleaving writes into a single CSV.
-#
-# Deliberately NOT an Inventory_*.json change: the zone identity this file exists
-# to carry would otherwise have to be added to the VM collector's output object,
-# which is the server-ingestion contract. See Extension/VMPlacement.ps1.
-#
-# Only parts from THIS run are consumed. $RunStartTime is the same filter the main
-# summary uses, so a crashed previous run's leftover parts cannot be folded in.
-#
-# The file is TIMESTAMPED, matching its sibling MainSummary_<stamp>.html in this
-# same directory, and that is load-bearing rather than cosmetic. A fixed
-# VMPlacement.csv would be overwritten in place, and on a -Resume run that is
-# actively misleading: the subscriptions being skipped write no new part (and
-# their parts from the earlier attempt were already consumed and deleted), so a
-# fixed name would silently replace a COMPLETE tenant-wide file with one covering
-# only the subscriptions this invocation happened to process. Timestamping makes
-# each run's coverage its own artifact, and the count reported below tells the
-# operator how many subscriptions actually contributed.
-#
-# Best-effort by design: the per-subscription reports and the consolidated zip are
-# already written by this point, so any failure here is a warning, never fatal.
-#
-# Nil-initialised so stage 3 below always has a defined variable to test. The
-# assignment lives inside the row-count branch, and this block is best-effort, so
-# a run with no VM rows - or a throw before the export - otherwise leaves it
-# never assigned. Defensive rather than required (this script sets no StrictMode,
-# so an unassigned read would already yield $null); it makes the contract with
-# stage 3 explicit instead of relying on that default.
+# Tenant-wide VM placement CSV, written next to MainSummary. Concatenates each per-sub VMPlacementPart_*.csv here (rather than having every run append to one shared file) so parallel streams cannot interleave writes into one CSV. Deliberately NOT an Inventory_*.json change: the zone identity this file carries would otherwise have to enter the VM collector's output object, which is the server-ingestion contract (see Extension/VMPlacement.ps1). Only parts from THIS run ($RunStartTime) are consumed.
+# TIMESTAMPED to match its sibling MainSummary_<stamp>.html, and load-bearing rather than cosmetic: a fixed name would be overwritten in place, so on a -Resume run (skipped subs write no new part, and their earlier parts were already consumed) it would silently replace a COMPLETE tenant-wide file with one covering only this invocation's subs. Best-effort (a failure here is a warning), and nil-initialised so stage 3 below always has a defined variable to test.
 $VmPlacementFile = $null
 try
 {
@@ -3272,12 +2480,7 @@ if ($EmptySubs.Count -gt 0)
         Write-Host "    Verify manually (PowerShell): (Invoke-AzRestMethod -Method GET -Path '/subscriptions/<id>/resourcegroups?api-version=2021-04-01').StatusCode" -ForegroundColor Yellow
     }
 
-    # Persist the per-subscription access verdict to the diagnostic log so it
-    # outlives the console/transcript and can be attached to a ticket or e-mail.
-    # This is the durable record behind the on-screen labels above: which
-    # 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume)
-    # vs genuinely empty (no action). Reuses the run's $DiagFile if one already
-    # exists (e.g. from a failure), otherwise creates one.
+    # Persist the per-sub access verdict to the diagnostic log so it outlives the console/transcript and can be attached to a ticket or e-mail: the durable record behind the on-screen labels of which 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume) vs genuinely empty (no action). Reuses the run's $DiagFile if one already exists, otherwise creates one.
     if ($null -eq $DiagFile)
     {
         $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_diagnostics_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
@@ -3310,22 +2513,10 @@ if ($EmptySubs.Count -gt 0)
     Write-Host ""
 }
 
-# Surface consumption (billing) data health. The inner script's consumption
-# loop populates these globals; if every Get-UsageAggregates call failed
-# (typically because the Az PowerShell module is broken on disk and cannot
-# load its bundled MSAL/Azure.Core assemblies) the customer ends up with an
-# empty consumption sheet and no signal that anything went wrong. Make it
-# loud here so it's caught before the report is shared.
+# Surface consumption (billing) data health: the inner script's consumption loop populates these globals; if every Get-UsageAggregates call failed (typically a broken Az module that cannot load its bundled MSAL/Azure.Core assemblies) the customer ends up with an empty consumption sheet and no signal - make it loud here, before the report is shared.
 $ConsumptionRecords = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $ConsumptionFailures = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
-# Report the record count UNCONDITIONALLY when consumption was requested. The
-# previous '-gt 0 -or failures' condition printed NOTHING in the one case this
-# block exists to make loud: zero records AND zero reported failures. That is
-# the silent-failure signature - the billing API answered successfully but
-# returned no rows - and it is exactly what ships an empty Consumption CSV with
-# a clean-looking summary. Zero is only legitimate for a genuinely idle
-# subscription, so state it in yellow and explain the likely causes rather than
-# staying quiet.
+# Report the consumption record count UNCONDITIONALLY when consumption was requested: the previous '-gt 0 -or failures' condition printed NOTHING in the one case this block exists for - zero records AND zero reported failures, the silent-failure signature (the billing API answered successfully but returned no rows) that ships an empty Consumption CSV with a clean-looking summary. Zero is legitimate only for a genuinely idle subscription, so state it in yellow and explain the likely causes.
 if (-not $SkipConsumption)
 {
     $ConsumptionRecordColor = if ($ConsumptionRecords -gt 0) { 'Green' } else { 'Yellow' }
@@ -3336,34 +2527,8 @@ elseif ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
     Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor Green
 }
 
-# Consumption was requested, the phase reported no per-subscription failure, and
-# yet not a single usage record came back. The up-front gate cannot catch this:
-# it classifies the billing probe's EXCEPTION text, and an empty-but-successful
-# response raises no exception (see Test-ConsumptionAccess). Call it out here
-# with the causes that actually produce it, because the operator otherwise has
-# no signal at all that the billing data they asked for is missing.
-# Gate CLOSELY MIRRORS the one in Get-RunSummaryLogContent's Health block so the
-# console and the SHIPPED RunSummary.log do not disagree about whether to warn. Both
-# require that at least one subscription was ATTEMPTED and that at least one of those
-# actually COMPLETED - the second half is the part that is easy to lose. Here it is
-# @($SubResourceCounts).Count -gt 0, which has three producers: appended per
-# subscription on the inner script's successful return in the sequential path, the same
-# per-subscription append in the inline path taken when -ParallelStreams collapses to a
-# single stream, and in MULTI-STREAM mode rebuilt from each stream's summary JSON
-# ResourceCounts. The builder cannot see that list, so it APPROXIMATES the same
-# condition with ($Processed - $Failed.Count) -gt 0.
-#
-# The two halves are NOT interchangeable: $Processed is eligible-minus-skipped, so
-# it still counts subscriptions that were attempted and then failed. Gating on it
-# alone would warn about billing causes on a run whose zero record count is fully
-# explained by those failures.
-#
-# THIS gate is never the looser of the two - at least as strict, and in most modes
-# exactly equal - so the mirror is close but not guaranteed exact. Where it diverges: a
-# stream whose summary file is missing or unparsable adds ONE $FailedSubscriptions entry
-# for the K subscriptions it owned, so for K > 1 the builder's arithmetic can still open
-# while this gate correctly stays quiet. That residual gap is recorded at the builder
-# too; closing it needs a real completed count passed into the builder.
+# Consumption was requested, the phase reported no per-sub failure, and yet not a single usage record came back. The up-front gate cannot catch this - it classifies the billing probe's EXCEPTION text, and an empty-but-successful response raises none (see Test-ConsumptionAccess) - so call it out here with the causes that actually produce it, or the operator has no signal the billing data is missing.
+# Gate CLOSELY MIRRORS the one in Get-RunSummaryLogContent's Health block so the console and the SHIPPED RunSummary.log do not disagree: both require at least one sub ATTEMPTED and at least one COMPLETED (the easy-to-lose half). Here that is @($SubResourceCounts).Count -gt 0; the builder cannot see that list so it APPROXIMATES with ($Processed - $Failed.Count) -gt 0, which is NOT interchangeable ($Processed still counts attempted-then-failed subs). This gate is never the looser of the two, but a stream with a missing/unparsable summary adds one $FailedSubscriptions entry for its K subs, so for K>1 the builder can still open while this gate correctly stays quiet.
 if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
 {
     Write-Host ""
@@ -3411,12 +2576,7 @@ if ($ConsumptionFailures.Count -gt 0)
     Write-Host ""
 }
 
-# Surface metrics-phase auth health. Mirrors the consumption block above:
-# metrics were requested (no -SkipMetrics) but skipped because no usable Azure
-# context/token could be established even after a reconnect attempt. Without
-# this the metrics sheet is silently empty and looks like "no metric-eligible
-# resources" rather than an auth failure. Listed per-subscription so the
-# operator knows exactly which subs are missing metrics.
+# Surface metrics-phase auth health (mirrors the consumption block above): metrics were requested (no -SkipMetrics) but skipped because no usable Azure context/token could be established even after a reconnect attempt. Without this the metrics sheet is silently empty and looks like "no metric-eligible resources" rather than an auth failure. Listed per-subscription so the operator knows exactly which subs are missing metrics.
 $MetricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 if ($MetricsFailures.Count -gt 0)
 {
@@ -3437,12 +2597,7 @@ if ($MetricsFailures.Count -gt 0)
     Write-Host ""
 }
 
-# Surface collector failures (#22). A Services/*/*.ps1 collector threw for a
-# specific subscription and was caught by ResourceInventory.ps1's circuit
-# breaker (CreateResourceJobs); that resource type is missing from the
-# affected subscription's report, not silently empty because none exist.
-# Grouped by subscription so the operator can see exactly which sub(s) and
-# which resource type(s) were affected without hunting through per-sub logs.
+# Surface collector failures: a Services/*.ps1 collector threw for a specific subscription and was caught by ResourceInventory.ps1's circuit breaker (CreateResourceJobs), so that resource type is MISSING from the affected sub's report, not silently empty because none exist. Grouped by subscription so the operator can see exactly which sub(s) and which resource type(s) were affected without hunting through per-sub logs.
 $CollectorFailuresList = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
 if ($CollectorFailuresList.Count -gt 0)
 {
@@ -3500,39 +2655,8 @@ if ($WrapperTranscriptStarted)
 }
 Write-Host "=========================================" -ForegroundColor Green
 
-# --- Run summary (ALWAYS produced) + fold run-level extras into the bundle ---
-# The run summary (parameters + sub tally + health) is the ONE artefact we must
-# never lose: it is how a shared bundle is triaged, and a customer has already
-# received a zip that was missing it. So its generation and on-disk write are
-# decoupled from both the outer zip and the best-effort MainSummary/HTML bundling
-# below - a failure in any later step can no longer suppress it.
-#
-# THE EXCEPTION THAT MATTERS, stated because the guarantee is otherwise easy to
-# over-read: the per-subscription zip-verification hard stop earlier in this script
-# calls Exit-Wrapper -Code 2 and returns BEFORE this block, so that path produces no
-# RunSummary.log at all. Of this script's many Exit-Wrapper and bare-exit sites it is
-# the only one that PRE-EMPTS this block after subscriptions have been inventoried - the
-# earlier aborts (argument validation, the access and coverage gates, -Plan, an empty
-# shard) emit no summary either, but at that point there is genuinely nothing to
-# summarise, and the final exit sits downstream of this block. Making
-# the Code 2 path emit one would be a real improvement - a run declared broken is
-# exactly when triage matters - but it needs the health aggregation this block depends
-# on, including the parallel-mode $SkippedCount derivation and $BundleVer, to be
-# available that much earlier, so it is a separate change rather than a comment.
-#
-# Three independent stages, each in its own try/catch:
-#   1. Generate RunSummary content and write it to disk (always).
-#   2. Fold RunSummary.log into the consolidated zip as its OWN operation, then
-#      verify it actually persisted (a silent Compress-Archive -Update failure
-#      previously dropped it); the on-disk copy from stage 1 is the fallback.
-#   3. Fold the unified MainSummary.html, the tenant-wide VMPlacement.csv, and a
-#      copy of each per-subscription HTML (drill-down targets) into the zip. Only
-#      additive members and NO loose *.json, so the ingestion contract (inner-zip
-#      *.json members) is unchanged and nothing is double-ingested. VMPlacement.csv
-#      is the one sanctioned loose data file at the outer root - see the NOTE on
-#      bundle membership at the stage 3 block itself.
-# Then: report the deliverable, with every claim derived from one read of the
-# finished archive rather than from what was staged.
+# --- Run summary (ALWAYS produced) + fold run-level extras into the bundle. The run summary (parameters + sub tally + health) is the ONE artefact we must never lose (a customer has already received a zip missing it), so its generation and on-disk write are decoupled from both the outer zip and the best-effort MainSummary/HTML bundling below - a failure in any later step can no longer suppress it.
+# THE EXCEPTION: the per-sub zip-verification hard stop earlier calls Exit-Wrapper -Code 2 and returns BEFORE this block, so that path produces no RunSummary.log (it is the only exit after subs are inventoried that pre-empts this block; the earlier aborts have nothing to summarise, and the final exit sits downstream). Three independent try/catch stages follow: (1) generate RunSummary and write it to disk (always); (2) fold it into the zip as its own verified operation - a silent Compress-Archive -Update once dropped it - with the on-disk copy as fallback; (3) fold MainSummary.html, the tenant-wide VMPlacement.csv, and a copy of each per-sub HTML, additive members and NO loose *.json so the ingestion contract is unchanged. Every final claim is derived from one read of the finished archive.
 
 # Version is display-only. Prefer Version.json (in parallel mode the wrapper's
 # $Global:Version is never set - child processes set it), fall back to
@@ -3545,12 +2669,7 @@ try
 }
 catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
 
-# --- Stage 1: generate RunSummary + durable on-disk copy (unconditional) -----
-# Obfuscated runs emit counts only (the wrapper holds no per-sub obfuscation
-# dictionary); default runs include per-sub detail. The on-disk copy lives next
-# to the report(s) in $InventoryRoot so the operator always has it even when no
-# consolidated zip was produced (e.g. a resume run that regenerated nothing) or
-# when the zip fold in stage 2 fails.
+# --- Stage 1: generate RunSummary + durable on-disk copy (unconditional). Obfuscated runs emit counts only (the wrapper holds no per-sub obfuscation dictionary); default runs include per-sub detail. The on-disk copy lives next to the report(s) in $InventoryRoot so the operator always has it even when no consolidated zip was produced (e.g. a resume run that regenerated nothing) or the stage 2 fold fails.
 $RunSummaryLocalFile = $null
 try
 {
@@ -3620,42 +2739,8 @@ if ($null -ne $RunSummaryLocalFile -and (Test-Path -LiteralPath $RunSummaryLocal
     }
 }
 
-# --- Stage 3: fold MainSummary.html + VMPlacement.csv + per-sub HTML in ------
-# Best-effort: any failure here is a warning and can no longer take the run
-# summary (already folded in stage 2) down with it.
-#
-# The bundle is the ONE artifact an operator sends. Anything tenant-wide that a
-# consumer needs therefore has to be INSIDE it: a deliverable left loose in
-# InventoryRoot is a second thing to remember, and the observed operator response
-# to "collect several files" is to zip the whole InventoryReports folder - which
-# ships the obfuscation dictionary (the de-obfuscation key) and the transcripts.
-# That is why the tenant-wide VMPlacement CSV is folded in here rather than being
-# left beside MainSummary_<stamp>.html on disk.
-#
-# NOTE on bundle membership: VMPlacement.csv is the first loose DATA file at this
-# outer root - previously the root held only per-subscription .zip archives plus
-# presentation/summary files (MainSummary.html, RunSummary.log). The per-subscription
-# ingestible members (Inventory_*.json, Metrics_*.json, Consumption_*.csv) all live
-# INSIDE the inner zips, and the shareable Diagnostics log is deliberately a .log so
-# it is not table-ingested. A consumer that discovers ingestible files by extension
-# at the outer root would therefore see this CSV where it previously saw none.
-#
-# CONFIRMED by the repository owner: the root placement is INTENTIONAL and is the
-# point of the file. It is a capacity-planning input, read directly by a human or a
-# planner to size how many nodes are needed per availability zone, so it must be
-# reachable without unpacking an inner per-subscription archive first. It is
-# deliberately NOT part of the Inventory_*.json server-ingestion contract - keeping
-# the zone identity out of the VM collector's output object is exactly why this file
-# exists as a separate CSV. Do not move it inside the inner zips and do not add its
-# columns to Inventory_*.json.
-# The fixed root name is also why a multi-shard merge must extract each shard into
-# its OWN folder: all shards use this same name, so a shared destination overwrites
-# every copy but the last. See the merge sequence in docs/horizontal-sharding.md.
-# Its obfuscation posture is safe either way: Extension/VMPlacement.ps1 sources every
-# identifier column from $Global:SmaResources, which CreateResourceJobs has already
-# obfuscated, so an -Obfuscate run's CSV carries tokens and no new identifier class.
-# Leaf names staged for the fold, captured for the post-fold reconciliation below.
-# Declared out here so it survives a throw inside the try.
+# --- Stage 3: fold MainSummary.html + VMPlacement.csv + per-sub HTML into the bundle. Best-effort - any failure here is a warning and can no longer take the run summary (already folded in stage 2) down with it. The bundle is the ONE artifact an operator sends, so anything tenant-wide must be INSIDE it: the observed operator response to "collect several files" is to zip the whole InventoryReports folder, which ships the obfuscation dictionary (the de-obfuscation key) and the transcripts.
+# NOTE VMPlacement.csv is the first loose DATA file at the outer root (the ingestible members - Inventory_*.json, Metrics_*.json, Consumption_*.csv - otherwise all live inside the inner zips). Its root placement is INTENTIONAL and CONFIRMED by the repository owner: it is a capacity-planning input read directly by a human/planner to size nodes per availability zone, so it must be reachable without unpacking an inner archive, and it is deliberately kept OUT of the Inventory_*.json ingestion contract - do NOT move it inside the inner zips or add its columns to Inventory_*.json. The fixed root name is also why a multi-shard merge must extract each shard into its OWN folder (see docs/horizontal-sharding.md). Obfuscation-safe: VMPlacement.ps1 sources every identifier column from already-obfuscated $Global:SmaResources.
 $StagedLeafNames = @()
 if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 {
@@ -3665,17 +2750,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         $BundleStage = Join-Path $InventoryRoot ('.rda-bundle-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
         New-Item -ItemType Directory -Path $BundleStage -Force | Out-Null
 
-        # 1. Unified MainSummary.html at the bundle root (renamed from the
-        #    timestamped file; its links are relative to sibling folders, so
-        #    renaming the summary itself does not break them). The drill-down
-        #    link folders are then renamed from ResourcesReport<stamp>/ to
-        #    HTML<stamp>/ (see step 2) - these bundle folders carry ONLY the
-        #    report HTML, so the HTML prefix distinguishes them at a glance
-        #    from the sibling ResourcesReport_<stamp>.zip data archives (which
-        #    hold the Inventory/Metrics/Consumption members). Rewrite the
-        #    summary's hrefs to match: only the leading folder token changes
-        #    (href="ResourcesReport... -> href="HTML...); the /<file>.html tail
-        #    is untouched because it is not preceded by href=".
+        # 1. Unified MainSummary.html at the bundle root, renamed from the timestamped file (its links are relative to sibling folders, so renaming the summary itself does not break them). The drill-down link folders are renamed ResourcesReport<stamp>/ -> HTML<stamp>/ (step 2) so a report-HTML folder is distinguishable at a glance from the sibling ResourcesReport_<stamp>.zip data archives; rewrite the summary's hrefs to match - only the leading folder token changes (href="ResourcesReport... -> href="HTML...), the /<file>.html tail is untouched because it is not preceded by href=".
         $StagedMainSummary = Join-Path $BundleStage 'MainSummary.html'
         if ($null -ne $MainSummaryFile -and (Test-Path -LiteralPath $MainSummaryFile))
         {
@@ -3683,13 +2758,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' | Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
         }
 
-        # 2. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
-        #    name is the source ResourcesReport<stamp> with the leading
-        #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
-        #    summary links. HTML only - no *.json/csv - so nothing is
-        #    double-ingested and the folder name signals "report HTML, not
-        #    data". Scoped to THIS run by timestamp; a de-obfuscated
-        #    *_revealed* report is never copied across.
+        # 2. A copy of each per-sub HTML at HTML<stamp>/ (the source ResourcesReport<stamp> with the leading 'ResourcesReport' replaced by 'HTML'), matching the rewritten summary links. HTML only - no *.json/csv - so nothing is double-ingested and the folder name signals "report HTML, not data". Scoped to THIS run by timestamp; a de-obfuscated *_revealed* report is never copied across.
         foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
         {
             $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
@@ -3700,16 +2769,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
         }
 
-        # 3. The tenant-wide VM placement CSV at the bundle root, de-timestamped to
-        #    VMPlacement.csv for the same reason MainSummary_<stamp>.html becomes
-        #    MainSummary.html: inside the bundle the run is already identified by
-        #    the archive's own name, so a consumer can bind to a fixed member name
-        #    instead of globbing. The on-disk copy KEEPS its timestamp - that is
-        #    load-bearing for -Resume coverage (see the aggregation block above)
-        #    and is deliberately not changed here.
-        #    Guarded on both the variable and the file: a run with no VM rows never
-        #    assigns it, and the aggregation block is best-effort so it can fail
-        #    before the export.
+        # 3. The tenant-wide VM placement CSV at the bundle root, de-timestamped to VMPlacement.csv for the same reason MainSummary_<stamp>.html becomes MainSummary.html: inside the bundle the run is already identified by the archive's own name, so a consumer can bind to a fixed member name instead of globbing. The on-disk copy KEEPS its timestamp - load-bearing for -Resume coverage (see the aggregation block above) - so it is not changed here. Guarded on both variable and file: a run with no VM rows never assigns it, and the best-effort aggregation can fail before the export.
         if (-not [string]::IsNullOrEmpty($VmPlacementFile) -and (Test-Path -LiteralPath $VmPlacementFile))
         {
             Copy-Item -LiteralPath $VmPlacementFile -Destination (Join-Path $BundleStage 'VMPlacement.csv') -Force
@@ -3741,27 +2801,8 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     }
 }
 
-# --- The deliverable instruction --------------------------------------------
-# Emitted HERE, after stages 2 and 3, because this is the first point at which
-# the bundle's membership is final. The run summary above names the path; this
-# states what to DO with it.
-#
-# Why this exists at all: the previous output named the bundle ("Consolidated
-# Report: <path>") but never said to send it, while the inner per-subscription
-# script printed "safe to share" once PER SUBSCRIPTION about its own zip. On a
-# large tenant the operator saw that sharing language many times, always attached
-# to a per-subscription file, and never once attached to the bundle. The observed
-# result is operators zipping the whole InventoryReports folder instead - which
-# ships the obfuscation dictionary (the key that reverses the masking) and the
-# transcripts, defeating the point of -Obfuscate. So: name the single file, and
-# state the negative explicitly.
-#
-# EVERY factual claim below is derived from ONE read of the finished archive.
-# Earlier revisions of this block hand-wrote the contents in prose and were wrong
-# three separate ways (they named the placement CSV on a tenant with no VMs, named
-# the summary HTML when its best-effort build had failed, and said "every
-# subscription" on a sharded or resumed run). Enumerating the real members removes
-# that whole class rather than correcting each sentence.
+# --- The deliverable instruction, emitted HERE (after stages 2 and 3) because this is the first point at which the bundle's membership is final: the run summary above names the path, this states what to DO with it. It exists because the previous output named the bundle but never said to send it, while the inner script printed "safe to share" once PER SUBSCRIPTION - so operators zipped the whole InventoryReports folder instead, shipping the obfuscation dictionary (the key that reverses the masking) and the transcripts, defeating -Obfuscate.
+# EVERY factual claim below is derived from ONE read of the finished archive: earlier revisions hand-wrote the contents in prose and were wrong three ways (named the placement CSV on a tenant with no VMs, named the summary HTML when its best-effort build had failed, and said "every subscription" on a sharded or resumed run).
 if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 {
     $BundleMembers = @()
@@ -3824,28 +2865,13 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     Write-Host "=============================================" -ForegroundColor Green
 }
 
-# Per-node blob upload. When -UploadToBlobContainerUri is set, ship THIS
-# machine's finalized consolidated zip to the shared blob container so an
-# operator running many shards does not have to collect output from each node by
-# hand. Placed AFTER the bundle is finalized (MainSummary folded in) so the
-# uploaded artifact is complete. Passwordless: uses the current signed-in
-# identity (Connect-AzAccount / AKS workload identity) via Azure AD
-# (-UseConnectedAccount), requiring "Storage Blob Data Contributor" on the
-# target - no account key or SAS. Best-effort by design: a failure warns loudly
-# but does NOT fail the run, because the zip is already safe on local disk and
-# can be retrieved manually; making the pod error would also trigger Job retries
-# of the whole (already-successful) shard.
+# Per-node blob upload: when -UploadToBlobContainerUri is set, ship THIS machine's finalized consolidated zip to the shared container so an operator running many shards does not have to collect output from each node by hand. Placed AFTER the bundle is finalized (MainSummary folded in) so the uploaded artifact is complete. Passwordless: current signed-in identity via Azure AD (-UseConnectedAccount), requiring "Storage Blob Data Contributor", no key or SAS.
+# Best-effort by design: a failure warns loudly but does NOT fail the run, because the zip is already safe on local disk, and erroring the pod would also trigger Job retries of the whole (already-successful) shard.
 if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 {
     try
     {
-        # Expect https://<account>.blob.core.windows.net/<container>[/<prefix>].
-        # Parsed by the shared helper rather than a hand-copy of it. Three copies of
-        # that parse existed in this repo and were character-for-character identical,
-        # which is exactly how they would have drifted apart on the next change to any
-        # one of them; all three now call the helper. A fourth copy remains in
-        # deploy/Test-NodeReadiness.ps1, left deliberately because that script is a
-        # self-contained in-pod preflight that dot-sources nothing.
+        # Expect https://<account>.blob.core.windows.net/<container>[/<prefix>], parsed by the shared helper rather than a hand-copy: three character-for-character identical copies of that parse existed in this repo (exactly how they would drift apart on the next change to any one), and all three now call the helper. A fourth copy remains in deploy/Test-NodeReadiness.ps1, left deliberately because that in-pod preflight dot-sources nothing.
         $BlobParts = Split-BlobContainerUri -Uri $UploadToBlobContainerUri
         $StorageAccountName = $BlobParts.Account
         $ContainerName = $BlobParts.Container
@@ -3873,23 +2899,8 @@ if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -Lite
         $null = Set-AzStorageBlobContent -File $OuterZipFile -Container $ContainerName -Blob $BlobName -Context $StorageContext -Force -ErrorAction Stop
         Write-Host ("Blob upload complete: {0}" -f $BlobName) -ForegroundColor Green
 
-        # Decouple compute from storage for the obfuscation dictionaries too.
-        # Each subscription's ObfuscationDictionary_*.json is a LOCAL file that is
-        # deliberately kept OUT of the shared report zip (it is the de-obfuscation
-        # key - it maps every obfuscated token back to the real value). On
-        # ephemeral compute (an AKS pod's emptyDir) that local file dies with the
-        # node, taking with it the ONLY record of this run's token mapping - and
-        # thus the only thing that lets a later scoped/recovery run reproduce the
-        # SAME tokens via -ObfuscationDictionary seeding. Since a blob target is
-        # already configured, mirror the dictionaries to that SAME container - as
-        # their OWN objects under a _dictionaries/ prefix, still NOT inside the zip
-        # - exactly as the resume state and support-log bundle (which also carry
-        # real identifiers) already do. That makes this container an operator-
-        # PRIVATE artefact store: it must never be handed to a report consumer
-        # as-is. Its OWN try/catch + best-effort so a dictionary-upload problem can
-        # never mask or fail the (already-successful) report upload above. Only
-        # obfuscated runs produce dictionaries; scoped to THIS run by write time so
-        # a shared InventoryRoot does not resurface a prior run's dictionaries.
+        # Decouple compute from storage for the obfuscation dictionaries too. Each sub's ObfuscationDictionary_*.json is a LOCAL file deliberately kept OUT of the shared report zip (it is the de-obfuscation key mapping every token back to the real value); on ephemeral compute (an AKS pod's emptyDir) it dies with the node, taking with it the ONLY record of this run's token mapping - and thus the only thing that lets a later scoped/recovery run reproduce the SAME tokens via -ObfuscationDictionary seeding. Since a blob target is already configured, mirror the dictionaries to that SAME container as their OWN objects under a _dictionaries/ prefix (still NOT inside the zip), like resume state and the support-log bundle.
+        # That makes this container an operator-PRIVATE artefact store that must never be handed to a report consumer as-is. Its OWN try/catch + best-effort so a dictionary-upload problem can never mask or fail the (already-successful) report upload above. Only obfuscated runs produce dictionaries; scoped to THIS run by write time so a shared InventoryRoot does not resurface a prior run's.
         try
         {
             $DictionaryFiles = @(Get-ChildItem -Path $InventoryRoot -Recurse -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime })
@@ -3924,12 +2935,7 @@ elseif ($UploadToBlobContainerUri)
     Write-Host ("WARNING: Blob upload was requested (-UploadToBlobContainerUri) but nothing was uploaded - {0}. Check that the run produced an AllSubscriptions_*.zip (look for the earlier 'Consolidated bundle created:' line)." -f $NoZipDetail) -ForegroundColor Yellow
 }
 
-# Final, last-thing-the-user-sees banner when a requested data phase could not
-# be collected due to authentication. Printed AFTER the summary block so it is
-# the final output on screen. Covers metrics (no -SkipMetrics) and consumption
-# (no -SkipConsumption) auth skips. The Excel sheets are intentionally NOT
-# annotated (server-side ingestion expects fixed columns); this banner is the
-# human-facing signal, and the non-zero exit below is the machine-facing one.
+# Final, last-thing-the-user-sees banner when a requested data phase (metrics without -SkipMetrics, consumption without -SkipConsumption) could not be collected due to authentication. Printed AFTER the summary block so it is the final output on screen. The Excel sheets are intentionally NOT annotated (server-side ingestion expects fixed columns); this banner is the human-facing signal and the non-zero exit below is the machine-facing one.
 $AuthSkippedPhases = @()
 if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
 $ConsumptionAuthSkipped = @(
@@ -3949,14 +2955,7 @@ if ($AuthSkippedPhases.Count -gt 0)
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
-# Machine-facing signal for collector failures (#22), distinct from the auth
-# banner above. A collector failure is not an auth problem - it means one or
-# more resource types are silently MISSING from one or more subscriptions'
-# reports because a Services/*/*.ps1 collector threw. This must be
-# machine-detectable (not just console-visible in the summary block above),
-# per the same "do not sweep failures under the rug" requirement that drove
-# the circuit breaker itself - a human-only signal that scrolls past in a
-# large multi-subscription run is not good enough for CI/automation.
+# Machine-facing signal for collector failures, distinct from the auth banner above: a collector failure is not an auth problem - one or more resource types are silently MISSING from one or more subs' reports because a Services/*.ps1 collector threw. This must be machine-detectable (not just console-visible in the summary block above), per the same "do not sweep failures under the rug" rule that drove the circuit breaker itself - a human-only signal that scrolls past in a large run is not enough for CI/automation.
 if (@($Global:CollectorFailures).Count -gt 0)
 {
     Write-Host ""
@@ -3995,22 +2994,10 @@ if ($WrapperTranscriptStarted)
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
 
-# Even on a run that completed and produced a report, collect the local support
-# logs when ANY per-phase failure occurred (failed subscriptions, collector
-# failures, or metrics/consumption auth-skips). The consolidated report already
-# carries RunSummary.log (failure counts) + the per-sub scrubbed diagnostics;
-# this additionally bundles the LOCAL detail logs (wrapper transcript + per-sub
-# DebugLog / ErrorLog) that are never in the shared report zip, so the operator
-# has one ready-to-send artefact if support needs the detail. Collected AFTER
-# Stop-Transcript so the finalized transcript is captured, and scoped to this
-# run via $RunStartTime. Failure exits are handled separately by Exit-Wrapper.
+# Even on a run that completed and produced a report, collect the LOCAL support logs when ANY per-phase failure occurred (failed subs, collector failures, or metrics/consumption auth-skips): the consolidated report already carries RunSummary.log + per-sub scrubbed diagnostics, but this additionally bundles the local detail logs (wrapper transcript + per-sub DebugLog/ErrorLog) never in the shared zip, so the operator has one ready-to-send artefact if support needs the detail.
+# Collected AFTER Stop-Transcript so the finalized transcript is captured, and scoped to this run via $RunStartTime. Failure exits are handled separately by Exit-Wrapper.
 $RunHadFailures = ($FailedSubscriptions.Count -gt 0) -or (@($Global:CollectorFailures).Count -gt 0) -or (@($Global:MetricsFailedSubs).Count -gt 0) -or (@($Global:ConsumptionFailedSubs).Count -gt 0)
-# Collect the local support logs when the run had any per-phase failure, and ALSO
-# whenever a blob upload target is configured - in the latter case the bundle is
-# uploaded to blob so the logs are retrievable without pod/node access. This is
-# what surfaces an otherwise-invisible "returned 0 resources (no Reader)" run: it
-# is a clean success (no failure counters), so without this an operator running in
-# AKS would get only an empty report zip and no way to see the per-sub warnings.
+# Also collect the local support logs whenever a blob upload target is configured (not just on failure): the bundle is uploaded to blob, so the logs become retrievable without pod/node access. This is what surfaces an otherwise-invisible "returned 0 resources (no Reader)" run - a clean success with no failure counters - which in AKS would otherwise give the operator only an empty report zip and no way to see the per-sub warnings.
 if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
 {
     Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount
@@ -4021,30 +3008,12 @@ $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
 
-# A subscription whose report archive could not be written is a MISSING REPORT,
-# which is what exit code 2 already means (the per-subscription output gap). The
-# verification gate cannot catch this case on its own: the failed sub is correctly
-# excluded from the expected archive count, so the counts agree and the gate stays
-# silent.
-#
-# Code 2 takes PRECEDENCE over 3/4/5 rather than deferring to them. Those codes
-# all mean "the report was produced but is incomplete in a diagnosable way" (see
-# the exit-code table in README.md), whereas this means a subscription's report is
-# NOT IN THE BUNDLE AT ALL - the strictly worse outcome, and the one a consumer
-# must not miss. Letting an auth skip mask it would be the same "sweep it under
-# the rug" failure the 3-vs-4 split exists to prevent. The banner above prints
-# every condition independently, so nothing is hidden from a human either way.
+# A subscription whose report archive could not be written is a MISSING REPORT, which is what exit code 2 already means (the per-subscription output gap). The verification gate cannot catch this case on its own: the failed sub is correctly excluded from the expected archive count, so the counts agree and the gate stays silent.
+# Code 2 takes PRECEDENCE over 3/4/5 rather than deferring to them: those all mean "the report was produced but is incomplete in a diagnosable way" (see the exit-code table in README.md), whereas this means a subscription's report is NOT IN THE BUNDLE AT ALL - the strictly worse outcome a consumer must not miss. Letting an auth skip mask it would be the same "sweep it under the rug" failure the 3-vs-4 split exists to prevent.
 if (@($ArchiveWriteFailures).Count -gt 0)
 {
     $WrapperExitCode = 2
 }
-# Always exit with the computed wrapper code (0 on a fully clean run). An explicit
-# exit makes $LASTEXITCODE deterministic for callers and CI. In particular the
-# Azure DevOps AzurePowerShell@5 task runs this script via a dot-sourced wrapper
-# where a bare fall-through would leave $LASTEXITCODE at the last native command's
-# value - so a clean run could look non-zero, and a hard-stop's own exit code does
-# not otherwise reach the task. Exiting unconditionally lets the pipeline check
-# $LASTEXITCODE and fail loudly on any non-zero (access gate, auth skip, collector
-# failures) instead of showing green.
+# Always exit with the computed wrapper code (0 on a fully clean run): an explicit exit makes $LASTEXITCODE deterministic for callers and CI. In particular the Azure DevOps AzurePowerShell@5 task runs this script via a dot-sourced wrapper where a bare fall-through would leave $LASTEXITCODE at the last native command's value - so a clean run could look non-zero and a hard-stop's own exit code would not otherwise reach the task. Exiting unconditionally lets the pipeline fail loudly on any non-zero.
 exit $WrapperExitCode
 

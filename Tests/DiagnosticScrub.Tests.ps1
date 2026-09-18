@@ -1,36 +1,13 @@
-# Protect-DiagnosticText scrub tests
-# =============================================================================
-# Offline, self-contained tests for the scrub that makes the SHAREABLE (in-zip,
-# obfuscated) diagnostics log safe. Protect-DiagnosticText is what stands
-# between a raw collector/phase exception message and the Diagnostics_*.log
-# that ships in the obfuscated bundle, so these assert - directly, without a
-# live run - that every identifier class is masked or tokenized and NONE leaks:
-#   - a dictionary-known subscription GUID / resource name / resource group /
-#     full ARM id  -> its deterministic prod_/nonprod_ token (via the caller's
-#     real-value -> token $ValueMap, applied longest-first)
-#   - an UNKNOWN GUID not in the map (e.g. a tenant GUID)  -> '<guid>'
-#   - email / UPN            -> '<email>'
-#   - IPv4                   -> '<ip>'
-#   - Azure data-plane FQDN  -> '<host>'
-#   - *nix / Windows home dir-> '<user>'
-#   - SAS signature / Bearer -> '<redacted>'
-# and that a prod_/nonprod_ token already in the text is left intact.
-#
-# No customer data: the only literal GUID is the Azure docs placeholder; the
-# "unknown tenant" GUID is generated at runtime; every other value is synthetic.
-# =============================================================================
+# Offline tests for Protect-DiagnosticText, the scrub between a raw exception message and the shareable obfuscated
+# Diagnostics_*.log: every identifier class must be masked/tokenized (map applied longest-first), none leaking; only literal GUID is the Azure docs placeholder.
 
 BeforeAll {
     $FunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/ResourceInventory.Functions.ps1'
     if (-not (Test-Path $FunctionsFile)) { throw "ResourceInventory.Functions.ps1 not found at $FunctionsFile" }
     . $FunctionsFile
 
-    # Known (dictionary-backed) real values and their deterministic tokens,
-    # mirroring the real-value -> token $diagScrubMap the packaging block builds.
-    # All token GUIDs and the secret-shaped fixtures (SAS sig, Bearer JWT) are
-    # GENERATED AT RUNTIME so no literal GUID / auth token lives in this source
-    # file (only the Azure docs placeholder is a literal GUID) - keeps the file
-    # clean for the pre-commit leak scan while still exercising every scrub path.
+    # Dictionary-backed real-value -> token fixtures mirroring the packaging block's $diagScrubMap;
+    # token GUIDs and secret-shaped fixtures are generated at runtime so no literal secret lives in this source (leak scan stays clean).
     $script:SubGuid = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
     $script:RgName = 'rg-sensitive-demo'
     $script:ResName = 'vm-app-demo'
@@ -186,12 +163,8 @@ Describe "Protect-DiagnosticText preserves already-obfuscated tokens and edge ca
 
 Describe "Protect-DiagnosticText redacts connection-string secrets while preserving readable segments" {
 
-    # The widened auth alternation now masks the connection-string secret keys
-    # Azure storage / Service Bus / SQL / AAD exception text carries, and its
-    # value class ([^&;...]) terminates at ';' or '&' so the NEXT segment - and
-    # the readable key NAME - survive. Each secret is built at runtime (a fresh
-    # GUID 'N' form, like the file's other fixtures) so no literal secret lives
-    # in this source and the pre-commit leak scan stays clean.
+    # Widened auth alternation masks connection-string secret values; the value class terminates at ';' or '&'
+    # so the next segment and the readable key NAME survive. Secrets built at runtime so no literal secret lives in source.
 
     It "redacts an AccountKey value while EndpointSuffix survives readable" {
         $Secret = [guid]::NewGuid().ToString('N') + '=='

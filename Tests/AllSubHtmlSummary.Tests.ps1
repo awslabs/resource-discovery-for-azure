@@ -1,21 +1,5 @@
-# New-RdaAllSubHtmlSummary unit tests
-# =============================================================================
-# Offline, self-contained tests for the aggregate all-subscriptions HTML summary
-# (New-RdaAllSubHtmlSummary in Functions/AllSubHtmlSummary.Functions.ps1). They
-# build a synthetic set of per-subscription report folders (each a
-# ResourcesReport<id>/ with a loose Inventory_*.json and a stub .html) in a temp
-# dir, invoke the builder against them, and assert on the produced HTML: run
-# totals equal the sum of fixtures, one row per subscription, self-containment
-# (no external CDN refs), obfuscation posture detection, health banners,
-# -Detailed charts, -SinceTime scoping, and fail-soft behaviour on an unreadable
-# inventory.
-#
-# No live Azure and no real GUIDs: obfuscated fixtures mint prod_/nonprod_
-# tokens at runtime with [guid]::NewGuid(). The only literal GUID in this file
-# is the Azure documentation placeholder (12345678-1234-1234-1234-123456789012),
-# used by the obfuscation-redaction tests to prove a passed-in tenant id is
-# suppressed under -Obfuscated.
-# =============================================================================
+# Offline unit tests for New-RdaAllSubHtmlSummary (Functions/AllSubHtmlSummary.Functions.ps1): build synthetic per-subscription report folders and assert on the produced aggregate HTML.
+# No live Azure and no real GUIDs - obfuscated fixtures mint prod_/nonprod_ tokens at runtime; the one literal GUID is the Azure documentation placeholder.
 
 BeforeAll {
     # Dot-source the function library under test so New-RdaAllSubHtmlSummary (and
@@ -27,12 +11,8 @@ BeforeAll {
     $script:TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('AllSubHtmlSummaryTest_' + [guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $script:TmpRoot -Force | Out-Null
 
-    # Build one synthetic per-subscription report folder.
-    #   -Services : hashtable of serviceName -> record count
-    #   -SubName  : the Subscription value stamped on every record
-    #   -Obfuscated : use prod_ GUID tokens for record Name + Subscription
-    #   -NoHtml   : omit the sibling .html (to exercise the "no report" link)
-    #   -BadInventory : write non-JSON so the fail-soft path is exercised
+    # Build one synthetic per-subscription report folder; switches select obfuscated
+    # tokens (-Obfuscated), a missing sibling .html (-NoHtml), or non-JSON to exercise the fail-soft path (-BadInventory).
     function New-SubFolder
     {
         param(
@@ -275,12 +255,8 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
 
         New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
 
-        # Self-containment is a per-file contract on the shareable artefact: the
-        # aggregate MainSummary AND every re-rendered per-sub report must carry no
-        # EXTERNAL reference (no external src/href, no cdn/googleapis/jsdelivr). A
-        # per-sub report legitimately carries an INLINE <script> block (Summary.ps1),
-        # so - unlike the aggregate-only guard - '<script' is deliberately NOT
-        # asserted here; only external dependencies are.
+        # Self-containment is a per-file contract on the shareable artefact: aggregate AND
+        # every re-rendered per-sub report must carry no EXTERNAL reference. Unlike the aggregate-only guard, '<script' is NOT asserted here because a per-sub report legitimately carries an inline <script>.
         $ReconstructedHtml = @(Get-ChildItem -Path $OutDir -Recurse -Filter '*.html' -File)
         $ReconstructedHtml.Count | Should -BeGreaterThan 0
         foreach ($Hf in $ReconstructedHtml)
@@ -353,14 +329,8 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
     }
 
     It 'excludes a leftover *_revealed.zip so no de-obfuscated report leaks into the reconstruction or the -PackageZip bundle' {
-        # Regression for the PII leak vector: the reveal engine names only the OUTER
-        # zip *_revealed.zip and rewrites the inner html/json members IN PLACE (their
-        # names carry no _revealed marker). A member-name-only filter would let those
-        # real-data members through; the guard must exclude at the zip/folder
-        # SELECTION level. Build a consolidated zip that carries one legitimate
-        # obfuscated inner report PLUS a leftover ResourcesReport_<id>_revealed.zip
-        # whose members hold a real (identifiable) marker, then assert the marker
-        # never reaches the reconstruction or the shareable bundle.
+        # Regression for the PII leak vector: the reveal engine names only the OUTER zip
+        # *_revealed.zip and rewrites the inner html/json members IN PLACE (no marker on their names), so the exclusion must act at the zip/folder SELECTION level, not by member name.
         $Run = New-Run
         $Marker = 'REAL-IDENTIFIER-DO-NOT-LEAK'
         $Stage = Join-Path $Run ('revsrc_' + [guid]::NewGuid().ToString('N').Substring(0, 6))

@@ -13,9 +13,6 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            # roleProfile is a CloudServiceRoleProfile OBJECT whose 'roles' member holds the
-            # array. Iterating roleProfile itself walked one object with no name or sku, so
-            # every cloud service emitted a single all-null role row whatever its real count.
             $Roles = $Data.roleProfile.roles
 
             $Obj = @{
@@ -26,10 +23,6 @@ if ($Task -eq 'Processing')
                 'Location'             = $1.location;
             }
 
-            # No Add-Member here: the assignment below creates 'Roles' by itself. A
-            # NoteProperty of the same name shadowed it for member access while
-            # ConvertTo-Json read the other, and which one won depended on whether the
-            # property had already been read. One store means nothing to shadow.
             $Obj.Roles = [System.Collections.Generic.List[object]]::new()
 
             foreach ($roleProfile in $Roles)
@@ -50,3 +43,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

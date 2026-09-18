@@ -775,6 +775,12 @@ if ($Task -eq 'Processing')
     # deliberately internal constants, NOT operator parameters, to keep the script surface small.
     $MetricTimeoutSeconds = 120
     $MetricMaxRetries = 3
+    # Throttling (429) has its OWN retry budget and honours the server's Retry-After: a throttle wave used to exhaust
+    # the 3 generic retries in ~28s and record the metric as failed, when waiting the directed few seconds would have succeeded.
+    $MetricMaxThrottleRetries = 6
+    $MetricMaxRetryAfterSeconds = 120
+    # Get-RdaRetryAfterSeconds (Functions/ResourceInventory.Functions.ps1) is not visible inside -Parallel runspaces; ship its definition.
+    $MetricRetryAfterFnDef = if (Get-Command Get-RdaRetryAfterSeconds -CommandType Function -ErrorAction SilentlyContinue) { ${function:Get-RdaRetryAfterSeconds}.ToString() } else { $null }
 
     # Thread-safe diagnostics: each parallel runspace appends one record so the
     # parent can summarise where time went and which calls timed out / were
@@ -783,7 +789,7 @@ if ($Task -eq 'Processing')
     $MetricDiagnostics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays))
+    Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, throttle retries={5} (honours Retry-After up to {6}s), lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays), $MetricMaxThrottleRetries, $MetricMaxRetryAfterSeconds)
 
     $RangeBatch = [math]::Min($MetricCount , 250)
     $RangeIdx = 1
@@ -807,6 +813,10 @@ if ($Task -eq 'Processing')
                 $AzContext = $using:MetricAzContext
                 $CallTimeoutSeconds = $using:MetricTimeoutSeconds
                 $CallMaxRetries = $using:MetricMaxRetries
+                $CallMaxThrottleRetries = $using:MetricMaxThrottleRetries
+                $CallMaxRetryAfterSeconds = $using:MetricMaxRetryAfterSeconds
+                $RetryAfterFnDef = $using:MetricRetryAfterFnDef
+                if ($RetryAfterFnDef) { Set-Item -Path function:Get-RdaRetryAfterSeconds -Value ([scriptblock]::Create($RetryAfterFnDef)) }
                 $DiagBag = $using:MetricDiagnostics
 
                 # Per-call progress is deliberately NOT written to the console here: Write-Host per
@@ -830,6 +840,27 @@ if ($Task -eq 'Processing')
                 # Pull Azure Monitor's response body out of a failed call: $_.Exception.Message only
                 # says a request was refused, the body says WHY (metric invalid vs unsupported grain (our bug via -MetricsIntervalMinutes) vs resource deleted). Defined INSIDE the -Parallel block (file-scope functions are invisible in these runspaces).
                 # CONTRACT: never throws, returns $null when it finds nothing - a diagnostic aid must not break the phase it describes.
+                # Retry decision for one failed Get-AzMetric attempt. Pure (no sleeping) so it is unit-testable.
+                # Throttled attempts draw on their own budget and wait at least the server's Retry-After (bounded); every
+                # other failure uses the generic budget and 2^attempt backoff. Returns @{ Retry; SleepSeconds } (no jitter).
+                function Get-RdaMetricRetryPlan
+                {
+                    param(
+                        [int]$Attempt, [bool]$Throttled, [int]$ThrottledAttempts, [double]$RetryAfterSeconds, [bool]$Permanent,
+                        [int]$MaxRetries, [int]$MaxThrottleRetries, [double]$MaxRetryAfterSeconds
+                    )
+                    if ($Permanent) { return @{ Retry = $false; SleepSeconds = 0 } }
+                    $Retry = if ($Throttled) { $ThrottledAttempts -le $MaxThrottleRetries } else { $Attempt -lt $MaxRetries }
+                    if (-not $Retry) { return @{ Retry = $false; SleepSeconds = 0 } }
+                    $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
+                    if ($Throttled)
+                    {
+                        $Backoff = [math]::Min($Backoff * 2, 60)
+                        if ($RetryAfterSeconds -gt 0) { $Backoff = [math]::Min([math]::Max($RetryAfterSeconds, $Backoff), $MaxRetryAfterSeconds) }
+                    }
+                    return @{ Retry = $true; SleepSeconds = $Backoff }
+                }
+
                 function Get-RdaMetricErrorBody
                 {
                     param($ErrorRecord)
@@ -964,15 +995,17 @@ if ($Task -eq 'Processing')
                     # a thread job so a single hung HTTP call can never wedge the
                     # whole metrics phase the way an un-timed Get-AzMetric can.
                     $Attempt = 0
+                    $ThrottledAttempts = 0
                     $Succeeded = $false
                     $LastError = $null
                     $MetricQuery = $null
 
-                    while (-not $Succeeded -and $Attempt -le $CallMaxRetries)
+                    while (-not $Succeeded)
                     {
                         $CallAttempts = $Attempt + 1
                         $TimedOut = $false
                         $Throttled = $false
+                        $RetryAfterSeconds = 0
                         # Reset the captured body PER ATTEMPT: otherwise a body from a failed attempt 1
                         # lingers into a successful attempt 2, reporting Outcome='Success' with a stale ErrorBody. Keeps the retained body tied to the final (reported) attempt.
                         $CallErrorBody = $null
@@ -1012,6 +1045,12 @@ if ($Task -eq 'Processing')
                                 elseif ($LastError -match '429|throttl|TooManyRequests|rate limit')
                                 {
                                     $Throttled = $true
+                                    $ThrottledAttempts++
+                                    # Server-directed wait (Retry-After header) when present; 0 means fall back to our own backoff.
+                                    if (Get-Command Get-RdaRetryAfterSeconds -ErrorAction SilentlyContinue)
+                                    {
+                                        try { $RetryAfterSeconds = [double](Get-RdaRetryAfterSeconds -ErrorRecord $_) } catch { $RetryAfterSeconds = 0 }
+                                    }
                                 }
                             }
                             finally
@@ -1037,26 +1076,21 @@ if ($Task -eq 'Processing')
 
                         # Failed attempt - decide whether to retry. Retry/giving-up detail is deliberately
                         # NOT written to the console (concurrent-runspace flood); the final Outcome/Attempts/Error land in the diagnostics bag and summary.
-                        if (-not $Permanent -and $Attempt -lt $CallMaxRetries)
+                        $Plan = Get-RdaMetricRetryPlan -Attempt $Attempt -Throttled $Throttled -ThrottledAttempts $ThrottledAttempts -RetryAfterSeconds $RetryAfterSeconds -Permanent $Permanent `
+                            -MaxRetries $CallMaxRetries -MaxThrottleRetries $CallMaxThrottleRetries -MaxRetryAfterSeconds $CallMaxRetryAfterSeconds
+                        if ($Plan.Retry)
                         {
-                            # Exponential backoff: 2^attempt seconds, capped, plus
-                            # jitter so a wave of throttled calls does not retry in
-                            # lockstep. Throttled calls wait a bit longer.
-                            $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
-                            if ($Throttled) { $Backoff = [math]::Min($Backoff * 2, 60) }
+                            # Jitter so a wave of throttled calls does not retry in lockstep.
                             $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
-                            $SleepSeconds = [math]::Round($Backoff + $Jitter, 2)
+                            $SleepSeconds = [math]::Round($Plan.SleepSeconds + $Jitter, 2)
                             Start-Sleep -Seconds $SleepSeconds
                         }
                         else
                         {
                             $CallOutcome = if ($Permanent) { $PermanentOutcome } elseif ($TimedOut) { 'Timeout' } elseif ($Throttled) { 'Throttled' } else { 'Error' }
 
-                            # Give up NOW on a permanent failure rather than spending the
-                            # remaining attempts (and their backoff) on a call that cannot
-                            # succeed. The throw below still runs, so the metric is still
-                            # recorded as having no data - only the futile retries are cut.
-                            if ($Permanent) { break }
+                            # Budget exhausted (or permanent failure): leave the loop; the throw below records the metric as having no data.
+                            break
                         }
 
                         $Attempt++

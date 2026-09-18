@@ -1,33 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
 # CollectorGuards.Tests.ps1
-#
-# OFFLINE unit tests for the fault-tolerance guards in the service collectors:
-#
-#   1. Creation-time [datetime] cast guard - a present-but-UNPARSEABLE timestamp
-#      must fall back to the 'Unknown' sentinel instead of throwing a terminating
-#      exception that would drop the whole collector (the run's
-#      $ErrorActionPreference = 'SilentlyContinue' does NOT suppress a .NET cast
-#      throw). Exercises the catch path directly - the scenario matrix only proves
-#      the happy path, and only for collectors whose resource type happens to
-#      exist in the test subscription.
-#
-#   2. Get-AzComputeResourceSku try/catch (VM / VMSS) - a SKU-API failure must
-#      leave the SKU map empty (vCPUs/RAM -> '0') and let the collector still emit,
-#      not abort the scale-set / VM section.
-#
-# Pure/offline: each collector is invoked through its standard 4-param contract
-# (param($Sub, $Resources, $Task, $ResourceIdDictionary)) with a synthetic
-# resource. No Azure session is needed - Get-AzComputeResourceSku is replaced with
-# a Pester Mock so the SKU path is deterministic regardless of ambient auth
-# (precedent for mocking an Az cmdlet in a focused error-handling unit test:
-# Tests/AzGraphQueryRetry.Tests.ps1 mocks Search-AzGraph). $ResourceIdDictionary
-# is passed $null so the obfuscation / Protect-FreeTextValue branches are skipped.
-# Offline also means MODULE-free, not just session-free: Pester's Mock resolves the
-# target command and throws when it does not exist, so a host without Az.Compute
-# would fail every mocking case here. The BeforeAll below stubs the cmdlet when it
-# is absent, which is what makes that promise true on such a host.
-# =============================================================================
+# OFFLINE unit tests for two collector guards: (1) an unparseable creation timestamp must fall back to the 'Unknown' sentinel, since a .NET cast throw is NOT suppressed by $ErrorActionPreference='SilentlyContinue'; (2) a Get-AzComputeResourceSku failure must leave the SKU map empty (vCPUs/RAM -> '0') yet still emit. Pester Mock resolves the command first, so the BeforeAll stubs the cmdlet when Az.Compute is absent.
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
@@ -66,28 +39,8 @@ BeforeAll {
         & $Full -Sub $script:Sub -Resources $Resources -Task 'Processing' -ResourceIdDictionary $null
     }
 
-    # Stub Get-AzComputeResourceSku so the SKU path is mockable even on a host
-    # without Az.Compute installed. Pester's Mock RESOLVES the command first and
-    # throws if it does not exist, which failed every test in both mocking Describes
-    # below on a Windows host carrying only Az.Accounts + Az.ResourceGraph - the
-    # header's 'no Azure session is needed' promise needs the MODULE to be optional
-    # too, not just the auth. Defined ONLY when absent so a real cmdlet is never
-    # shadowed where Az.Compute IS present; the tests Mock it either way.
-    # [CmdletBinding()] so the collectors' '-ErrorAction Stop' binds as a common
-    # parameter. Same idiom as Tests/SubscriptionCoverage.Tests.ps1.
-    #
-    # Tradeoff of guarding rather than always defining: on a host that DOES have
-    # Az.Compute, an unmocked call would reach the real cmdlet and the live API, so
-    # the offline promise holds there by mock discipline rather than by construction.
-    # Guarding is still preferred - it never shadows a real cmdlet for the whole
-    # container, and under Mock both hosts resolve to the same replaced command.
-    #
-    # Write-Warning BEFORE the throw is load-bearing, not decoration. Both callers
-    # wrap this call in try/catch and trace with Write-Verbose, so a bare throw from
-    # an unmocked stub would be SWALLOWED and would look exactly like the legitimate
-    # SKU-failure path (CPU/Memory '0'), i.e. a silent false PASS. They suppress
-    # DebugPreference only, never WarningPreference, so a warning still reaches the
-    # Pester output even though the throw itself is caught.
+    # Stub Get-AzComputeResourceSku ONLY when absent, so Pester Mock resolves even without Az.Compute and a real cmdlet is never shadowed where it IS present. [CmdletBinding()] so the collectors' '-ErrorAction Stop' binds.
+    # Write-Warning BEFORE the throw is load-bearing: both callers catch the throw, so without the warning an unmocked stub failure would look exactly like the legitimate SKU-failure path (CPU/Memory '0') - a silent false PASS. They suppress DebugPreference, never WarningPreference.
     if (-not (Get-Command Get-AzComputeResourceSku -ErrorAction SilentlyContinue))
     {
         function Get-AzComputeResourceSku
@@ -120,37 +73,8 @@ $script:DateCases = @(
     @{ Name = 'Purview'; Path = 'Data/Purview.ps1'; Type = 'microsoft.purview/accounts'; Field = 'createdAt'; Key = 'CreatedTime'; Extra = @{} }
 )
 
-# The malformed case covers an UNPARSEABLE timestamp. These cover the three
-# present-but-BLANK shapes, which were reported as an unguarded gap on the grounds
-# that the guard's 'if ($null -ne ...)' check only handles null.
-#
-# It is not a gap, but the mechanism differs by shape, and the difference is worth
-# stating precisely because this is the durable record of why that report was wrong:
-#
-#   - $null            reaches the else branch and never reaches the cast at all.
-#                      For this shape the null check IS the guard. The report already
-#                      conceded this one; it is pinned here only for completeness.
-#   - '' and '   '     pass the null check, throw on the [datetime] cast, and are
-#                      caught. These two are what actually rebut the report.
-#
-# Coverage honesty: '' and '   ' traverse the same catch branch the malformed case
-# already exercises, so their value is documentary - they pin the specific disputed
-# inputs. Only $null exercises a branch (else) that no other It reaches.
-#
-# Shape note: 12 of the 13 collectors below write the guard as a single-line
-# try { if (...) { cast } else { 'Unknown' } } catch { 'Unknown' }. AppInsights uses
-# a statement form instead ($Timecreated = 'Unknown'; if (...) { try { ... } catch
-# { ... } }). Behaviour is identical; the shape is not uniform, so do not "verify"
-# this note by grepping for one spelling.
-#
-# One input does NOT produce the sentinel: a NUMBER. [datetime]0 casts via ticks to
-# '0001-01-01 00:00'. Deliberately unguarded and deliberately untested - ARM sends a
-# string or omits the field, so a guard would defend an impossible input and a test
-# would pin current behaviour on one, making its own deletion the only way to fix it.
-#
-# Built as a discovery-time cross-product rather than a loop inside one It: Pester's
-# Should throws, so a loop would abort on the first failing shape and never evaluate
-# the other two, and the failure would not name which shape broke.
+# Blank-timestamp cases: '' and '   ' pass the null check, throw on the [datetime] cast, and are caught ('Unknown'); $null instead hits the else branch (there the null check IS the guard). A NUMBER is deliberately unguarded/untested ([datetime]0 casts via ticks to a real date; ARM sends a string or omits the field).
+# Built as a discovery-time cross-product, not a loop inside one It: a Pester Should throws, so a loop would abort on the first failing shape without evaluating the others or naming which broke.
 $script:BlankCases = foreach ($Case in $script:DateCases)
 {
     foreach ($Blank in @(

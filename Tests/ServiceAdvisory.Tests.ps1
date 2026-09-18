@@ -1,31 +1,5 @@
-# =============================================================================
-# SOURCE GUARDS for the -Service advisory.
-#
-# -Service scopes the INVENTORY phase only. The metrics and consumption phases
-# still run for the WHOLE subscription, so ResourceInventory.ps1 warns about it
-# (advisory only - the skips are NOT enforced, because the Merge-RecoveryData
-# recovery recipe intentionally runs -Service WITHOUT them).
-#
-# Why these are SOURCE guards rather than output assertions: the advisory is a
-# console/log Warning, not a field in any artifact, so no generated zip can prove
-# it. The behaviour also cannot be reached by dot-sourcing - it lives inside
-# CreateResourceJobs() nested in ExecuteInventoryProcessing(), whose body
-# authenticates and runs a whole inventory. Same rationale and same shape as the
-# 'Discovery failure is not survivable (source guard)' block in
-# AzGraphQueryRetry.Tests.ps1.
-#
-# Why this file exists at all: this advisory has ALREADY shipped a bug of exactly
-# this class. It was originally ONE static string behind a state-dependent gate,
-# so '-Service X -SkipMetrics' was told that metrics still ran and told to add a
-# switch it had already passed. Commit a748452 made the phase list and the skip
-# list state-derived, but left a third clause hardcoded - which reintroduced the
-# same wrong-for-this-state claim in a smaller form. Nothing caught either one:
-# the matrix's only -Service scenario passes BOTH skips, which is the one
-# combination in which this warning is SUPPRESSED, so the matrix never emits it.
-# These guards are what make the per-clause accuracy verifiable at all.
-#
-# OFFLINE. No Azure, no zip, no env vars.
-# =============================================================================
+# SOURCE GUARDS for the -Service advisory. -Service scopes the INVENTORY phase only; metrics/consumption still run whole-subscription, so ResourceInventory.ps1 warns (advisory only, NOT enforced - Merge-RecoveryData runs -Service without the skips).
+# These are source guards because the advisory is a console Warning (no artifact field, unreachable by dot-sourcing) and this bug class has already shipped once. OFFLINE - no Azure, zip, or env.
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
@@ -84,15 +58,8 @@ Describe '-Service advisory: per-phase accuracy (source guard)' {
         $script:InvSrc | Should -Not -Match 'which also scopes metrics'
     }
 
-    # BINDING GUARD. The tests above prove the two lists are state-derived and the
-    # count gate exists, but none of them touches the emitted string. A regression
-    # that keeps $UnscopedPhases/$SuggestedSkips and the gate yet hardcodes the
-    # message body (placeholders replaced by a literal 'metrics, consumption' /
-    # '-SkipMetrics -SkipConsumption') would reintroduce the exact wrong-for-state
-    # claim this file exists to prevent, and every assertion above would still pass.
-    # Bind the emitted Warning to the -f interpolation of BOTH derived lists so a
-    # static body fails here. Single-quoted regex: '$' is literal, per the sigil
-    # trap documented on the derivation test above.
+    # BINDING GUARD: the other tests prove the lists are state-derived and the gate
+    # exists but none touches the emitted string, so a hardcoded message body would pass them all yet re-ship the wrong-for-state claim. Bind the Warning to the -f interpolation of BOTH derived lists.
     It 'interpolates the derived phase and skip lists into the emitted advisory (not a hardcoded body)' {
         $script:InvSrc | Should -Match '(?s)-Service scopes the INVENTORY phase only[\s\S]*?\{0\}[\s\S]*?\{1\}[\s\S]*?-f\s*\(\$UnscopedPhases\s*-join[\s\S]{0,40}?\),\s*\(\$SuggestedSkips\s*-join'
     }

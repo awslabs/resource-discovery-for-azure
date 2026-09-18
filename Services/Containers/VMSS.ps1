@@ -19,17 +19,8 @@ if ($Task -eq 'Processing')
         }
         catch
         {
-            # A per-region SKU lookup failure (throttle / transient / permission) must
-            # not abort the whole VMSS collector. A terminating .NET exception here is
-            # NOT suppressed by the run's $ErrorActionPreference = 'SilentlyContinue',
-            # so it would otherwise propagate and drop the entire scale-set section.
-            # Skip this region's SKU map instead; any scale set whose size is not in
-            # the map falls back to '0' vCPUs/RAM below. Leave a low-noise trace
-            # (silent unless -Verbose) so a region-wide SKU failure is
-            # distinguishable from genuinely-unknown sizes. Write-Verbose (not
-            # Write-Warning) so a broad SKU-API failure across many regions cannot
-            # flood a normal run; the finally still restores DebugPreference on
-            # every path.
+            # Catch per-region SKU lookup failure so it can't abort the whole VMSS collector (a terminating
+            # exception isn't caught by SilentlyContinue). Skip the region's map (sizes fall back to '0'); Verbose-only trace.
             Write-Verbose ("VMSS: SKU lookup skipped for '{0}': {1}. vCPUs/RAM fall back to '0' for scale sets in that region." -f $location, $_.Exception.Message)
             $Skus = $null
         }

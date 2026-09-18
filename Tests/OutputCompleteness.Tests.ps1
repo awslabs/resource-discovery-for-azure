@@ -61,22 +61,8 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
-        # The report members are .html / .json / .csv. Permitted .log files depend
-        # on whether the bundle is obfuscated:
-        #
-        #   Diagnostics_*.log - ALWAYS allowed. Curated + dictionary-scrubbed, and
-        #     deliberately kept as .log so the ingestion pipeline does not
-        #     table-ingest it.
-        #   DebugLog_*.log    - allowed ONLY in a NON-obfuscated bundle. It carries
-        #     real service/resource names and raw exception text, which adds no new
-        #     class of identifier to a bundle whose report is already
-        #     non-obfuscated, and it is what makes a thin report diagnosable
-        #     without a second Collect-SupportLogs round-trip. In an OBFUSCATED
-        #     bundle it must NEVER appear - that bundle's whole guarantee is that it
-        #     carries no real identifiers, and the debug log is not scrubbed.
-        #
-        # Every other .log (ErrorLog_*, Heartbeat_*) and the transcript .txt stay
-        # LOCAL-only in both modes.
+        # Report members are .html/.json/.csv. Diagnostics_*.log is always allowed (scrubbed; kept .log so the pipeline won't table-ingest it);
+        # DebugLog_*.log only in a NON-obfuscated bundle (it carries real, unscrubbed identifiers); every other .log and the transcript stay local-only.
         $AllowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles)
         {
@@ -127,16 +113,8 @@ Describe "Inventory JSON Structure" {
         $Populated.Count | Should -BeGreaterThan 0 -Because "At least one service should have discovered resources"
     }
 
-    # Title says ID and Location ONLY, and deliberately does not claim Name. A plain
-    # 'Name' column is NOT universal: Services/Compute/ARO.ps1 and
-    # Services/Storage/NetApp.ps1 emit none, and Services/Infrastructure/AutomationAcc.ps1
-    # uses the domain-specific AutomationAccountName / RunbookName instead. So asserting
-    # Name here would fail on real output.
-    #
-    # The previous title read "ID, Name, and Location" while the body checked only two of
-    # the three, which is the worse failure of the two available: a reader trusts the
-    # title, and the obvious "fix" is to add the missing assertion - which then breaks on
-    # three legitimate collectors and looks like a collector bug rather than a test bug.
+    # Asserts ID and Location only, NOT Name: a plain 'Name' column is not universal (ARO.ps1 / NetApp.ps1 emit none,
+    # AutomationAcc.ps1 uses AutomationAccountName/RunbookName), so asserting Name would fail on real output.
     It "Every resource should have ID and Location fields" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {

@@ -1,32 +1,5 @@
-# Requires -Modules Pester
-# =============================================================================
-# AzGraphQueryRetry.Tests.ps1
-#
-# Unit tests for the bounded-retry behavior of Invoke-AzGraphQuerySafe
-# (Functions/ResourceInventory.Functions.ps1) - the single wrapper every
-# resource-discovery Search-AzGraph call goes through.
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# A dropped/changed network mid-run (VPN switch), ARM throttling, or a 5xx blip
-# during discovery used to throw on the first failure and fail the whole
-# subscription. The wrapper now retries TRANSIENT failures with exponential
-# backoff + jitter, but fails FAST + LOUD on clearly-permanent failures (auth
-# denied, malformed KQL). None of that is observable in the output zip, so -
-# unlike the collector/output tests - this is a function-level unit test in the
-# same style as DiagnosticScrub.Tests.ps1 (which dot-sources this same file).
-#
-# The seam: `Search-AzGraph` is mocked to simulate each failure class (it THROWS
-# on failure, unlike the old az CLI which set a non-zero exit code), and
-# `Start-Sleep` is mocked so the backoff waits are not actually incurred (tests
-# run in ms, not the many minutes of real backoff a full 30-retry exhaustion
-# would incur). Assertions are on OBSERVABLE
-# behavior: how many times Search-AzGraph was invoked, whether/how long it
-# slept, and what was thrown.
-#
-# No live Azure. Run with:
-#   Invoke-Pester ./Tests/AzGraphQueryRetry.Tests.ps1 -Output Detailed
-# =============================================================================
+# Offline unit tests for Invoke-AzGraphQuerySafe's bounded retry: transient failures retry with
+# backoff, permanent ones fail fast. Search-AzGraph and Start-Sleep are mocked so the suite runs offline in ms with no live Azure.
 
 BeforeAll {
     $FunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/ResourceInventory.Functions.ps1'
@@ -41,40 +14,16 @@ BeforeAll {
     if (-not (Test-Path $CommonFile)) { throw "Common.Functions.ps1 not found at $CommonFile" }
     . $CommonFile
 
-    # Offline-portability shim: Pester's `Mock -CommandName Search-AzGraph`
-    # resolves the command at mock-setup time. On a clean box / CI without the
-    # Az.ResourceGraph module installed that would throw CommandNotFoundException
-    # before any test runs. Declaring a no-op `Search-AzGraph` function here gives
-    # Mock something to intercept, so the suite is a genuine offline unit test
-    # that does not depend on Az.ResourceGraph being installed.
-    # [CmdletBinding()] so the shim accepts the common parameters the function under
-    # test passes (-ErrorAction Stop); a simple function would reject them. The
-    # named parameters are declared so a Mock body can assert on the WINDOW being
-    # requested (First/Skip), which the oversized-response tests below rely on.
+    # No-op Search-AzGraph shim so Mock has something to intercept without Az.ResourceGraph installed
+    # (Mock resolves the command at setup time); [CmdletBinding()] and named params let it accept -ErrorAction and assert the requested First/Skip window.
     function Search-AzGraph
     {
         [CmdletBinding()]
         param($Query, $Subscription, $First, $Skip, $ManagementGroup, $SkipToken)
     }
 
-    # Emit rows the way the REAL cmdlet does: ONE IEnumerable object, not N streamed
-    # rows. Hoisted to file scope because the mocks that most need it are in earlier
-    # Describes than the one it was first written for.
-    #
-    # This shape is the whole reason a real data-loss bug hid behind 48 passing
-    # tests. A mock returning a plain ARRAY is streamed by PowerShell as N separate
-    # outputs, so `@(Search-AzGraph ...)` flattened correctly under test while the
-    # real single-object response was collected UNFLATTENED in production. Mocks that
-    # return arrays therefore cannot see that class of defect at all.
-    #
-    # The unary comma is what produces one object: it wraps the list in a 1-element
-    # array which PowerShell unrolls back to the single list. Write-Output
-    # -NoEnumerate cannot be used - its -InputObject is typed PSObject[] and binding
-    # a generic List throws "Argument types do not match".
-    #
-    # Data is a SEPARATE list holding the same rows, deliberately not a self
-    # reference: pointing Data at its own container makes the object circular, and
-    # the -Lowercase path runs it through ConvertTo-Json -Depth 100.
+    # Emit rows as the real cmdlet does - ONE IEnumerable object (unary comma), not an array: a mock
+    # returning an array streams as N outputs and flattens under test, hiding the unflattened-in-production data-loss bug. Data is a separate list (not self-referential) to stay non-circular under ConvertTo-Json.
     function script:New-FakeGraphResponse
     {
         param([object[]]$Rows, [string]$SkipToken = $null)
@@ -225,13 +174,8 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
         }
 
         It 'every backoff is the doubled (throttled) duration, >= 2s' {
-            # Non-throttled backoff starts 1,2,4 (first < 2). Throttled doubles it,
-            # so the FIRST sleep is >= 2s; assert every one of the 30 throttled
-            # sleeps is >= 2s. Proves the throttle branch took the longer-backoff
-            # path (the per-attempt cap means later sleeps sit at the 60s ceiling).
-            # These string-throw mocks carry no .Response, so Get-RetryWaitSeconds
-            # finds no server header and returns the exponential fallback unchanged
-            # - the timing assertion still holds.
+            # Assert every one of the 30 throttled sleeps is >= 2s: throttling doubles the non-throttled
+            # 1,2,4 backoff, proving the throttle branch ran (string-throw mocks carry no .Response, so the exponential fallback is used unchanged).
             try { Invoke-AzGraphQuerySafe -Query 'resources' | Out-Null } catch { }
             Should -Invoke -CommandName Start-Sleep -Exactly -Times 30 -ParameterFilter { $Seconds -ge 2 }
         }
@@ -241,23 +185,14 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
 Describe 'Get-RetryWaitSeconds header honoring' {
 
     BeforeAll {
-        # Build a synthetic throttling exception whose .Response.Headers (or
-        # .InnerException.Response.Headers) mimics the real shape: each header
-        # value is an IEnumerable[string] (a single-element string array).
-        # PSCustomObject property access with no StrictMode returns $null for
-        # absent members, so the helper's null guards exercise the same fallback
-        # path they do in production. Defined in BeforeAll so it is available to
-        # the It scriptblocks at run time (Pester v5 scoping).
+        # Build a synthetic throttling exception whose .Response.Headers mimics the real shape (values
+        # as string arrays) so the helper's null guards hit the same fallback path; defined in BeforeAll for Pester v5 It-scope visibility.
         function New-FakeThrottleException
         {
             param([hashtable]$Headers, [switch]$OnInner)
 
-            # A PowerShell [hashtable] is NOT auto-enumerated by foreach, but the
-            # real ARG/consumption/metrics header containers are a
-            # Dictionary[string,IEnumerable[string]] / HttpResponseHeaders, which
-            # DO enumerate as KeyValuePair<string,IEnumerable[string]>. Convert to
-            # a generic Dictionary (values as string[]) so the fake faithfully
-            # matches the shape Get-RetryWaitSeconds walks in production.
+            # Use a generic Dictionary (string[] values), not a hashtable: foreach does not enumerate a
+            # hashtable, but the real header containers enumerate as KeyValuePairs - the shape Get-RetryWaitSeconds walks in production.
             $Dict = [System.Collections.Generic.Dictionary[string, object]]::new()
             foreach ($Key in $Headers.Keys) { $Dict[$Key] = [string[]]@($Headers[$Key]) }
             $ResponseObj = [pscustomobject]@{ Headers = $Dict }
@@ -323,39 +258,8 @@ Describe 'Get-RetryWaitSeconds header honoring' {
     }
 }
 
-# =============================================================================
-# Oversized-response handling, and the retry bound under the PRODUCTION
-# error preference.
-#
-# WHY THESE EXIST
-# ---------------
-# The tests above validate the retry ceiling, and they passed - while the ceiling
-# was inert in production. Pester runs at the default $ErrorActionPreference of
-# 'Continue', and every assertion above reaches the function through
-# `{ ... } | Should -Throw` or a `try { } catch { }`. Under either of those a
-# `throw` is terminating, so the ceiling appeared to work.
-#
-# A normal run is different: ResourceInventory.ps1 sets
-# $ErrorActionPreference = 'SilentlyContinue', and the discovery loops call the
-# wrapper with no local guard. Under that preference a terminating error with no
-# catch anywhere up the stack does NOT stop anything - execution continues at the
-# next statement. The retry loop used to be `for (;;)` whose only exits were
-# `break` on success and a `throw` on failure, so on a permanent failure the
-# throw fell through, the backoff ran, and the loop went round again forever. A
-# subscription holding an unfetchable page hung indefinitely.
-#
-# So the first Context below pins the bound at the preference production actually
-# uses, with no caller guard - the condition the old tests never reproduced.
-#
-# The rest cover Resource Graph's 16 MB response cap. A full page normally sits
-# well under it, but a type whose payload is hundreds of KB each
-# (microsoft.resources/templatespecs/versions, up to ~794 KB) can push one page
-# over. `order by id asc` makes those resources contiguous, so the whole
-# oversize lands in a single page that can never succeed. The wrapper now
-# re-fetches that window as smaller sub-windows and still returns the FULL window,
-# because the callers advance their offset by the page size they asked for - a
-# short page would silently skip resources.
-# =============================================================================
+# Pins the retry bound under production's 'SilentlyContinue' preference with no caller guard - where the old
+# for(;;) loop's throw fell through and hung forever - and covers the 16 MB response cap: an oversized page is re-fetched as sub-windows but still returns the FULL window (callers advance offset by the requested page size).
 
 Describe 'Retry bound under the production error preference' {
 
@@ -480,12 +384,8 @@ Describe 'Oversized Resource Graph response (16 MB cap)' {
         }
 
         It 'does not burn the transient-retry budget on the oversized attempts' {
-            # An oversized response is not transient; retrying it unchanged is futile.
-            # Each refused window must be attempted once, then split.
-            # 1000 is refused and splits to 500+500; each 500 is refused and splits
-            # to 250+250. So exactly 3 refused attempts (1000, 500, 500) and 4
-            # accepted (four 250s) - 7 requests in total. Each refused window is
-            # attempted ONCE; retrying an oversized response unchanged is futile.
+            # An oversized response is not transient: attempt each window once, then split.
+            # 1000 -> 500+500 -> four 250s = 3 refused + 4 accepted = 7 requests; retrying an oversized window unchanged is futile.
             $script:Requests.Clear()
             $null = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 0
             @($script:Requests | Where-Object { $_.First -gt 250 }).Count | Should -Be 3
@@ -548,27 +448,8 @@ Describe 'Discovery failure is not survivable (source guard)' {
     }
 }
 
-# =============================================================================
-# Structured error classification (Get-AzGraphErrorInfo)
-#
-# WHY THIS EXISTS
-# ---------------
-# The native cmdlet's exception .Message carries NO detail. Verified against live
-# Azure: a malformed query, a denied subscription and an oversized response all
-# produce the same line -
-#     Operation returned an invalid status code 'BadRequest'
-# The reason is only in the typed body:
-#     $Exception.Body.Error.Code            -> 'BadRequest'
-#     $Exception.Body.Error.Details[].Code  -> 'ResponsePayloadTooLarge', 'InvalidQuery', ...
-#     $Exception.Response.StatusCode        -> 400
-# So a message-text match for 'ResponsePayloadTooLarge' would NEVER fire on the
-# native path, and the page-splitting fix would never engage. These tests pin the
-# classification to codes and HTTP status.
-#
-# The exceptions here are duck-typed stand-ins carrying the same property shape,
-# because constructing a real ErrorResponseException offline is not possible. The
-# shape itself was confirmed against a live Search-AzGraph failure.
-# =============================================================================
+# Pins Get-AzGraphErrorInfo to error CODES and HTTP status, not message text: the native .Message is identical
+# ('invalid status code BadRequest') for malformed/denied/oversized, so a text match for 'ResponsePayloadTooLarge' would never fire and page-splitting would never engage. Exceptions are duck-typed stand-ins (a real one can't be built offline).
 
 Describe 'Get-AzGraphErrorInfo' {
 
@@ -665,21 +546,8 @@ Describe 'Get-AzGraphErrorInfo' {
     }
 }
 
-# =============================================================================
-# Consumption paging token isolation (source guard)
-#
-# $UsageData holds the LAST page fetched and is the source of the paging token for
-# the next request. It is not scoped to a single subscription's paging loop, so a
-# subscription that failed part-way through its pages used to leave its live
-# ContinuationToken in place - and the NEXT subscription's first billing request
-# went out carrying a token belonging to a different subscription. That either
-# fails outright or, worse, resumes another subscription's page sequence and
-# attributes its billing rows to the wrong subscription.
-#
-# The behaviour lives in ResourceInventory.ps1's orchestration, which cannot be
-# dot-sourced (its body authenticates and runs a whole inventory), so this is a
-# source guard - the same approach the discovery-failure guard above uses.
-# =============================================================================
+# Source guard: $UsageData's ContinuationToken must be reset per subscription. It holds the last page and is
+# not sub-scoped, so a mid-page failure once leaked a live token into the NEXT subscription's first billing request, misattributing its rows. The behaviour lives in ResourceInventory.ps1 orchestration, which can't be dot-sourced.
 
 Describe 'Consumption paging token does not leak between subscriptions' {
 
@@ -703,26 +571,8 @@ Describe 'Consumption paging token does not leak between subscriptions' {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Regression: the response object must be FLATTENED to rows at the boundary.
-#
-# Every other mock in this file returns a plain PSCustomObject ARRAY, which
-# PowerShell streams as N output objects. The real Search-AzGraph does NOT do
-# that - it writes ONE PSResourceGraphResponse object (an IEnumerable holding the
-# rows). That difference made the suite blind to a real data-loss bug:
-#
-#   $Rows = @(Search-AzGraph ...)    collected the RESPONSE, not the rows.
-#   Get-AzGraphRowWindow then accumulated one response object PER SUB-WINDOW
-#   after a 16 MB payload split, and the -Lowercase ConvertTo-Json round-trip
-#   turned those N responses into N NESTED arrays. $Global:Resources received
-#   arrays instead of resources, so every resource in the split window silently
-#   disappeared from the report - no error, no warning.
-#
-# These tests reproduce the real "one enumerable object" output shape via the
-# unary comma (see New-FakeGraphResponse), which is the ONLY way to catch this
-# in-process. They fail against the wrapped form and pass against the flattened
-# one.
-# ---------------------------------------------------------------------------
+# Regression: the response must be FLATTENED to rows at the boundary. Real Search-AzGraph returns ONE IEnumerable
+# response (not N streamed rows); @(Search-AzGraph) collected the response, and after a 16 MB split ConvertTo-Json turned N responses into N nested arrays, silently dropping resources. Reproduced via the unary-comma single-object shape, the only way to catch it in-process.
 Describe 'Search-AzGraph response is flattened to rows at the boundary' {
 
     BeforeAll {
@@ -798,12 +648,8 @@ Describe 'Search-AzGraph response is flattened to rows at the boundary' {
 
         It 'covers the window exactly once, with no gap and no overlap' {
             $Result = Invoke-AzGraphQuerySafe -Query 'resources | order by id asc' -First 1000 -Skip 116000 -Lowercase
-            # Index the FLAT array rather than a member-enumerated projection.
-            # `$Result.data | ForEach-Object { $_.id }` would pass even against the
-            # nested-array bug, because member enumeration reaches through the
-            # nesting and still yields the right ids - so it would not discriminate.
-            # Asserting the element count and indexing [0]/[-1] on the array itself
-            # fails when the elements are per-sub-window arrays instead of rows.
+            # Index the FLAT array and assert element count / [0]/[-1]: piping $Result.data | ForEach-Object { $_.id }
+            # would pass even against the nested-array bug because member enumeration reaches through the nesting, so it wouldn't discriminate.
             $Rows = @($Result.data)
             $Rows.Count | Should -Be 1000 -Because 'nested per-sub-window arrays would collapse this to the sub-window count'
             $Rows[0].id | Should -Be '/r/116000'

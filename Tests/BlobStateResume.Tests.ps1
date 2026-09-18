@@ -1,28 +1,5 @@
-# Blob-backed resume state - live pod-reschedule cycle (opt-in / live-sandbox)
-#
-# Exercises the AKS durability path end to end against a REAL Azure Blob
-# container, using the actual shipping helpers (New-StateBlobContext,
-# Save-StateBlob, Read-StateBlob, Get-StateBlobName, Get-SubscriptionDelta):
-#
-#   pod A: write resume state through to blob (write-through)
-#   pod death: local state is destroyed (emptyDir gone)
-#   pod B (rescheduled, same shard): read the state BLOB-FIRST and recover
-#   reconcile: classify a moved end-universe (Vanished / New / Incomplete)
-#
-# This is the automated form of the manual pod-death verification. The project
-# does NOT mock Azure cmdlets, so this is a LIVE-SANDBOX test: it is opt-in and
-# self-skips unless the target is provided, keeping CI (which has no Azure)
-# green. It never runs the wrapper - only the state helpers - so its only cost
-# is a few tiny blob writes/deletes that it cleans up.
-#
-# Enable by pointing it at a storage account the current Az identity can write
-# (needs "Storage Blob Data Contributor"):
-#   $env:TEST_STATE_BLOB_ACCOUNT = '<storageaccount>'      # required to run
-#   $env:TEST_STATE_BLOB_CONTAINER = 'rda-output'          # optional (default)
-#   Invoke-Pester ./Tests/BlobStateResume.Tests.ps1 -Output Detailed
-#
-# Leaves no artifacts: every blob it writes is removed in AfterAll, under a
-# unique per-run _state test prefix so it never touches real run state.
+# Live-sandbox end-to-end test of the AKS blob-backed resume path via the real state helpers (write-through, pod death, blob-first recovery, reconcile).
+# Opt-in: self-skips unless $env:TEST_STATE_BLOB_ACCOUNT is set; cleans up all blobs under a unique per-run _state prefix so it never touches real run state.
 
 # Evaluated at DISCOVERY time so -Skip can gate the whole suite when the target
 # is absent (a BeforeAll-set variable is too late for -Skip).

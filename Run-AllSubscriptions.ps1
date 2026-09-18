@@ -292,7 +292,7 @@ catch
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -302,7 +302,7 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 
 # Shared cross-cutting helpers (Write-RdaProgress). Same dot-source pattern.
 $CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -358,7 +358,7 @@ $WrapperTranscriptStarted = $false
 $WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 try
 {
-    Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
+    Start-Transcript -LiteralPath $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
     $WrapperTranscriptStarted = $true
     Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
 }
@@ -948,7 +948,7 @@ if ($Resume -or $ResumeFailedOnly)
         {
             try
             {
-                $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+                $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw | ConvertFrom-Json
                 if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
             }
@@ -1326,7 +1326,7 @@ if ($ParallelStreams -gt 1 -and -not (Test-BackgroundJobSupport))
 $Service = Expand-ServiceFilter -Service $Service
 if ($Service.Count -gt 0)
 {
-    $AvailableServices = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object -Unique)
+    $AvailableServices = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object -Unique)
     $UnknownServices = @($Service | Where-Object { $_ -notin $AvailableServices })
     if ($UnknownServices.Count -gt 0)
     {
@@ -1542,9 +1542,9 @@ if ($ParallelStreams -le 1)
                 # the preferred location was unwritable and the run fell back, the old
                 # inline copy measured free space on a directory this run never used.
                 $DiagRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
-                if (-not [string]::IsNullOrWhiteSpace($DiagRoot) -and (Test-Path $DiagRoot))
+                if (-not [string]::IsNullOrWhiteSpace($DiagRoot) -and (Test-Path -LiteralPath $DiagRoot))
                 {
-                    $RootDrive = (Get-Item $DiagRoot).PSDrive
+                    $RootDrive = (Get-Item -LiteralPath $DiagRoot).PSDrive
                     if ($RootDrive)
                     {
                         $DiagLines += "Free disk on $($RootDrive.Name): (MB): $([math]::Round($RootDrive.Free / 1MB, 1))"
@@ -1567,14 +1567,14 @@ if ($ParallelStreams -le 1)
                     $Resolved = Get-RdaInventoryRoot
                     if ($Resolved.Ok) { $FailRoot = $Resolved.Path }
                 }
-                if (-not [string]::IsNullOrWhiteSpace($FailRoot) -and -not (Test-Path $FailRoot))
+                if (-not [string]::IsNullOrWhiteSpace($FailRoot) -and -not (Test-Path -LiteralPath $FailRoot))
                 {
                     try { New-Item -ItemType Directory -Path $FailRoot -Force -ErrorAction Stop | Out-Null }
                     catch { Write-Host ("WARNING: could not create {0} for the failures log: {1}" -f $FailRoot, $_.Exception.Message) -ForegroundColor Yellow }
                 }
                 $DiagFile = Join-Path $FailRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
             }
-            try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+            try { $DiagLines | Out-File -LiteralPath $DiagFile -Append -Encoding utf8 }
             catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
             $FailedSubscriptions += $Sub.Name
@@ -1669,7 +1669,7 @@ else
                 {
                     $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
                 }
-                try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
+                try { $DiagLines | Out-File -LiteralPath $DiagFile -Append -Encoding utf8 }
                 catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
                 $FailedSubscriptions += $Sub.Name
                 # Mirror the sequential branch: persist failure to the
@@ -1701,9 +1701,9 @@ else
             # No snapshot was successfully written, so no security cleanup needed -
             # but Save-AzContext can write a partial file before throwing on some
             # error paths, so still try to remove it.
-            if (Test-Path -Path $AzContextSnapshot)
+            if (Test-Path -LiteralPath $AzContextSnapshot)
             {
-                try { Remove-Item -Path $AzContextSnapshot -Force }
+                try { Remove-Item -LiteralPath $AzContextSnapshot -Force }
                 catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
             }
             Exit-Wrapper -Code 1
@@ -1719,7 +1719,7 @@ else
         try
         {
             $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
-            if (-not (Test-Path -Path $WorkerScript -PathType Leaf))
+            if (-not (Test-Path -LiteralPath $WorkerScript -PathType Leaf))
             {
                 Write-Host ("ERROR: parallel worker script not found at {0}." -f $WorkerScript) -ForegroundColor Red
                 Write-Host "Make sure Run-AllSubscriptions.Stream.ps1 is present alongside Run-AllSubscriptions.ps1, or re-run without -ParallelStreams." -ForegroundColor Yellow
@@ -1853,7 +1853,7 @@ else
             # same shape as a sequential run.
             foreach ($S in $StreamSummaries)
             {
-                if (-not (Test-Path -Path $S.SummaryPath -PathType Leaf))
+                if (-not (Test-Path -LiteralPath $S.SummaryPath -PathType Leaf))
                 {
                     Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
                     $FailedSubscriptions += ("stream-{0} (no summary)" -f $S.StreamId)
@@ -1861,7 +1861,7 @@ else
                 }
                 try
                 {
-                    $StreamSummary = Get-Content -Path $S.SummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $StreamSummary = Get-Content -LiteralPath $S.SummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 }
                 catch
                 {
@@ -1947,7 +1947,7 @@ else
                 # accumulator so the final summary surfaces the path. The wrapper's
                 # existing $DiagFile was nullable; using a single concatenated log
                 # avoids breaking that contract.
-                if ((Test-Path -Path $S.FailuresPath -PathType Leaf) -and ((Get-Item $S.FailuresPath).Length -gt 0))
+                if ((Test-Path -LiteralPath $S.FailuresPath -PathType Leaf) -and ((Get-Item -LiteralPath $S.FailuresPath).Length -gt 0))
                 {
                     if ($null -eq $DiagFile)
                     {
@@ -1955,7 +1955,7 @@ else
                     }
                     try
                     {
-                        Get-Content -Path $S.FailuresPath -Raw | Out-File -FilePath $DiagFile -Append -Encoding utf8
+                        Get-Content -LiteralPath $S.FailuresPath -Raw | Out-File -LiteralPath $DiagFile -Append -Encoding utf8
                     }
                     catch
                     {
@@ -1971,9 +1971,9 @@ else
             # runs even on failure paths.
             foreach ($S in $StreamSummaries)
             {
-                if (Test-Path -Path $S.SummaryPath)
+                if (Test-Path -LiteralPath $S.SummaryPath)
                 {
-                    try { Remove-Item -Path $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+                    try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
                 }
             }
 
@@ -1987,7 +1987,7 @@ else
                 $PerStreamFile = $StreamFile.FullName
                 try
                 {
-                    $Obj = Get-Content -Path $PerStreamFile -Raw | ConvertFrom-Json
+                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw | ConvertFrom-Json
                     if ($null -ne $Obj.Completed)
                     {
                         $AllCompletedFromStreams += @($Obj.Completed)
@@ -2036,7 +2036,7 @@ else
             foreach ($StreamFile in $AllStreamFiles)
             {
                 $PerStreamFile = $StreamFile.FullName
-                try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                try { Remove-Item -LiteralPath $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
             }
             # Match the local cleanup for the per-stream BLOBS folded in above: once their progress is merged into the unified state (which IS preserved), remove the transient per-stream blobs so they do not accumulate under _state/ or resurrect stale FailedAttempts on a later run with a different stream count. Best-effort; the UNIFIED state blob is intentionally NOT deleted. $StreamBlobNames is in scope whenever $StateBlobParts is non-null.
             if ($null -ne $StateBlobParts)
@@ -2081,11 +2081,11 @@ else
             # token lifetime, but real). Best-effort: log if the delete fails
             # but do not propagate the error - that would mask the real exit
             # reason.
-            if (Test-Path -Path $AzContextSnapshot)
+            if (Test-Path -LiteralPath $AzContextSnapshot)
             {
                 try
                 {
-                    Remove-Item -Path $AzContextSnapshot -Force -ErrorAction Stop
+                    Remove-Item -LiteralPath $AzContextSnapshot -Force -ErrorAction Stop
                 }
                 catch
                 {
@@ -2150,9 +2150,9 @@ Write-Host "All subscriptions processed!" -ForegroundColor Green
 # === Per-subscription output verification (hard-stop): fail with exit code 2 (distinct from auth/runtime exit code 1) if any sub that ran to completion this invocation left no report archive on disk. Checks IDENTITY first (every successful sub records the exact $Global:ZipOutputFile it wrote, so a missing report is reported BY SUBSCRIPTION) and count second (catches an absent recorded path or a replaced archive).
 # Why it matters: the consolidation step below globs *.zip, so a per-sub zip missing for any reason (AV quarantine, Cloud Shell eviction between worker exit and consolidation, a worker that crashed after logging completion but before the zip flushed, a swallowed out-of-disk write) would otherwise be silently consolidated and reported as success. Invariant: ResourceInventory.ps1 always writes a per-sub zip on a successful return (even for zero resources), so expected zip count = subs in $SubResourceCounts (appended ONLY on the successful return path); failed subs are intentionally NOT counted since their zip state is unreliable and already surfaced by the failure summary.
 $ExpectedZipCount = @($SubResourceCounts).Count
-if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
+if ($ExpectedZipCount -gt 0 -and (Test-Path -LiteralPath $InventoryRoot -PathType Container))
 {
-    $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    $ActualSubZips = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     $ActualZipCount = $ActualSubZips.Count
 
     # A recorded path that is no longer a usable archive on disk is a NAMED missing report. "Usable" deliberately means present AND non-empty - the same standard ResourceInventory.ps1 applies to its own archive before reporting success - because a 0-byte file (a truncating quarantine or an eviction mid-flush) is not a report, and testing for presence only would let the two halves disagree.
@@ -2259,10 +2259,10 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
 # Consolidate per-subscription ZIPs into a single outer ZIP
 $OuterZipFile = $null
 
-if (Test-Path -Path $InventoryRoot -PathType Container)
+if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
 {
     # Filter ZIPs by current run timestamp only
-    $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    $SubZips = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     if ($SubZips.Count -gt 0)
     {
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
@@ -2270,7 +2270,7 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
         # -LiteralPath (as Reveal.ps1 uses) so a report folder/zip name containing
         # [ ] is not treated as a wildcard glob and silently dropped.
-        Compress-Archive -LiteralPath $SubZips.FullName -DestinationPath $OuterZipFile -Force
+        Compress-Archive -LiteralPath $SubZips.FullName -DestinationPath ([WildcardPattern]::Escape($OuterZipFile)) -Force
         # Deliberately NOT labelled "Reporting Data File": the inner per-sub script prints that label once PER SUBSCRIPTION for its own zip, so on a large tenant the operator saw the identical label N+1 times naming N+1 different files and could not tell which to send. This label names the bundle unambiguously - "created", not finished, since stages 2 and 3 below still fold in RunSummary.log, MainSummary.html, the VM CSV and per-sub HTML; the "What to send" block after stage 3 declares it the deliverable.
         Write-Host ("Consolidated bundle created: {0}" -f $OuterZipFile) -ForegroundColor Green
     }
@@ -2297,7 +2297,7 @@ if ($null -ne $OuterZipFile)
         # missing file throws into the surrounding catch and downgrades to
         # a warning.
         $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
-        if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
+        if (-not (Test-Path -LiteralPath $AllSubSummaryFunctions -PathType Leaf))
         {
             throw "Main summary functions not found at '$AllSubSummaryFunctions'."
         }
@@ -2383,11 +2383,11 @@ catch
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 {
     try
     {
-        Remove-Item -Path $ResumeStateFile -Force
+        Remove-Item -LiteralPath $ResumeStateFile -Force
         Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
     }
     catch
@@ -2503,7 +2503,7 @@ if ($EmptySubs.Count -gt 0)
     $EmptyDiag += ""
     try
     {
-        $EmptyDiag | Out-File -FilePath $DiagFile -Append -Encoding utf8
+        $EmptyDiag | Out-File -LiteralPath $DiagFile -Append -Encoding utf8
         Write-Host ("  Access verdict written to diagnostic log: {0}" -f $DiagFile) -ForegroundColor DarkGray
     }
     catch
@@ -2622,7 +2622,7 @@ if ($FailedSubscriptions.Count -gt 0)
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
     Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
     Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the failed subscriptions." -ForegroundColor Yellow
-    if ($DiagFile -and (Test-Path $DiagFile))
+    if ($DiagFile -and (Test-Path -LiteralPath $DiagFile))
     {
         Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red
     }
@@ -2695,7 +2695,7 @@ try
         -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `
         -Obfuscated:$Obfuscate
     $RunSummaryLocalFile = Join-Path $InventoryRoot ('RunSummary_{0}.log' -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
-    $RunSummaryLines | Out-File -FilePath $RunSummaryLocalFile -Encoding utf8
+    $RunSummaryLines | Out-File -LiteralPath $RunSummaryLocalFile -Encoding utf8
     Write-Host ("Run summary written: {0}" -f $RunSummaryLocalFile) -ForegroundColor Green
 }
 catch
@@ -2718,7 +2718,7 @@ if ($null -ne $RunSummaryLocalFile -and (Test-Path -LiteralPath $RunSummaryLocal
         $RunSummaryStage = Join-Path $InventoryRoot ('.rda-runsummary-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
         New-Item -ItemType Directory -Path $RunSummaryStage -Force | Out-Null
         Copy-Item -LiteralPath $RunSummaryLocalFile -Destination (Join-Path $RunSummaryStage 'RunSummary.log') -Force
-        Compress-Archive -Path (Join-Path $RunSummaryStage 'RunSummary.log') -DestinationPath $OuterZipFile -Update
+        Compress-Archive -LiteralPath (Join-Path $RunSummaryStage 'RunSummary.log') -DestinationPath ([WildcardPattern]::Escape($OuterZipFile)) -Update
 
         if (Test-ZipArchiveEntry -ZipPath $OuterZipFile -EntryName 'RunSummary.log')
         {
@@ -2759,9 +2759,9 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         }
 
         # 2. A copy of each per-sub HTML at HTML<stamp>/ (the source ResourcesReport<stamp> with the leading 'ResourcesReport' replaced by 'HTML'), matching the rewritten summary links. HTML only - no *.json/csv - so nothing is double-ingested and the folder name signals "report HTML, not data". Scoped to THIS run by timestamp; a de-obfuscated *_revealed* report is never copied across.
-        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
+        foreach ($SubDir in @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
         {
-            $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+            $SubHtml = Get-ChildItem -LiteralPath $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
             if ($null -eq $SubHtml) { continue }
             $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
             $DestDir = Join-Path $BundleStage $HtmlFolderName
@@ -2777,13 +2777,13 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 
         # Fold the staged extras into the existing outer zip (additive; the
         # inner per-sub zips already inside it are preserved by -Update).
-        $StageItems = @(Get-ChildItem -Path $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        $StageItems = @(Get-ChildItem -LiteralPath $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
         if ($StageItems.Count -gt 0)
         {
             # -LiteralPath, matching the outer compress: $BundleStage derives from
             # $InventoryRoot, and a '[' or ']' anywhere in that path would otherwise
             # be read as a wildcard and silently fold nothing.
-            Compress-Archive -LiteralPath $StageItems -DestinationPath $OuterZipFile -Update
+            Compress-Archive -LiteralPath $StageItems -DestinationPath ([WildcardPattern]::Escape($OuterZipFile)) -Update
 
             # Record only WHAT WAS STAGED here. Every claim about what the bundle
             # actually contains is derived from the finished archive below, in one
@@ -2903,7 +2903,7 @@ if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -Lite
         # That makes this container an operator-PRIVATE artefact store that must never be handed to a report consumer as-is. Its OWN try/catch + best-effort so a dictionary-upload problem can never mask or fail the (already-successful) report upload above. Only obfuscated runs produce dictionaries; scoped to THIS run by write time so a shared InventoryRoot does not resurface a prior run's.
         try
         {
-            $DictionaryFiles = @(Get-ChildItem -Path $InventoryRoot -Recurse -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime })
+            $DictionaryFiles = @(Get-ChildItem -LiteralPath $InventoryRoot -Recurse -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime })
             if ($DictionaryFiles.Count -gt 0)
             {
                 Write-Host ("Uploading {0} obfuscation dictionary file(s) to blob (PRIVATE - de-obfuscation key; never share this container as-is)..." -f $DictionaryFiles.Count) -ForegroundColor Cyan

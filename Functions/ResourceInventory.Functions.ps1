@@ -50,6 +50,103 @@ function Global:Protect-FreeTextValue([string]$Value)
     return $Global:FreeTextDictionary[$Value]
 }
 
+# Resolve one identifier segment to a stable obfuscated token. Order: reuse a token a prior phase minted (SharedDictionary keyed by LookupKey, READ-ONLY - never written here), else the per-run LocalCache keyed by the REAL value, else mint prefix+GUID into LocalCache.
+# Read-only against SharedDictionary is load-bearing: the consumption leaf passes $Global:ResourceIdDictionary here to REUSE the inventory token, and writing consumption fragments back would pollute that map's ObfuscationDictionary contract (obfuscated full-Azure-id -> real-id).
+function Global:Resolve-ObfuscationToken
+{
+    param(
+        [string]$RealValue,
+        [string]$LookupKey,
+        $SharedDictionary,
+        [hashtable]$LocalCache,
+        [string]$TokenPrefix
+    )
+
+    if ($null -ne $SharedDictionary -and $SharedDictionary.ContainsKey($LookupKey)) { return $SharedDictionary[$LookupKey] }
+    if ($LocalCache.ContainsKey($RealValue)) { return $LocalCache[$RealValue] }
+
+    $Token = $TokenPrefix + [guid]::NewGuid().ToString()
+    $LocalCache[$RealValue] = $Token
+    return $Token
+}
+
+# Rebuild an ARM resourceUri segment-by-segment, masking only the identifying segments (sub id, RG name, resource NAME) and keeping structure/provider/TYPE and the mc_ AKS-managed-RG marker intact - the dashboard categorises rows by parsing provider+type+mc_, which a flat opaque token destroys (AKS/VMSS rows go invisible).
+# empty -> 'obfuscated'; a non-ARM shape -> one cached prefix+GUID; canonical -> tokenise sub, then RG (preserving mc_), then walk providers: even provider-relative indices (>=2) are NAME segments to tokenise, odd are TYPE segments kept verbatim, $system left intact.
+# The LEAF name (largest even index >=2) reuses the inventory token via $NameDictionary (READ-ONLY, keyed by $RawUri) so a consumption/metric row joins back to Inventory_*.json / Metrics_*.json; intermediate names (parent resources) use $NameCache only.
+function Global:Build-ObfuscatedResourceUri
+{
+    param(
+        [string]$RawUri,
+        [string]$Prefix,
+        $SubscriptionDictionary,
+        $ResourceGroupDictionary,
+        $NameDictionary,
+        [hashtable]$SubCache,
+        [hashtable]$RgCache,
+        [hashtable]$NameCache
+    )
+
+    if ([string]::IsNullOrEmpty($RawUri))
+    {
+        return 'obfuscated'
+    }
+
+    if ($RawUri -notmatch '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
+    {
+        # Non-ARM shape (system-namespace placeholder, marketplace/tenant-level meter): stable single token via the name cache, so the ObfuscationDictionary file only ever holds real-Azure-id mappings.
+        if (-not $NameCache.ContainsKey($RawUri))
+        {
+            $NameCache[$RawUri] = $Prefix + [guid]::NewGuid().ToString()
+        }
+        return $NameCache[$RawUri]
+    }
+
+    $RealSub = $Matches[1]
+    $RealRg = $Matches[3]
+    $RealProv = $Matches[5]   # '<rp>/<type>/<name>[/<subtype>/<name2>...]'
+
+    $ObfSub = Resolve-ObfuscationToken -RealValue $RealSub -LookupKey $RawUri -SharedDictionary $SubscriptionDictionary -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+    $RebuiltUri = '/subscriptions/' + $ObfSub
+
+    if (-not [string]::IsNullOrEmpty($RealRg))
+    {
+        $RgTag = if ($RealRg -match '^mc_') { 'mc_' } else { '' }
+        $ObfRg = Resolve-ObfuscationToken -RealValue $RealRg -LookupKey $RawUri -SharedDictionary $ResourceGroupDictionary -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
+        $RebuiltUri += '/resourcegroups/' + $ObfRg
+    }
+
+    if (-not [string]::IsNullOrEmpty($RealProv))
+    {
+        $ProvParts = $RealProv -split '/'
+        # Leaf = last NAME segment (largest even index >=2); only it identifies THIS resource, so only it reuses the inventory token. Intermediate names are parent-resource identities and stay on the per-name cache.
+        $LeafNameIndex = -1
+        for ($Li = $ProvParts.Count - 1; $Li -ge 2; $Li--)
+        {
+            if ($Li % 2 -eq 0) { $LeafNameIndex = $Li; break }
+        }
+
+        $Rebuilt = @()
+        for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
+        {
+            $Part = $ProvParts[$Pi]
+            $IsNameSegment = ($Pi -ge 2 -and ($Pi % 2 -eq 0))
+            if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
+            {
+                # Only the leaf consults $NameDictionary (inventory, read-only); intermediate names pass $null so they only ever hit the name cache.
+                $LeafShared = if ($Pi -eq $LeafNameIndex) { $NameDictionary } else { $null }
+                $Rebuilt += Resolve-ObfuscationToken -RealValue $Part -LookupKey $RawUri -SharedDictionary $LeafShared -LocalCache $NameCache -TokenPrefix $Prefix
+            }
+            else
+            {
+                $Rebuilt += $Part
+            }
+        }
+        $RebuiltUri += '/providers/' + ($Rebuilt -join '/')
+    }
+
+    return $RebuiltUri
+}
+
 # Over-inclusive scrub of a diagnostic/exception string for the shareable log: dictionary tokenization (keys applied LONGEST-FIRST) then class masking of email/IP/host/path/residual GUID.
 # Must never LEAK a known value or structured identifier; the (?<!_) GUID lookbehind preserves real prod_/nonprod_ tokens. Global: to match Protect-FreeTextValue.
 function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDictionary]$ValueMap)

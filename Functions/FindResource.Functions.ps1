@@ -47,12 +47,10 @@
 # Broad '*revealed*' is fail-CLOSED (catches RevealedStaging_); an empty pattern silently disables this P0 guard.
 $Script:RdaRevealedExclusion = '*revealed*'
 
-# One owner of the report-stamp contract. Duplicating this regex would let the
-# discovery de-duplication key and the coverage key drift apart, and the set
-# arithmetic in Find-RdaResource is only sound while they agree. The parallel
-# reader receives it via $using: because a runspace cannot see functions or
-# script-scope variables from the enclosing scope.
-$Script:RdaReportStampPattern = '(\d{15,})'
+# Single owner of the report-stamp key (de-dup and coverage must agree; passed to runspaces via $using:).
+# The stamp is the 17-digit timestamp PLUS the optional 4-hex per-process tail: keying on digits alone
+# merged two same-millisecond reports and silently dropped a subscription.
+$Script:RdaReportStampPattern = '(\d{15,}[0-9a-fA-F]{0,4})(?=\.|$|_)'
 
 function Assert-RdaRevealedExclusion
 {
@@ -165,19 +163,17 @@ function Get-RdaInventorySource
 
     foreach ($P in $Path)
     {
-        if (-not (Test-Path -LiteralPath $P))
-        {
-            $Missing.Add($P)
-            continue
-        }
-
-        # Test-Path can go stale between the test and the stat (permission change,
-        # broken symlink, TOCTOU). Without -ErrorAction Stop, $Item would be $null
-        # and the file branch below would report a null path with the wrong reason.
+        # No Test-Path pre-check: it is $false for access-denied as well as absent, which filed ACL problems
+        # under Missing. Get-Item's exception is the single authority: not-found = Missing, anything else = Unreadable.
         $Item = $null
         try
         {
             $Item = Get-Item -LiteralPath $P -ErrorAction Stop
+        }
+        catch [System.Management.Automation.ItemNotFoundException]
+        {
+            $Missing.Add($P)
+            continue
         }
         catch
         {
@@ -196,13 +192,19 @@ function Get-RdaInventorySource
             {
                 $Sources.Add([pscustomobject]@{ Kind = 'LooseJson'; File = $Item.FullName })
             }
-            elseif ($Item.Name -like 'ResourcesReport*.zip')
-            {
-                $Sources.Add([pscustomobject]@{ Kind = 'PerSubZip'; File = $Item.FullName })
-            }
             elseif (($Item.Name -like 'AllSubscriptions_*.zip') -or ($Item.Name -like 'shard-*.zip'))
             {
+                # Checked BEFORE the per-sub match: a bundle name also contains
+                # "ResourcesReport", so the widened per-sub pattern below would
+                # otherwise misclassify it as a single subscription.
                 $Sources.Add([pscustomobject]@{ Kind = 'ConsolidatedZip'; File = $Item.FullName })
+            }
+            elseif ($Item.Name -like '*ResourcesReport*.zip')
+            {
+                # Widened from 'ResourcesReport*.zip' so a company-prefixed delivery
+                # name (the README's File Delivery step renames to
+                # CompanyName_ResourcesReport_<date>.zip) is still recognised.
+                $Sources.Add([pscustomobject]@{ Kind = 'PerSubZip'; File = $Item.FullName })
             }
             else
             {
@@ -229,9 +231,15 @@ function Get-RdaInventorySource
             $Sources.Add([pscustomobject]@{ Kind = 'LooseJson'; File = $Found.FullName })
         }
 
-        foreach ($Found in Get-ChildItem -LiteralPath $Item.FullName -Recurse -File -Filter 'ResourcesReport*.zip' -ErrorAction SilentlyContinue -ErrorVariable +EnumErrors)
+        foreach ($Found in Get-ChildItem -LiteralPath $Item.FullName -Recurse -File -Filter '*ResourcesReport*.zip' -ErrorAction SilentlyContinue -ErrorVariable +EnumErrors)
         {
             if ($Found.FullName -like $Excl) { $Rejected.Add((& $RefuseRevealed $Found.FullName)); continue }
+            # The widened '*ResourcesReport*.zip' filter (so a company-prefixed
+            # delivery name is found - see the explicit-file branch above) also
+            # matches the bundle names, which are handled separately below as
+            # ConsolidatedZip. Skip them here so a bundle is not double-classified
+            # as a single subscription.
+            if (($Found.Name -like 'AllSubscriptions_*.zip') -or ($Found.Name -like 'shard-*.zip')) { continue }
             $Sources.Add([pscustomobject]@{ Kind = 'PerSubZip'; File = $Found.FullName })
         }
 
@@ -554,10 +562,13 @@ function Find-RdaResource
                         }
                         else
                         {
+                            # try/finally so a throw from ReadToEnd() on a truncated
+                            # or corrupt deflate stream still disposes the reader and
+                            # the entry stream; the outer finally only disposes $Zip.
                             $Stream = $Entry.Open()
                             $Reader = [System.IO.StreamReader]::new($Stream)
-                            $Json = $Reader.ReadToEnd()
-                            $Reader.Dispose(); $Stream.Dispose()
+                            try { $Json = $Reader.ReadToEnd() }
+                            finally { $Reader.Dispose(); $Stream.Dispose() }
                             $Read = Read-Inventory -Json $Json -SourceFile $Source.File -ReportId $ReportId -Types $Types
                             [pscustomobject]@{
                                 ReportId = $ReportId; Rows = $Read.Rows; Failure = $null; InnerFailures = @()
@@ -610,8 +621,8 @@ function Find-RdaResource
                                 try
                                 {
                                     $InnerStream = $Inner.Open()
-                                    $InnerStream.CopyTo($Memory)
-                                    $InnerStream.Dispose()
+                                    try { $InnerStream.CopyTo($Memory) }
+                                    finally { $InnerStream.Dispose() }
                                     $Memory.Position = 0
                                     $InnerZip = [System.IO.Compression.ZipArchive]::new($Memory, [System.IO.Compression.ZipArchiveMode]::Read)
                                     try
@@ -625,8 +636,8 @@ function Find-RdaResource
                                         {
                                             $Stream = $Entry.Open()
                                             $Reader = [System.IO.StreamReader]::new($Stream)
-                                            $Json = $Reader.ReadToEnd()
-                                            $Reader.Dispose(); $Stream.Dispose()
+                                            try { $Json = $Reader.ReadToEnd() }
+                                            finally { $Reader.Dispose(); $Stream.Dispose() }
 
                                             # As the outer id: with no stamp, qualify with
                                             # the bundle so stamp-less members can't merge into a false complete coverage.
@@ -893,6 +904,17 @@ function Write-RdaFindSummary
         {
             Write-Host '  NOTHING WAS SCANNED. No report bundles were found under the given path(s),' -ForegroundColor Red
             Write-Host '  so this result says nothing about whether the type exists. Check the path.' -ForegroundColor Red
+        }
+        elseif ($UnitsRead -eq 0)
+        {
+            # Sources were found but none produced a readable inventory (every
+            # bundle corrupt, wrong permissions, etc.). Coverage is None for every
+            # type only because nothing was read - blaming "bundles predate the
+            # collector" or "-Service scoping" here would be wrong; the read
+            # failures below are the real story.
+            Write-Host ('  NO INVENTORY WAS READ. {0} source(s) were found but none produced a' -f $Result.SourceCount) -ForegroundColor Red
+            Write-Host '  readable inventory, so this result cannot speak to the type at all.' -ForegroundColor Red
+            Write-Host '  See the READ FAILURES below for why each source could not be read.' -ForegroundColor Red
         }
         elseif ($TypesNone.Count -gt 0)
         {

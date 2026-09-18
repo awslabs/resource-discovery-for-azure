@@ -1,18 +1,5 @@
-# Merge-RecoveryData unit tests
-# =============================================================================
-# Offline, self-contained tests for the recovery-merge splice + re-package
-# helper in Functions/RecoveryMerge.Functions.ps1. Each test builds a synthetic
-# "gap" bundle (the incomplete run) and a "recovery" bundle (the scoped re-run)
-# in a temp dir - Inventory_*.json plus optional Consumption_*.csv,
-# Metrics_*.json and ObfuscationDictionary_*.json - then calls Merge-RecoveryData
-# and asserts the splice, the packaging, and the fail-loud guards.
-#
-# No live Azure and no external fixture zip: the function only reads/writes files
-# and re-invokes Extension/Summary.ps1 to regenerate the HTML, so a temp bundle
-# is enough to drive it end to end. The only literal GUID used in synthetic ARM
-# paths is the Azure docs placeholder (12345678-...-123456789012); obfuscation
-# tokens are minted at runtime. No customer data.
-# =============================================================================
+# Offline unit tests for Merge-RecoveryData (Functions/RecoveryMerge.Functions.ps1): build synthetic gap + recovery bundles in a temp dir,
+# call the splice/re-package, and assert the splice, packaging, and fail-loud guards. No live Azure; only literal GUID is the Azure docs placeholder.
 
 BeforeAll {
     $script:FnFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RecoveryMerge.Functions.ps1'
@@ -574,12 +561,8 @@ Describe 'Merge-RecoveryData dictionary merge and packaging' {
     }
 
     It 'zips only the files this merge wrote, never stale JSON left in a reused output folder' {
-        # Regression guard: the re-zip once globbed $OutputPath/*.json, and the
-        # output folder is only ensured to exist (never cleaned), so a merge into
-        # a REUSED output folder silently bundled stale/foreign JSON from an
-        # earlier run. Pre-create the output folder and plant a stale inventory
-        # and a stale metrics file, then assert neither survives into the zip
-        # while the real members still do.
+        # Regression guard: the re-zip once globbed $OutputPath/*.json into a REUSED (never-cleaned) output folder, bundling stale JSON.
+        # Plant stale inventory + metrics files and assert neither survives into the zip while the real members do.
         $C = New-Case
         New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
         New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })

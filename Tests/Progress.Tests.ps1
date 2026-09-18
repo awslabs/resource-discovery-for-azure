@@ -1,34 +1,5 @@
-# Write-RdaProgress Scenario Tests
-#
-# Unit-tests the single, reusable progress reporter (Write-RdaProgress) that
-# every entry-point script routes through: the sequential per-subscription loop
-# (Run-AllSubscriptions.ps1), the reveal per-folder loop and its -Resume variant
-# (Reveal.ps1), the parallel stream per-sub tagged line
-# (Run-AllSubscriptions.Stream.ps1), and the high-frequency non-interactive
-# loops (Service Processing collectors in ResourceInventory.ps1 and the metrics
-# batch loop in Extension/Metrics.ps1, both bar-only).
-#
-# There is ONE function, so the scenarios differ only by the arguments each
-# caller passes. Each It below reproduces one caller's call shape and asserts
-# the observable behavior:
-#
-#   - Write-Progress is mocked so the bar's -Status / -PercentComplete / -Completed
-#     arguments are captured and asserted deterministically (the live bar renders
-#     to the console host and is intentionally NOT asserted here - it is verified
-#     by eye on an interactive console; see Tests/Show-ProgressScenarios.ps1 for
-#     the exact commands to reproduce it).
-#   - The non-interactive fallback line is captured off the Information stream
-#     (Write-Host writes there in PS7) via 6>&1, so we can assert it is emitted
-#     for the interactive-loop callers and SUPPRESSED for the -BarOnly callers.
-#   - The durable heartbeat is asserted by reading the temp log file back.
-#
-# Note: the $Lines = @(Get-RdaProgressLines { ... }) call sites wrap the helper
-# in @() deliberately. PowerShell unwraps a single-element array on assignment,
-# so a lone captured line would otherwise become a scalar string and $Lines[0]
-# would index its first CHARACTER instead of the whole line. @() keeps it an
-# array in every case (0, 1, or many lines).
-#
-# Run with: Invoke-Pester ./Tests/Progress.Tests.ps1 -Output Detailed
+# Scenario unit tests for the single reusable Write-RdaProgress (all entry points route through it; scenarios differ only by caller args).
+# Get-RdaProgressLines captures are wrapped in @() so a lone line stays an array, not a scalar whose $Lines[0] would index a character.
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'

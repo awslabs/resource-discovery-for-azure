@@ -138,14 +138,8 @@ Describe "Consumption to Inventory Cross-Reference" {
         {
             if ([string]::IsNullOrEmpty($row.ResourceId)) { continue }
             $Seen++
-            # The old assertion was tautological: it only fired inside an
-            # `if ($row.ResourceId -in $InventoryIds)` guard, so it re-asserted
-            # membership it had just tested. The real invariant is that an
-            # obfuscated consumption ResourceId is NEVER a raw Azure resource
-            # path - the consumption phase must run its ids through the
-            # obfuscator, same as inventory. A leak here would slip past the
-            # membership-only check because a raw path is simply absent from
-            # the obfuscated inventory id set.
+            # Assert the id is NOT a raw ARM path, not merely that it is a member of
+            # the inventory set: a leaked raw path is absent from that set, so a membership-only check would silently miss it.
             $row.ResourceId | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "obfuscated consumption ResourceId must not be a raw Azure resource path"
         }
         if ($Seen -eq 0) { Set-ItResult -Skipped -Because "no consumption row carried a ResourceId in this fixture" }
@@ -164,13 +158,8 @@ Describe "ResourceGroup Consistency" {
                 }
             }
         }
-        # The RG key itself is what matters here: when obfuscated, prove the RG
-        # key is a deterministic pseudonym rather than a raw name - a raw RG key
-        # would mean the RG dictionary failed to map it. Count-independent, so it
-        # holds regardless of how many RGs the fixture has. (A former per-group
-        # 'Count | Should -BeGreaterThan 0' assertion was dropped: each key is
-        # created only by appending an ID, so it was trivially >=1 and could
-        # never fail.)
+        # When obfuscated, assert each RG key is a deterministic prod_/nonprod_
+        # pseudonym: a raw key would mean the RG dictionary failed to map it.
         foreach ($rg in $RgGroups.Keys)
         {
             if ($script:IsObfuscated -and -not [string]::IsNullOrEmpty($rg))
@@ -214,17 +203,8 @@ Describe "ResourceGroup Determinism" {
     }
 }
 
-# ============================================================================
-# Task 6 (spec: obfuscation-and-reveal) — additive P8 coverage.
-# Purely additive. Closes gaps for cross-reference pairs not already asserted
-# above (SQLDB server/pool, SQLMIDB managed instance, AvSet VMs, VMSS related
-# cluster), the out-of-scope 'obfuscated' sentinel (Req 2.3), and the metric
-# per-resource cached token (Req 2.4). Where the live fixture lacks a given
-# pair the block skips gracefully rather than fabricating resources.
-#   Validates: Requirements 2.2, 2.3, 2.4 | Property: P8
-# The disk->VM (VM Disk to VM) and SQLVM->parent VM (SQL VM to VM) pairs are
-# already covered by the blocks above and are intentionally NOT duplicated here.
-# ============================================================================
+# Task 6 (spec: obfuscation-and-reveal) additive P8 coverage for cross-reference pairs not asserted above (Req 2.2/2.3/2.4, Property P8).
+# disk->VM and SQLVM->parent VM are covered by the blocks above and intentionally NOT duplicated here.
 
 Describe "SQLDB to SQL Server Cross-Reference (P8)" {
     It "Every SQLDB DatabaseServer carries the same token its parent SQL Server uses (or the 'obfuscated' sentinel)" {
@@ -301,17 +281,8 @@ Describe "VMSS Related-Cluster Cross-Reference (P8)" {
     It "Every VMSS related-cluster value carries the same token its AKS cluster uses, the out-of-scope sentinel, or a well-formed token for a Service-Fabric-backed scale set" {
         $VmssItems = @($script:Inventory.VMSS) | Where-Object { $null -ne $_ }
         if ($VmssItems.Count -eq 0) { Set-ItResult -Skipped -Because "no VMSS resources in this fixture"; return }
-        # A scale set exposes its related cluster via the 'AKS' field. The
-        # collector (Services/Containers/VMSS.ps1) resolves an AKS cluster
-        # first; if none owns the node pool's resource group it falls back to
-        # a Service Fabric cluster match instead. Either way it resolves the
-        # cluster's real ID through $ResourceIdDictionary and emits the SAME
-        # token the cluster's own row uses for its identity (Req 2.2), or the
-        # 'obfuscated' sentinel when the target is out of scope (Req 2.3).
-        # There is no dedicated Service Fabric collector/inventory bucket, so
-        # a Service-Fabric-backed match can't be looked up against a known-ID
-        # allowlist the way AKS can - instead we accept any well-formed
-        # prod_/nonprod_ token, which the AKS-cluster case already satisfies.
+        # A scale set's 'AKS' field holds its related-cluster token, resolved to an
+        # AKS cluster first, else a Service Fabric fallback; there is no SF inventory bucket, so an SF-backed match is accepted as any well-formed prod_/nonprod_ token, not an id lookup.
         $ClusterIds = @(@($script:Inventory.AKS) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID })
         $Checked = 0
         foreach ($ss in $VmssItems)
@@ -393,33 +364,13 @@ Describe "Metric Per-Resource Cached Token (P8)" {
         $MetricIds = @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) } | Select-Object -ExpandProperty ID -Unique)
         if ($MetricIds.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows carried an ID in this fixture"; return }
 
-        # A metric record's obfuscated ID is produced by looking the resource's
-        # REAL id up in the SAME $ResourceIdDictionary the inventory row used, so a
-        # metric-bearing resource that is ALSO inventoried MUST carry the identical
-        # token - that is the join the server relies on to attach a metric series to
-        # its resource. If metric obfuscation regressed (dictionary populated too
-        # late, a casing/key mismatch, or the fallback minting fresh GUIDs for
-        # in-scope resources), the metric IDs would instead be brand-new tokens that
-        # appear NOWHERE in the inventory. Two guards catch that without false-failing
-        # on the legitimate fallback (a genuinely deleted/transient resource that was
-        # metric-eligible but not inventoried, which is the rare exception):
-        #   1. Catastrophic break: zero overlap => every metric minted a fresh token.
-        #   2. Category/partial break: the matched set must be the majority; the
-        #      absent set is the exception, never the rule, in a healthy run - e.g. a
-        #      whole metric path (the batched getBatch fast-path) obfuscating IDs
-        #      inconsistently with the inventory would push absent past matched.
+        # A metric row's token comes from the same $ResourceIdDictionary the inventory row used, so an also-inventoried resource MUST carry the identical token (the metrics-to-inventory join).
+        # Two guards below catch a regression without false-failing on the legitimate fallback (a deleted/transient metric-eligible resource never inventoried): zero overlap is catastrophic; the matched set must be the majority.
         $Matched = @($MetricIds | Where-Object { $_ -in $InvIdSet })
         $Absent = @($MetricIds | Where-Object { $_ -notin $InvIdSet })
 
         $Matched.Count | Should -BeGreaterThan 0 -Because "at least one metric resource must carry the same obfuscated ID as its inventory row; zero overlap means metrics minted fresh tokens and the metrics-to-inventory join is broken"
-        # The majority check (guard 2) is only meaningful once the metric-ID sample
-        # is large enough that the matched/absent split is signal, not noise. On a
-        # tiny or fallback-heavy fixture a legitimately deleted/transient
-        # metric-eligible resource (absent by design) can outnumber the matched set
-        # with no regression, so gate the ratio behind a minimum sample and skip it
-        # below that floor - the catastrophic guard above still runs on every
-        # fixture. This keeps the suite's bounds/skip philosophy over a
-        # fixture-dependent ratio pin.
+        # Guard 2 (matched >= absent) is only signal once the metric-ID sample is large enough, so gate it behind a minimum floor and skip below it; the catastrophic zero-overlap guard above still runs on every fixture.
         $RatioSampleFloor = 5
         if ($MetricIds.Count -ge $RatioSampleFloor)
         {

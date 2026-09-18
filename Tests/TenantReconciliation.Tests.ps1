@@ -1,33 +1,5 @@
-# Tenant Reconciliation Tests
-# =============================================================================
-# Guards against a future code change that silently DUPLICATES, MANGLES,
-# MIS-ATTRIBUTES, or grossly DROPS resources, by checking a NON-OBFUSCATED
-# output zip two ways:
-#
-#   Tier 1 - Structural integrity (drift-immune, no Azure calls):
-#       Pure checks on the zip's own contents - unique IDs per one-row-per-
-#       resource collector, well-formed ARM paths, single-subscription scoping,
-#       and consumption scoped to the same subscription. These are 100% reliable
-#       and catch the duplication / ID-mangling / cross-subscription classes of
-#       regression. They run whenever the zip is non-obfuscated (offline OK).
-#
-#   Tier 2 - Live tenant reconciliation (requires a live Az session):
-#       Confirms the inventory's real resource IDs actually resolve to resources
-#       in the tenant. This is INHERENTLY subject to tenant DRIFT - resources can
-#       be created/deleted between report generation and this check (an active
-#       sandbox with auto-shutdown/auto-delete churns constantly) - so it is
-#       deliberately DRIFT-TOLERANT: it fails only on CATASTROPHIC divergence
-#       (a systemic ID-corruption / wrong-subscription bug drops the live-overlap
-#       to near zero), never on ordinary churn. It is meant to run against a
-#       FRESH zip (as the scenario matrix does, generating then testing seconds
-#       apart), which keeps the drift window tiny.
-#
-# The whole suite SELF-SKIPS (never fails) when the zip is obfuscated (IDs are
-# tokens, not real ARM paths), and Tier 2 additionally skips when there is no
-# live Az context or it cannot see the run's subscription - so it is safe in an
-# offline `Invoke-Pester ./Tests/` or CI run. All expected values are read live
-# at runtime; nothing is hardcoded, so it is tenant-portable.
-# =============================================================================
+# Tenant Reconciliation Tests: guard against a change that DUPLICATES, MANGLES, MIS-ATTRIBUTES, or DROPS resources, checking a NON-OBFUSCATED zip two ways - Tier 1 structural (drift-immune, offline: unique IDs, well-formed ARM paths, single-subscription scoping) and Tier 2 live tenant reconciliation (needs a live Az session, drift-TOLERANT: fails only on catastrophic divergence).
+# The whole suite self-skips on an obfuscated/empty zip (IDs are tokens, not ARM paths); Tier 2 additionally skips without a live context that can see the run's subscription. Nothing is hardcoded, so it is tenant-portable.
 
 BeforeAll {
     $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
@@ -234,11 +206,7 @@ Describe "Live tenant reconciliation" {
         $Present = @($script:InvIds | Where-Object { $script:LiveById.ContainsKey($_.ToLower()) }).Count
         $Missing = $Total - $Present
         # Drift-tolerant: a resource deleted between generation and this check is
-        # legitimately absent, so a few misses are fine. But if MOST inventory IDs
-        # are absent, the collector is emitting IDs that never existed (corruption)
-        # or targeted the wrong subscription - that is a real regression. Threshold
-        # is intentionally generous (>=50% must resolve) so normal churn never
-        # fails; a fresh zip (as the matrix produces) resolves ~100%.
+        # legitimately absent, so a few misses are fine; but MOST IDs absent means corrupted IDs or the wrong subscription. Threshold is generous (>=50% must resolve) so normal churn never fails.
         $Ratio = if ($Total -gt 0) { $Present / $Total } else { 1 }
         Write-Host ("    [recon] inventory IDs live: {0}/{1} ({2:P0}); {3} absent (drift or deleted-since)" -f $Present, $Total, $Ratio, $Missing) -ForegroundColor DarkGray
         $Ratio | Should -BeGreaterOrEqual 0.5 -Because "at least half of the inventory must resolve to real tenant resources; a near-zero overlap means IDs are corrupted or the wrong subscription was collected (present=$Present of $Total)"

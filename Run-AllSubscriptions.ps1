@@ -17,6 +17,8 @@ param (
     # -MetricsIntervalMinutes / -MetricsLookbackDays change data-point volume only, NOT the API-call COUNT (which is why -Plan cannot size from them); omit -MetricsLookbackDays to keep ResourceInventory.ps1's 31-day default as the single authority.
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
+    # -MetricsDetailed restores the native (finer) metric grain: VM/disk 15 min, SQL 30 min; default is hourly (upstream parity), 4x fewer VM data points.
+    [switch]$MetricsDetailed,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     # Deliberately NO default so an omitted value leaves ResourceInventory.ps1's own 31-day default as the single authority (a visible 31 here would pin a second copy and drift when the inner one changes).
     # ValidateRange is essential, not cosmetic: the inner param is untyped and run through [math]::Abs, so a negative would flip positive and a 0 would give a zero-width window that reports Success while shipping every trend metric as a measured 0.
@@ -657,6 +659,7 @@ if ($Plan)
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
     if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
+    if ($MetricsDetailed) { $ExtraFlags += '-MetricsDetailed' }
     if ($MetricsIntervalMinutes -gt 0) { $ExtraFlags += ('-MetricsIntervalMinutes {0}' -f $MetricsIntervalMinutes) }
     if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $ExtraFlags += ('-MetricsLookbackDays {0}' -f $MetricsLookbackDays) }
     if ($HeadRoom -gt 0) { $ExtraFlags += ('-HeadRoom {0}' -f $HeadRoom) }
@@ -1368,6 +1371,7 @@ if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
+if ($MetricsDetailed) { $InventoryPassthrough['MetricsDetailed'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
 # ContainsKey rather than a value sentinel: 0 is a REAL (and harmful) lookback
 # value, not "unset", so -gt 0 would silently swallow it. Omitted -> the key is
@@ -1781,6 +1785,7 @@ else
                 if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
                 if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
+                if ($MetricsDetailed) { $WorkerArgs.MetricsDetailed = $true }
                 if ($MetricsIntervalMinutes -gt 0) { $WorkerArgs.MetricsIntervalMinutes = $MetricsIntervalMinutes }
                 # NOT a key in the $WorkerArgs literal above: this form is what
                 # Tests/ParamForwardingParity.Tests.ps1 harvests, and widening the

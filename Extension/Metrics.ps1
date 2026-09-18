@@ -18,6 +18,9 @@ param(
     # Sampling grain for the VM/SQL/OSS-DB utilization series; 0 (default) keeps each
     # family's native cadence (byte-identical), a set 5/15/30/60 applies uniformly and changes data-point volume only, not API-call count.
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
+    # Default grain is HOURLY for the sampled VM/SQL/OSS-DB series and disk I/O (matches upstream awslabs). -MetricsDetailed
+    # restores each family's native cadence (VM/disk 15 min, SQL 30 min, OSS-DB 60 min); an explicit -MetricsIntervalMinutes still wins.
+    [switch]$MetricsDetailed,
     # EXPERIMENTAL (default OFF): fetch batchable services via metrics:getBatch; falls back to per-call on any failure (no data lost) and is byte-identical when omitted.
     # SIDE-EFFECT of opting in: attempts to register the Microsoft.Insights RP (a control-plane write), which getBatch requires.
     [switch]$UseMetricsBatch
@@ -45,6 +48,23 @@ if ($Task -eq 'Processing')
 
     # Read one obfuscation map, returning the 'obfuscated' sentinel on a missing key -
     # a missing key yields a silent $null (not a throw), which the PII no-null assertion flags. Shared per-call/batch so both obfuscate identically (divergent copies break determinism).
+    # Sampling grain for the VM/SQL/OSS-DB series and disk I/O. Precedence: an explicit -MetricsIntervalMinutes (applied
+    # uniformly to VM/SQL/OSS-DB, honoured as-is) > -MetricsDetailed (each family's native cadence) > the hourly default,
+    # which matches upstream awslabs and cuts VM data points 4x. Disk I/O ignores -MetricsIntervalMinutes (documented as
+    # fixed): 15 min when detailed, hourly otherwise. Pure so the rules are unit-tested.
+    function Get-RdaMetricGrainPlan
+    {
+        param([int]$MetricsIntervalMinutes = 0, [switch]$MetricsDetailed)
+        $Effective = if ($MetricsIntervalMinutes -gt 0) { $MetricsIntervalMinutes } elseif ($MetricsDetailed) { 0 } else { 60 }
+        $Uniform = if ($Effective -gt 0) { ([TimeSpan]::FromMinutes($Effective)).ToString() } else { $null }
+        return @{
+            Vm   = if ($Uniform) { $Uniform } else { '00:15:00' }
+            Sql  = if ($Uniform) { $Uniform } else { '00:30:00' }
+            Db   = if ($Uniform) { $Uniform } else { '01:00:00' }
+            Disk = if ($MetricsDetailed) { '00:15:00' } else { '01:00:00' }
+        }
+    }
+
     function Get-RdaMappedValue
     {
         param($Map, [string]$Key)
@@ -333,10 +353,9 @@ if ($Task -eq 'Processing')
     # High-frequency utilization-series grain (VM/SQL/OSS-DB). 0 (default) keeps each family's
     # native cadence (VM 15 / SQL 30 / OSS-DB 60 min; byte-identical); a set 5/15/30/60 applies uniformly, honoured as-is (all validated at Azure's PT1M base grain).
     # Only these utilization series are affected; the daily/storage/VMSS/CosmosDB reads keep their own literals.
-    $VmMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '00:15:00' }
-    $SqlMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '00:30:00' }
-    $DbMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '01:00:00' }
-    Write-MetricsDiag ("Metric grain (requested {0} min): VM={1} SQL={2} OSS-DB={3} (0 = each family's native default; a set value is applied uniformly, honoured as-is)." -f $MetricsIntervalMinutes, $VmMetricInterval, $SqlMetricInterval, $DbMetricInterval)
+    $Grain = Get-RdaMetricGrainPlan -MetricsIntervalMinutes $MetricsIntervalMinutes -MetricsDetailed:$MetricsDetailed
+    $VmMetricInterval = $Grain.Vm; $SqlMetricInterval = $Grain.Sql; $DbMetricInterval = $Grain.Db; $DiskMetricInterval = $Grain.Disk
+    Write-MetricsDiag ("Metric grain (requested {0} min, detailed={4}): VM={1} SQL={2} OSS-DB={3} Disk={5} (default = hourly; -MetricsDetailed = native cadences; a set -MetricsIntervalMinutes is applied uniformly to VM/SQL/OSS-DB and honoured as-is)." -f $MetricsIntervalMinutes, $VmMetricInterval, $SqlMetricInterval, $DbMetricInterval, [bool]$MetricsDetailed, $DiskMetricInterval)
 
     # Build a fast id -> subscription lookup once. The per-resource loops below
     # previously scanned the entire $Subscriptions list with Where-Object for
@@ -409,10 +428,10 @@ if ($Task -eq 'Processing')
         {
             $Subscription = $SubLookup[$managedDisk.subscriptionId]
 
-            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Read Operations/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '00:15:00'; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
-            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Write Operations/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '00:15:00'; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
-            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Read Bytes/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '00:15:00'; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
-            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Write Bytes/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '00:15:00'; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Read Operations/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = $DiskMetricInterval; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Write Operations/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = $DiskMetricInterval; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Read Bytes/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = $DiskMetricInterval; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
+            $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'Composite Disk Write Bytes/sec'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = $DiskMetricInterval; Aggregation = 'Maximum'; Measure = 'Average'; Id = $managedDisk.Id; SubName = $Subscription.Name; ResourceGroup = $managedDisk.ResourceGroup; Name = $managedDisk.Name; Location = $managedDisk.Location; Service = 'Managed Disk'; Series = 'true' })
         }
     }
 

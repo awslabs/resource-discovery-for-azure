@@ -23,6 +23,9 @@ param ($TenantID,
     # -SkipDiskMetrics drops disk I/O metrics, -MetricsIntervalMinutes overrides the VM/SQL/OSS-DB sampling grain (0 = native).
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
+    # OPT-IN (default OFF): produce the capacity-planning VM placement CSV (Extension/VMPlacement.ps1).
+    # Without it no VMPlacement*.csv is written or packaged. A SEPARATE file, so no other output schema changes.
+    [switch]$CapacityPlan,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     # -MetricsDetailed restores the native (finer) sampling grain; the default is hourly, matching upstream.
     [switch]$MetricsDetailed,
@@ -1672,32 +1675,36 @@ function ExecuteInventoryProcessing()
 
     # VM placement CSV for capacity planning, a SEPARATE file (not new VM-collector fields) so Inventory_*.json and its server ingestion contract are untouched (Extension/VMPlacement.ps1). Runs after ProcessResourceResult (needs $Global:SmaResources populated; no Azure calls of its own).
     # Written to the PARENT InventoryRoot tagged with SubscriptionID (the wrapper concatenates per-sub PARTs into one tenant-wide CSV) so it is NOT swept into the per-sub zip; a standalone run keeps it by its report. A failure here is downgraded to a warning since the report is already written.
-    try
+    # OPT-IN: only produced when -CapacityPlan is passed. Without the switch no VMPlacement*.csv is written or packaged (the wrapper's aggregation is gated on the same switch), so a default run's output is unchanged bar the removal of this one capacity-planning file.
+    if ($CapacityPlan.IsPresent)
     {
-        $PlacementScript = Join-Path $PSScriptRoot 'Extension/VMPlacement.ps1'
-        if (Test-Path -LiteralPath $PlacementScript -PathType Leaf)
+        try
         {
-            if ($RunAllSubs.IsPresent)
+            $PlacementScript = Join-Path $PSScriptRoot 'Extension/VMPlacement.ps1'
+            if (Test-Path -LiteralPath $PlacementScript -PathType Leaf)
             {
-                $PlacementDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-                $PlacementTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-                $PlacementCsv = Join-Path $PlacementDir ("VMPlacementPart_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $PlacementTag + ".csv")
+                if ($RunAllSubs.IsPresent)
+                {
+                    $PlacementDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+                    $PlacementTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+                    $PlacementCsv = Join-Path $PlacementDir ("VMPlacementPart_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $PlacementTag + ".csv")
+                }
+                else
+                {
+                    $PlacementCsv = ($DefaultPath + "VMPlacement_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+                }
+
+                & $PlacementScript -CsvFile $PlacementCsv
             }
             else
             {
-                $PlacementCsv = ($DefaultPath + "VMPlacement_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+                Write-Log -Message ("VM placement CSV skipped: {0} not found." -f $PlacementScript) -Severity 'Error'
             }
-
-            & $PlacementScript -CsvFile $PlacementCsv
         }
-        else
+        catch
         {
-            Write-Log -Message ("VM placement CSV skipped: {0} not found." -f $PlacementScript) -Severity 'Error'
+            Write-Log -Message ("VM placement CSV failed: {0}. The rest of the run is unaffected." -f $_.Exception.Message) -Severity 'Error'
         }
-    }
-    catch
-    {
-        Write-Log -Message ("VM placement CSV failed: {0}. The rest of the run is unaffected." -f $_.Exception.Message) -Severity 'Error'
     }
 
     if (!$SkipMetrics.IsPresent)

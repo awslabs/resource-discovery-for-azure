@@ -2,12 +2,7 @@
 # Run with: Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed
 
 BeforeAll {
-    # Helper for the Determinism (P1) block below. Given a dictionary map
-    # (token -> real-value) and a selector that derives the real value from a
-    # map value, return the groups of real values that are reachable from MORE
-    # THAN ONE distinct token. A non-empty result means the same real value
-    # produced two different tokens within the run, which breaks obfuscation
-    # determinism (P1). Defined in BeforeAll so it is in scope for the It blocks.
+    # Get-DeterminismViolation: given a (token -> real-value) map and a selector, return the real values reachable from MORE THAN ONE distinct token - a non-empty result means one real value produced two tokens, breaking obfuscation determinism (P1). In BeforeAll so the It blocks can see it.
     function Get-DeterminismViolation
     {
         param(
@@ -65,12 +60,7 @@ BeforeAll {
         $script:AllContent[$file.Name] = Get-Content $file.FullName -Raw
     }
 
-    # Obfuscation pattern: prod_ or nonprod_ followed by an optional type-tag
-    # (databricks_, aks_, vmss_) and a GUID. The type-tagged variants are the
-    # legitimate output for resources whose IDs do not fit the standard ARM
-    # shape (AKS-managed RGs, Databricks-managed clusters, VMSS instances
-    # inside AKS node pools). See ResourceInventory.ps1 lines 650-655 and
-    # 1030-1034 for where these are produced.
+    # Obfuscation token pattern: prod_/nonprod_, an optional type-tag (databricks_/aks_/vmss_), then a GUID. The type-tagged variants are legitimate output for IDs that do not fit the standard ARM shape (AKS-managed RGs, Databricks clusters, VMSS-in-AKS instances).
     $script:ObfuscationPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
     # Helper: get all resources from inventory as flat list
@@ -284,21 +274,8 @@ Describe "Metrics Obfuscation" {
 # 10. Consumption ResourceIds are obfuscated
 # ============================================================
 Describe "Consumption Obfuscation" {
-    # NOTE: the consumption ResourceUri shape preserves the ARM path structure
-    # (/subscriptions/<obf-sub>/resourcegroups/<obf-rg>/providers/<rp>/<type>/<obf-name>)
-    # so the server-side dashboard can categorise rows by resource provider +
-    # type. The pre-2026 behaviour replaced the whole URI with a flat token,
-    # which broke AKS / VMSS / Container Instance / Container Registry / Kusto
-    # detection on the dashboard. Tests must accept BOTH shapes:
-    #   - flat: prod_<guid>            (legacy / non-ARM uris like $system)
-    #   - ARM:  /subscriptions/...     (the new structure-preserving shape)
-    # And separately enforce the no-leak invariants that actually matter.
-    #
-    # NOTE: this derivation must run at RUN time, not discovery time. It depends
-    # on $script:ObfuscationPattern, which the top-level BeforeAll assigns. A
-    # bare assignment in the Describe body would execute during Pester discovery
-    # (when the pattern is still $null) and crash the whole block, silently
-    # dropping the two consumption assertions below. Keep it inside BeforeAll.
+    # Consumption ResourceUri keeps the ARM path structure (/subscriptions/<obf-sub>/resourcegroups/<obf-rg>/providers/<rp>/<type>/<obf-name>) so the dashboard can categorise by provider+type; a flat token broke AKS/VMSS/Container/Kusto detection. Tests accept BOTH the flat legacy token and the ARM shape.
+    # This derivation MUST run at RUN time, not discovery: it depends on $script:ObfuscationPattern (set by the top-level BeforeAll), so a bare assignment in the Describe body would run at discovery when the pattern is still $null and crash the block, silently dropping the assertions. Keep it inside BeforeAll.
     BeforeAll {
         $script:ConsumptionSafePattern = '^(' + $script:ObfuscationPattern.TrimStart('^').TrimEnd('$') + '|/subscriptions/(prod|nonprod)_sub_)'
     }
@@ -463,16 +440,8 @@ Describe "Non-Obfuscated Mode Safety" {
     }
 }
 Describe "Cross-Reference Field Obfuscation" {
-    # Each It below asserts a cross-reference field is either an obfuscation token
-    # ($script:ObfuscationPattern, defined once in the file-level BeforeAll) or one of
-    # the tolerated sentinels 'None' / 'obfuscated' / null.
-    #
-    # There used to be a $script:SafePattern here that spelled that contract out a
-    # second time. It was assigned and never referenced by any It, so it documented a
-    # rule nothing enforced - and it had drifted: it omitted the
-    # (databricks_|aks_|vmss_)? segment that $script:ObfuscationPattern carries, so
-    # wiring it up would have failed legitimate AKS / Databricks / VMSS tokens. It has
-    # been removed rather than fixed; $script:ObfuscationPattern is the single owner.
+    # Each It asserts a cross-reference field is an obfuscation token ($script:ObfuscationPattern, defined once in the file-level BeforeAll) or a tolerated sentinel ('None'/'obfuscated'/null).
+    # A duplicate $script:SafePattern was removed rather than fixed: it restated the contract, was never referenced by any It, and had drifted (omitting the (databricks_|aks_|vmss_)? segment, so it would reject legitimate AKS/Databricks/VMSS tokens). $script:ObfuscationPattern is the single owner.
     BeforeAll {
         $script:AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
     }
@@ -875,18 +844,8 @@ Describe "Dictionary File Exclusion" {
     }
 }
 
-# ============================================================
-# 16b. Full (raw) resource dump excluded from zip (P10)
-# The -Obfuscate run also writes a LOCAL Full_<ReportName>_<timestamp>.json
-# ($Global:AllResourceFile) that holds the RAW, un-obfuscated resource dump.
-# The packaging step's json filter excludes BOTH ObfuscationDictionary_* and
-# Full_* from the shipped ZIP (ResourceInventory.ps1 L1671). The Dictionary
-# File Exclusion block above guards the dictionary; this guards the Full_*
-# dump — the other local-only artifact whose presence would leak every real
-# identifier for every obfuscated dimension. Count-independent; asserts the
-# shared ZIP carries no Full_* member.
+# 16b. Full (raw) resource dump excluded from zip (P10): the -Obfuscate run also writes a LOCAL Full_*.json ($Global:AllResourceFile) of the RAW dump; the packaging json filter excludes both ObfuscationDictionary_* and Full_* (ResourceInventory.ps1 L1671). Asserts the shared ZIP carries no Full_* member, whose presence would leak every real identifier.
 # Validates: Requirements 12.1 | Property: P10
-# ============================================================
 Describe "Full Resource Dump Exclusion (P10)" {
     It "Should not contain the raw Full_* resource dump in the zip" {
         $FullDumpFiles = $script:AllFiles | Where-Object { $_.Name -like "Full_*" }
@@ -894,19 +853,8 @@ Describe "Full Resource Dump Exclusion (P10)" {
     }
 }
 
-# ============================================================
-# 17. Obfuscation determinism (P1)
-# Within a single run, the same real value must always map to the
-# SAME token. The obfuscated zip alone carries no real values, so
-# determinism is asserted against the reverse-lookup dictionary
-# (token -> real value): if any real value were reachable from two
-# DISTINCT tokens, the same input would have produced two outputs,
-# breaking determinism. This is the "all resources in one RG share
-# one RG token" invariant. Skips gracefully when no dictionary
-# fixture is available; count-independent (iterates whatever tokens
-# the run produced).
+# 17. Obfuscation determinism (P1): within a run the same real value must map to the SAME token. Asserted against the reverse-lookup dictionary (token -> real value) - a real value reachable from two DISTINCT tokens means two outputs for one input. Skips when no dictionary fixture; count-independent.
 # Validates: Requirements 2.1, 2.5 | Property: P1
-# ============================================================
 Describe "Obfuscation Determinism (P1)" {
     It "ResourceGroup: each real resource group maps to exactly one token" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
@@ -960,26 +908,8 @@ Describe "Obfuscation Determinism (P1)" {
     }
 }
 
-# ============================================================
-# 18. Obfuscation injectivity / no token collisions (P2)
-# Distinct real values must produce DISTINCT tokens (a fresh GUID
-# per newly seen value), so one token never stands in for two
-# different real values. Asserted against the reverse-lookup
-# dictionary (token -> real value): because tokens are a map's
-# property names they are unique by construction, so within a map
-# an injectivity failure surfaces as the SAME real value being
-# reachable from MORE THAN ONE distinct token. That is the converse
-# of the P1 determinism check and is exactly what
-# Get-DeterminismViolation detects, so the P1 helper is reused here
-# to express the P2 invariant per map: each real value appears under
-# at most one token (the set of real values has no duplicates).
-# Selectors mirror the P1 block so ResourceName injectivity is keyed
-# on the real resource id (two resources that share a display name in
-# different RGs legitimately get different name tokens). Skips
-# gracefully when no dictionary fixture is available;
-# count-independent (iterates whatever tokens the run produced).
+# 18. Obfuscation injectivity / no token collisions (P2): distinct real values must produce DISTINCT tokens. Tokens are unique map keys by construction, so an injectivity failure surfaces as the SAME real value reachable from >1 token - the converse of P1, so Get-DeterminismViolation is reused per map. Selectors mirror P1 (ResourceName keyed on real id). Skips when no dictionary fixture; count-independent.
 # Validates: Requirements 2.1 | Property: P2
-# ============================================================
 Describe "Obfuscation Injectivity (P2)" {
     It "ResourceGroup: no two tokens share the same real resource group" {
         if (-not $script:DictionaryAvailable) { Set-ItResult -Skipped -Because "No ObfuscationDictionary fixture available; set `$env:TEST_DICT_PATH"; return }
@@ -1032,44 +962,11 @@ Describe "Obfuscation Injectivity (P2)" {
     }
 }
 
-# ============================================================
-# 19. Tag tokenization — keys kept, values masked, determinism,
-#     and the mixed-case tag-key regression.
+# 19. Tag tokenization - keys kept, values masked, determinism, and the mixed-case tag-key regression. This fixture carries no tagged resources (TagMap empty, VM Tags loop has no rows), so two fixture-independent layers close Req 4.1-4.5: (1) a logic-level exercise of the EXACT tag-obfuscation loop (ResourceInventory.ps1 L1002-1017) against a MIXED-CASE Tags hashtable, and (2) a SOURCE-AUDIT regression that fails if the case-sensitive tag-scrub bug returns.
 # Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5 | Property: P1
-#
-# The ZIP-content VM Tags test (above) and the TagMap P1/P2 blocks are the
-# authoritative checks WHEN the fixture carries tagged resources. They are
-# DATA-DEPENDENT: this fixture's in-scope resources carried no tags, so TagMap
-# is empty (those blocks skip) and the VM Tags loop has no rows to assert
-# against (documented fixture limitation — the dictionary is NOT fabricated).
-#
-# To close Req 4.1-4.5 without weakening anything above, this block adds two
-# fixture-independent layers, mirroring the sanctioned classifier-logic +
-# source-audit approach established in ProdNonprodPrefix.Tests.ps1 (Task 3):
-#   1. A logic-level exercise of the EXACT tag-obfuscation loop
-#      (ResourceInventory.ps1 L1002-1017) against a representative structured
-#      Tags hashtable with MIXED-CASE keys — the same shape collectors produce
-#      (Services/Compute/VirtualMachines.ps1 L71/L99: $obj = @{ ...; Tags = ... }).
-#      Asserts keys survive verbatim (4.1), values become prod_/nonprod_ tokens
-#      (4.2), the same value yields the same token (4.3 | P1), and the structured
-#      Tags is NOT nulled/dropped (4.5).
-#   2. A SOURCE-AUDIT regression that genuinely fails if the lowercase /
-#      case-sensitive tag scrub bug were reintroduced into ResourceInventory.ps1
-#      (4.5): the malformed-row scrub must clear BOTH the 'tags' and 'Tags' key
-#      variants (case-insensitive), the structured-tag obfuscation must be
-#      guarded by ContainsKey('Tags') and reassign only $tag.Value, and
-#      $tag.Name must never be reassigned (key kept verbatim).
-# ============================================================
 Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (P1)" {
     BeforeAll {
-        # Faithful mirror of the tag-value classifier + tokenizer in
-        # ResourceInventory.ps1 L1002-1017. Same non-prod regex set as every
-        # other class (Req 3.3). Operates on the SAME shape the collectors
-        # produce: a case-insensitive [hashtable] $ResourceItem whose 'Tags'
-        # value is an array of { Name, Value } objects. Replicated here (rather
-        # than invoked) because the inline block lives inside the module-loop in
-        # ResourceInventoryLoop and the prod-only fixture cannot drive tag data
-        # through the ZIP. The source-audit Context below guards the real source.
+        # Faithful mirror of the tag-value classifier + tokenizer in ResourceInventory.ps1 L1002-1017 (same non-prod regex set, Req 3.3) over the shape collectors produce: a case-insensitive [hashtable] $ResourceItem whose 'Tags' value is an array of { Name, Value }. Replicated (not invoked) because the real block lives in the module-loop and the prod-only fixture cannot drive tag data through the ZIP; the source-audit Context below guards the real source.
         function script:Invoke-TagObfuscation
         {
             param(
@@ -1184,13 +1081,7 @@ Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (
         }
 
         It "malformed-row scrub clears BOTH 'tags' and 'Tags' key variants (case-insensitive) (Req 4.5)" {
-            # The mixed-case bug was a case-sensitive scrub. -cmatch is
-            # case-SENSITIVE, and these anchor on the SCRUB ASSIGNMENT STATEMENT
-            # ($resourceItem.<case>.tags/Tags = $null), which is unique to the
-            # malformed-row path (L948-949) — the bare ContainsKey('Tags') token
-            # also appears at the L1002 obfuscation guard, so matching the token
-            # alone would be a false guard. Dropping either case variant
-            # (reintroducing a lowercase-only / case-sensitive scrub) fails here.
+            # -cmatch is case-SENSITIVE and anchors on the SCRUB ASSIGNMENT STATEMENT ($resourceItem.<case>.tags/Tags = $null), unique to the malformed-row path (L948-949); the bare ContainsKey('Tags') token also appears at the L1002 obfuscation guard, so matching the token alone would be a false guard. Dropping either case variant (a lowercase-only / case-sensitive scrub) fails here.
             ($script:RiSource -cmatch '\$resourceItem\.tags = \$null') | Should -BeTrue -Because "lowercase tag key variant must be scrubbed on the malformed-row path (Req 4.5)"
             ($script:RiSource -cmatch '\$resourceItem\.Tags = \$null') | Should -BeTrue -Because "PascalCase tag key variant must be scrubbed on the malformed-row path (Req 4.5)"
         }
@@ -1206,28 +1097,8 @@ Describe "Tag Tokenization — keys kept, values masked, mixed-case regression (
     }
 }
 
-# ============================================================
-# 20. AKS multi-node-pool Tags: no shared-reference aliasing (P1, P2)
-# Regression for a real bug found in this session: Services/Containers/AKS.ps1
-# emits one row per node pool for a cluster (foreach ($2 in
-# $data.agentPoolProfiles)). The 'Tags' field must carry each cluster's real
-# tag values into EVERY one of that cluster's rows, but if the Select-Object
-# projection that builds 'Tags' were hoisted OUTSIDE that inner loop, every row
-# would share the SAME Tags array/element object instances. The obfuscation
-# pass in ResourceInventory.ps1 mutates $tag.Value IN PLACE
-# ($tag.Value = $Global:TagValueDictionary[$realTagValue]); with aliased
-# objects, row 1's mutation is visible to row 2, so row 2 re-reads an
-# already-tokenized value as if it were "real" and re-keys it into
-# $Global:TagValueDictionary — corrupting the dictionary (P2 injectivity
-# violation: one real value ends up spuriously mapped under two dictionary
-# keys) and breaking TagMap. This test invokes the ACTUAL collector (not a
-# mirror) against a synthetic two-node-pool cluster and proves: (a) the
-# collector does not hand back the same Tags object instance across rows, and
-# (b) running the real tag-obfuscation loop over the collector's output
-# produces exactly ONE dictionary entry for the one real tag value, with both
-# rows resolving to the SAME token (P1 determinism preserved across rows).
+# 20. AKS multi-node-pool Tags: no shared-reference aliasing (P1, P2). AKS.ps1 emits one row per node pool; if the Select-Object that builds 'Tags' were hoisted outside the inner loop the rows would share ONE Tags object, and the in-place obfuscation ($tag.Value = $Global:TagValueDictionary[$realTagValue]) would let row 1's mutation corrupt row 2 - re-keying an already-tokenized value into the dictionary (P2 violation) and breaking TagMap. Invokes the ACTUAL collector against a synthetic two-node-pool cluster.
 # Validates: Requirements 2.1, 4.1, 4.2, 4.3 | Properties: P1, P2
-# ============================================================
 Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
     BeforeAll {
         # Minimal synthetic managedClusters resource with TWO node pools and

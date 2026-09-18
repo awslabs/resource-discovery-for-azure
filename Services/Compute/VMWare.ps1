@@ -18,11 +18,6 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'            = $1.RESOURCEGROUP;
                 'Name'                     = $1.NAME;
                 'Location'                 = $1.LOCATION;
-                # sku is a TOP-LEVEL Resource Graph column for this type, not a
-                # member of properties: the ARM contract for
-                # Microsoft.AVS/privateClouds declares sku as a required sibling of
-                # properties. Reading $Data.sku (= properties.sku) therefore always
-                # yielded null. Same correction as IOTHubs.
                 'SKU'                      = $1.sku.name;
                 'AvailabilityStrategy'     = $Data.availability.strategy;
                 'Encryption'               = $Data.encryption.status;
@@ -35,3 +30,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

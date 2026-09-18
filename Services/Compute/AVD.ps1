@@ -41,15 +41,8 @@ if ($Task -eq 'Processing')
                         # dictionary value when the backing VM was indexed, else the
                         # lossy 'obfuscated' fallback used elsewhere in the codebase.
                         $HostIdValue = if ($ResourceIdDictionary.ContainsKey($Vmsessionhosts.Id)) { $ResourceIdDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
-                        # In the clear, Hostname is the backing VM's Name (see the else
-                        # branch below), so under obfuscation it must reuse the SAME name
-                        # token that VM's inventory 'Name' receives - otherwise an AVD row
-                        # cannot be joined back to its VM. $Global:ResourceNameDictionary is
-                        # keyed by the VM's real id and is fully populated in the up-front
-                        # obfuscation pass that runs before any collector, so the token is
-                        # available here (same read pattern the consumption phase uses for
-                        # $Global:ResourceIdDictionary). Falls back to 'obfuscated' when the
-                        # VM was not indexed (deleted / out of scope), consistent with HostId.
+                        # Hostname must reuse the SAME name token the backing VM's inventory 'Name' gets, or the AVD row
+                        # can't join back to its VM. $Global:ResourceNameDictionary (keyed by real VM id) is populated up-front; else 'obfuscated'.
                         $HostnameValue = if ($null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($Vmsessionhosts.Id)) { $Global:ResourceNameDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
                     }
                     else

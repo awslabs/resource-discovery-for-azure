@@ -1,36 +1,5 @@
-# Public IP -> associated-resource cross-reference tests
-# Run with: Invoke-Pester ./Tests/PublicIpAssociation.Tests.ps1 -Output Detailed
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# A public IP has TWO association surfaces and the collector used to read only
-# one. 'ipConfiguration' is set when the IP is attached to a NIC or a
-# load-balancer frontend; 'natGateway' is set when it is attached to a NAT
-# gateway. They are separate properties on the ARM PublicIPAddress type, and a
-# NAT-gateway-attached IP has NO ipConfiguration at all.
-#
-# The result was a row that contradicted itself: the Use flag already counted
-# natGateway, so the IP was correctly reported 'Utilized' while the association
-# fields fell through to the unassociated branch and emitted the literal 'None'
-# - in use, associated with nothing - with the real association sitting unread
-# in properties.natGateway.id.
-#
-# The live shapes asserted below were CONFIRMED against a real Azure tenant: on
-# a NAT-gateway-only public IP, Resource Graph omits the ipConfiguration key
-# ENTIRELY (it is not present-and-null), and returns natGateway = @{ id = ... }.
-# The fixtures reproduce that exactly, including the absent key, because
-# "absent" and "present but null" are different shapes and only one of them is
-# what Azure actually sends.
-#
-# Casing note: every data-fetch call site passes -Lowercase to
-# Invoke-AzGraphQuerySafe, which lowercases KEYS AND VALUES via a JSON
-# round-trip. So the provider type extracted from an ARM id is 'natgateways' /
-# 'networkinterfaces' in lower case, not the PascalCase spelling from the ARM
-# docs. These fixtures are pre-lowercased to match what collectors really see.
-#
-# No live Azure. No StrictMode - production never sets it, and under StrictMode
-# reading an ABSENT property throws instead of yielding $null, which would make
-# these fixtures behave in a way production never does.
+# Public IP -> associated-resource cross-reference tests: a NAT-gateway-attached IP carries its association only
+# in properties.natGateway.id with NO ipConfiguration key (absent, not null; fixtures pre-lowercased) - reading only ipConfiguration mislabelled it 'None'.
 
 BeforeAll {
     $script:Collector = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Networking', 'PublicIP.ps1' | Resolve-Path | Select-Object -ExpandProperty Path

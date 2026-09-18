@@ -1,9 +1,6 @@
 #Requires -Version 7.0
-# AllSubHtmlSummary.Functions.ps1
-# Self-contained (no CDN/JS/module) HTML chart + escaping helpers, dot-sourced ONLY by the two summary renderers (Extension/Summary.ps1, Run-AllSubscriptions.ps1) rather than into every entry point the way Common is. Definitions only.
 
 # === HTML helpers =============================================================
-# HTML-escape everything at the edge: report strings come from Azure Resource Graph and can carry HTML-significant characters; the input is never trusted.
 function ConvertTo-HtmlSafe
 {
     param([Parameter(ValueFromPipeline = $true)]$Value)
@@ -21,15 +18,11 @@ function ConvertTo-HtmlSafe
 }
 
 # === Chart helpers ============================================================
-#
-# Hand-rolled SVG. Two chart types: donut (proportions) and horizontal bar
-# (top-N counts). Both produce strings that drop straight into the HTML body.
-# No JS, no external library, ~5 KB combined.
 
 function New-DonutChart
 {
     param(
-        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
+        [Parameter(Mandatory)] [object[]]$Data,
         [int]$Size = 240,
         [int]$Thickness = 50
     )
@@ -42,8 +35,6 @@ function New-DonutChart
     $Radius = ($Size / 2) - 10
     $InnerRadius = $Radius - $Thickness
 
-    # Color palette - colorblind-friendly (Okabe-Ito + neutrals). Wraps if
-    # there are more services than colors, which is fine for visual purpose.
     $Palette = @(
         '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9',
         '#D55E00', '#F0E442', '#999999', '#332288', '#117733',
@@ -80,7 +71,6 @@ function New-DonutChart
         $i++
     }
 
-    # Inner donut cutout. Pass InvariantCulture explicitly: an odd -Size makes $Cx/$Cy/$InnerRadius Doubles (and $Total is a Double), so a comma-decimal host would otherwise emit cx='120,5' and break the SVG. New-BarChart needs none (all Int32).
     [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $Cx, $Cy, $InnerRadius)
     [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $Cx, ($Cy - 6), $Total)
     [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $Cx, ($Cy + 14))
@@ -92,7 +82,7 @@ function New-DonutChart
 function New-BarChart
 {
     param(
-        [Parameter(Mandatory)] [object[]]$Data,    # array of @{Label; Value}
+        [Parameter(Mandatory)] [object[]]$Data,
         [int]$Width = 480,
         [int]$RowHeight = 26,
         [int]$LabelWidth = 160
@@ -118,11 +108,8 @@ function New-BarChart
         $BarWidth = [int](($Value / $MaxValue) * $BarAreaWidth)
         if ($BarWidth -lt 1) { $BarWidth = 1 }
 
-        # Label on the left
         [void]$Svg.AppendFormat("<text x='{0}' y='{1}' class='bar-label' text-anchor='end'>{2}</text>", ($LabelWidth - 8), ($y + 17), $Label)
-        # Bar
         [void]$Svg.AppendFormat("<rect x='{0}' y='{1}' width='{2}' height='{3}' rx='3' class='bar-fill' />", $LabelWidth, $y, $BarWidth, ($RowHeight - 8))
-        # Count to the right of the bar
         [void]$Svg.AppendFormat("<text x='{0}' y='{1}' class='bar-value'>{2}</text>", ($LabelWidth + $BarWidth + 6), ($y + 17), $Value)
 
         $i++
@@ -132,39 +119,26 @@ function New-BarChart
     return $Svg.ToString()
 }
 
-# New-RdaAllSubHtmlSummary
-# Aggregate all-subscriptions HTML summary built purely from on-disk per-sub Inventory_*.json + .html (NEVER calls Azure/Graph); -Detailed adds run-wide by-service donut/bar charts. Reuses the helpers above.
 function New-RdaAllSubHtmlSummary
 {
     param(
-        # Directory holding the per-subscription report folders (ResourcesReport*).
         [Parameter(Mandatory = $true)] $RunOutputDirectory,
 
-        # Output path for the aggregate .html.
         [Parameter(Mandatory = $true)] $HtmlFile,
 
-        # Optional: only include report folders modified at/after this time, so the
-        # summary is scoped to a single wrapper run rather than every run ever left
-        # in the output directory. When omitted, every ResourcesReport* folder is
-        # included.
         $SinceTime,
 
-        # Optional run-health collections passed through from the wrapper. Each is an
-        # array; when empty the corresponding banner is omitted.
         $FailedSubscriptions = @(),
         $ConsumptionFailedSubs = @(),
         $MetricsFailedSubs = @(),
         $CollectorFailures = @(),
 
-        # Display-only header fields.
         $TenantId,
         $Version,
         $PlatOS,
 
-        # Tier 2 (per-service aggregate + charts) when set; Tier 1 index-only otherwise.
         [switch]$Detailed,
 
-        # When set (or when sampled per-sub names look obfuscated), carry NO real identifiers: suppress the tenant id and render health banners as COUNTS ONLY. Safe default is identifiable.
         [switch]$Obfuscated
     )
 
@@ -179,18 +153,12 @@ function New-RdaAllSubHtmlSummary
         throw "New-RdaAllSubHtmlSummary: -RunOutputDirectory not found: '$RunOutputDirectory'."
     }
 
-    # --- Discover per-subscription report folders and read their inventories ---
-    # Each per-sub run writes a ResourcesReport<stamp> folder containing a loose
-    # Inventory_*.json and its sibling .html. We read only those; no Azure calls.
     $Folders = @(Get-ChildItem -LiteralPath $RunOutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue)
     if ($null -ne $SinceTime)
     {
         $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
     }
 
-    # Allow the optional type hint (databricks_/aks_/vmss_) some collectors
-    # prepend to a token, so a fully-obfuscated aggregate is not mislabeled
-    # 'identifiable'. Same grammar the obfuscation tests use.
     $ObfPattern = '^(prod_|nonprod_)(databricks_|aks_|vmss_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     $Samples = New-Object System.Collections.Generic.List[string]
     $SubReports = @()
@@ -206,7 +174,6 @@ function New-RdaAllSubHtmlSummary
         }
         catch
         {
-            # A single unreadable inventory must not abort the whole summary.
             $SubReports += [pscustomobject]@{ Name = ('(unreadable inventory: {0})' -f $Folder.Name); Total = 0; Link = $null; Folder = $Folder.Name }
             continue
         }
@@ -236,13 +203,11 @@ function New-RdaAllSubHtmlSummary
 
         $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
-        # Relative link so the summary travels with the report folder.
         $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
 
         $SubReports += [pscustomobject]@{ Name = $SubName; Total = $Total; Link = $Link; Folder = $Folder.Name }
     }
 
-    # Detect obfuscation posture the same way Summary.ps1 does (safe default: identifiable).
     $ObfuscationStatus = 'identifiable'
     if ($Samples.Count -gt 0)
     {
@@ -250,9 +215,6 @@ function New-RdaAllSubHtmlSummary
         if ($ObfHits -gt ($Samples.Count * 0.7)) { $ObfuscationStatus = 'obfuscated' }
     }
 
-    # Redaction gate for the shareable bundle: explicit -Obfuscated from the caller
-    # OR a sampled-obfuscated posture. When set, the tenant id and health-banner
-    # subscription names (real identifiers the wrapper cannot tokenize) are omitted.
     $IsObfuscated = $Obfuscated.IsPresent -or ($ObfuscationStatus -eq 'obfuscated')
 
     $SubReports = @($SubReports | Sort-Object -Property Total -Descending)
@@ -260,8 +222,6 @@ function New-RdaAllSubHtmlSummary
     $SubCount = $SubReports.Count
     $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
 
-    # --- Render --------------------------------------------------------------
-    # InvariantCulture (not -Format): the 'HH:mm:ss'/'zzz' separators and the year resolve through the host culture, so a th-TH / ar-SA host would otherwise stamp a Buddhist/Hijri year while the per-sub reports stamp Gregorian.
     $Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
     $TenantSafe = if ($IsObfuscated -or [string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
@@ -276,8 +236,6 @@ function New-RdaAllSubHtmlSummary
         '<div class="privacy-banner identifiable"><span>&#9888;</span><div><b>Identifiable.</b> This summary and the linked reports contain real resource and subscription names. Treat as confidential.</div></div>'
     }
 
-    # Health banners built from the passed-through wrapper collections. Each is
-    # read-only; a null/empty collection renders nothing.
     $FailedList = @(@($FailedSubscriptions) | Where-Object { $_ })
     $ConsumpList = @(@($ConsumptionFailedSubs) | Where-Object { $_ -and $_.Id -ne '(auth)' })
     $MetricsList = @(@($MetricsFailedSubs) | Where-Object { $_ })
@@ -326,7 +284,6 @@ function New-RdaAllSubHtmlSummary
         [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} collector failure(s)</b> across the run (individual resource types that threw during collection).</div>', $CollectorList.Count)
     }
 
-    # Tier 2 charts (only when -Detailed and there is data).
     $ChartsHtml = ''
     if ($Detailed -and $ServiceAgg.Keys.Count -gt 0)
     {
@@ -337,14 +294,10 @@ function New-RdaAllSubHtmlSummary
         $ChartsHtml = "<div class='charts'><div class='chart-card'><h3>Resources by service (run-wide)</h3>$DonutSvg</div><div class='chart-card'><h3>Top services</h3>$BarSvg</div></div>"
     }
 
-    # Per-subscription table.
     $Rows = New-Object System.Text.StringBuilder
     foreach ($Sr in $SubReports)
     {
         $NameSafe = ConvertTo-HtmlSafe $Sr.Name
-        # Invariant: this number is rendered into the shared HTML, so its group
-        # separator must not follow the collecting host's culture. Total is
-        # seeded to 0 above, so it can never be null here.
         $CountText = $Sr.Total.ToString('N0', [cultureinfo]::InvariantCulture)
         $HealthCell = if ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
         $LinkCell = if ($Sr.Link) { ('<a href="{0}">open &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.Link)) } else { '<span class="muted">no report</span>' }
@@ -416,38 +369,21 @@ $ChartsHtml
     Write-Host ("  {0} subscription(s), {1} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
 }
 
-# New-RdaAllSubHtmlSummaryFromZip
-# Reconstructs a working aggregate summary from a consolidated outer zip: extract each inner ResourcesReport*.zip into its own folder NEXT TO MainSummary.html so the summary's folder-relative links resolve; falls back to already-extracted folders.
 function New-RdaAllSubHtmlSummaryFromZip
 {
     param(
-        # Consolidated outer zip (AllSubscriptions_ResourcesReport_*.zip).
         [Parameter(Mandatory = $true)] $InputZip,
 
-        # Durable folder to reconstruct into + write MainSummary.html. The per-sub
-        # folders MUST live next to the html for its relative links to resolve, so
-        # this is NOT a temp dir. Defaults to <zipdir>/<zipbasename>_MainSummary.
         $OutputDirectory,
 
-        # Explicit output path for the summary html. Defaults to
-        # <OutputDirectory>/MainSummary.html.
         $HtmlFile,
 
-        # Tier 2 (run-wide by-service donut/bar charts).
         [switch]$Detailed,
 
-        # Also emit a portable zip of the reconstructed folder (summary + per-sub
-        # HTMLs) whose links survive extraction elsewhere.
         [switch]$PackageZip,
 
-        # By default each per-subscription report is RE-RENDERED from its
-        # Inventory_*.json with the current Extension/Summary.ps1, so drill-down
-        # reports reflect the latest renderer (e.g. the Tags column fix) instead of
-        # whatever version produced the html inside the source zip. Pass this to
-        # keep the original per-sub html verbatim instead.
         [switch]$KeepOriginalReports,
 
-        # Display-only header fields (forwarded to New-RdaAllSubHtmlSummary).
         $TenantId,
         $Version,
         $PlatOS
@@ -476,26 +412,17 @@ function New-RdaAllSubHtmlSummaryFromZip
         $HtmlFile = Join-Path $OutputDirectory 'MainSummary.html'
     }
 
-    # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
-    # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
     $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $Staging -Force | Out-Null
     try
     {
         Expand-Archive -LiteralPath $InputZip -DestinationPath $Staging -Force
-        # Exclude any leftover *_revealed.zip (de-obfuscated single-report archive
-        # from a prior Reveal run) at SELECTION time: the reveal engine renames only
-        # the OUTER zip with the _revealed suffix and rewrites the inner html/json
-        # members IN PLACE (their names keep no _revealed marker), so a member-name
-        # filter alone would let real-data reports through. Mirrors Reveal.ps1.
         $InnerZips = @(Get-ChildItem -LiteralPath $Staging -Recurse -Filter 'ResourcesReport*.zip' -File -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -notlike '*_revealed*' })
 
         $Reconstructed = 0
         foreach ($InnerZip in $InnerZips)
         {
-            # Folder named after the inner zip base (ResourcesReport_<stamp>), which
-            # matches the ResourcesReport* glob New-RdaAllSubHtmlSummary discovers.
             $FolderName = [System.IO.Path]::GetFileNameWithoutExtension($InnerZip.Name)
             $Dest = Join-Path $OutputDirectory $FolderName
             New-Item -ItemType Directory -Path $Dest -Force | Out-Null
@@ -504,10 +431,6 @@ function New-RdaAllSubHtmlSummaryFromZip
             {
                 foreach ($Entry in $Archive.Entries)
                 {
-                    # Never pull a *_revealed* (de-obfuscated) report across: it holds
-                    # real identifiers and would otherwise ride along in a shareable
-                    # -PackageZip bundle. Only the obfuscated per-sub html + the
-                    # Inventory json (the summary's input) are reconstructed.
                     if (($Entry.Name -like 'Inventory_*.json') -or (($Entry.Name -like '*.html') -and ($Entry.Name -notlike '*_revealed*')))
                     {
                         [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, (Join-Path $Dest $Entry.Name), $true)
@@ -518,8 +441,6 @@ function New-RdaAllSubHtmlSummaryFromZip
             $Reconstructed++
         }
 
-        # Fallback for an archive that already holds extracted ResourcesReport*/
-        # folders instead of inner zips: copy their html + Inventory json across.
         if ($Reconstructed -eq 0)
         {
             $ExtractedFolders = @(Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue |
@@ -545,7 +466,6 @@ function New-RdaAllSubHtmlSummaryFromZip
         throw "New-RdaAllSubHtmlSummaryFromZip: no per-subscription reports found inside '$InputZip'. Is this a consolidated AllSubscriptions_ResourcesReport_*.zip?"
     }
 
-    # Re-render each per-sub report from its Inventory_*.json with the CURRENT Extension/Summary.ps1 so drill-downs reflect the latest renderer; fail-soft per sub (keep the original html on error). $PSScriptRoot is Functions/, so the sibling Extension/Summary.ps1 resolves from the repo root.
     if (-not $KeepOriginalReports)
     {
         $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'
@@ -556,8 +476,6 @@ function New-RdaAllSubHtmlSummaryFromZip
             {
                 $InvJson = Get-ChildItem -LiteralPath $SubDir.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($null -eq $InvJson) { continue }
-                # Overwrite the folder's existing html in place (single html per
-                # folder keeps the summary's link stable); derive a name if none.
                 $ExistingHtml = Get-ChildItem -LiteralPath $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
                 $TargetHtml = if ($null -ne $ExistingHtml) { $ExistingHtml.FullName } else { Join-Path $SubDir.FullName ($SubDir.Name + '.html') }
@@ -579,20 +497,16 @@ function New-RdaAllSubHtmlSummaryFromZip
         }
     }
 
-    # Build the summary against the reconstructed folder (links resolve on disk).
     New-RdaAllSubHtmlSummary -RunOutputDirectory $OutputDirectory -HtmlFile $HtmlFile -Detailed:$Detailed `
         -TenantId $TenantId -Version $Version -PlatOS $PlatOS
 
     Write-Host ("Reconstructed {0} per-subscription report(s) into: {1}" -f $Reconstructed, $OutputDirectory) -ForegroundColor Green
     Write-Host ("Open this summary (links resolve from here): {0}" -f $HtmlFile) -ForegroundColor Green
 
-    # Optional portable bundle: zip the reconstructed folder so the summary and
-    # its per-sub reports travel together with working links.
     if ($PackageZip)
     {
         $PackageZipPath = $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
         if (Test-Path -LiteralPath $PackageZipPath) { Remove-Item -LiteralPath $PackageZipPath -Force -ErrorAction SilentlyContinue }
-        # Enumerate literally, then zip literally: a '*' glob under a folder containing '[' or ']' would match a sibling folder instead.
         $PackageItems = @(Get-ChildItem -LiteralPath $OutputDirectory -Force | Select-Object -ExpandProperty FullName)
         Compress-Archive -LiteralPath $PackageItems -DestinationPath ([WildcardPattern]::Escape($PackageZipPath)) -Force
         Write-Host ("Portable summary bundle (links survive extraction): {0}" -f $PackageZipPath) -ForegroundColor Green
@@ -600,3 +514,4 @@ function New-RdaAllSubHtmlSummaryFromZip
 
     return $HtmlFile
 }
+

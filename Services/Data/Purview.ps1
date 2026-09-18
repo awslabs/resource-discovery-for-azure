@@ -20,8 +20,6 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'       = $1.RESOURCEGROUP;
                 'Name'                = $1.NAME;
                 'Location'            = $1.LOCATION;
-                # sku is a TOP-LEVEL Resource Graph column here (sibling of properties), so read $1.sku, not
-                # $Data.sku (= properties.sku), which is always null for Microsoft.Purview/accounts. Same as IOTHubs.
                 'SKU'                 = $1.sku.name;
                 'Capacity'            = $1.sku.capacity;
                 'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.createdBy } else { $Data.createdBy };
@@ -35,3 +33,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

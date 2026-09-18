@@ -1,27 +1,5 @@
 # Summary.ps1
-#
-# Generates the self-contained HTML report for a Resource Discovery for Azure
-# (RDA) run. Reads the aggregated Inventory_*.json produced by the Processing
-# phase and writes a single .html file with NO external dependencies (no CDN,
-# no JS libraries, no images, no Excel/EPPlus). The output renders in any
-# browser and is suitable for emailing, sharing, or opening in Cloud Shell.
-#
-# This replaces the previous Excel (ImportExcel/EPPlus) report. The data
-# pipeline is unchanged: collectors still run in the Processing phase to build
-# the Inventory JSON; this script only renders that JSON as HTML.
-#
-# Invoked from ResourceInventory.ps1 (ProcessSummary) via `& $SummaryPath ...`.
-#
-# Inputs (Inventory JSON schema):
-#   The JSON file is a single object whose top-level keys are service-type
-#   names (VirtualMachines, AppServices, StorageAcc, ...) and whose values
-#   are arrays of records. Each record has a heterogeneous set of fields,
-#   typically including: Name, Subscription, Location, ResourceGroup, ID,
-#   plus service-specific fields. The report iterates these dynamically so a
-#   new service type added in Services/* surfaces automatically.
-#
-# Outputs:
-#   A single self-contained .html file. ~50 KB framework + ~1 KB per record.
+# Renders the self-contained HTML report (NO CDN/JS/images/Excel) from a run's aggregated Inventory_*.json; invoked from ResourceInventory.ps1 (ProcessSummary). Iterates the JSON's service-type keys dynamically, so a new Services/* type surfaces automatically.
 param(
     # Path to the aggregated Inventory_*.json file (input).
     $JsonFile,
@@ -57,12 +35,7 @@ param(
     # Environment label (e.g. 'Azure CloudShell', 'PowerShell Unix'). Display only.
     $PlatOS,
 
-    # Path to the Consumption_*.csv produced by the consumption phase (input,
-    # optional). When supplied and non-empty, the report cross-checks the count
-    # of running VMs in the inventory against the count of VMs that produced a
-    # compute-usage record. A large shortfall indicates consumption data was
-    # incomplete for some subscriptions. Omitted on standalone runs and when
-    # -SkipConsumption was used; the check is silently skipped in that case.
+    # Optional Consumption_*.csv: when supplied and non-empty, cross-check the running-VM count in inventory against VMs that produced a compute-usage record (a large shortfall = incomplete consumption data). Omitted / standalone / -SkipConsumption -> silently skipped.
     $ConsumptionFile,
 
     # Minimum running-VM-vs-billed shortfall (count) required before the VM
@@ -82,13 +55,7 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
     throw "Summary.ps1: -HtmlFile output path is required."
 }
 
-# Shared HTML-summary render helpers (ConvertTo-HtmlSafe / New-DonutChart /
-# New-BarChart) live in Functions/AllSubHtmlSummary.Functions.ps1 - the single
-# source of truth also used by the aggregate all-subscriptions summary. They are
-# NOT in Common.Functions.ps1 on purpose: only the HTML-rendering paths need
-# them, so they are dot-sourced only here (and by the wrapper's -MainSummary
-# branch) rather than loaded into every entry point. This script sits in
-# Extension/, so resolve the sibling Functions/ folder from the repo root.
+# Shared render helpers (ConvertTo-HtmlSafe / New-DonutChart / New-BarChart) live in Functions/AllSubHtmlSummary.Functions.ps1 (single source, shared with the aggregate summary), dot-sourced only here rather than in Common. This script sits in Extension/, so resolve the sibling Functions/ from the repo root.
 $RenderFunctionsFile = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
 if (-not (Test-Path -Path $RenderFunctionsFile -PathType Leaf))
 {
@@ -124,12 +91,7 @@ foreach ($prop in $Inventory.PSObject.Properties)
         Count   = $Count
     }
 }
-# @() around the sort: with exactly ONE populated service type the pipeline
-# returns a bare [pscustomobject] whose own 'Count' property shadows the
-# intrinsic array count, so '$ServiceSummary.Count' reported that service's
-# RESOURCE count as the number of service types (a VM-only subscription with 12
-# VMs rendered 'Service Types: 12'). Same guard the sibling renderer uses
-# (Functions/AllSubHtmlSummary.Functions.ps1 $SubReports).
+# @() around the sort: with exactly ONE populated service type the pipeline returns a bare [pscustomobject] whose own 'Count' shadows the array count, so '$ServiceSummary.Count' reported the RESOURCE count as the service-type count. Same guard the sibling renderer uses.
 $ServiceSummary = @($ServiceSummary | Sort-Object -Property Count -Descending)
 # [int] cast, not the bare .Sum: on a zero-resource subscription every service
 # is filtered out above, so Measure-Object has nothing to sum and returns $null,
@@ -168,14 +130,7 @@ if ($Samples.Count -gt 0)
     }
 }
 
-# VM billing-coverage check. The inventory (ARM/Resource Graph) lists every VM
-# that EXISTS; the consumption CSV lists VMs that produced a compute-usage
-# record in the billing window. A running VM with no compute-usage record is an
-# anomaly - it usually means consumption data was incomplete for that VM's
-# subscription (auth / billing-scope gap), not that the VM is idle. We compare
-# COUNTS only (not identities): the inventory and consumption files obfuscate
-# resource ids through different dictionaries, so a per-VM join is impossible in
-# an obfuscated report. Counts of distinct tokens are preserved either way.
+# VM billing-coverage check: inventory (ARM/Resource Graph) lists every VM that EXISTS; the consumption CSV lists VMs that billed a compute-usage record. A running VM with no such record usually means incomplete consumption data (auth / billing-scope gap), not that it is idle. Compare COUNTS only, since inventory and consumption obfuscate ids through different dictionaries and cannot be joined.
 $VmBilling = $null
 if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $ConsumptionFile -PathType Leaf))
 {
@@ -186,12 +141,7 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $C
         $RunningVmCount = @($VmRecords | Where-Object { $_.PowerState -match 'running' }).Count
     }
 
-    # Count distinct VM-meter resources in the consumption CSV. A header-only or
-    # empty CSV (zero-billing subscription, or -SkipConsumption safety net) has
-    # no data rows at all; in that case consumption coverage is unknown, so the
-    # check is skipped rather than reporting a false 100% gap. A CSV that DOES
-    # have rows but none in the 'Virtual Machines' meter is a legitimate zero -
-    # the gap then reflects a real coverage shortfall.
+    # Count distinct VM-meter resources in the consumption CSV. A header-only/empty CSV (zero-billing sub, or -SkipConsumption safety net) has no data rows -> coverage unknown, so skip rather than report a false 100% gap. Rows present but none in the 'Virtual Machines' meter is a legitimate zero (real shortfall).
     $BilledVmCount = 0
     $HasConsumptionData = $false
     try
@@ -248,21 +198,10 @@ if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Ver
 }
 
 # === HTML + chart helpers ====================================================
-#
-# ConvertTo-HtmlSafe / New-DonutChart / New-BarChart now live in
-# Functions/AllSubHtmlSummary.Functions.ps1 (dot-sourced near the top of this
-# script) so the per-subscription report and the aggregate all-subscriptions
-# summary share ONE copy instead of duplicating them. Behaviour is unchanged;
-# see that file for the definitions.
+# ConvertTo-HtmlSafe / New-DonutChart / New-BarChart now live in Functions/AllSubHtmlSummary.Functions.ps1 (dot-sourced above), shared with the aggregate summary; behaviour unchanged.
 
 # === Per-service table builder ================================================
-#
-# Each service section is an HTML <details> element (so it's collapsible
-# without any JS) wrapping a search input + a sortable <table>.
-#
-# Column selection: the union of all field names across the records, ordered
-# by frequency. This avoids the trap of letting a single record with many
-# fields blow out the column list.
+# Each service section is a collapsible <details> (no JS) wrapping a search input + a sortable <table>. Columns = union of record field names ordered by frequency, so one wide record can't blow out the column list.
 
 function New-ServiceTable
 {
@@ -317,12 +256,7 @@ function New-ServiceTable
             $ColCounts.Remove($p)
         }
     }
-    # Append remaining columns ordered by descending frequency, but skip
-    # nested-object fields (they don't render usefully in a table cell).
-    # Tie-break on the column name (ascending) so the order is fully
-    # deterministic: without a secondary key, equal-frequency columns fall back
-    # to the enumeration order of an unordered hashtable, which varies run to
-    # run and made columns (e.g. OSName) drift in and out of the 12-column cap.
+    # Append remaining columns by descending frequency, skipping nested-object fields (they don't render in a cell). Tie-break on column name (ascending) so equal-frequency columns are deterministic rather than following unordered-hashtable enumeration order, which made columns (e.g. OSName) drift run to run.
     $Remaining = $ColCounts.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Key'; Descending = $false } | ForEach-Object { $_.Key }
     $Columns += $Remaining
 
@@ -359,12 +293,7 @@ function New-ServiceTable
         $Columns = $Columns | Where-Object { $ObfuscatedNoiseColumns -notcontains $_ }
     }
 
-    # A 12-column cap used to be applied here to avoid horizontal scrolling on
-    # narrow screens, but it silently DROPPED genuinely useful collected columns
-    # (e.g. ImageSku = the OS image edition, OSType). Now that every table has a
-    # synced top+bottom horizontal scrollbar (see .table-scroll-top /
-    # setupTopScroll in the CSS/JS), the width is fully navigable, so ALL
-    # collected columns are shown rather than hidden behind a cap.
+    # No column cap: an old 12-column cap silently DROPPED useful collected columns (e.g. ImageSku, OSType). With a synced top+bottom horizontal scrollbar (setupTopScroll) the width is fully navigable, so ALL collected columns are shown.
 
     # Render header
     $Sb = New-Object System.Text.StringBuilder
@@ -801,12 +730,7 @@ else
     $PrivacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
 }
 
-# VM billing-coverage banner. Rendered only when the inventory shows materially
-# more running VMs than the consumption data billed for (see the $VmBilling
-# detection above). Frames the inventory as authoritative and points at
-# consumption-collection completeness, not at the report being inaccurate. In
-# an obfuscated report the per-VM identities cannot be joined (separate
-# dictionaries), so this is a count-level signal; the wording reflects that.
+# VM billing-coverage banner: rendered only when inventory shows materially more running VMs than consumption billed for (see $VmBilling above). Frames inventory as authoritative and points at consumption completeness; a count-level signal since obfuscated per-VM identities can't be joined.
 $CoverageBanner = ''
 if ($null -ne $VmBilling)
 {

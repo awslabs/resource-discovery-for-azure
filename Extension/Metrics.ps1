@@ -101,7 +101,22 @@ if ($Task -eq 'Processing')
                 if (![string]::IsNullOrEmpty($OriginalId) -and $null -ne $ResourceIdDictionary)
                 {
                     $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
-                    $ResourceIdDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
+
+                    # Build the fallback ID through the shared segment-walk helper so a transient/deleted resource's metric row KEEPS its ARM shape (provider+type+mc_), which the dashboard categorises on - a flat GUID here would make that row uncategorisable. This is the METRICS phase minting the id token (it legitimately owns the ID map), so writing into $ResourceIdDictionary is intended here, unlike the consumption read-only leaf.
+                    # Guarded: when Metrics.ps1 runs in isolation (unit tests) without the Functions file dot-sourced, the helper is absent - fall back to the previous flat GUID so obfuscation still fails closed.
+                    if (-not $script:MetricsFbUriCaches)
+                    {
+                        $script:MetricsFbUriCaches = @{ Sub = @{}; Rg = @{}; Name = @{} }
+                    }
+                    if (Get-Command Build-ObfuscatedResourceUri -CommandType Function -ErrorAction SilentlyContinue)
+                    {
+                        # $null shared dicts: the resource is NOT inventoried (that is why we are in the fallback), so there is no inventory token to reuse - segments tokenise via the fallback caches only.
+                        $ResourceIdDictionary[$OriginalId] = Build-ObfuscatedResourceUri -RawUri $OriginalId -Prefix $FbPrefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $null -SubCache $script:MetricsFbUriCaches.Sub -RgCache $script:MetricsFbUriCaches.Rg -NameCache $script:MetricsFbUriCaches.Name
+                    }
+                    else
+                    {
+                        $ResourceIdDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
+                    }
                     $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString()
                     $ResourceSubDictionary[$OriginalId] = $FbPrefix + 'sub_' + [guid]::NewGuid().ToString()
                     $ResourceGroupDictionary[$OriginalId] = $FbPrefix + 'rg_' + [guid]::NewGuid().ToString()

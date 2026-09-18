@@ -1,45 +1,5 @@
-# Schema Contract & Cross-Dataset Linkage Tests
-# =============================================================================
-# The three output files are only useful together: a resource's metrics and its
-# cost have to trace back to the resource itself. That means all three share one
-# identity key - Inventory.ID, Metrics.ID, and Consumption.ResourceId. A rename
-# that breaks the link is dropped silently on ingest, since unmapped JSON members
-# are ignored by default, so nothing else catches it. This suite does.
-#
-# It reads the generated zip plus the pinned field list in
-# Tests/schema-contract.json, and makes no Azure calls, so it is deterministic
-# and runs offline. It works on obfuscated and plain output alike, so the
-# scenario matrix runs it in both the 'default' and 'obfuscate' scenarios.
-#
-# Tier 1 - the fields exist.
-#   Each server-bound inventory section in the zip has the identity field names
-#   on every row, metric rows have their required fields, the consumption header
-#   has every required column, and join keys are not empty.
-#   Limit: an absent section is skipped, not failed. From output alone a renamed
-#   section looks identical to a resource type the subscription does not have.
-#   Its rows still count toward the Tier 2 join space, but nothing checks their
-#   field names.
-#
-# Tier 2 - the keys line up. Inventory is the hub, and metrics and consumption
-# each link to it by ID, so there are two links to check, not three.
-#   1. Metrics to inventory. A real check: it fails on zero overlap, plus a
-#      majority check once there are 5 or more metric IDs.
-#   2. Consumption to inventory. Reports the match, and skips when nothing
-#      overlaps because billing and current inventory need not line up, so this
-#      one cannot fail. The consumption check that CAN fail is the raw-path PII
-#      guard in ReferentialIntegrity.Tests.ps1, and only on an obfuscated run.
-#   Plus: under -Obfuscate every ID shared between files must be a prod_/nonprod_
-#   token, never a raw path. Shared IDs only - whole-zip scanning is in
-#   Obfuscation.Tests.ps1 and DataIntegrity.Tests.ps1.
-#
-#   No metrics to consumption check. Both are already checked against the hub, so
-#   a direct check adds nothing, and it would fail on sets that are legitimately
-#   disjoint (a metric-bearing resource that is not billed, and vice versa).
-#
-# Tests skip rather than fail when there is nothing to assert on: no zip or
-# manifest, a phase suppressed by a -Skip* switch, an empty dataset or no
-# overlap, or a non-obfuscated run for the tokenization check.
-# =============================================================================
+# Schema contract & cross-dataset linkage tests (offline, deterministic): assert the
+# shared identity key (Inventory.ID/Metrics.ID/Consumption.ResourceId) so a silent rename can't break the join.
 
 BeforeAll {
     $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
@@ -271,21 +231,8 @@ Describe "Cross-dataset linkage" {
         $ConsumptionIds = @($script:Consumption | Where-Object { ![string]::IsNullOrEmpty($_.ResourceId) } | Select-Object -ExpandProperty ResourceId -Unique)
         if ($ConsumptionIds.Count -eq 0) { Set-ItResult -Skipped -Because "no consumption row carried a ResourceId in this fixture"; return }
 
-        # Zero overlap is often legitimate: billing still covers resources since
-        # deleted, brand-new resources are not billed yet, and some meters
-        # (bandwidth, marketplace, reservations) are never inventoried at all. So
-        # this skips rather than fails when nothing matches.
-        #
-        # Match on the identity, not the whole string. Obfuscation writes the same
-        # identity two ways. Inventory and metrics collapse the resource to a bare
-        # token (prod_/nonprod_, an optional type hint, and a guid). Consumption
-        # keeps the ARM path and tokenizes only the identifying segments -
-        # subscription, resource group, and resource names - leaving the provider
-        # and type segments intact so the server can still categorise the row. The
-        # resource's own token therefore sits in the LAST name segment. A
-        # full-string compare would find nothing under obfuscation even though the
-        # join is fine. Both forms are unique per resource, so checking the full
-        # value or the last segment cannot false-match.
+        # Consumption->inventory join skips (not fails) on zero overlap (billing vs current
+        # inventory legitimately diverge); match the leaf token too, since obfuscation keeps the ARM path.
         $Matched = @($ConsumptionIds | Where-Object { $InvIdSet.ContainsKey($_) -or $InvIdSet.ContainsKey(($_ -split '/')[-1]) })
         Write-Host ("    [linkage] consumption->inventory: {0}/{1} ResourceIds resolve to an inventory ID (full-value or leaf-token)" -f $Matched.Count, $ConsumptionIds.Count) -ForegroundColor DarkGray
         if ($Matched.Count -eq 0)
@@ -303,14 +250,8 @@ Describe "Cross-dataset linkage" {
         if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
         if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "join keys are only tokenized in an obfuscated run"; return }
 
-        # An ID that shows up in two files proves determinism for that ID: the same
-        # resource got the same token in both, or the sets would not intersect.
-        # Run-wide determinism is Obfuscation.Tests.ps1. Here, each shared ID must
-        # be a well-formed token and never a raw path.
-        #
-        # Shared IDs only - this checks the join, not the whole zip. Whole-zip
-        # scanning is Obfuscation.Tests.ps1 and DataIntegrity.Tests.ps1, and
-        # consumption's raw-path guard is ReferentialIntegrity.Tests.ps1.
+        # A shared ID proves per-ID token determinism; assert each is a well-formed
+        # prod_/nonprod_ token, never a raw path (join keys only; whole-zip scan is elsewhere).
         $InvIdSet = @{}
         foreach ($Id in $script:AllInvIds) { $InvIdSet[$Id] = $true }
 

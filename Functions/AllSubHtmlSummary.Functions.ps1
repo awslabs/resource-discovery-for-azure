@@ -1,32 +1,9 @@
 #Requires -Version 7.0
-# =============================================================================
 # AllSubHtmlSummary.Functions.ps1
-#
-# The HTML-summary rendering library: the self-contained (no CDN / JS libs / no
-# external module) chart + escaping helpers shared by the per-subscription
-# report (Extension/Summary.ps1) AND the aggregate "all-subscriptions" summary
-# builder (New-RdaAllSubHtmlSummary, used by Run-AllSubscriptions.ps1 after a
-# run finishes).
-#
-# It deliberately lives in ITS OWN function file rather than in
-# Functions/Common.Functions.ps1: Common is dot-sourced by every entry point
-# (ResourceInventory.ps1, Reveal.ps1, the wrappers), most of which never render
-# HTML/charts. Only the two summary-rendering paths need these functions, so
-# they are dot-sourced ONLY where needed and not loaded into every script's
-# scope. Definitions only - no top-level code.
-#
-# Consumers:
-#   - Extension/Summary.ps1            dot-sources this for the render helpers.
-#   - Run-AllSubscriptions.ps1         dot-sources this for New-RdaAllSubHtmlSummary
-#                                      (only inside its -MainSummary branch).
-# =============================================================================
+# Self-contained (no CDN/JS/module) HTML chart + escaping helpers, dot-sourced ONLY by the two summary renderers (Extension/Summary.ps1, Run-AllSubscriptions.ps1) rather than into every entry point the way Common is. Definitions only.
 
 # === HTML helpers =============================================================
-#
-# All output is HTML-escaped by default. The report embeds JSON-derived strings
-# from a downstream system (Azure Resource Graph) which could legitimately
-# contain HTML-significant characters in a name or tag. Escaping at the edge
-# is the only safe pattern; we never trust the input.
+# HTML-escape everything at the edge: report strings come from Azure Resource Graph and can carry HTML-significant characters; the input is never trusted.
 function ConvertTo-HtmlSafe
 {
     param([Parameter(ValueFromPipeline = $true)]$Value)
@@ -103,13 +80,7 @@ function New-DonutChart
         $i++
     }
 
-    # Inner cutout to make it a donut. These three AppendFormat calls pass
-    # InvariantCulture explicitly because their arguments are not all integers:
-    # an odd -Size makes $Cx/$Cy/$InnerRadius Doubles, and $Total is the
-    # Measure-Object Sum (also a Double). Without a provider, AppendFormat uses
-    # CurrentCulture, so a comma-decimal host would emit cx='120,5' and the SVG
-    # would not render. New-BarChart needs no provider: every argument there is
-    # an Int32, which carries no separator in any culture.
+    # Inner donut cutout. Pass InvariantCulture explicitly: an odd -Size makes $Cx/$Cy/$InnerRadius Doubles (and $Total is a Double), so a comma-decimal host would otherwise emit cx='120,5' and break the SVG. New-BarChart needs none (all Int32).
     [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<circle cx='{0}' cy='{1}' r='{2}' fill='white' />", $Cx, $Cy, $InnerRadius)
     [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<text x='{0}' y='{1}' text-anchor='middle' class='donut-total'>{2}</text>", $Cx, ($Cy - 6), $Total)
     [void]$Svg.AppendFormat([cultureinfo]::InvariantCulture, "<text x='{0}' y='{1}' text-anchor='middle' class='donut-label'>resources</text>", $Cx, ($Cy + 14))
@@ -161,23 +132,8 @@ function New-BarChart
     return $Svg.ToString()
 }
 
-# =============================================================================
 # New-RdaAllSubHtmlSummary
-#
-# Aggregate "all-subscriptions" HTML summary across every per-subscription
-# report produced by one Run-AllSubscriptions.ps1 run. Self-contained (no
-# CDN/JS libraries, no external module), same portability contract as the
-# per-subscription report. Built purely from artefacts already on disk (each
-# per-subscription Inventory_*.json and its sibling .html) and NEVER calls
-# Azure/Graph.
-#
-# Tier 1 (default): run totals + per-subscription table with links to each
-# per-sub report. Tier 2 (-Detailed): additionally parses each per-sub inventory
-# for a by-service aggregate and renders run-wide donut/bar charts. Uses the
-# ConvertTo-HtmlSafe / New-DonutChart / New-BarChart helpers defined above (same
-# dot-sourced file), so it never has to dot-source or modify the per-subscription
-# report generator. See docs/design/main-html-summary.md.
-# =============================================================================
+# Aggregate all-subscriptions HTML summary built purely from on-disk per-sub Inventory_*.json + .html (NEVER calls Azure/Graph); -Detailed adds run-wide by-service donut/bar charts. Reuses the helpers above.
 function New-RdaAllSubHtmlSummary
 {
     param(
@@ -208,12 +164,7 @@ function New-RdaAllSubHtmlSummary
         # Tier 2 (per-service aggregate + charts) when set; Tier 1 index-only otherwise.
         [switch]$Detailed,
 
-        # When set, this summary is part of a shareable (obfuscated) bundle and must
-        # carry NO real identifiers: the tenant id is suppressed and the run-health
-        # banners are rendered as COUNTS ONLY (no subscription names). The caller
-        # (the wrapper) knows the true obfuscation mode and passes it; even without
-        # it, a summary whose sampled per-sub names look obfuscated is treated the
-        # same way (safe default).
+        # When set (or when sampled per-sub names look obfuscated), carry NO real identifiers: suppress the tenant id and render health banners as COUNTS ONLY. Safe default is identifiable.
         [switch]$Obfuscated
     )
 
@@ -310,11 +261,7 @@ function New-RdaAllSubHtmlSummary
     $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
 
     # --- Render --------------------------------------------------------------
-    # InvariantCulture, not -Format: the ':' in 'HH:mm:ss' and the 'zzz' offset
-    # separator both resolve through the culture's TimeSeparator, and the year
-    # comes from the culture's calendar, so a th-TH / ar-SA host would otherwise
-    # stamp a Buddhist / Hijri year here while the per-subscription reports
-    # (Extension/Summary.ps1) stamp a Gregorian one.
+    # InvariantCulture (not -Format): the 'HH:mm:ss'/'zzz' separators and the year resolve through the host culture, so a th-TH / ar-SA host would otherwise stamp a Buddhist/Hijri year while the per-sub reports stamp Gregorian.
     $Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
     $TenantSafe = if ($IsObfuscated -or [string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
@@ -469,29 +416,8 @@ $ChartsHtml
     Write-Host ("  {0} subscription(s), {1} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
 }
 
-# =============================================================================
 # New-RdaAllSubHtmlSummaryFromZip
-#
-# Receiver-side convenience: build a working aggregate summary from a
-# CONSOLIDATED outer zip (AllSubscriptions_ResourcesReport_*.zip) - the artifact
-# a customer/operator hands you. That zip contains one per-subscription .zip per
-# sub (NOT extracted folders) and carries no summary, so the summary's
-# folder-relative links have nothing to resolve against until the inner zips are
-# unpacked. This function does exactly that reconstruction, then calls
-# New-RdaAllSubHtmlSummary against it:
-#   1. Expand the outer zip to a temp staging dir.
-#   2. Extract each inner ResourcesReport*.zip into its own ResourcesReport*/
-#      folder under -OutputDirectory, pulling only the per-sub .html (the link
-#      target) and Inventory_*.json (the summary's input). The per-sub HTML is
-#      self-contained, so navigation works without the bulky csv/metrics members.
-#   3. Build MainSummary.html in -OutputDirectory (links now resolve on disk).
-#   4. Optionally (-PackageZip) zip that folder into a portable bundle whose
-#      links survive being moved/emailed.
-#
-# Backward-compatible: works on any consolidated zip, old or new, because it only
-# relies on the long-standing inner-zip layout. Falls back to already-extracted
-# ResourcesReport*/ folders if the archive contains those instead of inner zips.
-# =============================================================================
+# Reconstructs a working aggregate summary from a consolidated outer zip: extract each inner ResourcesReport*.zip into its own folder NEXT TO MainSummary.html so the summary's folder-relative links resolve; falls back to already-extracted folders.
 function New-RdaAllSubHtmlSummaryFromZip
 {
     param(
@@ -619,15 +545,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         throw "New-RdaAllSubHtmlSummaryFromZip: no per-subscription reports found inside '$InputZip'. Is this a consolidated AllSubscriptions_ResourcesReport_*.zip?"
     }
 
-    # Re-render each per-subscription report from its Inventory_*.json with the
-    # CURRENT Extension/Summary.ps1, so drill-down reports reflect the latest
-    # renderer (e.g. the Tags column fix) rather than whatever version produced
-    # the html inside the source zip. The per-sub report is built entirely from
-    # the inventory json; only the optional consumption billing-coverage banner
-    # (which needs the csv, not extracted) is skipped. Fail-soft per sub: one that
-    # cannot be re-rendered keeps its original html so its drill-down link still
-    # resolves. $PSScriptRoot here is the Functions/ folder (where this function is
-    # defined), so the sibling Extension/Summary.ps1 resolves from the repo root.
+    # Re-render each per-sub report from its Inventory_*.json with the CURRENT Extension/Summary.ps1 so drill-downs reflect the latest renderer; fail-soft per sub (keep the original html on error). $PSScriptRoot is Functions/, so the sibling Extension/Summary.ps1 resolves from the repo root.
     if (-not $KeepOriginalReports)
     {
         $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'

@@ -27,10 +27,11 @@
        resource-side fact with no evidence to tell them apart.
 
     These are OFFLINE source assertions plus pure-logic checks of the two regexes.
-    The classification is inline in a large loop rather than a function, so it
-    cannot be invoked directly without refactoring working code; asserting on the
-    source is the proportionate guard. Same approach as the source-audit tests in
-    Tests/AzGraphQueryRetry.Tests.ps1.
+    The classification now lives in the pure function Get-RdaMetricFailureClass
+    (Extension/Metrics.ps1), which Tests/MetricsThrottleRetryAfter.Tests.ps1 invokes
+    directly; this suite keeps the source-level ORDERING guards (anchored permanent
+    check returns before the loose throttle test) that a behavioural test cannot
+    express. Same approach as the source-audit tests in Tests/AzGraphQueryRetry.Tests.ps1.
 #>
 
 BeforeAll {

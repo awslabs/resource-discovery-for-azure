@@ -151,6 +151,12 @@ Describe 'Get-RdaMetricFailureClass - one failed attempt, classified from its me
         $Msg = "Operation returned an invalid status code 'NotFound' for /subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-429-prod/providers/x"
         (Get-RdaMetricFailureClass -Message $Msg).Outcome | Should -Be 'NotFound'
     }
+    It 'is not fooled by a bare 401/403 inside a resource id: a throttled call stays throttled' {
+        $Msg = "Operation returned an invalid status code 'TooManyRequests' for /subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-403/providers/x"
+        $C = Get-RdaMetricFailureClass -Message $Msg
+        $C.Throttled | Should -BeTrue; $C.Permanent | Should -BeFalse
+        (Get-RdaMetricFailureClass -Message 'Timed out after 120s for /resourceGroups/rg-401-prod').Outcome | Should -Be 'Error'
+    }
     It 'falls back to a retryable generic Error' {
         $C = Get-RdaMetricFailureClass -Message 'Timed out after 120s'
         $C.Permanent | Should -BeFalse; $C.Throttled | Should -BeFalse; $C.Outcome | Should -Be 'Error'

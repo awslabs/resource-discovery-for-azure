@@ -97,17 +97,17 @@ function Invoke-RdaReveal
     $ErrorActionPreference = 'Stop'
 
     # ---- Resolve inputs ----------------------------------------------------
-    if (-not (Test-Path -Path $InputZip -PathType Leaf))
+    if (-not (Test-Path -LiteralPath $InputZip -PathType Leaf))
     {
         throw "Input zip not found: $InputZip"
     }
 
     if ([string]::IsNullOrEmpty($DictionaryPath))
     {
-        $DictionaryPath = Get-ChildItem -Path $SearchDirectory -Filter 'ObfuscationDictionary_*.json' -ErrorAction SilentlyContinue |
+        $DictionaryPath = Get-ChildItem -LiteralPath $SearchDirectory -Filter 'ObfuscationDictionary_*.json' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
-    if ([string]::IsNullOrEmpty($DictionaryPath) -or -not (Test-Path -Path $DictionaryPath -PathType Leaf))
+    if ([string]::IsNullOrEmpty($DictionaryPath) -or -not (Test-Path -LiteralPath $DictionaryPath -PathType Leaf))
     {
         throw "No ObfuscationDictionary_*.json found. Pass -DictionaryPath, or run from the folder that holds it."
     }
@@ -135,7 +135,7 @@ function Invoke-RdaReveal
     Write-Host ("Output zip  : {0}" -f $OutputZip)
 
     # ---- Load dictionary ---------------------------------------------------
-    $Dict = Get-Content -Path $DictionaryPath -Raw | ConvertFrom-Json
+    $Dict = Get-Content -LiteralPath $DictionaryPath -Raw | ConvertFrom-Json
 
     $RgMap = ConvertTo-LookupTable $Dict.ResourceGroupMap
     $SubMap = ConvertTo-LookupTable $Dict.SubscriptionMap
@@ -254,7 +254,7 @@ function Invoke-RdaReveal
         [System.IO.Compression.ZipFile]::ExtractToDirectory($InputZip, $TmpRoot)
 
         $TotalHits = 0
-        $Files = Get-ChildItem -Path $TmpRoot -Recurse -File
+        $Files = Get-ChildItem -LiteralPath $TmpRoot -Recurse -File
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem ('Scanning {0} member file(s)' -f @($Files).Count) -Index 2 -Total 3 }
         foreach ($file in $Files)
         {
@@ -266,7 +266,7 @@ function Invoke-RdaReveal
                 # Field-aware reveal: re-export through the CSV writer so a
                 # revealed value containing a comma/quote is correctly quoted and
                 # cannot break the column structure a raw text replace could.
-                $Rows = @(Import-Csv -Path $file.FullName)
+                $Rows = @(Import-Csv -LiteralPath $file.FullName)
                 if ($Rows.Count -gt 0)
                 {
                     foreach ($row in $Rows)
@@ -281,13 +281,13 @@ function Invoke-RdaReveal
                     }
                     if ($script:FileHits -gt 0)
                     {
-                        $Rows | Export-Csv -Path $file.FullName -NoTypeInformation -Encoding utf8
+                        $Rows | Export-Csv -LiteralPath $file.FullName -NoTypeInformation -Encoding utf8
                     }
                 }
             }
             else
             {
-                $Content = Get-Content -Path $file.FullName -Raw
+                $Content = Get-Content -LiteralPath $file.FullName -Raw
                 if ([string]::IsNullOrEmpty($Content)) { continue }
 
                 $EscapeMode = switch ($Ext)
@@ -301,7 +301,7 @@ function Invoke-RdaReveal
 
                 if ($script:FileHits -gt 0)
                 {
-                    Set-Content -Path $file.FullName -Value $NewContent -Encoding utf8 -NoNewline
+                    Set-Content -LiteralPath $file.FullName -Value $NewContent -Encoding utf8 -NoNewline
                 }
             }
 
@@ -316,7 +316,7 @@ function Invoke-RdaReveal
         # hard kill can't leave a truncated zip at the final name (-Resume/consolidation trust it).
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Compressing output' -Index 3 -Total 3 }
         $OutputZipPartial = ($OutputZip -replace '\.zip$', '') + '.partial.zip'
-        if (Test-Path -Path $OutputZipPartial) { Remove-Item -Path $OutputZipPartial -Force }
+        if (Test-Path -LiteralPath $OutputZipPartial) { Remove-Item -LiteralPath $OutputZipPartial -Force }
         # includeBaseDirectory = $false so the archive entries sit at the root
         # (the members of $TmpRoot), matching the previous
         # Compress-Archive -Path "$TmpRoot\*" layout the ingestion server expects.
@@ -335,6 +335,6 @@ function Invoke-RdaReveal
     }
     finally
     {
-        if (Test-Path -Path $TmpRoot) { Remove-Item -Path $TmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $TmpRoot) { Remove-Item -LiteralPath $TmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

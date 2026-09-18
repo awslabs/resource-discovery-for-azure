@@ -887,7 +887,7 @@ if ($Task -eq 'Processing')
                     {
                         return @{ Permanent = $true; Outcome = $Matches['Status']; Throttled = $false }
                     }
-                    # ARM error CODES only (never bare '401'/'403': an ARM id echoed in the message could contain them, exactly the 429-in-a-GUID trap above).
+                    # ARM error CODES only (never bare '401'/'403': an ARM id echoed in the message could contain them, the same trap the 429-in-a-GUID note below describes).
                     if ($Message -match 'ExpiredAuthenticationToken|InvalidAuthenticationToken|AuthenticationFailed')
                     {
                         return @{ Permanent = $true; Outcome = 'Unauthorized'; Throttled = $false }

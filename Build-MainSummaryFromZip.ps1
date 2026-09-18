@@ -64,7 +64,7 @@ $ErrorActionPreference = 'Stop'
 # Shared function library: New-RdaAllSubHtmlSummaryFromZip + New-RdaAllSubHtmlSummary
 # + the render helpers all live here. Dot-source so they load into this scope.
 $SummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
-if (-not (Test-Path -Path $SummaryFunctions -PathType Leaf))
+if (-not (Test-Path -LiteralPath $SummaryFunctions -PathType Leaf))
 {
     throw "Cannot find shared functions at $SummaryFunctions"
 }

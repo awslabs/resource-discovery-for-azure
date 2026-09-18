@@ -35,7 +35,7 @@ param ($TenantID,
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -45,7 +45,7 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 
 # Shared cross-cutting helpers (Write-RdaProgress). Same dot-source pattern.
 $CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -288,7 +288,7 @@ function RunInventorySetup()
         {
             try
             {
-                $OutputDirectory = (Resolve-Path $OutputDirectory -ErrorAction Stop).Path + [IO.Path]::DirectorySeparatorChar
+                $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory -ErrorAction Stop).Path + [IO.Path]::DirectorySeparatorChar
             }
             catch
             {
@@ -498,7 +498,7 @@ function RunInventorySetup()
 
         Write-Log -Message ("Checking report folder: {0}" -f $DefaultPath) -Severity 'Info'
 
-        if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false)
+        if ((Test-Path -LiteralPath $DefaultPath -PathType Container) -eq $false)
         {
             # -ErrorAction Stop + catch: without it this inherited the run's SilentlyContinue, so a failed report-folder creation was invisible and every subsequent write into it failed one-by-one with no statement of the cause. Reaching here is unusual (parent root already write-probed) but it must name the problem.
             try
@@ -672,7 +672,7 @@ function RunInventorySetup()
         # Subscription/ResourceGroup tokens are SHARED per sub/RG so they cannot be reused ID-keyed - rebuild the real-value-keyed $subLookup/$rgLookup the mint logic consults (sub name from SubscriptionNameMap; RG name parsed from each ResourceGroupMap representative id).
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
-            $SeedDictionary = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
+            $SeedDictionary = Get-Content -LiteralPath $ObfuscationDictionary -Raw | ConvertFrom-Json
 
             if ($null -ne $SeedDictionary.ResourceIdMap)
             {
@@ -926,11 +926,11 @@ function ExecuteInventoryProcessing()
 
             if ($PSScriptRoot -like '*\*')
             {
-                $MetricPath = Get-ChildItem -Path ($PSScriptRoot + '\Extension\Metrics.ps1') -Recurse
+                $MetricPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '\Extension\Metrics.ps1') -Recurse
             }
             else
             {
-                $MetricPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Metrics.ps1') -Recurse
+                $MetricPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '/Extension/Metrics.ps1') -Recurse
             }
 
             $MetricsFilePath = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + "_")
@@ -973,11 +973,11 @@ function ExecuteInventoryProcessing()
 
         if ($PSScriptRoot -like '*\*')
         {
-            $Modules = Get-ChildItem -Path ($PSScriptRoot + '\Services\*.ps1') -Recurse
+            $Modules = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse
         }
         else
         {
-            $Modules = Get-ChildItem -Path ($PSScriptRoot + '/Services/*.ps1') -Recurse
+            $Modules = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse
         }
 
         # -Service <string[]> targeted collection: run ONLY the named collectors (matched on file base name, case-insensitive) for fast re-collection of one resource type without re-running the whole tenant - the basis of a scoped recovery bundle. Metrics/consumption phases are unaffected. A requested name matching no collector is failed loud (not a silent empty inventory) so the typo is caught before shipping.
@@ -1219,7 +1219,7 @@ function ExecuteInventoryProcessing()
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
-        $Global:SmaResources | ConvertTo-Json -Depth 100 -Compress | Out-File $Global:JsonFile
+        $Global:SmaResources | ConvertTo-Json -Depth 100 -Compress | Out-File -LiteralPath $Global:JsonFile
         #$Global:Resources | ConvertTo-Json -depth 100 -compress | Out-File $Global:AllResourceFile
 
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
@@ -1603,7 +1603,7 @@ function ExecuteInventoryProcessing()
                         $NewUsageDataExport.Add($UsageDataExport[$Item]) | Out-Null
                     }
 
-                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
                     # Count rows actually WRITTEN to Consumption_*.csv this page (after the null-InstanceData skip and -ResourceGroup filter), NOT rows FETCHED: $Global:ConsumptionRecordCount is the documented 'rows written' figure, and accumulating the pre-filter count overstated it in a -ResourceGroup-scoped run. The fetched count stays visible in the 'Records found' line above.
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
@@ -1723,11 +1723,11 @@ function FinalizeOutputs
 
         if ($PSScriptRoot -like '*\*')
         {
-            $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '\Extension\Summary.ps1') -Recurse
+            $SummaryPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '\Extension\Summary.ps1') -Recurse
         }
         else
         {
-            $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
+            $SummaryPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
         }
 
         # Tenant ID is shown in the report header for reference, but it is a
@@ -1781,7 +1781,7 @@ if (-not $RunAllSubs.IsPresent)
     # 0. -Service fast-fail: when -Service is supplied but NONE of the names match a collector, the run would otherwise authenticate and extract everything only to produce an empty inventory (and a failed report) while exiting 0 - a silent-looking failure for a scripted recovery. Validate up front, before auth, and hard-fail (exit 1) with the full valid-name list. Partial matches pass through here (CreateResourceJobs warns on the unmatched).
     if ($Service -and @($Service).Count -gt 0)
     {
-        $PreFlightAvailableServices = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object)
+        $PreFlightAvailableServices = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object)
         $PreFlightMatchedServices = @($Service | Where-Object { $_ -in $PreFlightAvailableServices })
         if (@($PreFlightMatchedServices).Count -eq 0)
         {
@@ -1801,14 +1801,14 @@ if (-not $RunAllSubs.IsPresent)
             Write-Host "ERROR: -ObfuscationDictionary requires -Obfuscate (there are no obfuscation dictionaries to seed without it)." -ForegroundColor Red
             exit 1
         }
-        if (-not (Test-Path -Path $ObfuscationDictionary -PathType Leaf))
+        if (-not (Test-Path -LiteralPath $ObfuscationDictionary -PathType Leaf))
         {
             Write-Host ("ERROR: -ObfuscationDictionary file not found: {0}" -f $ObfuscationDictionary) -ForegroundColor Red
             exit 1
         }
         try
         {
-            $null = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
+            $null = Get-Content -LiteralPath $ObfuscationDictionary -Raw | ConvertFrom-Json
         }
         catch
         {
@@ -1841,7 +1841,7 @@ if (-not $RunAllSubs.IsPresent)
     # 2. Disk space probe.
     try
     {
-        $RootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
+        $RootItem = Get-Item -LiteralPath $PreFlightInventoryRoot -ErrorAction Stop
         $Drive = $RootItem.PSDrive
         if ($null -ne $Drive -and $null -ne $Drive.Free)
         {
@@ -1879,18 +1879,18 @@ if (-not $RunAllSubs.IsPresent)
     $ProbePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
     try
     {
-        Set-Content -Path $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
-        $ProbeRead = Get-Content -Path $ProbePath -Raw -ErrorAction Stop
+        Set-Content -LiteralPath $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $ProbeRead = Get-Content -LiteralPath $ProbePath -Raw -ErrorAction Stop
         if ($ProbeRead -notmatch 'preflight write probe')
         {
             throw "Write probe content mismatch (read back '$ProbeRead')"
         }
-        Remove-Item -Path $ProbePath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $ProbePath -Force -ErrorAction Stop
         Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
     }
     catch
     {
-        try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
+        try { if (Test-Path -LiteralPath $ProbePath) { Remove-Item -LiteralPath $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
         # exit 1, NOT throw (see the disk-space gate above): a swallowed throw let an unwritable output directory print 'passed' and fail later at exit 0. Reaching here is now unusual - Get-RdaInventoryRoot already created + write-probed the root (with a fallback for the default path) - so it fires for an unusable explicit -OutputDirectory or one that became unwritable since.
         Write-Host ("ERROR: cannot write to {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Red
@@ -1909,7 +1909,7 @@ $Global:Runtime = Measure-Command -Expression {
     RunInventorySetup
 
     $Global:PowerShellTranscriptFile = ($Global:DefaultPath + "Transcript_Log_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".txt")
-    Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
+    Start-Transcript -LiteralPath $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
 # Execution and processing of inventory. Wrap in try/finally so this run's transcript frame is ALWAYS stopped even on a terminating error: transcripts are a process-wide STACK and the -RunAllSubs wrapper invokes this via & in the SAME process, so an orphaned open frame makes the wrapper's Stop-Transcript pop THIS frame instead, leaving the wrapper transcript held open/undeletable. The inner try/catch tolerates the rare case where no transcript is active.
@@ -2016,7 +2016,7 @@ if ($Obfuscate.IsPresent)
         }
     }
 
-    $Dictionary | ConvertTo-Json -Depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
+    $Dictionary | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $Global:DictionaryFile -Encoding utf8
     Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
@@ -2057,20 +2057,20 @@ if ($Obfuscate.IsPresent)
 
 if ($SkipMetrics.IsPresent)
 {
-    @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+    @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -LiteralPath $Global:MetricsJsonFile -Encoding utf8
 }
 else
 {
     # Subscriptions with zero metric-eligible resources produce no Metrics_*.json, but downstream consumers that expect every per-sub bundle to contain one (dashboard ingestion, the ParallelStreamsAggregation tests) reject the bundle when it is missing. Emit an empty-but-valid Metrics JSON at $Global:MetricsJsonFile so the bundle is always structurally complete; wildcard Get-ChildItem because the batched writer suffixes '_<rangeIdx>.json'.
     $MetricsPattern = ('Metrics_{0}_{1}*.json' -f $Global:ReportName, $CurrentDateTime)
-    $MetricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)
+    $MetricsAny = @(Get-ChildItem -LiteralPath $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)
     if ($MetricsAny.Count -eq 0)
     {
-        @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+        @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -LiteralPath $Global:MetricsJsonFile -Encoding utf8
     }
 }
 
-$ConsumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
+$ConsumptionCreated = Test-Path -LiteralPath $Global:ConsumptionFileCsv
 
 # A subscription with zero billing records produces an empty (0-byte) CSV rather than a header-only one (Export-Csv -Append with no input writes nothing), so treat 0-byte files as 'not created' and emit the header below - otherwise header-parsing consumers (dashboard ingestion, the Pester tests) fail on the empty file and reject the entire per-sub bundle.
 $ConsumptionEmpty = $false
@@ -2078,7 +2078,7 @@ if ($ConsumptionCreated)
 {
     try
     {
-        $ConsumptionEmpty = ((Get-Item -Path $Global:ConsumptionFileCsv -ErrorAction Stop).Length -eq 0)
+        $ConsumptionEmpty = ((Get-Item -LiteralPath $Global:ConsumptionFileCsv -ErrorAction Stop).Length -eq 0)
     }
     catch
     {
@@ -2090,7 +2090,7 @@ if ($ConsumptionCreated)
 
 if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 {
-    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
+    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
 }
 
 if ($Obfuscate.IsPresent)
@@ -2100,7 +2100,7 @@ if ($Obfuscate.IsPresent)
 
     # Exclude the obfuscation dictionary (maps obfuscated values back to REAL ids) and the transcript (raw Write-Log auth UPN / tenant GUID / sub names) from the obfuscated zip; ship only a specific safe obfuscated .json file list. The curated dictionary-scrubbed Diagnostics_*.log is added explicitly below.
     # The LOCAL-only .log files (DebugLog_* heartbeat+metrics, legacy Heartbeat_*/ErrorLog_*) carry a real sub GUID and real names, are not .json so this filter never sweeps them, and are never added - with explicit -notlike guards hardening the seam if the filter is later broadened.
-    $JsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     # Include the shareable diagnostics .log if it was successfully written.
     # Guarded (not assumed) so a diagnostics build/write failure above - which is
     # caught and downgraded to a warning - cannot inject a $null/missing path
@@ -2108,9 +2108,9 @@ if ($Obfuscate.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
     $CompressionOutput = @{
-        Path             = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
-        DestinationPath  = $Global:ZipOutputFile
+        DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }
     Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
@@ -2131,13 +2131,13 @@ else
     }
 
     # Use the SAME hardened json file list as the obfuscated branch, not a broad DefaultPath+'*.json' wildcard: in a default run none of the excluded names exist as .json so it ships the same files today, but keeping the branches symmetric stops a future local *.json artifact being swept into the default zip while filtered out of the obfuscated one.
-    $JsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
 
     # Exclude the PowerShell transcript from the default zip too (it captures the authenticated account UPN, tenant/subscription ids, and local paths); keep it on disk locally for debugging. The Diagnostics_*.log (a .log, not swept by the *.json wildcard) is added explicitly via $ShareableExtras so it still ships.
     $CompressionOutput = @{
-        Path             = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
-        DestinationPath  = $Global:ZipOutputFile
+        DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }
     Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }

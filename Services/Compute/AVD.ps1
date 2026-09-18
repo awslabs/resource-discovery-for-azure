@@ -30,19 +30,13 @@ if ($Task -eq 'Processing')
             {
                 $Vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId }
 
-                # Resolve HostId and Hostname
                 $HostIdValue = $null
                 $HostnameValue = $null
                 if (![string]::IsNullOrEmpty($Vmsessionhosts.Id))
                 {
                     if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
                     {
-                        # Obfuscation ON: never emit the real VM id or name. Use the
-                        # dictionary value when the backing VM was indexed, else the
-                        # lossy 'obfuscated' fallback used elsewhere in the codebase.
                         $HostIdValue = if ($ResourceIdDictionary.ContainsKey($Vmsessionhosts.Id)) { $ResourceIdDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
-                        # Hostname must reuse the SAME name token the backing VM's inventory 'Name' gets, or the AVD row
-                        # can't join back to its VM. $Global:ResourceNameDictionary (keyed by real VM id) is populated up-front; else 'obfuscated'.
                         $HostnameValue = if ($null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($Vmsessionhosts.Id)) { $Global:ResourceNameDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
                     }
                     else
@@ -81,3 +75,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

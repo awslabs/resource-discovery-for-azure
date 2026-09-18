@@ -44,6 +44,7 @@ param (
     # Metric-volume controls forwarded to ResourceInventory.ps1: -IncludeStorageMetrics OPTS IN to the (default-off) Storage UsedCapacity metric; -MetricsIntervalMinutes 0 = native grain.
     [switch] $IncludeStorageMetrics,
     [switch] $SkipDiskMetrics,
+    [switch] $MetricsDetailed,
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
     # No default (matches parent): an absent key must leave ResourceInventory.ps1's 31-day default in force. Unbound this reads 0, NOT 31, so read the effective lookback only via the ContainsKey gate below.
     [ValidateRange(1, 93)][int] $MetricsLookbackDays,
@@ -216,6 +217,7 @@ if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
+if ($MetricsDetailed) { $InventoryPassthrough['MetricsDetailed'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
 # ContainsKey, not a value sentinel - 0 is a real, harmful lookback rather than
 # "unset". Populated from the parent's splat, exactly as the -Debug forward below.

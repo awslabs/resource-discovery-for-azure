@@ -1,53 +1,5 @@
-# Scenario Matrix Runner
-# =============================================================================
-# Generates a fresh output zip for each supported flag combination against a
-# live Azure subscription, then runs the Pester suite against each zip with the
-# CORRECT expectations per scenario. This is the standing regression protocol:
-# run it after any change that could affect output (metrics, consumption,
-# obfuscation, schema, packaging).
-#
-# Scenarios:
-#   1. default          - metrics + consumption, NO obfuscation (compat baseline)
-#   2. obfuscate        - metrics + consumption, -Obfuscate (server-bound shape)
-#   3. skipboth         - -SkipMetrics -SkipConsumption
-#   4. skipmetrics      - -SkipMetrics only
-#   5. skipconsumption  - -SkipConsumption only
-#   6. service          - -Service VirtualMachines (collector scoping): asserts the
-#                         inventory contains ONLY the requested service(s)
-#   7. includestorage   - -IncludeStorageMetrics: asserts Storage Account
-#                         UsedCapacity metrics ARE emitted (the metric is opt-in,
-#                         so this proves the gate opens; 'default' proves it is
-#                         absent when not asked for)
-#   8. skipdisk         - -SkipDiskMetrics: asserts no Managed Disk metrics
-#   9. metricinterval   - -MetricsIntervalMinutes 60: asserts the VM/SQL sampled
-#                         series carry the 60-min grain
-#  10. recovery         - LIVE end-to-end recovery workflow: generate an obfuscated
-#                         scoped "gap" bundle, re-collect one populated service
-#                         seeded with the gap dictionary, splice with
-#                         Merge-RecoveryData, then run the structural + obfuscation
-#                         suite against the merged bundle. Proves the operator
-#                         recovery path yields a server-valid, PII-clean zip against
-#                         REAL collector output (RecoveryMerge.Tests.ps1 covers the
-#                         splice mechanics offline; this covers it live). Self-skips
-#                         if the subscription has no records in the scoped services.
-#
-# IMPORTANT - obfuscation vs PII tests:
-#   The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
-#   "no transcript/dictionary", Obfuscation, ProdNonprodPrefix, DictionaryValidation)
-#   ONLY make sense on an -Obfuscate run. On a non-obfuscated zip the raw
-#   subscription paths/transcript ARE present by design, so those tests are
-#   EXPECTED to fail and are therefore NOT run for non-obfuscated scenarios.
-#   Only obfuscated zips are ever shared server-side, so this matches reality.
-#
-# This script contains NO customer data. Tenant/subscription are supplied as
-# parameters or auto-discovered from the current Az context at runtime.
-#
-# Usage:
-#   pwsh ./Tests/Invoke-ScenarioMatrix.ps1                      # auto-discover sub
-#   pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -SubscriptionID <id> -TenantID <id>
-#   pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -Scenarios default,obfuscate
-#   pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -KeepOutput        # don't auto-clean zips
-# =============================================================================
+# Scenario Matrix Runner: generates a fresh output zip for each supported flag combination against a LIVE Azure subscription, then runs the Pester suite against each zip with the correct per-scenario expectations. Standing regression protocol - run after any change affecting output (metrics, consumption, obfuscation, schema, packaging). Contains NO customer data; tenant/subscription come from parameters or the current Az context. Usage: pwsh ./Tests/Invoke-ScenarioMatrix.ps1 [-SubscriptionID <id> -TenantID <id>] [-Scenarios ...] [-KeepOutput].
+# The PII-leak / obfuscation tests only make sense on an -Obfuscate run: a non-obfuscated zip carries raw subscription paths/transcript by design, so those tests are EXPECTED to fail and are NOT attached to non-obfuscated scenarios. Only obfuscated zips are ever shared server-side, so this matches reality.
 
 [CmdletBinding()]
 param(
@@ -129,33 +81,11 @@ $StructuralTests = @(
 $ReconciliationTests = @(
     'TenantReconciliation.Tests.ps1'
 )
-# Schema-contract + cross-dataset-linkage gate. PURE-OUTPUT (no Azure), drift-
-# immune, and valid in BOTH obfuscated and non-obfuscated modes (the join keys
-# must correlate whether they are raw ARM paths or prod_/nonprod_ tokens), so it
-# is attached to BOTH 'default' and 'obfuscate' as a hard gate. It self-skips
-# when a phase was legitimately suppressed by a -Skip* switch, so it stays inert
-# on the skip* scenarios and is not attached there.
+# Schema-contract + cross-dataset-linkage gate: PURE-OUTPUT (no Azure), drift-immune, valid in BOTH obfuscated and non-obfuscated modes (join keys must correlate whether raw ARM paths or prod_/nonprod_ tokens), so attached to both 'default' and 'obfuscate' as a hard gate. Self-skips when a phase was suppressed by a -Skip* switch, so it stays inert on the skip* scenarios and is not attached there.
 $SchemaContractTests = @(
     'SchemaContract.Tests.ps1'
 )
-# Assertions in OutputCompleteness.Tests.ps1 that must be reclassified as
-# expected-skips for NON-obfuscated scenarios.
-#
-# This list is now EMPTY, deliberately. It previously held both of the
-# assertions below on the grounds that a non-obfuscated zip shipped the
-# transcript .txt - which is no longer true (ResourceInventory.ps1 excludes the
-# transcript from BOTH branches), so the justification was stale and the
-# exclusion was silently disarming two real gates on every non-obfuscated
-# scenario. Both assertions are now MODE-AWARE inside the test itself
-# ($script:IsObfuscatedBundle, derived from the Diagnostics_*.log header), so
-# they express the correct rule per mode and must PASS in every scenario:
-#   'Should not contain any unexpected file types'    - permits DebugLog_*.log
-#       only in a non-obfuscated bundle; Diagnostics_*.log only when obfuscated.
-#   'Should not contain dictionary or transcript files' - true in both modes.
-#
-# Keep the reclassification MACHINERY (below) rather than deleting it: it is the
-# documented seam for a genuinely obfuscate-only assertion. Add a name here only
-# with a justification that is verified against the CURRENT packaging code.
+# Assertions in OutputCompleteness.Tests.ps1 to reclassify as expected-skips for NON-obfuscated scenarios. Deliberately EMPTY: the two former entries are now MODE-AWARE inside the test itself ($script:IsObfuscatedBundle from the Diagnostics_*.log header) and must PASS in every scenario - the old exclusion was stale (transcript is now excluded from both branches) and silently disarmed two real gates. Keep the reclassification machinery below as the seam for a genuinely obfuscate-only assertion; add a name only with a justification verified against CURRENT packaging code.
 $NonObfuscatedExcludedTests = @()
 # PII / obfuscation tests only valid for -Obfuscate runs.
 $ObfuscationTests = @(
@@ -180,13 +110,7 @@ $Catalog = @{
     # ServiceScope suite reads $env:TEST_EXPECTED_SERVICES (set below) and asserts
     # the inventory contains ONLY the requested collector(s) + metadata.
     'service'         = @{ Args = @{ Service = @('VirtualMachines'); SkipMetrics = $true; SkipConsumption = $true }; Tests = @('ServiceScope.Tests.ps1') }
-    # Opt-in metric-volume controls. Each runs the structural suite (proving the
-    # flag produces a valid, schema-correct zip) plus MetricsVolumeControls.Tests.ps1,
-    # which reads the per-scenario TEST_EXPECT_* env vars set below to assert the
-    # flag's specific effect (no Storage Account / no Managed Disk metrics, or the
-    # VM/SQL sampled series at the requested grain).
-    # The Storage Account UsedCapacity metric is OPT-IN, so 'includestorage' is the
-    # scenario that proves the gate OPENS; 'default' proves it stays shut.
+    # Opt-in metric-volume controls: each runs the structural suite (proving a valid, schema-correct zip) plus MetricsVolumeControls.Tests.ps1, which reads the per-scenario TEST_EXPECT_* env vars set below to assert the flag's effect (no Storage Account / no Managed Disk metrics, or the VM/SQL sampled series at the requested grain). Storage Account UsedCapacity is OPT-IN, so 'includestorage' proves the gate OPENS and 'default' proves it stays shut.
     'includestorage'  = @{ Args = @{ IncludeStorageMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'skipdisk'        = @{ Args = @{ SkipDiskMetrics = $true }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
     'metricinterval'  = @{ Args = @{ MetricsIntervalMinutes = 60 }; Tests = ($StructuralTests + @('MetricsVolumeControls.Tests.ps1')) }
@@ -198,21 +122,7 @@ $Catalog = @{
     'recovery'        = @{ Recovery = $true; Tests = ($StructuralTests + $ObfuscationTests) }
 }
 
-# -------------------------------------------------------------------------
-# Recovery-scenario generator. Produces the LIVE gap + seeded-recovery bundles
-# and splices them with Merge-RecoveryData, returning the merged (obfuscated)
-# bundle so the loop can run the obfuscation/structural suite against it.
-#
-# Returns a hashtable:
-#   @{ Skip = $true;  Reason = <string> }                      # nothing to recover
-#   @{ Skip = $false; Zip = <FileInfo>; Dict = <FileInfo>; Recovered = <key> }
-#
-# Both generations are collector-scoped and skip metrics/consumption: the
-# recovery workflow is about the INVENTORY splice, so this keeps the two extra
-# generations fast. The recovery run is seeded with the gap bundle's dictionary
-# (-ObfuscationDictionary) so its tokens match the gap exactly - the guarantee
-# Merge-RecoveryData relies on. Fails loud if the splice does not land the key.
-# -------------------------------------------------------------------------
+# Recovery-scenario generator: produces the LIVE gap + seeded-recovery bundles and splices them with Merge-RecoveryData, returning the merged (obfuscated) bundle for the loop. Returns @{ Skip=$true; Reason } when nothing to recover, else @{ Skip=$false; Zip; Dict; Recovered }. Both generations are collector-scoped and skip metrics/consumption (the workflow is about the INVENTORY splice). The recovery run is seeded with the gap bundle's dictionary (-ObfuscationDictionary) so its tokens match exactly - the guarantee Merge-RecoveryData relies on. Fails loud if the splice does not land the key.
 function New-RecoveryMergedBundle
 {
     param(
@@ -475,21 +385,7 @@ try
         $Skipped = $Res.SkippedCount
         $RealFailures = @($Res.Failed)
 
-        # A container (test file) can fail at DISCOVERY time - e.g. code in a
-        # Describe body throwing before any It runs. The assertions in that
-        # block never execute, so FailedCount stays 0 and the scenario would
-        # otherwise look green while a whole block is silently broken.
-        #
-        # The reliable signal for a discovery problem is a non-empty
-        # $container.ErrorRecord. This is distinct from a RUNTIME test failure:
-        #   - runtime failure  -> Container.Result='Failed', ErrorRecord empty
-        #                         (already counted in FailedCount / handled by
-        #                          the reclassification below)
-        #   - discovery crash  -> ErrorRecord populated, even when other blocks
-        #                         in the same file ran and the container's own
-        #                         Result reports 'Passed' (a partial crash)
-        # So we key off ErrorRecord, NOT Result, and NOT TotalCount (a partial
-        # crash still executes some tests, so TotalCount > 0).
+        # Detect a DISCOVERY-time crash: a container (test file) can fail before any It runs (code in a Describe body throwing), leaving FailedCount 0 so the scenario looks green while a whole block is silently broken. Key off a non-empty $container.ErrorRecord, NOT Result (a partial crash still reports 'Passed') and NOT TotalCount (some tests still ran); a runtime failure instead has Result='Failed' with ErrorRecord empty (handled by the reclassification below).
         $DiscoveryFailures = @($Res.Containers | Where-Object { @($_.ErrorRecord).Count -gt 0 })
         if ($DiscoveryFailures.Count -gt 0)
         {

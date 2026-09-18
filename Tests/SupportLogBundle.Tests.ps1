@@ -153,4 +153,16 @@ Describe 'New-RdaSupportLogBundle' {
         Test-ZipArchiveEntry -ZipPath $Bundle -EntryName 'NoSuchEntry.log' | Should -BeFalse
         Test-ZipArchiveEntry -ZipPath (Join-Path $script:TestRoot 'no-such-archive.zip') -EntryName 'MANIFEST.txt' | Should -BeFalse
     }
+
+    It 'bundles the logs of an inventory root whose path contains brackets' {
+        $Base = Join-Path $script:TestRoot 'reports [1]'
+        New-Item -ItemType Directory -Path $Base -Force | Out-Null
+        $Root = New-FakeInventoryRoot -Base $Base
+        $Bundle = New-RdaSupportLogBundle -InventoryRoot $Root
+        Test-Path -LiteralPath $Bundle | Should -BeTrue
+        $Names = Get-ZipEntryNames $Bundle
+        ($Names | Where-Object { $_ -like '*RunSummary_*' }).Count | Should -Be 1
+        ($Names | Where-Object { $_ -like '*ObfuscationDictionary*' }).Count | Should -Be 0
+    }
 }
+

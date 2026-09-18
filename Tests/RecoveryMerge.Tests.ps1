@@ -581,4 +581,32 @@ Describe 'Merge-RecoveryData dictionary merge and packaging' {
         ($Entries | Where-Object { $_ -like 'Consumption_*.csv' }) | Should -Not -BeNullOrEmpty -Because 'the consumption CSV must still be packaged'
         ($Entries | Where-Object { $_ -eq ('Metrics_{0}__0.json' -f $script:GapBase) }) | Should -Not -BeNullOrEmpty -Because 'the real gap metrics batch must still be packaged'
     }
+
+    It 'packages the merged files, not a decoy sibling, when the output folder name contains brackets' {
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) })
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+        # 'out [1]' is a wildcard pattern under -Path; it matches the sibling 'out 1'. Plant a decoy there
+        # with the exact names the merge will produce, so a -Path regression would zip the decoy instead.
+        $Bracketed = Join-Path $script:TmpRoot ('out [1]_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $Decoy = $Bracketed -replace '\[1\]', '1'
+        New-Item -ItemType Directory -Path $Decoy -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Decoy ('{0}.html' -f $script:GapBase)) -Value 'DECOY'
+        Set-Content -LiteralPath (Join-Path $Decoy ('Inventory_{0}.json' -f $script:GapBase)) -Value 'DECOY'
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $Bracketed
+
+        Test-Path -LiteralPath $Result.OutputZip | Should -BeTrue
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Result.OutputZip)
+        try
+        {
+            $Entry = $Archive.Entries | Where-Object { $_.Name -eq ('Inventory_{0}.json' -f $script:GapBase) } | Select-Object -First 1
+            $Entry | Should -Not -BeNullOrEmpty
+            $Reader = New-Object System.IO.StreamReader($Entry.Open()); try { $Text = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+            $Text | Should -Not -Match 'DECOY' -Because 'the zip must hold the files written to the bracketed folder, not the sibling that matches it as a wildcard'
+            $Text | Should -Match 'VirtualMachines'
+        }
+        finally { $Archive.Dispose() }
+    }
 }
+

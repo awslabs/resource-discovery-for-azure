@@ -379,6 +379,31 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
         }
         finally { $Archive.Dispose() }
     }
+
+    It 'packages the reconstructed folder, not a decoy sibling, when the run folder name contains brackets' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run          # fixture built in a plain folder (the helper globs)
+        $Bracketed = Join-Path $Run 'reports [1]'
+        New-Item -ItemType Directory -Path $Bracketed -Force | Out-Null
+        $OutDir = Join-Path $Bracketed 'rebuilt_pkg'
+        # Under -Path, 'reports [1]/rebuilt_pkg/*' also matches 'reports 1/rebuilt_pkg/*'. Plant a decoy there.
+        $DecoyDir = Join-Path (Join-Path $Run 'reports 1') 'rebuilt_pkg'
+        New-Item -ItemType Directory -Path $DecoyDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $DecoyDir 'DECOY.txt') -Value 'decoy'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+
+        $Zip = $OutDir + '.zip'
+        Test-Path -LiteralPath $Zip | Should -BeTrue
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+        try
+        {
+            $Names = @($Archive.Entries | ForEach-Object FullName)
+            $Names | Should -Not -Contain 'DECOY.txt' -Because 'the package must come from the bracketed folder, not the sibling that matches it as a wildcard'
+            ($Names | Where-Object { $_ -like '*.html' }).Count | Should -BeGreaterThan 0
+        }
+        finally { $Archive.Dispose() }
+    }
 }
 
 Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak guard)' {

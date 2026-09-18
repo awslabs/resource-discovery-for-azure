@@ -117,18 +117,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string[]] $Path,
 
-    # Typo protection with no second copy of the collector list.
-    #
-    # A hardcoded [ValidateSet] would duplicate the 50-plus collector names and
-    # drift the moment one is added or renamed, and [ValidateSet([SomeClass])] is
-    # not usable here because a PowerShell class cannot be declared before this
-    # param block and 'using module' with a relative path does not resolve the
-    # type. So the valid list is read from the Services tree at parameter-binding
-    # time by both attributes below: the completer offers the names, and the
-    # validator rejects anything else BEFORE the script body runs.
-    #
-    # $PSCommandPath is used rather than $PSScriptRoot because $PSScriptRoot is
-    # not populated inside an attribute scriptblock.
+    # Valid collector names are read from the Services tree at bind time (completer + validator below),
+    # not a hardcoded [ValidateSet] that would drift; $PSCommandPath because $PSScriptRoot is empty in an attribute scriptblock.
     [Parameter(Mandatory = $true)]
     [ArgumentCompleter({
             param($CommandName, $ParameterName, $WordToComplete, $CommandAst, $FakeBoundParameters)
@@ -152,12 +142,8 @@ param(
             $Valid = @($Names | Sort-Object -Unique)
             if ($Requested -in $Valid) { return $true }
 
-            # Near misses first: at 50-plus collectors the full list is hard to
-            # scan for the one intended name. Matched on a shared prefix, which
-            # catches the common typo shapes (a dropped or transposed letter).
-            # Three characters, not four: 'VMWre' (a dropped letter in VMWare)
-            # shares only 'VMW' with it, so a longer stem misses the very typo
-            # shape this hint exists to catch.
+            # "Did you mean" hint: match on a shared 3-char prefix (not 4) so a dropped/transposed
+            # letter like 'VMWre' still shares the stem with 'VMWare' - the very typo shape this catches.
             $Stem = $Requested
             if ($Stem.Length -gt 3) { $Stem = $Stem.Substring(0, 3) }
             $Near = @($Valid | Where-Object { $_ -like ('{0}*' -f $Stem) })
@@ -221,14 +207,8 @@ if ($CsvPath)
 {
     if ($Rows.Count -gt 0)
     {
-        # Projected through the UNION of field names across all matched rows.
-        # Export-Csv takes its header from the FIRST object only and silently drops
-        # any column that appears later, which is a real risk here for two reasons:
-        # -ResourceType accepts several types with different schemas, and even one
-        # type differs across bundle vintages (a field added to a collector exists
-        # in newer inventories and not older ones). Rows also arrive in parallel
-        # completion order, so without this the surviving column set would vary
-        # between runs of the same scan.
+        # Project through the UNION of all rows' field names: Export-Csv takes its header from the first
+        # object only and drops later columns - schemas differ across resource types / bundle vintages and parallel arrival order.
         $Union = Get-RdaRowField -Rows $Rows
         try
         {
@@ -281,14 +261,8 @@ if ($JsonPath)
 # went to the host, so a pipe into Export-Csv stays clean.
 $Rows
 
-# A wrong path and a genuinely empty estate are different outcomes and get
-# different exit codes. An empty match set on a COMPLETE scan is a SUCCESS.
-#
-# Code 3 exists because the summary and the exit code must agree: the same four
-# lists that force the summary off its "confirmed zero" wording have to be
-# visible to a caller that only reads $LASTEXITCODE. Without it, a scan that
-# refused a revealed bundle or could not enumerate a subtree would print
-# "NOT a confirmed zero" and then exit 0.
+# Exit code 3 keeps the exit code and summary in agreement: a scan that refused a revealed bundle or could not
+# enumerate a subtree is NOT a confirmed zero and must not exit 0. (An empty match on a complete scan is success.)
 if ([int]$Result.SourceCount -eq 0) { exit 1 }
 if (@($Result.Failures).Count -gt 0) { exit 2 }
 if ((@($Result.Missing).Count -gt 0) -or

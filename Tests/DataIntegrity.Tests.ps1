@@ -48,20 +48,8 @@ BeforeAll {
             }
     }
 
-    # Return the rows a "field was NOT obfuscated" check can actually examine, or SKIP
-    # the It when there are none.
-    #
-    # WHY. The Non-Sensitive Fields Preserved tests below were written as
-    #   foreach ($vm in @($Inventory.VirtualMachines)) { if (field non-empty) { assert } }
-    # which runs ZERO assertions - and therefore reports PASSED - on a subscription with
-    # no VMs, or no storage accounts, or where the field is empty on every row. Pester
-    # does not fail an It for making no assertions, so the suite reported green while
-    # verifying nothing. That is false assurance in the PII suite specifically, which is
-    # the one place a silent pass is most expensive.
-    #
-    # Set-ItResult -Skipped ABORTS the It immediately (verified, not assumed), so the
-    # caller needs no guard after calling this: either it gets rows back, or its body
-    # stops here and the run shows a visible Skipped instead of a misleading Passed.
+    # Return the rows a "field not obfuscated" check can examine, or Set-ItResult -Skipped (aborts the It immediately, no guard needed).
+    # Pester reports an It with ZERO assertions as PASSED, so an empty row set would be false assurance in this PII suite.
     function script:Get-ExaminableRows
     {
         param(
@@ -373,13 +361,8 @@ Describe "No Null Obfuscated Fields" {
 }
 
 
-# ============================================================
-# 6. Generic per-property leak scan
-# ============================================================
-# Walks every property of every resource across all collectors and asserts no
-# value contains a raw Azure resource path. This catches secondary-field leaks
-# that the per-collector specialised tests do not cover (since only ~14 of the
-# 57 collectors have dedicated cross-reference tests).
+# Generic per-property leak scan: walk every property of every resource and assert no value contains a raw Azure resource path.
+# Catches secondary-field leaks the per-collector tests miss (only ~14 of 57 collectors have dedicated cross-reference tests).
 Describe "Generic per-property leak scan" {
     It "No resource property in obfuscated output should contain a raw Azure resource path" {
         if (-not $script:IsObfuscated)

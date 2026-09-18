@@ -15,8 +15,6 @@ if ($Task -eq 'Processing')
 
             foreach ($2 in $Data.agentPoolProfiles)
             {
-                # Fresh per-row Select-Object projection (not hoisted): obfuscation mutates $tag.Value on the
-                # instance, so a shared instance would re-key an already-tokenized value and corrupt $Global:TagValueDictionary.
                 $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
                 $Obj = @{
@@ -36,10 +34,6 @@ if ($Task -eq 'Processing')
                     'NodeSize'                  = $2.vmSize;
                     'OSDiskSize'                = $2.osDiskSizeGB;
                     'Nodes'                     = $2.count;
-                    # -eq 'true' deliberately, matching VMSS/AppServicePlan/DataExplorerCluster:
-                    # correct for a real boolean, for an absent property, AND for a stringified
-                    # 'false'. A presence test ('$null -ne') reported autoscale as on for a pool
-                    # that had explicitly disabled it - do not 'align' this with lines below.
                     'Autoscale'                 = if ($2.enableAutoScaling -eq 'true') { 'true' } else { 'false' };
                     'AutoscaleMax'              = if ($null -ne $2.maxCount) { $2.maxCount } else { '0' };
                     'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' };
@@ -55,3 +49,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

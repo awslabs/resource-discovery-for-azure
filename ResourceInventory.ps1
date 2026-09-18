@@ -1,19 +1,6 @@
 #!/usr/bin/env pwsh
-# [CmdletBinding()] makes this an ADVANCED script, which is what gets the
-# parameter binder to REJECT unrecognized arguments instead of silently
-# collecting them into $args. A mistyped -Obfusacte must not run the whole
-# inventory UNOBFUSCATED while the operator believes the output was masked.
-# It also provides -? help for free.
-#
-# There is deliberately NO [switch]$Debug in the param block below. -Debug is a
-# CmdletBinding COMMON parameter, and declaring it here as well is a hard
-# MetadataError ("A parameter with the name 'Debug' was defined multiple times")
-# that stops the script from starting at all. The built-in one is equivalent for
-# this script's purposes: passing -Debug sets $DebugPreference to 'Continue' in
-# script scope, so Write-Debug output appears exactly as before, and
-# $PSBoundParameters.ContainsKey('Debug') is how the -Debug-only branches below
-# test for it. -Debug therefore remains the public flag name and
-# Run-AllSubscriptions.ps1's existing passthrough of it is unchanged.
+# [CmdletBinding()] makes this an ADVANCED script so the binder REJECTS unknown args (a mistyped -Obfuscate must not run the whole inventory UNOBFUSCATED).
+# No [switch]$Debug in the param block: -Debug is a CmdletBinding common param and redeclaring it is a fatal MetadataError; the built-in one drives the -Debug branches below.
 [CmdletBinding()]
 param ($TenantID,
     $Appid,
@@ -29,20 +16,11 @@ param ($TenantID,
     [switch]$DeviceLogin,
     [switch]$Obfuscate,
     [switch]$RunAllSubs,
-    # EXPERIMENTAL (default OFF). Forwarded to Extension/Metrics.ps1. When set,
-    # VM CPU/memory metrics are collected via the Azure Monitor metrics:getBatch
-    # data-plane API instead of one Get-AzMetric per (resource, metric), and the
-    # tool will attempt to register the Microsoft.Insights provider if needed.
-    # Falls back to the per-call path on any batch failure (no data lost). See
-    # the -UseMetricsBatch notes in Extension/Metrics.ps1.
+    # EXPERIMENTAL (default OFF), forwarded to Extension/Metrics.ps1: collect VM CPU/memory via the Azure Monitor metrics:getBatch data-plane API instead of per-call Get-AzMetric,
+    # falling back to the per-call path on any batch failure (no data lost).
     [switch]$UseMetricsBatch,
-    # Metric-volume controls forwarded to Extension/Metrics.ps1.
-    # -IncludeStorageMetrics OPTS IN to the Storage Account UsedCapacity metric,
-    # which is NOT collected by default (one metric-query call per storage account
-    # makes it the dominant cost on a large storage estate).
-    # -SkipDiskMetrics drops the Managed Disk composite I/O metrics.
-    # -MetricsIntervalMinutes overrides the VM / SQL / OSS-DB utilization sampling
-    # grain (0 = native 15 min VM / 30 min SQL / 60 min OSS-DB). See Extension/Metrics.ps1.
+    # Metric-volume controls forwarded to Extension/Metrics.ps1: -IncludeStorageMetrics OPTS IN to the costly per-account Storage UsedCapacity metric (OFF by default),
+    # -SkipDiskMetrics drops disk I/O metrics, -MetricsIntervalMinutes overrides the VM/SQL/OSS-DB sampling grain (0 = native).
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
@@ -76,33 +54,12 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 . $CommonFunctionsFile
 
 
-# -Debug is the CmdletBinding COMMON parameter (see the note above the param
-# block). When it was passed the binder has ALREADY set $DebugPreference to
-# 'Continue' for this scope, so Write-Debug output appears with no work here -
-# the old explicit '$DebugPreference = Continue' line is now redundant and was
-# removed. $DebugMode is still needed for the $ErrorActionPreference choice.
-#
-# ContainsKey alone is NOT enough: '-Debug:$false' is a BOUND parameter whose
-# value is $false, so ContainsKey returns $true and the old form treated an
-# explicit opt-OUT as an opt-IN. That flipped $ErrorActionPreference to
-# 'Continue' for the whole run, which is the opposite of what the caller asked
-# for and turns the deliberately-swallowed long tail of per-resource errors into
-# console noise. The value has to be read, not just its presence. This also keeps
-# the flag consistent with the two forwarding sites in Run-AllSubscriptions.ps1
-# and Run-AllSubscriptions.Stream.ps1, which already use [bool] on the value.
+# -Debug (a common param) has ALREADY set $DebugPreference before this runs, so Write-Debug needs no help here; $DebugMode only feeds the $ErrorActionPreference choice below.
+# Read the VALUE, not ContainsKey: '-Debug:$false' is bound-but-false, so a presence test wrongly treats an explicit opt-OUT as opt-IN (matching the two forwarding sites in Run-AllSubscriptions*.ps1).
 $DebugMode = ($PSBoundParameters.ContainsKey('Debug') -and [bool]$PSBoundParameters['Debug'])
 
-# Production runs deliberately swallow the long tail of trivial per-resource
-# errors so a partial-but-useful inventory still completes; -Debug surfaces
-# everything. Do NOT "fix" this default - the high-value phases each opt into
-# terminating behavior with their own -ErrorAction Stop + try/catch (resource
-# discovery, Test-DataPlaneAuthReady, the consumption pull, packaging).
-#
-# Becoming an advanced script means -ErrorAction is now ACCEPTED by the binder,
-# which sets $ErrorActionPreference for this scope before the script body runs.
-# Honor that when the caller passed it explicitly instead of unconditionally
-# clobbering it, which would accept the flag and silently ignore it. With no
-# -ErrorAction the behavior is byte-for-byte what it was before.
+# Non-Debug runs deliberately default $ErrorActionPreference to SilentlyContinue so the long tail of trivial per-resource errors is swallowed and a partial inventory still completes; high-value phases opt into Stop themselves. Do NOT 'fix' this default.
+# Honor an explicitly-passed -ErrorAction (now accepted as an advanced script) instead of clobbering it; with none passed, behavior is byte-for-byte unchanged.
 if (-not $PSBoundParameters.ContainsKey('ErrorAction'))
 {
     $ErrorActionPreference = if ($DebugMode) { 'Continue' } else { 'SilentlyContinue' }
@@ -129,39 +86,13 @@ function Variables
     # always yields the same token within a run) so the obfuscated report can still
     # group/correlate by tag value without exposing it. Tag KEYS are kept verbatim.
     $Global:TagValueDictionary = $null
-    # Maps a REAL free-text / identity value (resource Description, FriendlyName,
-    # CreatedBy, RoleName, container image, etc.) to its deterministic obfuscated
-    # token. These fields are free-form text - previously they were dropped (nulled
-    # or stamped with the literal 'obfuscated') and so were unrecoverable. Tokenizing
-    # them (same real value -> same token within a run) keeps them out of the shared
-    # report while letting Reveal-Obfuscation.ps1 restore them locally via FreeTextMap.
+    # Maps a REAL free-text/identity value (Description, FriendlyName, CreatedBy, RoleName, container image, etc.) to a deterministic obfuscated token, so these formerly-dropped fields stay out of the shared report yet remain locally reversible via FreeTextMap.
     $Global:FreeTextDictionary = $null
 
     if ($Obfuscate.IsPresent)
     {
-        # The four IDENTIFIER dictionaries are CASE-INSENSITIVE (OrdinalIgnoreCase).
-        #
-        # ARM resource ids, subscription ids and resource-group names are
-        # case-insensitive identifiers by specification - Azure preserves the case
-        # you created them with but treats two spellings as the same resource. A
-        # lookup keyed on exact case therefore MISSES on a casing difference, and
-        # every consequence of that miss is silent:
-        #   - a cross-reference (VM <-> disk, SQL VM <-> parent VM) falls through to
-        #     the 'obfuscated' sentinel instead of the real token
-        #   - a consumption row fails to join back to its inventory resource
-        #   - a dictionary seeded from a PREVIOUS run (-ObfuscationDictionary) stops
-        #     matching, so the same resource is re-tokenised and the two runs no
-        #     longer correlate
-        # None of those raise an error. Making the comparer explicit removes the
-        # whole failure class rather than relying on every upstream producer to
-        # lowercase consistently forever.
-        #
-        # TagValueDictionary and FreeTextDictionary stay CASE-SENSITIVE deliberately.
-        # Azure tag values are genuinely case-sensitive, so 'Env=Prod' and 'Env=prod'
-        # are two different values; collapsing them onto one token would lose a real
-        # distinction in the estate. There is no injectivity/distinctness test in the
-        # suite that would catch such a collapse, which makes the conservative choice
-        # the correct one here.
+        # The four IDENTIFIER dictionaries are OrdinalIgnoreCase: ARM ids / sub-ids / RG names are case-insensitive per Azure spec, so a case-sensitive key MISSES silently (broken cross-refs, unjoined consumption rows, a re-tokenised -ObfuscationDictionary seed).
+        # TagValueDictionary and FreeTextDictionary stay CASE-SENSITIVE deliberately: Azure tag values are case-sensitive, so collapsing 'Env=Prod' and 'Env=prod' onto one token would lose a real distinction.
         $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -181,14 +112,7 @@ function RunInventorySetup()
 {
     function CheckVersion()
     {
-        # Idempotent per PowerShell session. Under -RunAllSubs this script is
-        # invoked via & once per subscription in the SAME process; the version
-        # banner and the GitHub update check (a network round-trip to
-        # RawRepo/Version.json) do not vary by subscription, so run them only once.
-        # Skipping on later subs also removes one WebClient call per subscription
-        # on large tenants. $Global:RdaSessionInitialized is set once at the end of
-        # the first subscription's setup (GetSubscriptionsData). Parallel streams
-        # are separate processes and each performs the check once.
+        # Version banner + GitHub update check run once per PowerShell session (gated on $Global:RdaSessionInitialized): under -RunAllSubs this script is invoked per-subscription in the SAME process and neither varies by sub. Parallel streams are separate processes and each checks once.
         if ($Global:RdaSessionInitialized)
         {
             return
@@ -197,12 +121,7 @@ function RunInventorySetup()
         Write-Log -Message ('Checking Version') -Severity 'Info'
         Write-Log -Message ('Version: {0}' -f $Global:Version) -Severity 'Info'
 
-        # The version check is best-effort. On corporate networks that block
-        # raw.githubusercontent.com (DNS failure, firewall, or air-gap), this
-        # WebClient call would otherwise raise SocketException and abort the
-        # entire subscription before any inventory work began. A failed update
-        # check is not a reason to skip a subscription's inventory - log a
-        # clear note and continue with the local version. See #18.
+        # Best-effort: on a network that blocks raw.githubusercontent.com this WebClient call would otherwise raise SocketException and abort the subscription before any inventory. Log a clear note and continue on the local version (#18).
         try
         {
             $VersionJson = (New-Object System.Net.WebClient).DownloadString($RawRepo + '/Version.json') | ConvertFrom-Json
@@ -218,14 +137,7 @@ function RunInventorySetup()
 
         if ($VersionNumber -ne $Global:Version)
         {
-            # A version difference is informational, not fatal. Aborting the whole
-            # run on any mismatch (the previous behaviour: Write-Log Error + Exit)
-            # blocked users who were only slightly behind or on a managed clone,
-            # and mis-fired for local/dev builds whose version is AHEAD of
-            # upstream. This mirrors the network-failure branch above, which
-            # already chooses "log a clear note and continue" over aborting the
-            # inventory. Compare as semver so the note reflects reality (behind vs
-            # ahead) rather than a plain string inequality.
+            # A version difference is informational, not fatal: aborting on any mismatch blocked slightly-behind, managed-clone, and AHEAD dev builds. Compare as semver so the note reflects behind vs ahead, and continue (mirroring the network-failure branch above).
             $LocalParsed = $null
             $UpstreamParsed = $null
             $HaveSemver = [version]::TryParse($Global:Version, [ref]$LocalParsed) -and `
@@ -250,15 +162,7 @@ function RunInventorySetup()
 
     function CheckCliRequirements()
     {
-        # Idempotent per PowerShell session. Under -RunAllSubs the wrapper invokes
-        # this script via & once per subscription in the SAME process, so the Az
-        # module check and import only need to run once: the imported modules
-        # persist process-wide. $Global:AzPowerShellLoaded is set $true at the end
-        # of a successful load (below); when it is already set we skip the whole
-        # re-check, which removes the repeated "Loading Az.* ..." output on every
-        # subscription. Parallel streams run in separate processes, so each stream
-        # still loads once. On a failed load the flag stays $false, so the next
-        # subscription retries the full check.
+        # Az module check + import run once per PowerShell session (gated on $Global:AzPowerShellLoaded; the imports persist process-wide): under -RunAllSubs this runs per-sub in the same process. The flag stays $false on a failed load so the next sub retries; parallel streams load once each.
         if ($Global:AzPowerShellLoaded)
         {
             return
@@ -271,17 +175,8 @@ function RunInventorySetup()
         # per-OS shell layer between us and the call.
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        # This tool only calls cmdlets from five Az submodules (see the import
-        # loop below), so it validates and loads exactly those - it does NOT
-        # require the full ~80-submodule `Az` rollup to be installed. A slim
-        # install is sufficient:
-        #   Install-Module Az.Accounts, Az.Compute, Az.Monitor, Az.Billing, Az.ResourceGraph
-        # The full `Az` rollup also satisfies this check because installing `Az`
-        # lays down each Az.* submodule as its own discoverable module on disk,
-        # so Get-Module -Name Az.Accounts (etc.) finds them either way. Checking
-        # the submodules (not the `Az` umbrella) is what lets the slim install
-        # pass - a slim install has no `Az` meta-module, so the old
-        # Get-Module -Name Az check would have thrown a false "not found".
+        # Validate/load ONLY the five Az submodules this tool calls (Az.Accounts, Az.Compute, Az.Monitor, Az.Billing, Az.ResourceGraph), NOT the ~80-module Az rollup, so a slim install is sufficient.
+        # Checking the submodules (not the Az umbrella) is what lets a slim install pass, since it has no Az meta-module; the full rollup also satisfies it because each submodule is independently discoverable.
         $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
@@ -293,17 +188,7 @@ function RunInventorySetup()
         }
         else
         {
-            # Behaviour change (deliberate): do not Install-Module from inside
-            # this script. A real field run produced a half-installed Az module
-            # - .psd1 manifests present so Get-Module -ListAvailable was happy,
-            # but the bundled MSAL/Azure.Core assemblies were missing on disk -
-            # and the script then ran for nearly an hour producing zero
-            # consumption data because every Get-AzUsageAggregate call failed
-            # with "Azure PowerShell context has not been properly initialized".
-            # In-process module installs into a script that's already importing
-            # the same module are fragile (concurrent install, AppDomain
-            # caching, partial download) and the failure mode is a silent broken
-            # install rather than a clean error. Failing loudly here is safer.
+            # Deliberately do NOT Install-Module from inside this script: a field run left a half-installed Az (manifests present, MSAL/Azure.Core assemblies missing) that ran ~an hour producing zero consumption. In-process installs of a module already importing are fragile and fail silently, so fail loud here instead.
             Write-Log -Message ('Required Azure PowerShell module(s) not found: {0}' -f ($MissingAzSubModules -join ', ')) -Severity 'Error'
             Write-Log -Message ('This tool needs only these Az submodules. Install them manually before re-running. From an elevated PowerShell 7 prompt:') -Severity 'Error'
             Write-Log -Message ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck' -f ($RequiredAzSubModules -join ',')) -Severity 'Error'
@@ -312,29 +197,8 @@ function RunInventorySetup()
             throw ('Required Azure PowerShell submodule(s) not found: {0}. See log above for installation instructions.' -f ($MissingAzSubModules -join ', '))
         }
 
-        # Load ONLY the Az submodules this tool actually uses ($RequiredAzSubModules,
-        # validated above), not the full `Az` rollup. Importing `Az` pulls in ~80
-        # submodules (hundreds of DLLs plus their format/type data) and stalls for
-        # 20-40s on a fresh box with no output - which looks like a hang right
-        # after "Checking Azure PowerShell Module...". The tool only calls cmdlets
-        # from these five:
-        #   Az.Accounts      - Connect/Get/Set-AzContext, Get-AzSubscription,
-        #                      Get-AzAccessToken, Save-/Import-AzContext
-        #   Az.Compute       - Get-AzComputeResourceSku
-        #   Az.Monitor       - Get-AzMetric
-        #   Az.Billing       - Get-UsageAggregates
-        #   Az.ResourceGraph - Search-AzGraph (resource discovery)
-        # Because these five are the entire Az cmdlet surface, a slim install of
-        # just them is enough and cannot cause "command not found". If the full
-        # `Az` rollup happens to be installed instead, any other submodule still
-        # auto-loads on first use - but nothing outside these four is ever called.
-        #
-        # This import doubles as the broken-install probe. Get-Module
-        # -ListAvailable above only checks the manifest on disk; importing
-        # Az.Accounts actually loads the bundled assemblies (MSAL, Azure.Core),
-        # so a half-installed module (manifest present, assemblies missing - a
-        # real field-observed scenario) fails loudly HERE instead of silently
-        # producing zero data at the consumption phase.
+        # Import ONLY the five submodules used, NOT the Az rollup (which pulls ~80 modules and stalls 20-40s with no output, looking like a hang).
+        # This import also doubles as the broken-install probe: unlike the -ListAvailable manifest check, importing Az.Accounts actually loads MSAL/Azure.Core, so a half-installed module fails loudly HERE instead of silently producing zero data at the consumption phase.
         try
         {
             foreach ($AzSubModule in $RequiredAzSubModules)
@@ -355,22 +219,12 @@ function RunInventorySetup()
         }
 
 
-        # NOTE: The ImportExcel / EPPlus preflight that used to live here was
-        # removed when the report format changed from Excel (.xlsx) to a
-        # self-contained HTML report (Extension/Summary.ps1). The HTML report
-        # has no external module dependency, so there is nothing to preflight.
-        # This is the dependency that previously failed in Cloud Shell when the
-        # module was partially installed.
+        # NOTE: the ImportExcel/EPPlus preflight that lived here was removed when the report moved from Excel (.xlsx) to a self-contained HTML report (Extension/Summary.ps1), which has no external module dependency to preflight.
     }
 
     function CheckPowerShell()
     {
-        # Session-scoped detection (once per PowerShell session). Under -RunAllSubs
-        # this script runs via & once per subscription in the SAME process, and
-        # Variables() does not reset $Global:PlatformOS, so platform / PS-version
-        # detection and its console output only need to run for the first sub. The
-        # per-subscription timestamp + report-folder computation below still runs
-        # every invocation so each subscription gets its own output folder.
+        # Platform / PS-version detection runs once per PowerShell session (Variables() does not reset $Global:PlatformOS): under -RunAllSubs this runs per-sub in the same process. The per-subscription timestamp + report-folder computation below still runs every invocation.
         if (-not $Global:RdaSessionInitialized)
         {
             Write-Log -Message ('Checking PowerShell...') -Severity 'Info'
@@ -405,21 +259,8 @@ function RunInventorySetup()
             }
         }
 
-        # Per-subscription: a fresh report folder every invocation so each sub
-        # writes to its own output folder.
-        #
-        # Millisecond precision is required when multiple inner-script invocations
-        # can start in the same second (the parallel-streams orchestration in
-        # Run-AllSubscriptions.ps1 fans out N child processes that all run this
-        # init block concurrently). Without it, two workers compute the same
-        # $Global:CurrentDateTime, point at the same per-sub folder, and the
-        # second worker's Compress-Archive fails with "archive file already
-        # exists". The format change is invisible to every downstream consumer:
-        # all glob filters use `*` wildcards over the timestamp segment.
-        # Append a 4-char per-process discriminator to the timestamp. Two
-        # worker processes that hit the same millisecond still produce
-        # different folder names. Discriminator is hex-only and length-stable
-        # so the existing `*<timestamp>*` glob filters keep matching.
+        # Per-subscription: a fresh report folder every invocation. Millisecond precision plus a 4-char per-process discriminator are REQUIRED because parallel-stream child processes can start in the same second - without them two workers compute the same folder and the second Compress-Archive fails 'already exists'.
+        # Invisible to consumers: the discriminator is hex-only/length-stable and every downstream glob wildcards the timestamp segment.
         $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
         # InvariantCulture: 'Get-Date -Format' takes the YEAR from CurrentCulture's
         # Calendar, so a th-TH host stamped 2569... and an ar-SA host 1448... into
@@ -429,20 +270,8 @@ function RunInventorySetup()
         $Global:CurrentDateTime = ((Get-Date).ToString('yyyyMMddHHmmssfff', [cultureinfo]::InvariantCulture) + $ProcDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
 
-        # Base output root comes from the SINGLE resolver in
-        # Functions/Common.Functions.ps1 rather than an inline "$HOME/InventoryReports".
-        # By this point the root has already been established and pinned - by this
-        # script's own pre-flight on a standalone run, or by Run-AllSubscriptions.ps1
-        # under -RunAllSubs - so this call resolves to the SAME directory that was
-        # validated there instead of independently re-deriving it. That is what keeps
-        # the wrapper's consolidation step and the inner script's output in agreement
-        # when the preferred location was unwritable and a fallback was used.
-        #
-        # Still ends with a trailing separator: $Global:DefaultPath is string-
-        # concatenated with file names throughout this script (e.g.
-        # $DefaultPath + "Inventory_" + ...), and the parent-directory logic for the
-        # error/debug logs does Split-Path on it. Shape is unchanged from the
-        # previous per-branch assignments.
+        # Base output root comes from the SINGLE resolver in Functions/Common.Functions.ps1 (already pinned by this script's pre-flight or by Run-AllSubscriptions.ps1), so it resolves to the SAME validated directory - which is what keeps the wrapper's consolidation and the inner output in agreement.
+        # Still ends with a trailing separator: $Global:DefaultPath is string-concatenated with filenames throughout this script, and the log parent-dir logic does Split-Path on it.
         $RootForRun = Get-RdaInventoryRoot
         if (-not $RootForRun.Ok)
         {
@@ -539,19 +368,7 @@ function RunInventorySetup()
                 Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
             }
 
-            # Suppress Az's own debug chatter across the interactive sign-in, then RESTORE
-            # WHAT WAS THERE - not a hardcoded 'Continue'.
-            #
-            # The restore below used to assign the literal "Continue", which turned debug
-            # output ON for the remaining ~100 lines of this function even when the caller
-            # had passed -Debug:$false (or no -Debug at all, where the preference is
-            # 'SilentlyContinue'). That is the same opt-out-read-as-opt-in defect the
-            # $DebugMode assignment at the top of this script fixes, so the two now agree.
-            # Saving the incoming value is also what makes -Debug still work: under -Debug
-            # the binder has set 'Continue', and that is exactly what gets put back.
-            #
-            # Function-scoped, so it never leaked to script scope - the damage was bounded
-            # to the rest of this function, which is why it was easy to miss.
+            # Suppress Az's own debug chatter across interactive sign-in, then RESTORE the incoming value - not a literal 'Continue', which turned debug output on for the rest of this function even under -Debug:$false (the same opt-out-read-as-opt-in defect fixed at the top of the script). Function-scoped, so the effect ends at return; saving the value is also what keeps -Debug working.
             $SavedDebugPref = $DebugPreference
             $DebugPreference = "SilentlyContinue"
 
@@ -592,14 +409,7 @@ function RunInventorySetup()
                     $SequenceID ++
                 }
 
-                # A read-host here blocks until someone types at a console. Under
-                # the wrapper (-RunAllSubs), a parallel worker, an SSM run-command,
-                # or any redirected/CI session there IS no console, so the prompt
-                # would hang the entire run forever with no way to answer it.
-                # Detect a non-interactive session and default to the first tenant
-                # instead (the "Default 1" the prompt always intended); a real
-                # interactive session still gets the picker. Pass -TenantID to
-                # choose a specific tenant and skip this path entirely.
+                # A Read-Host tenant prompt blocks forever under the wrapper, a parallel worker, SSM, or CI where there is no console. Detect a non-interactive session and default to the first tenant (the prompt's 'Default 1'); pass -TenantID to skip this path entirely.
                 $IsInteractiveSession = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
                 if ($RunAllSubs.IsPresent -or -not $IsInteractiveSession)
                 {
@@ -690,12 +500,7 @@ function RunInventorySetup()
 
         if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false)
         {
-            # -ErrorAction Stop + catch. Without it this inherited the run's global
-            # 'SilentlyContinue', so a failure to create the report folder was
-            # invisible and every subsequent write into it failed one by one with no
-            # statement of the actual cause. The parent root was already created and
-            # write-probed by Get-RdaInventoryRoot, so reaching this is unusual - but
-            # it must name the problem rather than produce a run with no output.
+            # -ErrorAction Stop + catch: without it this inherited the run's SilentlyContinue, so a failed report-folder creation was invisible and every subsequent write into it failed one-by-one with no statement of the cause. Reaching here is unusual (parent root already write-probed) but it must name the problem.
             try
             {
                 New-Item -Type Directory -Force -Path $DefaultPath -ErrorAction Stop | Out-Null
@@ -708,13 +513,7 @@ function RunInventorySetup()
             }
         }
 
-        # Session init is complete once the first subscription's setup has run.
-        # Subsequent subscriptions in the same PowerShell process now skip the
-        # version check, platform/PS detection, and the subscription-count line
-        # above (see CheckVersion / CheckPowerShell / the guard just above). This
-        # is the single place the flag is set; nothing resets it mid-session
-        # (Variables() does not touch it), and parallel streams are separate
-        # processes that each set it once.
+        # Mark session init complete: subsequent subscriptions in the same process now skip the version check, platform detection, and the subscription-count line above. Single place the flag is set; nothing resets it mid-session; parallel streams are separate processes that each set it once.
         $Global:RdaSessionInitialized = $true
     }
 
@@ -847,22 +646,8 @@ function RunInventorySetup()
     CheckPowerShell
     GetSubscriptionsData
 
-    # Resource discovery is wrapped because a failed discovery page must NOT be
-    # survivable. Both loops page through Resource Graph as
-    #   $Resource = Invoke-AzGraphQuerySafe ...; $Global:Resources += $Resource.data
-    # with no local guard. In a normal run $ErrorActionPreference is
-    # 'SilentlyContinue', and under that preference a terminating error with NO
-    # catch anywhere up the stack does not stop anything - every frame simply
-    # continues at its next statement. So a page that failed left $Resource holding
-    # the PREVIOUS page's object, appended it a second time, and the run went on to
-    # produce a report that was missing ~1000 real resources while double-counting
-    # another page, with the total looking plausible and nothing reported.
-    #
-    # ONE catch here covers every discovery call site, because a terminating error
-    # propagates up until something catches it - verified for this exact nesting.
-    # exit 1 (not throw) is this script's hard-fail signal at script scope, and the
-    # wrapper turns a non-zero inner exit into "this subscription failed", so
-    # -Resume can retry it rather than shipping a quietly incomplete inventory.
+    # Wrap resource discovery in ONE catch: both paging loops append pages ($Global:Resources += $Resource.data) with no local guard, and under the run's SilentlyContinue a terminating error with no catch up-stack does not stop anything - a failed page silently re-appended the PREVIOUS page, producing a plausible-looking total that missed ~1000 real resources.
+    # One catch covers every discovery call site; exit 1 (not throw) is this script's hard-fail signal at script scope, so the wrapper marks the sub failed and -Resume can retry it.
     try
     {
         ResourceInventoryLoop
@@ -883,30 +668,8 @@ function RunInventorySetup()
         $SubLookup = @{}
         $RgLookup = @{}
 
-        # -ObfuscationDictionary seeding. When a prior run's saved dictionary file
-        # is supplied, preload the obfuscation maps from it so identical real values
-        # yield the SAME prod_/nonprod_ tokens as that earlier run. This is what lets
-        # a scoped recovery run (e.g. -Service <one collector>) be merged back into
-        # the earlier bundle - without it, each run mints fresh random GUID tokens
-        # and the recovered rows would not join. New real values not in the seed
-        # still get fresh tokens below, so determinism is EXTENDED, never broken.
-        # (Pre-flight has already validated the file exists, parses, and -Obfuscate.)
-        #
-        # The saved file stores each map inverted (token -> real):
-        #   - ResourceIdMap / ResourceNameMap: token -> real resource ID. These
-        #     tokens are UNIQUE per resource so the maps are complete; invert them
-        #     back to the in-memory (real ID -> token) form.
-        #   - TagMap / FreeTextMap: token -> real value; the collector loop reuses
-        #     these via ContainsKey, so seeding the real-value-keyed dicts suffices.
-        #   - Subscription / ResourceGroup tokens are SHARED by every resource in a
-        #     sub/RG, so SubscriptionMap/ResourceGroupMap collapse to one
-        #     representative real ID per token and CANNOT be reused ID-keyed. Rebuild
-        #     the real-value-keyed $subLookup/$rgLookup the mint logic consults:
-        #       sub -> SubscriptionNameMap gives token -> real subscription NAME,
-        #              which is exactly the key the mint logic uses.
-        #       rg  -> extract the RG name from each ResourceGroupMap representative
-        #              real ID (/resourcegroups/<name>/); $rgLookup is a
-        #              case-insensitive hashtable so ID-vs-property casing is moot.
+        # -ObfuscationDictionary seeding: preload the maps from a prior run's saved (token->real) file so identical real values yield the SAME tokens, letting a scoped recovery run merge back into the earlier bundle; new values still mint fresh tokens (determinism EXTENDED, not broken).
+        # Subscription/ResourceGroup tokens are SHARED per sub/RG so they cannot be reused ID-keyed - rebuild the real-value-keyed $subLookup/$rgLookup the mint logic consults (sub name from SubscriptionNameMap; RG name parsed from each ResourceGroupMap representative id).
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
             $SeedDictionary = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
@@ -990,37 +753,12 @@ function RunInventorySetup()
             }
             $ObfuscatedResourceGroup = $RgLookup[$RealRG]
 
-            # Seeded reuse (-ObfuscationDictionary): if this real resource ID was
-            # preloaded from a prior run's dictionary, reuse its per-resource ID and
-            # Name tokens so a scoped recovery run's output lands in the SAME token
-            # space as the bundle it will be merged into. Gated purely on
-            # ContainsKey: on a normal (non-seeded) run the dictionary starts empty
-            # and this loop is what first populates it, so ContainsKey is always
-            # false here and behavior is byte-for-byte unchanged. The ID/Name GUIDs
-            # minted just above are harmless throwaway on a seed hit.
-            #
-            # Subscription and ResourceGroup tokens are deliberately NOT reused from
-            # the ID-keyed dictionaries here: those tokens are SHARED by every
-            # resource in a sub/RG, so the saved SubscriptionMap/ResourceGroupMap
-            # collapse to one representative ID per token and the reseeded ID-keyed
-            # dicts are sparse. Instead they are reused via the real-value-keyed
-            # $subLookup/$rgLookup, which the mint logic above already consulted and
-            # which the seed block populated - so $obfuscatedSubscription /
-            # $obfuscatedResourceGroup are already the seeded tokens at this point.
+            # Seeded reuse (-ObfuscationDictionary): if this real resource id was preloaded, reuse its per-resource ID and Name tokens so a scoped recovery run lands in the SAME token space as the bundle it merges into. Gated on ContainsKey, so a normal (empty-dict) run is byte-for-byte unchanged and the just-minted GUIDs are harmless throwaway.
+            # Subscription/ResourceGroup tokens are NOT reused from the ID-keyed dicts (those are shared per sub/RG and reseed sparse) - they come via the real-value-keyed $subLookup/$rgLookup the mint logic already consulted.
             if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
             {
                 $ObfuscatedID = $ResourceIdDictionary[$resourceItem.ID]
-                # Guard the name-map read: a seeded/hand-edited -ObfuscationDictionary
-                # can contain the ID in the ResourceId map but NOT the ResourceName map.
-                #
-                # MEASURED, correcting an earlier claim in this comment: the indexer does
-                # NOT throw KeyNotFoundException here. PowerShell's indexer adapter
-                # swallows it and yields $null, so the unguarded read would have produced
-                # a NULL masked name rather than an abort - quieter, and worse. The guard
-                # is still exactly right, only the stated reason was wrong.
-                #
-                # On a normal run both maps are populated together so this is a no-op; on
-                # a sparse seed we keep the freshly-minted $ObfuscatedName.
+                # Guard the name-map read: a seeded/hand-edited -ObfuscationDictionary can hold the id in the ResourceId map but NOT the ResourceName map. The indexer yields $null (not a KeyNotFoundException) on a miss, so an unguarded read would produce a NULL masked name - keep the freshly-minted $ObfuscatedName instead. No-op on a normal run where both maps populate together.
                 if ($ResourceNameDictionary.ContainsKey($resourceItem.ID))
                 {
                     $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
@@ -1032,12 +770,7 @@ function RunInventorySetup()
             $ResourceSubscriptionDictionary[$resourceItem.ID] = $ObfuscatedSubscription
             $ResourceResourceGroupDictionary[$resourceItem.ID] = $ObfuscatedResourceGroup
 
-            # Raw tags are intentionally NOT scrubbed here any more. They must
-            # survive on the in-memory $Global:Resources objects so collectors can
-            # surface them; tag VALUES are then obfuscated deterministically (and
-            # tag KEYS kept) in the per-collector obfuscation loop further below.
-            # $Global:Resources itself is never serialized into the report, so
-            # leaving raw tags on it in memory does not leak.
+            # Raw tags are intentionally NOT scrubbed here: they must survive on the in-memory $Global:Resources objects so collectors can surface them; tag VALUES are obfuscated deterministically (keys kept) in the per-collector loop below. $Global:Resources is never serialized into the report, so leaving raw tags on it in memory does not leak.
         }
     }
 }
@@ -1053,14 +786,7 @@ function ExecuteInventoryProcessing()
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
 
-        # Local errors-only log (see Write-Log's error sink). Like the transcript
-        # and heartbeat it is a LOCAL debug artifact, NEVER added to the shared
-        # zip. Under the wrapper (-RunAllSubs) $DefaultPath is a per-subscription
-        # subfolder, so writing the error log there buries one per sub. Put it in
-        # the PARENT InventoryRoot (next to the transcript / heartbeat / wrapper
-        # failures log), tagged with the SubscriptionID, so per-sub error logs are
-        # findable at a glance (only subs that actually errored produce one) and
-        # never collide. Standalone runs keep it in the report folder.
+        # Local errors-only log: a LOCAL debug artifact, NEVER zipped. Written to the PARENT InventoryRoot (not the per-sub $DefaultPath, which would bury one per sub) tagged with the SubscriptionID so per-sub error logs are findable and never collide under a parallel multi-sub run; standalone runs keep it in the report folder.
         if ($RunAllSubs.IsPresent)
         {
             $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
@@ -1072,31 +798,8 @@ function ExecuteInventoryProcessing()
             $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
         }
 
-        # Consolidated LOCAL debug log. One file per run (per-sub under the
-        # wrapper) that collects the per-collector heartbeat trace AND the
-        # metrics-phase diagnostics (previously two separate Heartbeat_* files
-        # plus a flood of [Metrics] Write-Host lines on the terminal). Placed
-        # with the SAME parent-vs-report-folder + SubscriptionID-tag logic as
-        # the error log so it is findable and never collides across a parallel
-        # multi-sub run.
-        #
-        # IMPORTANT - contents are UNSCRUBBED: the metrics diagnostics
-        # interpolate REAL service/resource names (the obfuscation layer does not
-        # touch them) and heartbeat FAIL lines can carry raw
-        # $_.Exception.Message text, which may include a signed URL or token
-        # fragment. Treat this file as sensitive.
-        #
-        # Zipping posture is MODE-DEPENDENT (see the packaging section near the
-        # end of this script):
-        #   -Obfuscate run : LOCAL-only. NEVER add it to that branch's zip Path
-        #                    array - that bundle's guarantee is that it carries
-        #                    no real identifiers, and this file is not scrubbed.
-        #   default run    : INCLUDED in the zip by explicit path, because that
-        #                    bundle's report already carries real names, so this
-        #                    adds no new class of identifier. The operator is
-        #                    warned that it is in the bundle.
-        # The DebugLog_* -notlike guard on the *.json sweep remains in BOTH
-        # branches, so only the deliberate explicit add can ever ship it.
+        # Consolidated LOCAL debug log (per-collector heartbeat + metrics diagnostics), placed in the parent root tagged with SubscriptionID like the error log. Contents are UNSCRUBBED (real service/resource names, and heartbeat FAIL lines can carry raw exception text incl. a signed URL/token) - treat as sensitive.
+        # Zipping is MODE-DEPENDENT: LOCAL-only under -Obfuscate (that bundle must carry no real ids), included by explicit path in a default run; the DebugLog_* -notlike guard on the *.json sweep keeps it out of the obfuscated bundle either way.
         if ($RunAllSubs.IsPresent)
         {
             $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
@@ -1113,19 +816,8 @@ function ExecuteInventoryProcessing()
 
     function Test-DataPlaneAuthReady([string]$Phase)
     {
-        # Verify a live Azure context + token are available before a data-plane
-        # phase (Metrics via Get-AzMetric in parallel runspaces; Consumption via
-        # Get-UsageAggregates). Both silently produce ZERO records when the
-        # context/token is missing. Because the caller did NOT pass the matching
-        # -Skip* switch, the user wants this data - so we detect the gap, attempt
-        # ONE reconnect using the same auth method the script was invoked with,
-        # then re-check. Returns $true only when a usable token is confirmed.
-        #
-        # Reuses the script's existing auth approach (Service Principal /
-        # device / browser); it does not introduce a new auth path. Under
-        # -RunAllSubs the phase may run in a background job where an interactive
-        # prompt cannot reach the user, so interactive reconnect is skipped there
-        # in favour of a loud failure.
+        # Verify a live Azure context + token before a data-plane phase (Metrics via Get-AzMetric, Consumption via Get-UsageAggregates - both silently produce ZERO records when the token is missing). The caller did not pass the matching -Skip*, so detect the gap, reconnect ONCE using the script's own auth method, then re-check; returns $true only when a usable token is confirmed.
+        # Interactive reconnect is skipped under -RunAllSubs background jobs (no console) in favour of a loud failure.
         $TokenOk = {
             $Ctx = $null
             try { $Ctx = Get-AzContext -ErrorAction Stop } catch { return $false }
@@ -1191,13 +883,7 @@ function ExecuteInventoryProcessing()
 
         if (!$SkipMetrics.IsPresent)
         {
-            # -SkipMetrics was NOT passed, so the user wants metrics. Get-AzMetric
-            # runs in parallel runspaces and returns ZERO data (silently) if the
-            # Azure context/token is missing. Detect + attempt recovery first; if
-            # it still cannot authenticate, fail loud and skip ONLY this phase so
-            # the rest of the inventory still completes (the end-of-script
-            # empty-metrics-JSON fallback keeps the output bundle structurally
-            # valid). This is intentionally NOT a silent skip.
+            # -SkipMetrics was NOT passed, so metrics are wanted, but Get-AzMetric silently returns ZERO in parallel runspaces if the context/token is missing. Detect + attempt recovery; if it still cannot authenticate, fail loud and skip ONLY this phase (the end-of-script empty-metrics-JSON fallback keeps the bundle structurally valid). Intentionally not a silent skip.
             if (-not (Test-DataPlaneAuthReady -Phase 'Metrics'))
             {
                 Write-Log -Message ('Metrics: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Metrics were requested (no -SkipMetrics) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
@@ -1206,13 +892,7 @@ function ExecuteInventoryProcessing()
                 $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
                 $Global:AzMetrics.Metrics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
-                # Record per-subscription metrics-phase health so the wrapper's
-                # final summary can name exactly which subs are missing metrics
-                # (mirrors $Global:ConsumptionFailedSubs). Lives in the wrapper's
-                # scope because ResourceInventory.ps1 is invoked via `& <path>`.
-                # Resolve which subscription(s) this skip applies to: when invoked
-                # per-sub (the wrapper passes -SubscriptionID) it is that one sub;
-                # for a standalone all-subs run it is every in-scope subscription.
+                # Record per-subscription metrics-phase health (mirrors $Global:ConsumptionFailedSubs) in the wrapper's scope, since this script is invoked via '&'. Resolve which sub(s) the skip applies to: the -SubscriptionID one when invoked per-sub, else every in-scope sub for a standalone all-subs run.
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                 $MetricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
                 $AffectedSubs = @(
@@ -1265,26 +945,8 @@ function ExecuteInventoryProcessing()
     {
         if (!$SkipMetrics.IsPresent)
         {
-            # Managed-heap + process working-set snapshot around the post-metrics GC.
-            # Routed to the consolidated debug log ONLY (-NoConsole so it never
-            # touches the terminal, -ToDebugLog so it is kept out of the shared
-            # report data; note the debug log itself ships in a default run's zip
-            # and is LOCAL-only under -Obfuscate): under the
-            # wrapper each subscription runs in the SAME long-lived stream process
-            # (ResourceInventory.ps1 is invoked via '&'), so comparing these lines
-            # across subscriptions shows whether the process footprint is a stable
-            # high-water mark or is creeping (a real leak) over a large tenant.
-            # GetTotalMemory is the GC-managed heap only; WorkingSet64 is the fuller
-            # process RSS (incl. LOH pages not returned to the OS). Values captured
-            # into variables (not emitted bare) so nothing leaks onto the pipeline;
-            # the $true call still forces a blocking full collection as before.
-            # Wrapped defensively: this runs as a bare statement after metrics are
-            # already written, and in non-Debug mode $ErrorActionPreference is
-            # 'SilentlyContinue' (which does NOT suppress a terminating .NET method
-            # exception). These APIs effectively never throw, but a diagnostic line
-            # must never be able to abort a subscription whose metrics already
-            # succeeded. The GC.Collect() itself stays outside so collection still
-            # happens even if the (best-effort) measurement/logging hiccups.
+            # Managed-heap + working-set snapshot around the post-metrics GC, routed to the consolidated debug log ONLY (-NoConsole / -ToDebugLog): under the wrapper every sub runs in the same long-lived process, so comparing these lines across subs shows whether the footprint is a stable high-water mark or creeping (a real leak).
+            # Values are captured into variables (not emitted bare) so nothing leaks onto the pipeline, and it is wrapped defensively so a diagnostic line can never abort a sub whose metrics already succeeded; the GC.Collect($true) stays outside so collection still happens even if measurement hiccups.
             [System.GC]::Collect()
             try
             {
@@ -1318,17 +980,7 @@ function ExecuteInventoryProcessing()
             $Modules = Get-ChildItem -Path ($PSScriptRoot + '/Services/*.ps1') -Recurse
         }
 
-        # -Service <string[]> targeted collection. When supplied, run ONLY the
-        # named collectors (matched on file base name, case-insensitive) instead
-        # of every file under Services/. This enables fast re-collection of a
-        # single resource type (e.g. recovering one collector that failed for a
-        # subscription) WITHOUT re-running the whole tenant, and is what a scoped
-        # recovery bundle is built from before it is merged back into a prior run.
-        # The metrics/consumption phases are unaffected - they remain governed by
-        # their own -SkipMetrics/-SkipConsumption switches. A requested name that
-        # matches no collector is almost always a typo; we fail loud (rather than
-        # silently producing an empty inventory) so the operator notices before
-        # shipping an incomplete report.
+        # -Service <string[]> targeted collection: run ONLY the named collectors (matched on file base name, case-insensitive) for fast re-collection of one resource type without re-running the whole tenant - the basis of a scoped recovery bundle. Metrics/consumption phases are unaffected. A requested name matching no collector is failed loud (not a silent empty inventory) so the typo is caught before shipping.
         if ($Service -and @($Service).Count -gt 0)
         {
             $AvailableServices = @($Modules | ForEach-Object { $_.BaseName } | Sort-Object)
@@ -1343,19 +995,7 @@ function ExecuteInventoryProcessing()
             $MatchedNames = @($Modules | ForEach-Object { $_.BaseName } | Sort-Object)
             Write-Log -Message ("-Service filter active: collecting {0} of {1} collectors: [{2}]" -f @($Modules).Count, @($AvailableServices).Count, ($MatchedNames -join ', ')) -Severity 'Info'
 
-            # -Service scopes the INVENTORY phase only; the metrics and consumption
-            # phases still run for the WHOLE subscription. Warn (do NOT enforce) when
-            # the operator has not also passed both skips, so a "-Service X" run does
-            # not silently spend time pulling every service's metrics + the whole
-            # subscription's billing. This is only a warning because the recovery
-            # recipe that re-collects metrics/consumption for a later
-            # Merge-RecoveryData -RecoverMetrics/-RecoverConsumption INTENTIONALLY runs
-            # -Service WITHOUT the skips - enforcing them would break that flow.
-            # Name ONLY the phases that are actually still subscription-wide, and
-            # suggest ONLY the switch(es) not already supplied - a partially-skipped
-            # run (e.g. -Service X -SkipMetrics, used when re-pulling consumption
-            # for a later -RecoverConsumption merge) must not be told that metrics
-            # still run nor be told to add a switch it already passed.
+            # -Service scopes the INVENTORY phase only; metrics and consumption still run subscription-wide. Warn (do NOT enforce) when the operator omitted the skips, naming ONLY the still-wide phases and suggesting ONLY the switch(es) not already supplied - the Merge-RecoveryData recovery recipe intentionally runs -Service WITHOUT the skips, so enforcing them would break that flow.
             $UnscopedPhases = @()
             $SuggestedSkips = @()
 
@@ -1371,46 +1011,14 @@ function ExecuteInventoryProcessing()
                 $SuggestedSkips += '-SkipConsumption'
             }
 
-            # The -ResourceGroup tip is STATE-DERIVED for the same reason the two
-            # lists above are. It used to be a hardcoded clause that always claimed
-            # -ResourceGroup "also scopes metrics", which is the same
-            # wrong-for-this-state defect the per-phase wording exists to prevent:
-            #
-            #   - Offering it to a -SkipMetrics run advertises the one benefit that
-            #     run has already declined. Scoping metrics is the ONLY thing
-            #     -ResourceGroup does for the problem this warning describes.
-            #   - Offering it to a run that already passed -ResourceGroup tells the
-            #     operator to add a switch they supplied. -Service and
-            #     -ResourceGroup are independent parameters with no mutual
-            #     exclusion, so that combination is legal and reachable.
-            #
-            # It is also honest about the limit now. -ResourceGroup narrows the
-            # Resource Graph query itself, so it scopes inventory AND metrics (the
-            # metrics phase filters the same narrowed $Global:Resources and issues
-            # no Graph query of its own). It does NOT scope consumption:
-            # Get-UsageAggregates is whole-subscription billing with no
-            # resource-group or resource-type filter. Since this warning names
-            # consumption as part of the problem, presenting -ResourceGroup as the
-            # remedy without that caveat overstates it - see
-            # docs/recovery-and-diagnostics.md, which already documents the
-            # exception.
+            # The -ResourceGroup tip is STATE-DERIVED: do not offer it to a -SkipMetrics run (scoping metrics is its only benefit here) or to a run that already passed it (the two params are independent and combinable). It narrows the Graph query so it scopes inventory AND metrics but NOT consumption (Get-UsageAggregates is whole-subscription billing), so present it with that caveat since this warning names consumption (see docs/recovery-and-diagnostics.md).
             $RgTip = ''
             if (-not $SkipMetrics.IsPresent -and [string]::IsNullOrEmpty($ResourceGroup))
             {
                 $RgTip = ' For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which scopes inventory and metrics - but NOT consumption, which stays whole-subscription.'
             }
 
-            # Suppressed under -RunAllSubs. The wrapper invokes this script via & once
-            # PER SUBSCRIPTION in the same process and forwards -Service on every one,
-            # so an ungated warning repeats identically N times on a large tenant. It
-            # is also wrong there: Run-AllSubscriptions.ps1 has no -ResourceGroup
-            # parameter, so recommending it under the wrapper points at a switch that
-            # entry point does not accept. The wrapper carries its own once-up-front
-            # equivalent instead, so the advice is not lost - only de-duplicated.
-            # Deliberately NOT gated on $Global:RdaSessionInitialized: that flag is
-            # already $true by the time this runs (RunInventorySetup sets it at its
-            # end, before ExecuteInventoryProcessing), so it would suppress the
-            # warning on every run including a standalone one.
+            # Suppressed under -RunAllSubs: the wrapper forwards -Service per-sub, so an ungated warning repeats identically N times and is wrong there (Run-AllSubscriptions.ps1 has no -ResourceGroup param); the wrapper carries its own once-up-front equivalent. Deliberately NOT gated on $Global:RdaSessionInitialized (already $true here), which would suppress it on every run including standalone.
             if (@($UnscopedPhases).Count -gt 0 -and -not $RunAllSubs.IsPresent)
             {
                 Write-Log -Message ("-Service scopes the INVENTORY phase only; these phases still run for the WHOLE subscription: {0}. For a clean inventory-only run add {1}.{2} (Ignore this if you are deliberately re-collecting for a later Merge-RecoveryData.)" -f ($UnscopedPhases -join ', '), ($SuggestedSkips -join ' '), $RgTip) -Severity 'Warning'
@@ -1426,59 +1034,17 @@ function ExecuteInventoryProcessing()
         $Resource = $Resources
         #$Resource = ($Resource | ConvertTo-Json -Depth 50)
 
-        # Circuit breaker for collector failures (#22). A single collector
-        # throwing (a null property, a malformed API response, a bug in that
-        # one file) must not silently drop that resource type NOR abort the
-        # whole run - it is recorded loudly and processing continues with the
-        # next collector, exactly like the existing Metrics/Consumption
-        # fail-loud-and-skip-that-phase pattern. But if MANY collectors fail
-        # in a row, the cause is almost never "this one resource type has a
-        # bug" - it is systemic (auth dropped mid-run, network gone, Az
-        # module broken) and every remaining collector is about to fail for
-        # the identical reason. Limping through the rest would just produce
-        # ~50 more identical error lines and an empty report that looks like
-        # "no resources" instead of "the environment broke partway through".
-        # Stop the run once that pattern is detected instead of grinding
-        # through it - the operator gets ONE clear diagnosis instead of a
-        # wall of repeated errors, and can fix the real problem and re-run.
+        # Circuit breaker for collector failures (#22): one collector throwing is recorded loudly and skipped (like the metrics/consumption fail-and-skip pattern), but MANY failures in a row are almost never per-type bugs - they are systemic (auth dropped, network gone, Az module broken) and every remaining collector will fail identically. Stop once that pattern is detected so the operator gets ONE clear diagnosis instead of ~50 identical errors and an empty-looking report.
         $ConsecutiveCollectorFailures = 0
         $CollectorFailureCircuitBreakerThreshold = 5
 
-        # Per-service progress is surfaced two ways, neither of which prints a
-        # per-collector line to the shared console (that green Write-Log line
-        # per collector - ~40+ lines per subscription - scrolled the real
-        # errors/warnings off screen and would repeat once per subscription,
-        # e.g. 164x for a 164-subscription run):
-        #   1. Write-Progress renders a single updating bar in an interactive
-        #      host and is a no-op in non-interactive hosts (parallel runspaces,
-        #      transcripts, CI), so it never pollutes the transcript.
-        #   2. A per-collector heartbeat is appended to a local .log file.
-        #      Because Write-Progress is a no-op in exactly the non-interactive
-        #      contexts the wrapper drives collectors in, a transcript otherwise
-        #      had NO marker between "Starting Service Processing Jobs" and the
-        #      next phase - you could not tell which collector was in flight when
-        #      a run hung. This file restores that "how far did it get / where
-        #      did it hang" trace without adding any console noise. It is a debug
-        #      artifact: named like the transcript (unique per run/process via the
-        #      PID-discriminated $CurrentDateTime), it stays local and is never
-        #      added to the shared zip (a .log matches no packaging pattern).
-        # Collector FAILURES are still logged loudly (Error severity) in the
-        # catch below regardless, so nothing diagnostic depends on this file.
+        # Per-service progress is surfaced without a per-collector console line (that ~40+/sub green line scrolled real errors off screen and repeated once per sub, e.g. 164x): Write-Progress (a no-op in the non-interactive hosts the wrapper drives collectors in, so transcripts stay clean) plus a per-collector heartbeat appended to a LOCAL .log that restores the 'where did it hang' trace and is never zipped.
+        # Collector FAILURES are still logged loudly in the catch below, so nothing diagnostic depends on this file.
         $ModuleTotal = @($Modules).Count
         $ModuleIndex = 0
 
         $HeartbeatSubLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(all in-scope subscriptions)' }
-        # The per-collector heartbeat (which collector was in flight when a run
-        # hung) is written through the single shared logger: Write-Log with
-        # -NoConsole (no per-collector console spam - that green line x40+ per sub
-        # scrolled real errors off screen) + -ToDebugLog (append to
-        # $Global:DebugLogFile, the consolidated LOCAL debug log the metrics
-        # diagnostics also use, established in InitializeInventoryProcessing with
-        # the parent-InventoryRoot-vs-report-folder + SubscriptionID-tag placement
-        # so per-sub heartbeats are discoverable, never collide, and are never
-        # packaged). Write-Log's -ToDebugLog is a silent no-op when no debug-log
-        # path exists and never throws, so no separate enable/disable guard is
-        # needed here - a write failure can never break collection.
+        # Write the per-collector heartbeat through the single shared Write-Log with -NoConsole (no per-collector console spam) + -ToDebugLog (append to the consolidated LOCAL $Global:DebugLogFile, parent-root/SubscriptionID-placed so per-sub heartbeats are discoverable, never collide, and are never packaged). -ToDebugLog is a silent no-op when no debug-log path exists and never throws, so no separate enable/disable guard is needed.
         Write-Log -Message ("Service processing started for {0}: {1} collectors" -f $HeartbeatSubLabel, $ModuleTotal) -NoConsole -ToDebugLog
 
         foreach ($Module in $Modules)
@@ -1523,12 +1089,7 @@ function ExecuteInventoryProcessing()
                     throw ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Total collector failures across the whole run so far (all subscriptions processed to this point): {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
                 }
 
-                # This collector's resource type is missing from the report,
-                # not silently empty-looking-like-none-exist: the Error-severity
-                # log line above and the $Global:CollectorFailures entry are
-                # the loud signal. $result must still become a defined empty
-                # array so $Global:SmaResources.$ModName is a valid (empty)
-                # JSON array rather than an absent/undefined member.
+                # This collector's resource type is missing from the report (not silently empty): the Error-severity log line above and the $Global:CollectorFailures entry are the loud signal. $result must still become a defined empty array so $Global:SmaResources.$ModName is a valid (empty) JSON array rather than an absent member.
                 $Result = @()
             }
 
@@ -1613,12 +1174,7 @@ function ExecuteInventoryProcessing()
                         $resourceItem.ResourceGroup = $FbRG
                     }
 
-                    # Collector 'Tags' output is an array of { Name, Value }. Keep the
-                    # KEY (Name) verbatim and obfuscate the VALUE deterministically via
-                    # $Global:TagValueDictionary: the same real value always maps to the
-                    # same prod_/nonprod_ token, so the obfuscated report can still group
-                    # and correlate by tag value without exposing it. Prefix is derived
-                    # from the value so an environment-type signal survives.
+                    # Collector 'Tags' output is an array of { Name, Value }: keep the KEY (Name) verbatim and obfuscate the VALUE deterministically via $Global:TagValueDictionary (same value -> same token) so the report can still group/correlate by tag value without exposing it; the prefix is value-derived so an environment-type signal survives.
                     if ($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
                     {
                         foreach ($Tag in $resourceItem.Tags)
@@ -1639,12 +1195,7 @@ function ExecuteInventoryProcessing()
             }
 
             $Global:SmaResources | Add-Member -MemberType NoteProperty -Name $ModName -Value NotSet
-            # Wrap with @() so the JSON serializer always emits an array, even
-            # when the collector returns exactly one resource. Without this,
-            # PowerShell unwraps a single-element pipeline result into a scalar
-            # PSCustomObject, ConvertTo-Json emits {...} instead of [{...}],
-            # and downstream parsers that iterate the resource type as an
-            # array silently see zero rows.
+            # Wrap with @() so the JSON serializer always emits an array, even for a single resource: without it PowerShell unwraps a one-element result into a scalar object, ConvertTo-Json emits {...} instead of [{...}], and array-iterating downstream parsers silently see zero rows.
             $Global:SmaResources.$ModName = @($Result)
 
             $Result = $null
@@ -1685,13 +1236,7 @@ function ExecuteInventoryProcessing()
         $ReportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $ReportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
 
-        # Consumption was requested (no -SkipConsumption). Get-UsageAggregates
-        # silently returns ZERO records when the Azure context/token is missing,
-        # which would otherwise leave an empty consumption sheet that looks like
-        # "this tenant has no billing data". Detect + attempt one reconnect; if
-        # still unauthenticated, record a loud per-run health entry (reusing the
-        # existing $Global:ConsumptionFailedSubs surfaced by the wrapper summary)
-        # and skip the phase rather than producing silent empty output.
+        # Consumption was requested (no -SkipConsumption), but Get-UsageAggregates silently returns ZERO records when the context/token is missing (looks like 'no billing data'). Detect + reconnect once; if still unauthenticated, record a loud per-run entry ($Global:ConsumptionFailedSubs, surfaced by the wrapper) and skip the phase rather than produce silent empty output.
         if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
         {
             Write-Log -Message ('Consumption: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Consumption was requested (no -SkipConsumption) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
@@ -1723,18 +1268,8 @@ function ExecuteInventoryProcessing()
                 }
             }
 
-            # Switch the Azure context to the TARGET subscription before pulling
-            # its billing data. This MUST succeed AND MUST land on $sub.id:
-            # Get-UsageAggregates reads whatever subscription the current context
-            # points at, so a silently-failed switch (e.g. the identity has no
-            # access to this subscription) would leave the context on the PREVIOUS
-            # subscription and attribute THAT subscription's consumption to this
-            # one - a data-integrity bug and a cross-subscription data leak. The
-            # production $ErrorActionPreference = 'SilentlyContinue' would swallow
-            # the failure, so force it terminating here and then verify the
-            # resulting context actually matches the target. On failure, record
-            # per-sub health (mirroring the catch block below) and skip ONLY this
-            # subscription's consumption rather than pulling the wrong sub's data.
+            # Switch the Azure context to the TARGET subscription before pulling billing: Get-UsageAggregates reads whatever sub the context points at, so a silently-failed switch (no access) would leave the context on the PREVIOUS sub and attribute its consumption here - a data-integrity bug and cross-subscription leak.
+            # Force it terminating (the run's SilentlyContinue would swallow the failure), then VERIFY the resulting context matches $sub.id; on failure record per-sub health and skip ONLY this sub's consumption rather than pull the wrong sub's data.
             $ContextOk = $false
             $ContextSwitchError = $null
             try
@@ -1768,12 +1303,7 @@ function ExecuteInventoryProcessing()
 
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
-            # Track consumption health per-subscription so the wrapper can report
-            # at the end whether consumption data was actually collected. Without
-            # this, a broken Az module produces zero consumption records on every
-            # subscription and the run still reports as successful - leaving an
-            # empty consumption sheet in the output that nobody noticed until the
-            # report was reviewed.
+            # Track consumption health per-subscription so the wrapper can report at the end whether data was actually collected: without it a broken Az module yields zero consumption records on every sub while the run still reports success, leaving an empty sheet nobody notices until the report is reviewed.
             $ConsumptionRecordsThisSub = 0
             $ConsumptionFailedThisSub = $false
             $ConsumptionFailureMessage = $null
@@ -1783,15 +1313,7 @@ function ExecuteInventoryProcessing()
             # the row count. Incremented once per distinct page attempted.
             $ConsumptionPageIndex = 0
 
-            # Cleared per subscription. $UsageData holds the LAST page fetched, and
-            # the paging token below is read from it. It is not scoped to this
-            # subscription's loop, so without this reset a subscription that failed
-            # part-way through its pages left its live ContinuationToken in place -
-            # and the NEXT subscription's very first billing request was issued with
-            # a token belonging to a different subscription. That either fails or,
-            # worse, resumes another subscription's page sequence, attributing its
-            # billing rows here. A fresh start per subscription is the only correct
-            # first request.
+            # Cleared per subscription: $UsageData holds the LAST page fetched and the paging token below is read from it, but it is not loop-scoped - so a sub that failed mid-paging left its live ContinuationToken in place and the NEXT sub's first billing request resumed a different sub's page sequence, attributing its rows here. A fresh start per sub is the only correct first request.
             $UsageData = $null
 
             try
@@ -1808,37 +1330,8 @@ function ExecuteInventoryProcessing()
 
                     $Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }
 
-                    # Bounded retry with exponential backoff + jitter around the billing
-                    # pull. On a very large tenant this loop pages through millions of
-                    # usage records; a single transient HTTP failure (e.g. "Error while
-                    # copying content to a stream", a timeout, or 429/503 throttling) would
-                    # otherwise abort the ENTIRE remaining consumption pull for this
-                    # subscription via the outer catch. Retrying the SAME page is safe: a
-                    # failed assignment leaves $usageData holding the previous page's
-                    # ContinuationToken, so the retried call re-requests the same page (no
-                    # duplicate rows, no skipped rows). A permanent error simply exhausts
-                    # the retries and then propagates to the outer catch, preserving the
-                    # existing warn-and-continue per-subscription health reporting.
-                    #
-                    # The Cost Management / Consumption rate limit is SHARED across all
-                    # callers in the tenant (not per-user). When another billing pipeline
-                    # is draining the same token bucket the throttle can persist well
-                    # beyond a few seconds, so a short fixed 2/4/8s (3 retries, ~14s) can
-                    # be exhausted while contention is still ongoing - truncating this
-                    # subscription's consumption. So the retry HONORS the server-directed
-                    # wait when Azure supplies one (the Cost Management / Consumption 429
-                    # returns 'x-ms-ratelimit-microsoft.consumption-retry-after' /
-                    # 'Retry-After' - Get-RdaRetryAfterSeconds reads it off the thrown
-                    # CloudException); absent that, a throttling failure (429 /
-                    # TooManyRequests) backs off LONGER than a generic transient one. The
-                    # retry budget is larger and each wait is capped (server-directed waits
-                    # clamped to 300s; computed backoff to ~120s), so the run keeps trying
-                    # across a sustained throttle instead of truncating after ~14s. Jitter
-                    # keeps parallel streams (which share that same tenant bucket) from
-                    # retrying in lockstep. The retry budget matches the Resource Graph
-                    # wrapper (Invoke-AzGraphQuerySafe) so both tenant-wide shared limits -
-                    # Resource Graph and Cost Management / Consumption - ride out the same
-                    # sustained, self-contended throttling when many shards run at once.
+                    # Bounded retry with exponential backoff + jitter around the billing pull: retrying the SAME page is safe (a failed assignment keeps the previous ContinuationToken, so no duplicated/skipped rows) and a permanent error just exhausts retries into the outer catch (preserving warn-and-continue per-sub health).
+                    # HONOR the server-directed Retry-After when Azure supplies one (Cost Management 429; read by Get-RdaRetryAfterSeconds, clamped 300s) and back off LONGER on throttling, because that TENANT-SHARED rate limit can persist far beyond a fixed ~14s; jitter de-syncs parallel streams and the budget matches the Resource Graph wrapper so both shared limits ride out the same throttle.
                     $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
                     # Reset per PAGE: the token can lapse at any page during a multi-hour
@@ -1855,54 +1348,16 @@ function ExecuteInventoryProcessing()
                         }
                         catch
                         {
-                            # ABANDON an authorization denial immediately. Retrying a 403
-                            # cannot make it a 200, and this catch is otherwise untyped, so
-                            # a denial previously consumed the whole 30-attempt budget -
-                            # roughly 26 minutes of escalating backoff PER SUBSCRIPTION -
-                            # before propagating to exactly the same place it goes now.
-                            #
-                            # This is deliberately checked FIRST, before the throttle test
-                            # below, for the same reason the metrics classifier orders its
-                            # branches that way: the throttle test is a loose substring
-                            # match and a billing exception echoes ids and URLs that can
-                            # contain '429', so evaluating it first could reclassify a
-                            # terminal denial as throttling and restore the full burn.
-                            #
-                            # Test-RdaConsumptionDenial (Common.Functions.ps1) is the SAME
-                            # verdict the wrapper's up-front access gate uses, so a denial
-                            # is treated identically whether it is caught before the run or
-                            # part-way through it. Only an unambiguous denial qualifies -
-                            # throttling, an expired token, a 5xx and the transient "Error
-                            # while copying content to a stream" all still retry, because
-                            # abandoning retrievable billing data is the expensive mistake.
+                            # ABANDON an authorization denial immediately: retrying a 403 cannot make it a 200, and this otherwise-untyped catch used to burn the whole ~26-min budget per sub first.
+                            # Checked BEFORE the throttle test (a loose substring match on '429' that a billing exception's ids/URLs can trip) so a terminal denial is not reclassified as throttling; uses Test-RdaConsumptionDenial - the same verdict as the wrapper's up-front gate - and only an unambiguous denial qualifies (throttle / expired token / 5xx / stream-copy errors still retry).
                             if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
                             {
                                 Write-Log -Message ("Consumption page query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
                                 throw
                             }
 
-                            # REFRESH a lapsed token before retrying. On a very large
-                            # subscription this paging loop can run for well over an hour;
-                            # an interactive sign-in whose policy lifetime expires part-way
-                            # through fails every remaining page with an expired/invalid
-                            # token. Because that is NOT a denial (see Test-RdaConsumptionDenial's
-                            # KNOWN RESIDUAL note), it used to just retry the SAME dead token
-                            # until the budget was exhausted, then fail the subscription.
-                            # Here we re-establish the Azure context ONCE per page via the
-                            # same reconnect helper used before the phase (Test-DataPlaneAuthReady,
-                            # which reuses the script's own auth method - SP / device / browser -
-                            # and introduces no new auth path), then let the existing backoff
-                            # retry the SAME page (the ContinuationToken guard above re-sends the
-                            # previous page's token, so no rows are skipped or duplicated).
-                            #
-                            # Guarded by $ConsumptionAuthRefreshedThisPage so a genuinely
-                            # PERMANENT 401 (a revoked or interaction-required refresh token
-                            # that a reconnect cannot fix) triggers at most ONE reconnect
-                            # attempt per page rather than one on every retry - it then rides
-                            # out the remaining budget and fails loud, exactly as before.
-                            # A managed identity / service principal / workload identity
-                            # re-issues its own token transparently, so this branch is a
-                            # no-op cost for them (the retry simply succeeds).
+                            # REFRESH a lapsed token before retrying: an hour-plus paging loop can outlive an interactive sign-in's policy lifetime, and an expired token is NOT a denial, so it used to retry the dead token until the budget was spent. Reconnect ONCE per page via Test-DataPlaneAuthReady (the script's own auth method), then let the existing backoff retry the SAME page (the ContinuationToken guard avoids skip/dup).
+                            # Guarded by $ConsumptionAuthRefreshedThisPage so a genuinely permanent 401 triggers at most one reconnect per page then fails loud; a no-op for managed identity / SP / workload identity, which re-issue transparently.
                             if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
                             {
                                 $ConsumptionAuthRefreshedThisPage = $true
@@ -1922,16 +1377,7 @@ function ExecuteInventoryProcessing()
 
                             $ConsumptionThrottled = $_.Exception.Message -match 'TooManyRequests|\b429\b|throttl|rate limit'
 
-                            # Prefer the SERVER-DIRECTED wait when Azure supplies one: the
-                            # Cost Management / Consumption 429 returns the exact delay via
-                            # 'x-ms-ratelimit-microsoft.consumption-retry-after' (or the
-                            # standard 'Retry-After'), which Get-RdaRetryAfterSeconds reads
-                            # off the thrown CloudException. Honoring it is more accurate
-                            # than blind backoff and is what keeps us from re-hitting a
-                            # bucket another billing pipeline is draining. Clamp to 300s so
-                            # a pathological/misparsed value cannot stall the run. Absent a
-                            # header, fall back to exponential (2^attempt) capped at 60s,
-                            # doubled (capped 120s) when throttled.
+                            # Prefer the SERVER-DIRECTED wait when Azure supplies one (Cost Management 429 returns the exact delay via the ratelimit/Retry-After header, read by Get-RdaRetryAfterSeconds): more accurate than blind backoff and what keeps us off a bucket another billing pipeline is draining; clamp to 300s. Absent a header, fall back to exponential (2^attempt) capped 60s, doubled (cap 120s) when throttled.
                             $ConsumptionRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_
                             if ($ConsumptionRetryAfter -gt 0)
                             {
@@ -1960,14 +1406,7 @@ function ExecuteInventoryProcessing()
 
                     for ($Item = 0; $Item -lt $UsageDataExport.Count; $Item++)
                     {
-                        # Some meters (marketplace purchases, certain reservations,
-                        # tenant-level charges) return a null/empty InstanceData. Calling
-                        # .tolower() on null throws, and because this loop sits inside the
-                        # per-subscription paging try/catch that throw would abort the WHOLE
-                        # subscription's consumption (marking it INCOMPLETE). Such a record
-                        # has no resourceUri to attribute or join anyway, so skip just that
-                        # one record - mirroring the resource-group filter's own 'continue'
-                        # below - and let the rest of the subscription's consumption complete.
+                        # Some meters (marketplace purchases, certain reservations, tenant-level charges) return null/empty InstanceData; .tolower() on null throws, and inside this per-sub paging try/catch that throw would abort the WHOLE sub's consumption. Such a record has no resourceUri to attribute anyway, so skip just it (mirroring the RG-filter 'continue' below) and let the rest complete.
                         $RawInstanceData = $UsageDataExport[$Item].InstanceData
                         if ([string]::IsNullOrEmpty($RawInstanceData))
                         {
@@ -2034,53 +1473,17 @@ function ExecuteInventoryProcessing()
                             # against an already-obfuscated value below.
                             $Prefix = if ($UsageDataExport[$Item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $UsageDataExport[$Item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
 
-                            # Obfuscate the consumption ResourceUri while PRESERVING the
-                            # ARM path STRUCTURE (resourcegroups/<rg>/providers/<rp>/<type>[/...]/<name>).
-                            # The dashboard categorises rows by parsing this path - it
-                            # looks at the resource provider + type to detect AKS, VMSS,
-                            # Container Instances, Container Registry, Kusto, etc., and
-                            # at the `mc_*` resource-group marker to detect AKS-managed
-                            # resources specifically. Replacing the whole URI with a flat
-                            # opaque token (the previous behaviour) destroyed every one
-                            # of those signals and made AKS/VMSS rows invisible on the
-                            # dashboard. We now obfuscate ONLY the identifying segments
-                            # (subscription id, resource group name, resource name) and
-                            # keep the rest of the path intact - including the `mc_`
-                            # prefix on AKS-managed RGs - so the server can still
-                            # categorise without seeing real customer identifiers.
+                            # Obfuscate the consumption ResourceUri while PRESERVING the ARM path structure (resourcegroups/<rg>/providers/<rp>/<type>[/...]/<name>): the dashboard categorises rows by parsing the provider+type and the mc_* RG marker (AKS/VMSS/ACI/ACR/Kusto), which a flat opaque token (the previous behaviour) destroyed - making AKS/VMSS rows invisible. Obfuscate ONLY the identifying segments (sub id, RG name, resource name) and keep the rest (incl. the mc_ prefix) intact.
                             $RawUri = $InstanceObject.'Microsoft.Resources'.resourceUri
                             $ObfuscatedUri = $RawUri
 
-                            # Per-run caches keyed by REAL value, so the same real sub
-                            # id / RG / resource name always maps to the same obfuscated
-                            # token within a run (deterministic, per the obfuscation
-                            # rules in steering). The sub / RG / intermediate-name caches
-                            # are kept separate from $ResourceIdDictionary because that
-                            # dictionary's public contract (the ObfuscationDictionary
-                            # file) maps obfuscated FULL Azure IDs to their real values -
-                            # we don't pollute it with bare sub / RG / name fragments.
+                            # Per-run caches keyed by REAL value, so the same real sub id / RG / resource name always maps to the same token within a run. Kept SEPARATE from $ResourceIdDictionary because that dictionary's public contract (the ObfuscationDictionary file) maps obfuscated FULL Azure ids to real values - don't pollute it with bare sub/RG/name fragments.
                             if (-not $script:ConsumptionSubCache) { $script:ConsumptionSubCache = @{} }
                             if (-not $script:ConsumptionRgCache) { $script:ConsumptionRgCache = @{} }
                             if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
 
-                            # Cross-dataset link (consumption <-> inventory / metrics):
-                            # if this row's real resourceUri IS an inventoried resource,
-                            # the LEAF resource-name segment must REUSE the exact token
-                            # inventory (and metrics) assigned to that resource via
-                            # $Global:ResourceIdDictionary - NOT a freshly minted name
-                            # token - otherwise the consumption row cannot be joined back
-                            # to its inventory/metrics record (the whole point of the
-                            # tool). Resource IDs are ingested lowercased
-                            # (Invoke-AzGraphQuerySafe -Lowercase) and $RawUri is the
-                            # lowercased real uri here, so a direct ContainsKey match is
-                            # correct. This is READ-ONLY against the dictionary (we do not
-                            # add consumption entries to it), so the ObfuscationDictionary
-                            # contract stays clean, and the ARM path structure below is
-                            # still preserved for dashboard categorisation - so this does
-                            # NOT reintroduce the flat-token regression that broke
-                            # categorisation. $null when the resource is not inventoried
-                            # (deleted / not in Resource Graph), in which case the leaf
-                            # falls back to the per-name cache exactly as before.
+                            # Cross-dataset link (consumption <-> inventory/metrics): if this row's real resourceUri IS an inventoried resource, the LEAF name segment must REUSE the exact token inventory/metrics assigned via $Global:ResourceIdDictionary (not a fresh one) or the consumption row cannot join back - the whole point of the tool. Ids are ingested lowercased and $RawUri is lowercased, so a direct ContainsKey is correct.
+                            # READ-ONLY against the dictionary (keeps the ObfuscationDictionary contract clean and does not reintroduce the flat-token regression); $null when the resource is not inventoried, in which case the leaf falls back to the per-name cache.
                             $InventoryLeafToken = if ($null -ne $Global:ResourceIdDictionary -and $Global:ResourceIdDictionary.ContainsKey($RawUri)) { $Global:ResourceIdDictionary[$RawUri] } else { $null }
 
                             if ($RawUri -match '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
@@ -2113,53 +1516,17 @@ function ExecuteInventoryProcessing()
 
                                 if (-not [string]::IsNullOrEmpty($RealProv))
                                 {
-                                    # $realProv = "<rp>/<type>[/<name>[/<subtype>/<name2>...]]"
-                                    # Keep the resource provider (segment 0) and every
-                                    # type segment so categorisation works; obfuscate
-                                    # only the name segments. After the provider, the
-                                    # path alternates type-name-type-name, so within
-                                    # the provider-relative index space TYPE segments
-                                    # are at indices 1,3,5,... (i.e. odd) and NAME
-                                    # segments are at indices 2,4,6,... (i.e. even).
+                                    # $realProv = '<rp>/<type>[/<name>[/<subtype>/<name2>...]]': keep the resource provider (segment 0) and every TYPE segment so categorisation works, and obfuscate only NAME segments. After the provider the path alternates type-name, so in provider-relative index space TYPE segments are odd (1,3,5) and NAME segments even (2,4,6).
                                     $ProvParts = $RealProv -split '/'
-                                    # The LEAF resource-name segment is the last name
-                                    # segment (largest even index >= 2). Only THAT segment
-                                    # reuses the inventory token (it identifies THIS
-                                    # resource, which is what inventory/metrics keyed on);
-                                    # any intermediate name segments - parent names in a
-                                    # child-resource path - stay on the per-name cache
-                                    # because they are a different resource's identity.
+                                    # The LEAF resource-name segment is the last name segment (largest even index >= 2): only THAT reuses the inventory token (it identifies THIS resource, which inventory/metrics keyed on). Intermediate name segments are parent resources' identities and stay on the per-name cache.
                                     $LeafNameIndex = -1
                                     for ($Li = $ProvParts.Count - 1; $Li -ge 2; $Li--)
                                     {
                                         if ($Li % 2 -eq 0) { $LeafNameIndex = $Li; break }
                                     }
 
-                                    # Cross-link diagnostic (case-drift early warning): a
-                                    # TOP-LEVEL resource path (provider/type/name, no child
-                                    # segments -> $LeafNameIndex -eq 2) whose real uri is NOT
-                                    # in $Global:ResourceIdDictionary means the leaf cannot
-                                    # reuse the inventory/metrics token and falls back to the
-                                    # per-name cache. That is legitimate for resources deleted
-                                    # between the graph scan and the billing pull, or for a
-                                    # -Service-narrowed inventory.
-                                    #
-                                    # This used to ALSO be the signature of a lowercasing
-                                    # regression, because the dictionary was a case-SENSITIVE
-                                    # Dictionary[string,string] that missed on any casing
-                                    # difference. It is now built with OrdinalIgnoreCase (see
-                                    # Variables()), so a casing difference can no longer cause
-                                    # a miss and this diagnostic means what it says: the uri is
-                                    # genuinely absent from the inventory. Child/sub-resource
-                                    # rows ($LeafNameIndex >= 4) legitimately miss and would
-                                    # flood, so only the top-level case is surfaced. Routed to
-                                    # the debug log ONLY (-NoConsole so it never touches the
-                                    # terminal, -ToDebugLog so it stays out of the shared report
-                                    # DATA) because $RawUri is a real resource id. NOTE: the debug
-                                    # log itself ships in a default run's zip and is LOCAL-only
-                                    # under -Obfuscate, so this real id is only ever bundled
-                                    # alongside a report that already carries real ids. A no-op
-                                    # before the debug log path is set.
+                                    # Cross-link diagnostic (case-drift early warning): a TOP-LEVEL uri ($LeafNameIndex -eq 2) absent from $Global:ResourceIdDictionary is legitimate for resources deleted between the graph scan and the billing pull, or a -Service-narrowed inventory. Since the dictionary is now OrdinalIgnoreCase, this no longer signals a lowercasing regression - it means the uri is genuinely absent.
+                                    # Only the top-level case is surfaced (child rows would flood), routed to the debug log ONLY (-NoConsole / -ToDebugLog) since $RawUri is a real id; a no-op before the debug-log path is set.
                                     if ($LeafNameIndex -eq 2 -and $null -eq $InventoryLeafToken)
                                     {
                                         Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; the dictionary is case-insensitive, so this means the resource is genuinely absent - deleted between the graph scan and the billing pull, or outside a -Service-narrowed inventory): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
@@ -2202,17 +1569,7 @@ function ExecuteInventoryProcessing()
                             }
                             else
                             {
-                                # Non-ARM-shape uri (e.g. system-namespace placeholder). Hash it
-                                # to a stable token rather than emitting the raw value. Use
-                                # the local name cache so the obfuscation dictionary file
-                                # only ever contains real-Azure-ID -> obfuscated mappings.
-                                # A null/empty resourceUri is legitimate for some meters
-                                # (marketplace purchases, certain reservations, tenant-level
-                                # charges). hashtable.ContainsKey($null) THROWS, which the
-                                # per-subscription catch below would swallow - aborting the
-                                # rest of that subscription's consumption collection. Guard
-                                # the null/empty case explicitly so one such meter row can
-                                # never truncate the consumption data (obfuscate-only bug).
+                                # Non-ARM-shape uri (e.g. system-namespace placeholder): hash it to a stable token via the local name cache so the obfuscation dictionary file only ever contains real-Azure-id -> obfuscated mappings. Guard the null/empty case explicitly - hashtable.ContainsKey($null) THROWS, which the per-sub catch would swallow, truncating that sub's consumption.
                                 if ([string]::IsNullOrEmpty($RawUri))
                                 {
                                     $ObfuscatedUri = 'obfuscated'
@@ -2248,32 +1605,14 @@ function ExecuteInventoryProcessing()
 
                     $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
-                    # Count rows actually WRITTEN to Consumption_*.csv this page - i.e. after
-                    # the null-InstanceData skip and the -ResourceGroup filter above - NOT the
-                    # rows FETCHED from the billing API. $Global:ConsumptionRecordCount is the
-                    # documented "rows written" figure (surfaced as "Consumption records
-                    # collected"); accumulating the pre-filter $UsageDataExport.Count overstated
-                    # the CSV row count in a -ResourceGroup-scoped run. The per-page fetched
-                    # count is still visible in the "Records found" log line above.
+                    # Count rows actually WRITTEN to Consumption_*.csv this page (after the null-InstanceData skip and -ResourceGroup filter), NOT rows FETCHED: $Global:ConsumptionRecordCount is the documented 'rows written' figure, and accumulating the pre-filter count overstated it in a -ResourceGroup-scoped run. The fetched count stays visible in the 'Records found' line above.
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
 
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
             }
             catch
             {
-                # The most common cause is a broken Az module install (manifest
-                # present, MSAL/Azure.Core assemblies missing). The script-level
-                # Import-Module probe should have caught that, but we also catch
-                # here defensively so a transient ARM throttling event or a
-                # subscription the identity cannot bill against does not abort
-                # the entire run for other subscriptions.
-                #
-                # Capture WHERE it stopped (page index + records collected so
-                # far) so the truncation is precise and self-evident downstream,
-                # rather than a silently-short CSV that can only be inferred from
-                # a round row count. The rows already written to the CSV up to
-                # this page are valid and kept, but this subscription's
-                # consumption is INCOMPLETE and is reported as such.
+                # Catch defensively (most common cause: a broken Az install the import probe should have caught, plus transient ARM throttling or a non-billable sub) so one sub's failure does not abort the rest of the run. Capture WHERE it stopped (page index + records collected) so the truncation is precise rather than a silently-short CSV; rows already written are valid and kept, but this sub's consumption is reported INCOMPLETE.
                 $ConsumptionFailedThisSub = $true
                 $ConsumptionFailureMessage = ("{0} (stopped at consumption page {1}, after {2} record(s); this subscription's consumption is INCOMPLETE)" -f $_.Exception.Message, $ConsumptionPageIndex, $ConsumptionRecordsThisSub)
                 Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $ConsumptionFailureMessage) -Severity 'Warning'
@@ -2285,14 +1624,7 @@ function ExecuteInventoryProcessing()
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
             $Global:ConsumptionRecordCount += $ConsumptionRecordsThisSub
-            # Per-INVOCATION total, separate from the run-wide global above. The
-            # wrapper invokes this script via '&' once per subscription in the
-            # SAME process, so $Global:ConsumptionRecordCount is a cumulative
-            # running total across subscriptions. The per-subscription
-            # Diagnostics_*.log must report only THIS subscription's count, and
-            # its zero-record warning must be able to fire for a subscription
-            # that collected nothing even after an earlier one collected plenty.
-            # Script-scoped (not a new global) so it resets naturally per invocation.
+            # Per-INVOCATION total, separate from the run-wide global: the wrapper invokes this per-sub in the SAME process, so $Global:ConsumptionRecordCount is cumulative across subs. The per-sub Diagnostics log must report only THIS sub's count and be able to fire its zero-record warning even after an earlier sub collected plenty. Script-scoped (not a new global) so it resets naturally per invocation.
             if ($null -eq $script:ConsumptionRecordsThisRun) { $script:ConsumptionRecordsThisRun = 0 }
             $script:ConsumptionRecordsThisRun += $ConsumptionRecordsThisSub
             if ($ConsumptionFailedThisSub)
@@ -2308,37 +1640,15 @@ function ExecuteInventoryProcessing()
             }
         }
 
-        # No $DebugPreference restore here on purpose. The suppression above is
-        # FUNCTION-SCOPED (verified: assigning a preference variable inside a function
-        # creates a local copy and does not leak to script scope), so it ends when this
-        # function returns. A trailing assignment was previously the LAST statement of
-        # this function, which meant it could never affect anything - dead code that read
-        # like a safeguard. Worse, it assigned the literal 'Continue', so had it ever been
-        # moved somewhere reachable it would have forced debug output on for a caller who
-        # passed -Debug:$false.
+        # No $DebugPreference restore here on purpose: the suppression above is function-scoped and ends when this function returns. The old trailing assignment was the function's LAST statement (dead code that read like a safeguard) and set the literal 'Continue', which would have forced debug output on for a -Debug:$false caller had it ever been reachable.
     }
 
     InitializeInventoryProcessing
 
-    # Per-phase timing for the report header. Stored in $script: scope (NOT a new
-    # $Global:) so it is readable by ProcessSummary later without polluting the
-    # global namespace and without persisting across subscriptions under
-    # -RunAllSubs (each & invocation gets a fresh script scope). The individual
-    # phase calls are timed WITHOUT reordering them - the stopwatches wrap the
-    # existing calls exactly as they were. This replaces the single opaque
-    # "Reporting time" (which bundled metrics + collectors + consumption) with a
-    # clear breakdown so an operator can see which phase dominates a long run.
+    # Per-phase timing for the report header, in $script: scope (NOT a new $Global:) so ProcessSummary can read it later without polluting the global namespace or persisting across subs under -RunAllSubs. The stopwatches wrap the existing calls WITHOUT reordering them, replacing the single opaque 'Reporting time' with a per-phase breakdown.
     $script:PhaseTimings = [ordered]@{}
 
-    # Metric-query API calls issued by THIS invocation, for the shareable
-    # Diagnostics_*.log. Extension/Metrics.ps1 accumulates into
-    # $Global:MetricsApiCallCount, which is deliberately RUN-cumulative - the wrapper
-    # reports a whole-run (or per-stream-slice) total from it. The Diagnostics log is
-    # PER-SUBSCRIPTION, so handing that global straight over would make the third
-    # subscription's log claim sub1 + sub2 + sub3 calls. Take the delta across this
-    # invocation's metrics phase instead, which mirrors how
-    # $script:ConsumptionRecordsThisRun keeps a per-invocation consumption figure and
-    # relies on the same fresh-script-scope-per-& property noted above.
+    # Metric-query API calls issued by THIS invocation, for the per-sub Diagnostics log: $Global:MetricsApiCallCount is deliberately RUN-cumulative (the wrapper reports a whole-run total), so handing it over directly would make the third sub's log claim sub1+sub2+sub3. Take the delta across this invocation's metrics phase, mirroring $script:ConsumptionRecordsThisRun.
     $MetricsApiCallsBefore = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
 
     $MetricsPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -2358,25 +1668,8 @@ function ExecuteInventoryProcessing()
     ProcessMetricsResult
     ProcessResourceResult
 
-    # VM placement CSV for capacity planning. Deliberately a SEPARATE file rather
-    # than new fields on the VM collector, so Inventory_*.json and the server
-    # ingestion contract it feeds are untouched (see Extension/VMPlacement.ps1).
-    #
-    # Runs after ProcessResourceResult so $Global:SmaResources is fully populated,
-    # and needs no Azure calls of its own - it joins the collector output already
-    # in memory to the Resource Graph payload for the zone.
-    #
-    # Placement mirrors $Global:ErrorLogFile rather than the report files: under the
-    # wrapper this is a per-subscription PART that Run-AllSubscriptions.ps1
-    # concatenates into one tenant-wide VMPlacement.csv, so it is written to the
-    # PARENT InventoryRoot (tagged with the SubscriptionID so parallel streams
-    # cannot collide) and NOT into the report folder, where it would be swept into
-    # the per-subscription zip and silently add a member to that bundle. A
-    # standalone run has nothing to aggregate, so it keeps the file alongside its
-    # own report.
-    #
-    # A failure here must never fail the run: the inventory, metrics and report are
-    # already written by this point, so it is downgraded to a warning.
+    # VM placement CSV for capacity planning, a SEPARATE file (not new VM-collector fields) so Inventory_*.json and its server ingestion contract are untouched (Extension/VMPlacement.ps1). Runs after ProcessResourceResult (needs $Global:SmaResources populated; no Azure calls of its own).
+    # Written to the PARENT InventoryRoot tagged with SubscriptionID (the wrapper concatenates per-sub PARTs into one tenant-wide CSV) so it is NOT swept into the per-sub zip; a standalone run keeps it by its report. A failure here is downgraded to a warning since the report is already written.
     try
     {
         $PlacementScript = Join-Path $PSScriptRoot 'Extension/VMPlacement.ps1'
@@ -2445,16 +1738,7 @@ function FinalizeOutputs
         $ReportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
         $ReportTitle = ('Azure Resource Inventory - {0}' -f $Global:ReportName)
 
-        # Unlike a single collector failing (where the rest of the inventory
-        # can still proceed - see CreateResourceJobs), the HTML report IS the
-        # deliverable: there is nothing meaningful to "continue" to after this
-        # fails. Catch here purely to give a clear, loud, specific diagnosis
-        # (which file, which stage) instead of letting a raw exception from
-        # deep inside Summary.ps1 surface as an unqualified PowerShell error,
-        # then re-throw so this subscription is still correctly marked as
-        # failed by the wrapper (same propagation path as every other
-        # uncaught throw in this script - see Az-module-load and pre-flight
-        # checks above).
+        # Unlike a single collector failing (where the rest of the inventory proceeds), the HTML report IS the deliverable, so there is nothing meaningful to continue to. Catch only to give a clear, specific diagnosis (which file, which stage) instead of a raw Summary.ps1 exception, then re-throw so the wrapper still marks this subscription failed (same propagation as every other uncaught throw).
         try
         {
             $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
@@ -2470,50 +1754,13 @@ function FinalizeOutputs
     ProcessSummary
 }
 
-# === Pre-flight checks ===
-#
-# Detect the most common environment problems that make a long run pointless,
-# before transcript start, authentication, or any per-subscription work.
-#
-# When this script is invoked by Run-AllSubscriptions.ps1 (-RunAllSubs is
-# set), the wrapper has already executed the same checks at its top level,
-# so the entire block is skipped here - otherwise the checks would re-run
-# once per subscription in a multi-subscription run, adding noise to the
-# per-subscription transcript without adding safety. Standalone invocation
-# of this script still runs the full block.
-#
-# NOTE: Keep the body of this block in sync with Invoke-PreFlightChecks in
-# Functions/RunAllSubscriptions.Functions.ps1 (which Run-AllSubscriptions.ps1
-# dot-sources). This copy is deliberately kept INLINE here - not shared - so
-# the environment sanity checks have no dependency on locating another file,
-# which matters most in exactly the broken environments these checks exist to
-# catch. Intentional differences vs the wrapper copy:
-#   - This copy honors -OutputDirectory if the caller passed one (the wrapper
-#     does not expose or forward that parameter).
-#   - This copy hard-fails with `exit 1`; the wrapper's copy calls Exit-Wrapper
-#     (which also stops its transcript and collects support logs). Both are
-#     non-zero exits. NEITHER may use a bare `throw` at script scope: this script
-#     runs with $ErrorActionPreference = 'SilentlyContinue' for any non-Debug run,
-#     under which such a throw is DISCARDED - the run printed "Pre-flight checks
-#     passed." and continued to authentication with exit code 0.
-#   - This copy is gated on -not $RunAllSubs to avoid duplicate execution
-#     when invoked by the wrapper.
+# === Pre-flight checks === Detect common environment problems before transcript/auth/per-subscription work; skipped under -RunAllSubs (the wrapper already ran them at top level), full block on a standalone run.
+# Kept INLINE (not shared with Invoke-PreFlightChecks in RunAllSubscriptions.Functions.ps1) so the checks have no file-location dependency in the broken environments they catch; each gate must exit, not throw (a script-scope throw is swallowed by SilentlyContinue).
 if (-not $RunAllSubs.IsPresent)
 {
 
-    # Honor -OutputDirectory when the caller passed one. CheckPowerShell will
-    # re-validate -OutputDirectory itself further down and is the authoritative
-    # gate; we Resolve-Path here defensively so a relative path is checked at
-    # the right location, and fall back to the raw value if it does not yet
-    # resolve (the write probe below will surface the underlying error).
-    # Get-RdaInventoryRoot (Functions/Common.Functions.ps1) is the SINGLE resolver
-    # for this path. It creates the directory, PROVES it writable, and for the
-    # DEFAULT location degrades to a writable fallback rather than leaving the run
-    # to fail later - which is what happened when this was six inline copies of
-    # "$HOME/InventoryReports" whose creation failure went to Write-Verbose.
-    # An explicit -OutputDirectory is never redirected; it fails here instead.
-    # -NoInherit because this process ESTABLISHES the root for a standalone run,
-    # so a stale pin left in this shell's environment must not be trusted.
+    # Honor -OutputDirectory when the caller passed one (CheckPowerShell re-validates it later and is authoritative; Resolve-Path defensively, falling back to the raw value so the write probe surfaces the real error). Get-RdaInventoryRoot (Common.Functions.ps1) is the SINGLE resolver: it creates, PROVES writable, and for the DEFAULT location degrades to a writable fallback.
+    # -NoInherit because this process ESTABLISHES the root for a standalone run, so a stale pin in this shell's environment must not be trusted.
     $RootResult = Get-RdaInventoryRoot -Requested $OutputDirectory -NoInherit
     if (-not $RootResult.Ok)
     {
@@ -2531,30 +1778,14 @@ if (-not $RunAllSubs.IsPresent)
 
     Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
 
-    # 0. -Service fast-fail. When -Service is supplied but NONE of the requested
-    # names match a collector under Services/, the run would otherwise
-    # authenticate and extract every resource only to produce an empty inventory
-    # (and, downstream, a failed report) while still exiting 0 - a silent-looking
-    # failure for a scripted recovery workflow. Validate up front, before auth or
-    # any per-subscription work, and hard-fail (exit 1, matching the
-    # functions-file-missing gate near the top of the script) with the full list
-    # of valid collector names so a typo is caught immediately. Partial matches
-    # (some valid, some not) are allowed through here; CreateResourceJobs
-    # surfaces the unmatched names as a Warning.
+    # 0. -Service fast-fail: when -Service is supplied but NONE of the names match a collector, the run would otherwise authenticate and extract everything only to produce an empty inventory (and a failed report) while exiting 0 - a silent-looking failure for a scripted recovery. Validate up front, before auth, and hard-fail (exit 1) with the full valid-name list. Partial matches pass through here (CreateResourceJobs warns on the unmatched).
     if ($Service -and @($Service).Count -gt 0)
     {
         $PreFlightAvailableServices = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object)
         $PreFlightMatchedServices = @($Service | Where-Object { $_ -in $PreFlightAvailableServices })
         if (@($PreFlightMatchedServices).Count -eq 0)
         {
-            # Hard-fail here with exit 1 (NOT throw): $ErrorActionPreference is
-            # 'SilentlyContinue' for a normal run, under which a bare throw at
-            # script scope is swallowed and execution continues - which would
-            # authenticate, extract, then produce an empty report while still
-            # exiting 0. exit 1 is the script's established hard-fail signal (see
-            # the functions-file-missing gate near the top) and is safe here
-            # because this whole block is gated on -not $RunAllSubs, so the
-            # in-process wrapper never reaches it.
+            # Hard-fail with exit 1, NOT throw: $ErrorActionPreference is SilentlyContinue for a normal run, under which a bare script-scope throw is swallowed and the run would authenticate, extract, then produce an empty report exiting 0. exit 1 is the established hard-fail signal, and is safe here because this whole block is gated on -not $RunAllSubs.
             Write-Host ("ERROR: -Service matched no collectors. Requested: [{0}]." -f ($Service -join ', ')) -ForegroundColor Red
             Write-Host ("Valid collector names: [{0}]" -f ($PreFlightAvailableServices -join ', ')) -ForegroundColor Yellow
             exit 1
@@ -2562,12 +1793,7 @@ if (-not $RunAllSubs.IsPresent)
         Write-Host ("Pre-flight: -Service will collect {0} of {1} collectors: [{2}]" -f @($PreFlightMatchedServices).Count, @($PreFlightAvailableServices).Count, ($PreFlightMatchedServices -join ', ')) -ForegroundColor Green
     }
 
-    # 0b. -ObfuscationDictionary fast-fail. Seeding only makes sense with
-    # -Obfuscate (the dictionaries are created only then), and a missing or
-    # unreadable seed file must stop the run BEFORE auth rather than silently
-    # minting fresh tokens - which would make a later merge fail to line up.
-    # exit 1 (not throw) for the same reason as the -Service gate above:
-    # $ErrorActionPreference is SilentlyContinue for a normal run.
+    # 0b. -ObfuscationDictionary fast-fail: seeding only makes sense with -Obfuscate, and a missing/unreadable seed must stop the run BEFORE auth rather than silently mint fresh tokens that make a later merge fail to line up. exit 1 (not throw) for the same SilentlyContinue reason as the -Service gate above.
     if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
     {
         if (-not $Obfuscate.IsPresent)
@@ -2622,13 +1848,7 @@ if (-not $RunAllSubs.IsPresent)
             $FreeMB = [math]::Round($Drive.Free / 1MB, 0)
             if ($FreeMB -lt 100)
             {
-                # exit 1, NOT throw. $ErrorActionPreference is 'SilentlyContinue'
-                # for a normal run, under which a bare throw at script scope is
-                # SWALLOWED - the run printed "Pre-flight checks passed." and
-                # carried on to authentication with the gate having decided to
-                # stop it. Matches the -Service / -ObfuscationDictionary gates
-                # above, and the wrapper's copy of this check, which calls
-                # Exit-Wrapper -Code 1.
+                # exit 1, NOT throw: a bare script-scope throw is swallowed under SilentlyContinue, so the gate would print 'Pre-flight checks passed.' and continue to authentication. Matches the -Service / -ObfuscationDictionary gates above and the wrapper's Exit-Wrapper -Code 1.
                 Write-Host ("ERROR: Free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Red
                 exit 1
             }
@@ -2672,16 +1892,7 @@ if (-not $RunAllSubs.IsPresent)
     {
         try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
-        # exit 1, NOT throw - see the disk-space gate above. A bare throw here was
-        # discarded under $ErrorActionPreference = 'SilentlyContinue', so an
-        # unwritable output directory printed "Pre-flight checks passed." and the
-        # run continued to authentication and failed later, with exit code 0.
-        #
-        # Reaching this at all is now unusual: Get-RdaInventoryRoot has already
-        # created and write-probed $PreFlightInventoryRoot, falling back to a
-        # writable location for the DEFAULT path. So this fires when an explicit
-        # -OutputDirectory is unusable, or when the directory became unwritable
-        # between that resolution and here.
+        # exit 1, NOT throw (see the disk-space gate above): a swallowed throw let an unwritable output directory print 'passed' and fail later at exit 0. Reaching here is now unusual - Get-RdaInventoryRoot already created + write-probed the root (with a fallback for the default path) - so it fires for an unusable explicit -OutputDirectory or one that became unwritable since.
         Write-Host ("ERROR: cannot write to {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Red
         Write-Host "  This usually means a readonly directory, denied permissions, an antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Yellow
         Write-Host "  Verify the directory is writable and re-run, or pass -OutputDirectory with a writable path." -ForegroundColor Yellow
@@ -2692,16 +1903,7 @@ if (-not $RunAllSubs.IsPresent)
     Write-Host ""
 }
 
-# Setup and Inventory Gathering.
-#
-# Variables and RunInventorySetup populate $Global:DefaultPath, $Global:ReportName,
-# and $Global:CurrentDateTime which are required to compute the transcript path.
-# Start-Transcript must therefore run *after* RunInventorySetup, not before.
-# Previously this block placed Start-Transcript above Variables, with the result
-# that $DefaultPath/$ReportName/$CurrentDateTime were all $null at that point and
-# the transcript file landed in the current working directory with the literal
-# name "Transcript_Log__.txt" - two underscores, missing report name and missing
-# timestamp.
+# Setup and Inventory Gathering. Variables + RunInventorySetup populate $Global:DefaultPath / ReportName / CurrentDateTime, which the transcript path needs, so Start-Transcript MUST run AFTER RunInventorySetup - otherwise those were all $null and the transcript landed in the cwd as 'Transcript_Log__.txt' with the report name and timestamp missing.
 $Global:Runtime = Measure-Command -Expression {
     Variables
     RunInventorySetup
@@ -2710,18 +1912,7 @@ $Global:Runtime = Measure-Command -Expression {
     Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
-# Execution and processing of inventory.
-#
-# Wrap in try/finally so this run's transcript frame is ALWAYS stopped - even if
-# ExecuteInventoryProcessing throws a terminating error (e.g. the collector
-# circuit breaker throwing after repeated failures). PowerShell transcripts are
-# a process-wide STACK, and the -RunAllSubs wrapper invokes this script via & in
-# the SAME process. A frame left open here is orphaned on that stack; the
-# wrapper's own Stop-Transcript at the end then pops THIS orphan instead of the
-# wrapper's frame, leaving the wrapper transcript file held open ("in use",
-# undeletable) for the life of the calling shell. Stopping it here keeps the
-# stack balanced per subscription. The inner try/catch tolerates the rare case
-# where no transcript is active (Start-Transcript above having failed).
+# Execution and processing of inventory. Wrap in try/finally so this run's transcript frame is ALWAYS stopped even on a terminating error: transcripts are a process-wide STACK and the -RunAllSubs wrapper invokes this via & in the SAME process, so an orphaned open frame makes the wrapper's Stop-Transcript pop THIS frame instead, leaving the wrapper transcript held open/undeletable. The inner try/catch tolerates the rare case where no transcript is active.
 try
 {
     $Global:ReportingRunTime = Measure-Command -Expression {
@@ -2850,12 +2041,7 @@ if ($Obfuscate.IsPresent)
         Write-Log -Message ("  - Debug log:  {0}" -f $Global:DebugLogFile) -Severity 'Warning'
     }
     Write-Log -Message ("") -Severity 'Info'
-    # Scope the sharing claim to the artifact it is actually about. Under the
-    # wrapper this block runs once PER SUBSCRIPTION, so an unqualified "the ZIP
-    # file is safe to share" told the operator N times that a zip was sendable
-    # while only ever naming a per-subscription one - and the consolidated bundle
-    # they should actually send was never described that way. Operators resolved
-    # it by sending the whole folder, dictionary included.
+    # Scope the sharing claim to the artifact it is about: under the wrapper this runs once PER SUBSCRIPTION, so an unqualified 'the ZIP is safe to share' told the operator N times a per-sub zip was sendable while never naming the consolidated bundle they should actually send - so operators sent the whole folder, dictionary included.
     if ($RunAllSubs.IsPresent)
     {
         Write-Log -Message ("This subscription's ZIP is obfuscated and is one COMPONENT of the run's bundle - it is not the file to send on its own.") -Severity 'Success'
@@ -2875,15 +2061,7 @@ if ($SkipMetrics.IsPresent)
 }
 else
 {
-    # Subscriptions with zero metric-eligible resources never enter the
-    # batched-write loop in Extension/Metrics.ps1, so no Metrics_*.json is
-    # produced for them. Downstream consumers that expect *every* per-sub
-    # bundle to contain a Metrics JSON (dashboard ingestion, the
-    # ParallelStreamsAggregation tests) reject the bundle when the file is
-    # missing. Detect that case and emit an empty-but-valid Metrics JSON
-    # at the canonical $Global:MetricsJsonFile path so the bundle is always
-    # structurally complete. Use Get-ChildItem with a wildcard because the
-    # batched writer suffixes filenames with "_<rangeIdx>.json".
+    # Subscriptions with zero metric-eligible resources produce no Metrics_*.json, but downstream consumers that expect every per-sub bundle to contain one (dashboard ingestion, the ParallelStreamsAggregation tests) reject the bundle when it is missing. Emit an empty-but-valid Metrics JSON at $Global:MetricsJsonFile so the bundle is always structurally complete; wildcard Get-ChildItem because the batched writer suffixes '_<rangeIdx>.json'.
     $MetricsPattern = ('Metrics_{0}_{1}*.json' -f $Global:ReportName, $CurrentDateTime)
     $MetricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)
     if ($MetricsAny.Count -eq 0)
@@ -2894,12 +2072,7 @@ else
 
 $ConsumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
 
-# A subscription with zero billing records produces an empty (0-byte) CSV
-# rather than a header-only one, because Export-Csv -Append with no input
-# objects writes nothing. Treat 0-byte files as "not created" so the safety
-# net below emits the header. Without this, downstream consumers that parse
-# the CSV by header (dashboard ingestion, the Pester tests) fail on the
-# empty file and reject the entire per-sub bundle.
+# A subscription with zero billing records produces an empty (0-byte) CSV rather than a header-only one (Export-Csv -Append with no input writes nothing), so treat 0-byte files as 'not created' and emit the header below - otherwise header-parsing consumers (dashboard ingestion, the Pester tests) fail on the empty file and reject the entire per-sub bundle.
 $ConsumptionEmpty = $false
 if ($ConsumptionCreated)
 {
@@ -2922,30 +2095,11 @@ if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 
 if ($Obfuscate.IsPresent)
 {
-    # Shareable diagnostics log for this (obfuscated) run - phase timings +
-    # per-subscription collector/metrics/consumption health, every identifier
-    # scrubbed via Protect-DiagnosticText. Built by Write-RdaShareableDiagnosticsLog
-    # (Functions/ResourceInventory.Functions.ps1) so the SAME builder serves both
-    # the obfuscated and default packaging branches. Returns $null on any
-    # build/write failure (downgraded to a warning inside), so the guard below
-    # cannot inject a missing path into the archive list and break packaging.
+    # Shareable diagnostics log for this (obfuscated) run - phase timings + per-sub collector/metrics/consumption health, every identifier scrubbed via Protect-DiagnosticText, built by Write-RdaShareableDiagnosticsLog so the SAME builder serves both packaging branches. Returns $null on any build/write failure (downgraded to a warning) so the guard below cannot inject a missing path into the archive list and break packaging.
     $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
-    # Exclude the obfuscation dictionary and transcript from the obfuscated zip.
-    # The dictionary maps obfuscated values back to REAL identifiers, and the
-    # transcript captures the raw Write-Log stream (auth UPN, tenant GUID,
-    # subscription names) that the obfuscation layer never touches. The
-    # transcript is excluded separately below (it is not a .json). Use a
-    # specific json file list so only the safe, obfuscated json files ship.
-    # The shareable Diagnostics_*.log built above is a .log (so it is NOT swept
-    # by this *.json filter and is NOT table-ingested); it is added to the Path
-    # array EXPLICITLY below because it is curated + dictionary-scrubbed and is
-    # meant to ship. The LOCAL-only .log files (DebugLog_* consolidated
-    # heartbeat + metrics diagnostics, legacy Heartbeat_*/ErrorLog_*) are also
-    # not .json so this filter never sweeps them AND they are never added to the
-    # Path array, so they stay local; the explicit -notlike guards harden the
-    # seam so none can ship even if this filter is broadened later - they carry a
-    # real subscription GUID and real service/resource names.
+    # Exclude the obfuscation dictionary (maps obfuscated values back to REAL ids) and the transcript (raw Write-Log auth UPN / tenant GUID / sub names) from the obfuscated zip; ship only a specific safe obfuscated .json file list. The curated dictionary-scrubbed Diagnostics_*.log is added explicitly below.
+    # The LOCAL-only .log files (DebugLog_* heartbeat+metrics, legacy Heartbeat_*/ErrorLog_*) carry a real sub GUID and real names, are not .json so this filter never sweeps them, and are never added - with explicit -notlike guards hardening the seam if the filter is later broadened.
     $JsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     # Include the shareable diagnostics .log if it was successfully written.
     # Guarded (not assumed) so a diagnostics build/write failure above - which is
@@ -2962,33 +2116,13 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    # Shareable diagnostics log for this (default/non-obfuscated) run - same
-    # builder as the obfuscated branch, WITHOUT -Obfuscated so its header states
-    # the bundle is not obfuscated. Identifiers in the log are still class-masked
-    # by Protect-DiagnosticText; the surrounding report already carries real
-    # names, so shipping the log here adds no new exposure. Guarded like the
-    # obfuscate path so a build/write failure cannot break packaging.
+    # Shareable diagnostics log for the default (non-obfuscated) run - same builder WITHOUT -Obfuscated so the header states it; identifiers are still class-masked by Protect-DiagnosticText. The surrounding report already carries real names, so shipping the log adds no new exposure; guarded like the obfuscate path so a build/write failure cannot break packaging.
     $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 
-    # Include the consolidated DEBUG log in the DEFAULT (non-obfuscated) zip only.
-    # Rationale: this bundle already carries real subscription, resource-group and
-    # resource names throughout the report itself, so the debug log's real service
-    # and resource names add no new class of identifier - while the per-collector
-    # START/DONE/FAIL heartbeat and the metrics-phase diagnostics it holds are
-    # exactly what is needed to explain a thin or partial report without asking
-    # the operator for a second Collect-SupportLogs run.
-    #
-    # This is deliberately NOT done in the -Obfuscate branch above: there the
-    # whole point is that the bundle carries no real identifiers, and the debug
-    # log is not dictionary-scrubbed. The DebugLog_* -notlike guard on the JSON
-    # sweep in BOTH branches stays as-is; this adds the file by explicit path, so
-    # an obfuscated run still cannot pick it up.
-    #
-    # Caveat the operator is told about below: heartbeat FAIL lines can carry raw
-    # $_.Exception.Message text, which in rare cases can include a signed URL or
-    # token fragment. That is why this stays out of the obfuscated bundle.
+    # Include the consolidated DEBUG log in the DEFAULT (non-obfuscated) zip ONLY: this bundle already carries real sub/RG/resource names throughout, so the log's real names add no new class of identifier while its per-collector heartbeat + metrics diagnostics explain a thin report without a second support-logs run.
+    # Deliberately NOT done in the -Obfuscate branch (that bundle must carry no real ids and the log is unscrubbed); added by explicit path, and the DebugLog_* -notlike JSON-sweep guard stays in both branches so an obfuscated run still cannot pick it up.
     if (-not [string]::IsNullOrEmpty($Global:DebugLogFile) -and (Test-Path -LiteralPath $Global:DebugLogFile))
     {
         $ShareableExtras += $Global:DebugLogFile
@@ -2996,20 +2130,10 @@ else
         Write-Log -Message ('  It carries real service/resource names and raw exception text. The report in this bundle is already non-obfuscated. Re-run with -Obfuscate to keep the debug log LOCAL.') -Severity 'Warning'
     }
 
-    # Use the SAME hardened json file list as the obfuscated branch rather than a
-    # broad DefaultPath+'*.json' wildcard. In a default run none of the excluded
-    # names exist as .json (the dictionary is not written; DebugLog_/ErrorLog_ are
-    # .log), so this ships exactly the same files today - but keeps the two
-    # branches symmetric so a future local *.json artifact cannot be swept into
-    # the default zip while being filtered out of the obfuscated one.
+    # Use the SAME hardened json file list as the obfuscated branch, not a broad DefaultPath+'*.json' wildcard: in a default run none of the excluded names exist as .json so it ships the same files today, but keeping the branches symmetric stops a future local *.json artifact being swept into the default zip while filtered out of the obfuscated one.
     $JsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
 
-    # Exclude the PowerShell transcript from the default zip too. It captures
-    # the authenticated account UPN, tenant/subscription IDs, and local paths
-    # from Start-Transcript onward - data customers don't expect in the shared
-    # bundle. Keep it on disk locally for debugging (same as the obfuscate path).
-    # The Diagnostics_*.log (a .log, not swept by the *.json wildcard) is added
-    # explicitly via $ShareableExtras so it ships in the default zip too.
+    # Exclude the PowerShell transcript from the default zip too (it captures the authenticated account UPN, tenant/subscription ids, and local paths); keep it on disk locally for debugging. The Diagnostics_*.log (a .log, not swept by the *.json wildcard) is added explicitly via $ShareableExtras so it still ships.
     $CompressionOutput = @{
         Path             = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
@@ -3018,28 +2142,8 @@ else
     Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
-# Packaging is the LAST place a subscription's whole report can be lost without
-# anyone noticing, so it fails loudly and is verified on disk before anything
-# claims success. Three things previously conspired to hide a failure here:
-#
-#   1. The run-wide $ErrorActionPreference = 'SilentlyContinue' (line 109)
-#      discarded a NON-terminating Compress-Archive error outright, so the catch
-#      below never even fired.
-#   2. When it did fire, the handler used Write-Error - which under that same
-#      preference prints nothing, does not rethrow, and does not set an exit
-#      code.
-#   3. The 'Reporting Data File' line was unconditional, so the log reported
-#      Success naming an archive that was never written.
-#
-# The wrapper (Run-AllSubscriptions.ps1) only fails a subscription on a thrown
-# exception or a non-zero exit code, so it recorded the sub as complete and
-# consolidated a bundle that was quietly one report short.
-#
-# -ErrorAction Stop forces the compress terminating so the catch always fires,
-# and the archive is then confirmed present and non-empty. exit 1 (not throw) is
-# this script's established hard-fail signal: a bare throw at script scope is
-# swallowed by 'SilentlyContinue' - same reason as the -Service and
-# -ObfuscationDictionary gates above.
+# Packaging is the LAST place a subscription's whole report can be lost unnoticed, so it fails loudly and is verified on disk before claiming success. The run-wide SilentlyContinue discarded Compress-Archive's non-terminating error and the old Write-Error handler printed nothing / set no exit code, so the wrapper consolidated a bundle one report short.
+# -ErrorAction Stop forces the compress terminating so the catch always fires, then the archive is confirmed present + non-empty; exit 1 (not throw) is the hard-fail signal since a script-scope throw is swallowed.
 $ZipWriteError = $null
 try
 {
@@ -3050,12 +2154,7 @@ catch
     $ZipWriteError = $_.Exception.Message
 }
 
-# Test-ReportArchiveUsable (Functions/Common.Functions.ps1) is the SINGLE
-# definition of "the archive is really there": present, a file, and non-empty.
-# The wrapper's per-subscription output verification calls the same predicate, so
-# the two sides of this seam cannot drift into disagreeing about what counts as a
-# usable report. The absent-vs-empty distinction below is only for the operator
-# message - the verdict itself comes from the shared predicate.
+# Test-ReportArchiveUsable (Common.Functions.ps1) is the SINGLE definition of 'the archive is really there' (present, a file, non-empty); the wrapper's per-subscription output verification calls the same predicate, so the two sides of this seam cannot drift. The absent-vs-empty distinction below is only for the operator message.
 $ZipVerified = $false
 if ($null -eq $ZipWriteError)
 {
@@ -3083,13 +2182,7 @@ if (-not $ZipVerified)
     Write-Log -Message ("  The uncompressed report files are still in {0} - check free disk space first, then an antivirus/DLP quarantine, then write permissions on that folder." -f $DefaultPath) -Severity 'Error'
     Write-Log -Message ('  Reporting this subscription as FAILED so the wrapper does not consolidate a bundle that is missing it. Re-run with -Resume to retry.') -Severity 'Error'
 
-    # Delete whatever IS at the archive path before leaving. The wrapper
-    # consolidates by globbing *.zip under the inventory root filtered on write
-    # time - it does not consult this script's verdict - so a truncated or
-    # half-written archive left here would be swept into the shared bundle as a
-    # corrupt member AND would inflate the wrapper's archive count, hiding the very
-    # gap this exit is reporting. Best-effort: if the remove fails there is nothing
-    # further to do, and it must not mask the original failure.
+    # Delete whatever IS at the archive path before leaving: the wrapper consolidates by globbing *.zip under the inventory root by write time (it does not consult this script's verdict), so a truncated/half-written archive left here would be swept in as a corrupt member and inflate the wrapper's archive count, hiding the very gap this exit reports. Best-effort, and must not mask the original failure.
     if (Test-Path -LiteralPath $Global:ZipOutputFile -PathType Leaf)
     {
         try
@@ -3103,12 +2196,7 @@ if (-not $ZipVerified)
         }
     }
 
-    # Exit code 2 specifically means "the report archive is missing", as distinct
-    # from this script's generic hard-fail (exit 1, used by the pre-flight gates
-    # above). Run-AllSubscriptions.ps1 still treats ANY non-zero as "this
-    # subscription failed", but it reads the 2 to also set its OWN exit code 2 -
-    # the code that already means "per-subscription output gap" - so a lost report
-    # is visible to automation and not just in the console summary.
+    # Exit code 2 specifically means 'the report archive is missing', distinct from the generic hard-fail (exit 1) used by the pre-flight gates: Run-AllSubscriptions.ps1 treats any non-zero as 'this subscription failed' but reads the 2 to also set its OWN exit code 2 ('per-subscription output gap'), so a lost report is visible to automation, not just the console summary.
     exit 2
 }
 

@@ -28,8 +28,6 @@ if ($Task -eq 'Processing')
             }
             $Sampling = if ([string]::IsNullOrEmpty($Data.SamplingPercentage)) { 'Disabled' }else { $Data.SamplingPercentage }
 
-            # WorkspaceResourceId (LA workspace ARM id) routes through $ResourceIdDictionary when obfuscating;
-            # ContainsKey needs no .ToLower() (dictionary is OrdinalIgnoreCase). Classic components get 'None'.
             $WorkspaceId = [string]$Data.WorkspaceResourceId
 
             $WorkspaceRef = if ([string]::IsNullOrEmpty($WorkspaceId))
@@ -67,3 +65,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

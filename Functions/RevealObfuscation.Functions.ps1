@@ -1,14 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# RevealObfuscation.Functions.ps1
-#
-# Shared helper functions AND the single-report reveal engine (Invoke-RdaReveal)
-# for the reveal feature. Dot-sourced by Reveal.ps1 (and by the child jobs it
-# spawns for the multi-subscription path) so they load into that scope.
-# Definitions only - no top-level code. Convert-RevealString references
-# $Replacements / $tokenPattern / $script:fileHits which Invoke-RdaReveal (its
-# caller) establishes before invoking it, so the parent-scope lookup is safe.
-# =============================================================================
+# Shared helpers + the single-report reveal engine (Invoke-RdaReveal), dot-sourced
+# by Reveal.ps1; Convert-RevealString reads its caller's $Replacements/$tokenPattern/$script:fileHits.
 function ConvertTo-LookupTable
 {
     param($MapObject)
@@ -46,27 +38,13 @@ function Get-JsonEscaped
     return $Json.Substring(1, $Json.Length - 2)
 }
 
-# Reveal selected tokens inside a single string. The replacement value is
-# escaped to match the destination format so a revealed value containing
-# special characters (e.g. a subscription display name with '&', or a
-# free-text tag value) stays valid in that file:
-#   Json -> escaped for a JSON string literal
-#   Html -> HTML-entity encoded (the report encodes every rendered value)
-#   None -> raw (CSV field values are re-quoted by Export-Csv instead)
-# Tokens not in $Replacements are returned unchanged, so unselected
-# dimensions stay masked. Increments $script:fileHits per substituted token.
+# Reveal tokens in a string, escaping the replacement for the destination format
+# (Json/Html/None) so it stays valid; tokens not in $Replacements stay masked.
 function Convert-RevealString
 {
     param([string]$Text, [string]$EscapeMode = 'None')
-    # Fast path: every obfuscation token starts with the literal 'prod_' or
-    # 'nonprod_' prefix (plain or type-hinted, e.g. prod_<guid> / prod_aks_<guid>),
-    # so text containing neither substring cannot contain a token - return it
-    # unchanged and skip the comparatively expensive regex scan. This is the hot
-    # path for the large Consumption CSV, whose cells are overwhelmingly dates,
-    # numbers and meter names with no token: it turns a per-cell regex sweep over
-    # 100k+ rows (minutes) into a substring test. Correctness is unchanged - the
-    # regex callback only ever substitutes tokens found in $Replacements, and any
-    # skipped text provably has no token to substitute.
+    # Fast path: every token starts with 'prod_'/'nonprod_', so text with neither
+    # can't contain one - skip the expensive regex (hot path for the huge Consumption CSV).
     if (-not ($Text.Contains('prod_') -or $Text.Contains('nonprod_')))
     {
         return $Text
@@ -90,24 +68,8 @@ function Convert-RevealString
 }
 
 
-# =============================================================================
-# Invoke-RdaReveal
-#
-# The single-report reveal ENGINE, moved here from the former standalone
-# Reveal-Obfuscation.ps1 so the whole reveal feature lives in ONE entry script
-# (Reveal.ps1) that handles both a single report and a whole multi-subscription
-# tree. Takes one obfuscated report zip + its dictionary, rewrites ONLY the
-# selected dimensions' tokens back to real values, and re-zips with the same
-# structure.
-#
-# Scope note: this function sets $Replacements and $tokenPattern as LOCALS and
-# calls Convert-RevealString, which reads them via PowerShell's parent-scope
-# (dynamic) variable lookup, and increments $script:fileHits (the dot-sourcing
-# entry script's script scope). That is the same contract the old top-level
-# script provided - just nested one function deep - so the helpers behave
-# identically. Raises terminating errors via throw (never exit) so a caller /
-# Start-Job can catch them.
-# =============================================================================
+# The single-report reveal engine: rewrites only the selected dimensions' tokens
+# back to real values. Sets locals Convert-RevealString reads; throws (never exit) so a job caller can catch.
 function Invoke-RdaReveal
 {
     [CmdletBinding()]
@@ -282,21 +244,12 @@ function Invoke-RdaReveal
 
     try
     {
-        # Phase progress (Expanding -> Scanning -> Compressing) so a single
-        # report's reveal is not a black box while the opaque extract / compress
-        # steps run. Uses the shared Write-RdaProgress when it is
-        # loaded (single-report mode via Reveal.ps1, which dot-sources
-        # Common.Functions); in the all-subscriptions child job the helper is
-        # absent AND the job's output is suppressed, so guard on its presence and
-        # no-op there (the wrapper shows a per-folder heartbeat instead).
+        # Phase progress (Expanding->Scanning->Compressing); Write-RdaProgress is
+        # absent in the all-subscriptions child job, so guard on its presence and no-op.
         $EmitProgress = [bool](Get-Command -Name Write-RdaProgress -ErrorAction SilentlyContinue)
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Expanding archive' -Index 1 -Total 3 }
-        # Use System.IO.Compression directly instead of Expand-Archive /
-        # Compress-Archive: the cmdlets are markedly slower (a multi-MB report can
-        # take minutes to re-zip), whereas ZipFile.ExtractToDirectory /
-        # CreateFromDirectory do the same work in a fraction of the time and
-        # produce the same flat archive layout. $TmpRoot was just created empty,
-        # so extraction has nothing to overwrite.
+        # Use System.IO.Compression (ZipFile) directly, not Expand-/Compress-Archive:
+        # the cmdlets are markedly slower on multi-MB reports; same flat archive layout.
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::ExtractToDirectory($InputZip, $TmpRoot)
 
@@ -359,17 +312,8 @@ function Invoke-RdaReveal
             }
         }
 
-        # Atomic output: compress to a sibling *.partial.zip, then swap it into
-        # place with File.Move(overwrite). A same-volume move is a rename, so a
-        # hard kill (SIGKILL / shell timeout) DURING compression can never leave a
-        # truncated zip at $OutputZip. This matters for the all-subscriptions
-        # reveal (Reveal.ps1), whose -Resume trusts the presence of the output zip
-        # to mean "this folder is done" and whose consolidation sweeps every *.zip
-        # in staging: a partial file left at the FINAL name would be both skipped
-        # on resume AND folded into the outer zip. The .partial.zip name is
-        # excluded from that consolidation sweep, so only the completed archive
-        # ever appears at $OutputZip. The Remove-Item below is required because
-        # ZipFile.CreateFromDirectory throws if the destination already exists.
+        # Atomic output: compress to a sibling *.partial.zip then rename into place, so a
+        # hard kill can't leave a truncated zip at the final name (-Resume/consolidation trust it).
         if ($EmitProgress) { Write-RdaProgress -Activity 'Revealing report' -CurrentItem 'Compressing output' -Index 3 -Total 3 }
         $OutputZipPartial = ($OutputZip -replace '\.zip$', '') + '.partial.zip'
         if (Test-Path -Path $OutputZipPartial) { Remove-Item -Path $OutputZipPartial -Force }

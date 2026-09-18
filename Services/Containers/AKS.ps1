@@ -15,16 +15,8 @@ if ($Task -eq 'Processing')
 
             foreach ($2 in $Data.agentPoolProfiles)
             {
-                # Recomputed on every node-pool iteration (not hoisted above this
-                # loop): the cluster's tags are the SAME real values across all of
-                # its node pools, but the obfuscation pass mutates $tag.Value on
-                # the object instance it's given. Sharing one $tags array/element
-                # instance across multiple $obj rows would let a value that was
-                # already tokenized on row 1 be re-read (and re-keyed) as a "real"
-                # value on row 2, corrupting $Global:TagValueDictionary. A fresh
-                # Select-Object projection per row gives each row its own object
-                # instances so the same real tag value still yields the same
-                # token (determinism, P1), without aliasing across rows.
+                # Fresh per-row Select-Object projection (not hoisted): obfuscation mutates $tag.Value on the
+                # instance, so a shared instance would re-key an already-tokenized value and corrupt $Global:TagValueDictionary.
                 $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
                 $Obj = @{

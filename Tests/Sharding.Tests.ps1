@@ -1,17 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# Sharding.Tests.ps1
-#
-# OFFLINE unit tests for the horizontal-sharding partition helpers in
-# Functions/RunAllSubscriptions.Functions.ps1 (Get-ShardKeyForSubscription /
-# Select-ShardSubscriptions). No Azure calls, no zip - the helpers are pure, so
-# these run anywhere with just Pester v5+.
-#
-# The properties proven here are the correctness contract horizontal scaling
-# relies on: N machines each run the same command with a different -ShardIndex,
-# and their slices must be disjoint, exhaustive, deterministic, and stable to a
-# drifting visible-subscription set - WITHOUT the machines coordinating.
-# =============================================================================
+# Offline unit tests for the sharding helpers (Get-ShardKeyForSubscription / Select-ShardSubscriptions):
+# per-ShardIndex slices must be disjoint, exhaustive, deterministic, and stable to a drifting set, uncoordinated.
 
 BeforeAll {
     $RepoRoot = Split-Path $PSScriptRoot -Parent

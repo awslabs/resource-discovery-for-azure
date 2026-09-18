@@ -58,9 +58,6 @@ param(
 
 . (Join-Path $PSScriptRoot 'RunAllSubscriptions.Functions.ps1')
 
-# Forward only the parameters the caller actually supplied so New-RdaSupportLogBundle
-# applies its own defaults (platform inventory root, timestamped destination) for
-# the rest.
 $CollectParams = @{}
 foreach ($Name in @('InventoryRoot', 'SinceTime', 'IncludeMainSummary', 'DestinationPath'))
 {
@@ -77,3 +74,4 @@ else
 {
     Write-Host "No support logs were found to collect under the inventory root." -ForegroundColor Yellow
 }
+

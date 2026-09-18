@@ -43,25 +43,8 @@
     data need not load it.
 #>
 
-# Single owner of the de-obfuscated-report pattern, matched against a FULL PATH.
-#
-# Deliberately 'revealed' and NOT '_revealed': the reveal engine's own default
-# output directory is named RevealedStaging_<timestamp> (Reveal.ps1, where
-# StagingDirectory defaults to Join-Path InventoryRoot 'RevealedStaging_<ts>'),
-# and it writes each fully revealed per-subscription zip into it under the
-# ORIGINAL zip name. That folder is KEPT unless -RemoveStaging is passed. An
-# underscore-prefixed pattern does not match 'RevealedStaging_', so it would let
-# a de-obfuscated report carrying real customer identifiers be read as an
-# ordinary source. Verified: '<root>/RevealedStaging_<ts>/ResourcesReport_<stamp>.zip'
-# is NOT -like '*_revealed*' but IS -like '*revealed*'.
-#
-# The broader pattern is the fail-CLOSED direction. A path that merely contains
-# "revealed" is refused and RECORDED in the Rejected list where the operator can
-# see it, whereas a miss leaks real data with no signal at all.
-#
-# Every consumer asserts it is non-empty before scanning: '-notlike $null' is TRUE
-# for every input, so an unset pattern would silently turn this P0 guard off
-# rather than failing.
+# Single owner of the de-obfuscated-report exclusion, matched against a FULL PATH.
+# Broad '*revealed*' is fail-CLOSED (catches RevealedStaging_); an empty pattern silently disables this P0 guard.
 $Script:RdaRevealedExclusion = '*revealed*'
 
 # One owner of the report-stamp contract. Duplicating this regex would let the
@@ -287,15 +270,8 @@ function Get-RdaInventorySource
             }
         }
 
-        # A subtree we could not enumerate is scope we did not cover. Stamped with
-        # the directory that actually failed rather than the scan root.
-        #
-        # De-duplicated on the FORMATTED STRING, not on the ErrorRecord: the four
-        # walks above each produce a separate ErrorRecord instance for the same
-        # inaccessible directory, and ErrorRecord does not implement IComparable,
-        # so sorting the records themselves collapses nothing. One lost subtree
-        # would otherwise be reported four times, overstating the scope loss in
-        # output whose whole purpose is stating scope accurately.
+        # An un-enumerable subtree is uncovered scope, stamped with the failing dir;
+        # de-dup on the FORMATTED STRING (four walks emit separate non-comparable ErrorRecords).
         foreach ($E in @($EnumErrors))
         {
             $Where = $Item.FullName
@@ -501,14 +477,8 @@ function Find-RdaResource
 
             $Obj = $Json | ConvertFrom-Json
 
-            # An inventory that is empty, literal null, an array, or a bare scalar
-            # must be a FAILURE, not a healthy read of a subscription that merely
-            # lacks the type - the latter would feed a false absence claim. Testing
-            # the type explicitly matters: an Object[] exposes Length/Count/Rank
-            # and a String exposes Length, so a property-count test alone lets both
-            # through. A real inventory is always a JSON object (the orchestrator
-            # always sets .Version before serialising), so this cannot reject a
-            # legitimate file.
+            # Empty/null/array/scalar inventory is a FAILURE, not a healthy empty read
+            # (else a false absence); a real inventory is always a JSON object, so test the type explicitly.
             if (($null -eq $Obj) -or
                 ($Obj -isnot [System.Management.Automation.PSCustomObject]) -or
                 (@($Obj.PSObject.Properties.Name).Count -eq 0))
@@ -549,13 +519,8 @@ function Find-RdaResource
             return [pscustomobject]@{ Rows = $Rows; TypesPresent = @($Present) }
         }
 
-        # The stamped id is what makes two views of ONE subscription collapse to a
-        # single coverage unit. With no stamp, fall back to the FULL PATH rather
-        # than the bare name: two different subscriptions whose reports happen to
-        # share a stamp-less name would otherwise merge into one unit, and a merge
-        # can turn partial coverage into an apparent complete one - a false
-        # confirmed zero. A full path can only ever fail the other way, splitting
-        # one report into two units, which reports Partial and is fail-closed.
+        # The stamped id collapses two views of ONE subscription into one coverage unit;
+        # with no stamp, fall back to FULL PATH (a bare name could merge subs into a false zero).
         $Match = [regex]::Match([System.IO.Path]::GetFileName($Source.File), $Stamp)
         if ($Match.Success) { $ReportId = $Match.Groups[1].Value }
         else { $ReportId = $Source.File }
@@ -617,13 +582,8 @@ function Find-RdaResource
                     {
                         $Candidates = @($Outer.Entries | Where-Object { $_.Name -like 'ResourcesReport*.zip' })
 
-                        # RECORDED, not silently dropped. Excluding a de-obfuscated
-                        # member removes a whole subscription from the scan, so it
-                        # has to make the scan visibly incomplete - the same rule the
-                        # recursive discovery walks follow. The wording is rebuilt
-                        # from a plain format string rather than shared with
-                        # $RefuseRevealed, because a scriptblock carries the session
-                        # state it was created in and cannot cross a runspace.
+                        # Excluding a de-obfuscated member is RECORDED (not dropped) so the
+                        # scan is visibly incomplete; wording is rebuilt inline (a scriptblock can't cross a runspace).
                         $InnerEntries = [System.Collections.Generic.List[object]]::new()
                         foreach ($C in $Candidates)
                         {
@@ -668,12 +628,8 @@ function Find-RdaResource
                                             $Json = $Reader.ReadToEnd()
                                             $Reader.Dispose(); $Stream.Dispose()
 
-                                            # Same reasoning as the outer id: with no
-                                            # stamp, qualify with the containing
-                                            # bundle so two stamp-less members in
-                                            # DIFFERENT bundles cannot merge into one
-                                            # coverage unit and manufacture a false
-                                            # complete coverage.
+                                            # As the outer id: with no stamp, qualify with
+                                            # the bundle so stamp-less members can't merge into a false complete coverage.
                                             $IM = [regex]::Match($Inner.Name, $Stamp)
                                             if ($IM.Success) { $InnerId = $IM.Groups[1].Value }
                                             else { $InnerId = '{0}!{1}' -f $Source.File, $Inner.FullName }
@@ -918,12 +874,8 @@ function Write-RdaFindSummary
     $TypesNone = @($Types | Where-Object { $Coverage[$_] -eq 'None' })
     $TypesPartial = @($Types | Where-Object { $Coverage[$_] -eq 'Partial' })
 
-    # DuplicateUnits is deliberately NOT part of this test. Every other entry here
-    # means scope was LOST, which can produce a false absence; reading a
-    # subscription twice is the opposite problem - it inflates row counts and sums,
-    # and the set-based coverage arithmetic already absorbs it, so it cannot cause
-    # a false absence. Folding it in would weaken the confirmed-zero test into
-    # "never confirmable when anything was read twice". It is reported separately.
+    # DuplicateUnits is deliberately NOT in this test: it inflates counts but the set-based
+    # coverage arithmetic absorbs it and cannot cause a false absence (reported separately).
     $Incomplete = (
         (@($Result.Missing).Count -gt 0) -or
         (@($Result.Unreadable).Count -gt 0) -or
@@ -1041,12 +993,8 @@ function Write-RdaFindSummary
             $Field = $Result.GroupBy
             Write-Host ''
             Write-Host ('  Breakdown by {0}:' -f $Field) -ForegroundColor Cyan
-            # Group only the rows that CARRY the field. Grouping every row would
-            # bucket "field absent from this row's schema" together with "field
-            # present but blank", and a match set spanning bundles of different
-            # vintages makes that distinction real. Null and empty-string are
-            # normalised to one bucket, because Group-Object treats them as
-            # distinct keys and the inventory produces both shapes.
+            # Group only rows that CARRY the field (else "absent" buckets with "present but
+            # blank"); normalise null and '' to one bucket (Group-Object keys them distinctly).
             $Any = @($Rows | Where-Object { $_.PSObject.Properties[$Field] })
             if ($Any.Count -eq 0)
             {

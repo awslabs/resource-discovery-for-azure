@@ -1357,7 +1357,9 @@ function Test-MetricsAccess
     $Query = "resources | where subscriptionId =~ '{0}' and type in~ ('microsoft.compute/virtualmachines','microsoft.storage/storageaccounts','microsoft.sql/servers/databases','microsoft.web/sites','microsoft.network/publicipaddresses') | project id | take 1" -f $SubscriptionId
     try
     {
-        $Probe = @(Search-AzGraph -Query $Query -Subscription $SubscriptionId -First 1 -ErrorAction Stop)
+        # Same collection form as Invoke-AzGraphRequest: never @(Search-AzGraph ...), which wraps the single response object instead of enumerating its rows.
+        $ProbeResponse = Search-AzGraph -Query $Query -Subscription $SubscriptionId -First 1 -ErrorAction Stop
+        $Probe = if ($null -eq $ProbeResponse) { @() } else { @($ProbeResponse) }
     }
     catch
     {

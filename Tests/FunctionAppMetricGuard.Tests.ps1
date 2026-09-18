@@ -172,16 +172,8 @@ Describe 'Guard predicate: non-function resources stay excluded' {
 
 Describe 'The -Plan estimator agrees with the metrics phase about which apps count' {
 
-    # Get-MetricQueryWeightMap (Functions/RunAllSubscriptions.Functions.ps1) carries an
-    # ExtraFilter for microsoft.web/sites that must select the SAME population this
-    # file enqueues metrics for. They are two independent expressions - a KQL filter
-    # and a PowerShell -match - so nothing in the language keeps them aligned.
-    #
-    # This matters because they drift SILENTLY and in the direction that looks fine:
-    # narrowing one leaves -Plan sizing shards for a workload the run no longer does
-    # (or, worse, not sizing for one it does), and the only symptom is a shard that
-    # overruns its ceiling. It is the exact pair that would have gone out of sync had
-    # the '-notmatch linux' narrowing stayed in.
+    # Guard that Get-MetricQueryWeightMap's ExtraFilter for microsoft.web/sites selects the SAME apps this
+    # file enqueues metrics for: the KQL filter and the PowerShell -match can drift silently and missize -Plan shards.
 
     BeforeAll {
         $script:WrapperFnPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'

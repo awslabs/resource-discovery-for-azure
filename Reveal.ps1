@@ -292,13 +292,8 @@ $ResumedCount = 0
 $SkippedItems = @()
 $FailedItems = @()
 
-# Hard cap on how long a single folder's reveal may run. A pathological report
-# (e.g. an unusually large or malformed zip) can make Expand-Archive /
-# Compress-Archive run effectively forever; without a cap one bad folder stalls
-# the entire batch. When a folder exceeds this it is abandoned, recorded as a
-# timeout failure, and the run continues with the next folder. Configurable via
-# -FolderTimeoutMinutes (default 20); Ceiling keeps a fractional-minute value
-# (e.g. 0.5) at a whole >=1s Wait-Job timeout.
+# Hard cap per folder: a pathological zip can make Expand/Compress-Archive hang forever, so a folder over
+# -FolderTimeoutMinutes (default 20) is abandoned as a timeout. Ceiling keeps a fractional minute at a whole >=1s.
 $RevealTimeoutSeconds = [int][math]::Ceiling($FolderTimeoutMinutes * 60)
 
 # Resolve each folder's obfuscated report + dictionary up front, handling the
@@ -349,15 +344,8 @@ foreach ($Folder in $Folders)
     $Queue.Enqueue([pscustomobject]@{ Folder = $Folder.Name; Zip = $Zip.FullName; Dict = $Dict.FullName; OutPath = $OutPath })
 }
 
-# Bounded job pool. Keep up to -ParallelStreams reveals in flight, each its own
-# child process (so a pathological Expand/Compress can be stopped instead of
-# wedging the batch) bounded by its OWN per-folder deadline ($RevealTimeoutSeconds).
-# The parent reaps every job serially in this one loop, so the shared counters
-# and record lists are mutated only on the parent thread - no cross-thread races.
-# The folders are independent (each has its own report zip + dictionary and
-# writes its own staged output), so revealing several at once is safe and the
-# obfuscation/reveal determinism is per-folder. -ParallelStreams 1 reproduces
-# the original one-at-a-time behaviour.
+# Bounded pool: up to -ParallelStreams reveals in flight, each a child process (killable on hang) with its own
+# deadline; the parent reaps serially so shared counters stay single-threaded. Folders are independent (-ParallelStreams 1 = serial).
 $TotalToReveal = $Queue.Count
 $DoneCount = 0
 $Running = [System.Collections.Generic.List[object]]::new()

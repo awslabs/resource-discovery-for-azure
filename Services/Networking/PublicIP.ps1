@@ -16,8 +16,6 @@ if ($Task -eq 'Processing')
             if (!($Data.ipConfiguration.id)) { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
             if (!($Data.natGateway.id) -and $Use -eq 'UnderUtilized') { $Use = 'UnderUtilized' } else { $Use = 'Utilized' }
 
-            # Resolve the association from whichever surface is populated, preferring ipConfiguration so no existing row changes value:
-            # a NAT-gateway-only IP has no ipConfiguration and its association lives in natGateway.id. Both id shapes put provider type at segment 7, name at segment 8.
             $AssocId = if (-not [string]::IsNullOrEmpty([string]$Data.ipConfiguration.id))
             {
                 [string]$Data.ipConfiguration.id
@@ -31,8 +29,6 @@ if ($Task -eq 'Processing')
                 $null
             }
 
-            # 'None' (not $null) preserves the value the unassociated row has always emitted. A NAT gateway is a
-            # first-class collected resource, so its id normally resolves to the NATGateway collector's token (a real cross-reference), unlike an ipConfiguration child path.
             $AssocName = if ([string]::IsNullOrEmpty($AssocId))
             {
                 'None'
@@ -69,3 +65,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

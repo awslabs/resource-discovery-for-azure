@@ -576,7 +576,8 @@ Everything untagged is accepted by both, and the wrapper forwards it to the inne
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
 | `IncludeStorageMetrics` | Switch | **Opt in** to the Storage Account `UsedCapacity` metric. It is **not collected by default**, because it costs one metric-query call per storage account and on a tenant with a very large storage estate that single capacity figure can dominate the metrics phase. Pass this when storage capacity is actually wanted. | False | `-IncludeStorageMetrics` |
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
-| `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = each family's native cadence (15 min VM, 30 min SQL, 60 min OSS-DB). A set value (5/15/30/60) is applied **uniformly** to all three families and honored as-is. Coarser than a family's native cadence cuts that family's data-point volume/memory; finer increases it (your choice — e.g. `30` for finer OSS-DB fidelity than its 60-min default). Does **not** change the API-call count. All values are supported (these series have a 1-minute base grain). Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
+| `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = the default grain (hourly, or each family's native cadence when `-MetricsDetailed` is set: 15 min VM, 30 min SQL, 60 min OSS-DB). A set value (5/15/30/60) is applied **uniformly** to all three families and honored as-is. Coarser than a family's native cadence cuts that family's data-point volume/memory; finer increases it (your choice — e.g. `30` for finer OSS-DB fidelity than its 60-min default). Does **not** change the API-call count. All values are supported (these series have a 1-minute base grain). Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
+| `MetricsDetailed` | Switch | Collect the sampled utilization series at their native (finer) cadence: VM and disk I/O every 15 min, Azure SQL DB every 30 min, OSS-DB hourly. Without it the grain is hourly for all of them (the upstream default), which cuts VM data-point volume 4x. An explicit `-MetricsIntervalMinutes` overrides both for VM/SQL/OSS-DB. | `-MetricsDetailed` |
 | `MetricsLookbackDays` | Integer (1-93) | How many days of history to request for the **lookback-bound trend / utilization** series (see below). Omit to use the 31-day default. Does **not** change the number of Azure Monitor queries, only the data points each one returns, so it trades right-sizing sample depth for run time / memory / `Metrics_*.json` size. Capacity and limit metrics use a fixed 24h window and are unaffected. Upper bound is Azure Monitor's 93-day platform-metric retention. | 31 | `-MetricsLookbackDays 14` |
 | `UseMetricsBatch` | Switch | Collect VM/disk/storage metrics via the Azure Monitor `metrics:getBatch` data-plane API (one request per ≤50 resources), which lowers the metric-query API-call count. Falls back to the per-call path on any failure. See `docs/metrics-batch-trial.md`. | False | `-UseMetricsBatch` |
 | `HeadRoom` | Integer (0–90) | **Wrapper only.** Leave this percentage of the chosen metrics concurrency unused so the run consumes less of the shared Azure API throttle budget (leaving room for the tenant's production workloads). `0` = full concurrency. | 0 | `-HeadRoom 20` |
@@ -603,23 +604,23 @@ captured.
 
 | Metric | Resource | Granularity |
 |--------|----------|-------------|
-| Percentage CPU | VMs, VMSS | 15-min (VM) / 1-hr (VMSS) |
-| Available Memory Bytes | VMs, VMSS | 15-min / 1-hr |
-| cpu_percent, memory_percent | SQL, MariaDB, MySQL(+Flexible), PostgreSQL(+Flexible) | 30-min / 1-hr |
-| cpu_used, dtu_used | SQL DB | 30-min |
+| Percentage CPU | VMs, VMSS | 1-hr default, 15-min with `-MetricsDetailed` (VM) / 1-hr (VMSS) |
+| Available Memory Bytes | VMs, VMSS | 1-hr default, 15-min with `-MetricsDetailed` / 1-hr |
+| cpu_percent, memory_percent | SQL, MariaDB, MySQL(+Flexible), PostgreSQL(+Flexible) | 1-hr default; 30-min (SQL) / 1-hr with `-MetricsDetailed` |
+| cpu_used, dtu_used | SQL DB | 1-hr default, 30-min with `-MetricsDetailed` |
 | physical_data_read_percent, log_write_percent | SQL DB | 1-hr |
 | FunctionExecutionCount/Units | Functions | daily |
-| Composite Disk Read/Write Operations/sec, Read/Write Bytes/sec | Managed Disks (attached) | 15-min (fixed) |
+| Composite Disk Read/Write Operations/sec, Read/Write Bytes/sec | Managed Disks (attached) | 1-hr default, 15-min with `-MetricsDetailed` (not affected by `-MetricsIntervalMinutes`) |
 
 Capacity and point-in-time metrics (storage used, limits, CosmosDB throughput,
 ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 **not** affected by this setting.
 
-> The Group A granularities above are the **native** cadences. `-MetricsIntervalMinutes`
+> The default grain is **hourly** (matching the upstream awslabs project); `-MetricsDetailed` restores the **native** cadences shown above. `-MetricsIntervalMinutes`
 > (see Performance Parameters) can override the VM (`Percentage CPU`, `Available
 > Memory Bytes`), Azure SQL DB (`cpu_used`, `dtu_used`, `cpu_percent`) and OSS-DB
 > (`cpu_percent`, `memory_percent`) sampled series to a coarser grain — e.g. `60`
-> gives one hourly (peak) point instead of the 15/30-min default — to cut
+> gives one hourly (peak) point instead of the 15/30-min detailed cadence — to cut
 > data-point volume on very large tenants. A set value is applied **uniformly** to
 > all three families (VM, SQL, OSS-DB) and honored as-is: coarser than a family's
 > native cadence reduces its data-point volume, finer increases it — the operator's

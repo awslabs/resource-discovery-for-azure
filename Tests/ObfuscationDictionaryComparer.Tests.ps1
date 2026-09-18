@@ -128,15 +128,8 @@ Describe 'The case-drift diagnostic no longer claims a premise that is false' {
 
 Describe 'Protect-RdaMetrics survives a mismatched seeded dictionary set' {
 
-    # Protect-RdaMetrics checks ContainsKey on the ID map ONLY, then reads the three
-    # companion maps for the same key. Under -ObfuscationDictionary those four maps
-    # come from a FILE and are not guaranteed to be parallel, so the ID map can hold
-    # a key the Name map lacks.
-    #
-    # MEASURED first, not assumed: a missing key on a Dictionary[string,string] does
-    # NOT throw under PowerShell - the indexer adapter yields $null. So the defect is
-    # a silent null, not a crash, and the fix is to fail closed to the standard
-    # 'obfuscated' sentinel that the rest of the function already uses.
+    # Protect-RdaMetrics ContainsKey-checks only the ID map but reads companion maps by the same key; a
+    # file-seeded dictionary may not be parallel, and a missing key yields $null (not a throw) - fail closed to 'obfuscated'.
 
     BeforeAll {
         $MetricsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Extension/Metrics.ps1'

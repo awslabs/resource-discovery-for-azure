@@ -1,16 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# WeightedInventoryPlan.Tests.ps1
-#
-# OFFLINE unit tests for the composition-aware -Plan sizing helpers in
-# Functions/RunAllSubscriptions.Functions.ps1:
-#   - Get-MetricQueryWeightMap   (authoritative per-type metric-query weights)
-#   - Get-PlanWeightKql          (KQL builder, honors -Skip*Metrics gating)
-#   - Get-SubscriptionHashValue  (must agree with Get-ShardKeyForSubscription)
-#   - Get-WeightedInventoryPlan  (busiest-shard sizing over the real partition)
-#
-# All pure - no Azure calls - so they run anywhere with Pester v5+.
-# =============================================================================
+# Offline unit tests for the composition-aware -Plan sizing helpers in Functions/RunAllSubscriptions.Functions.ps1
+# (weight map, KQL builder, hash value - must agree with Get-ShardKeyForSubscription - and busiest-shard sizing); all pure, no Azure.
 
 BeforeAll {
     $RepoRoot = Split-Path $PSScriptRoot -Parent
@@ -117,12 +107,8 @@ Describe 'Get-PlanWeightKql' {
         $kql | Should -Match 'microsoft.compute/virtualmachines'
     }
 
-    # SOURCE GUARD. The Storage Account UsedCapacity metric is opt-in, so -Plan must
-    # drop the storage weight term unless the run would actually collect it. If the
-    # wrapper ever stops deriving the sizer's storage gate from -IncludeStorageMetrics,
-    # -Plan silently sizes in a cost the run never spends and recommends more machines
-    # than needed. That is invisible in the output, hence a guard on the source rather
-    # than on a value.
+    # SOURCE GUARD: the storage metric is opt-in, so -Plan must derive its storage weight from -IncludeStorageMetrics.
+    # If the wrapper stops doing so, -Plan silently oversizes (invisible in output), hence a guard on the source not a value.
     It 'the wrapper derives the plan storage term from the opt-in' {
         $WrapperSrc = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
 
@@ -175,12 +161,8 @@ Describe 'Get-WeightedInventoryPlan' {
     }
 
     It 'shards a large load so the busiest shard fits under the ceiling' {
-        # Per-sub 300s is small vs the 7200s ceiling, so the busiest shard fits
-        # with wide margin regardless of hash imbalance (it would take >24 subs in
-        # ONE bucket to breach, impossible with 200) - keeping this robust now
-        # that the shard count is capped at the subscription count.
-        # Deterministic ids (not random GUIDs) so this absolute-threshold check
-        # cannot flake on an unlucky hash partition.
+        # Per-sub 300s vs the 7200s ceiling: the busiest shard fits with wide margin regardless of hash imbalance.
+        # Deterministic ids (not random GUIDs) so this absolute-threshold check cannot flake on an unlucky partition.
         $subs = @{}
         1..200 | ForEach-Object { $subs[('{0:d8}-0000-4000-8000-000000000000' -f $_)] = 300.0 }  # 200 x 5m
         $p = Get-WeightedInventoryPlan -SubSeconds $subs -Streams 1 -MaxSingleMachineHours 2

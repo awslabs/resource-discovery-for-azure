@@ -1,35 +1,9 @@
-# Parallel-Streams Aggregation Tests
-# Validates that a parallel run (-ParallelStreams N) produces structurally
-# equivalent output to a sequential run (single sub-folder per subscription,
-# matching HTML service-section sets, matching Inventory JSON keys, matching
-# consumption record counts, matching obfuscated-ID universes when -Obfuscate is set).
-#
-# These tests are the drift-prevention guard for the parallel-streams feature.
-# Any change to the wrapper, the worker, or the per-sub folder convention that
-# silently desyncs sequential vs parallel output will fail here.
-#
-# Run with:
-#   Invoke-Pester ./Tests/ParallelStreamsAggregation.Tests.ps1 -Output Detailed
-#
-# Inputs (env vars):
-#   $env:TEST_SEQUENTIAL_BUNDLE  - path to AllSubscriptions_*.zip from a -ParallelStreams 1 run
-#   $env:TEST_PARALLEL_BUNDLE    - path to AllSubscriptions_*.zip from a -ParallelStreams N (N>=2) run
-#
-# Both env vars are REQUIRED. Auto-discovery of the two newest
-# AllSubscriptions_*.zip files was deliberately removed: two arbitrary bundles
-# in the default InventoryReports directory could come from runs with different
-# flag combinations (e.g. one -SkipMetrics, one not), producing false-positive
-# failures here. If either env var is unset, every test in this file is marked
-# Skipped (mirroring how Obfuscation.Tests.ps1 handles "no fixture provided").
+# Parallel-Streams Aggregation Tests: drift-prevention guard that a parallel run (-ParallelStreams N) produces output structurally equivalent to a sequential run.
+# Both TEST_SEQUENTIAL_BUNDLE and TEST_PARALLEL_BUNDLE env vars are REQUIRED (auto-discovery was removed to avoid mismatched-flag false positives); unset => every test is Skipped.
 
 BeforeAll {
-    # Resolve the sequential/parallel bundle pair *only* from explicit env vars.
-    # Auto-discovery is unsafe: any two AllSubscriptions_*.zip files in the
-    # default InventoryReports directory could be from runs with different
-    # flag combinations (e.g. one with -SkipMetrics, one without), which would
-    # produce false-positive failures here. If the env vars are unset we mark
-    # all tests in this file Skipped, mirroring how Obfuscation.Tests.ps1
-    # gracefully handles "no fixture provided".
+    # Resolve the bundle pair ONLY from explicit env vars; unset => mark all tests
+    # Skipped. Auto-discovery is unsafe: two arbitrary bundles may be from mismatched-flag runs, causing false-positive failures.
     $script:HaveFixture = $false
     if ($env:TEST_SEQUENTIAL_BUNDLE -and $env:TEST_PARALLEL_BUNDLE)
     {
@@ -90,12 +64,8 @@ BeforeAll {
         $PopulatedTypes = @()
         if ($Inv)
         {
-            # "Populated" means the resource type actually has rows. Every
-            # collector emits a (possibly empty) array, so a non-null check
-            # alone would treat all ~57 types as populated even for an empty
-            # subscription. Require Count > 0 so this matches what the HTML
-            # report renders (one section per type with rows) and what an
-            # empty subscription legitimately produces (none).
+            # "Populated" requires Count > 0, not just non-null: every collector
+            # emits a possibly-empty array, so a non-null check would mark all ~57 types populated. Count>0 matches what the HTML report renders.
             $PopulatedTypes = @(
                 $Inv.PSObject.Properties |
                     Where-Object { $_.Name -ne 'Version' -and $null -ne $_.Value -and @($_.Value).Count -gt 0 } |
@@ -128,12 +98,8 @@ BeforeAll {
 
     function Get-HtmlSectionSlugs($htmlPath)
     {
-        # Enumerate the service-section slugs the HTML report emitted, without
-        # depending on any module. Summary.ps1 emits one
-        # <details class="service-section" id="svc-<slug>"> per populated
-        # service, where <slug> is the service key lowercased with
-        # non-alphanumerics replaced by '-'. This is the HTML analogue of the
-        # old XLSX worksheet-name set.
+        # Enumerate the HTML service-section slugs without a module dependency:
+        # Summary.ps1 emits one id="svc-<slug>" per populated service, where <slug> is the service key lowercased with non-alphanumerics replaced by '-'.
         $Names = @()
         if (-not $htmlPath -or -not (Test-Path $htmlPath)) { return $Names }
         $Content = Get-Content $htmlPath -Raw
@@ -182,13 +148,8 @@ BeforeAll {
         # if both subs happen to have identical type sets.
         '{0}|{1}' -f $a.ResourceCount, ($a.PopulatedTypes -join ',')
     }
-    # Group per-sub artifacts by signature into LISTS, not single values: two
-    # subs with an identical (ResourceCount, PopulatedTypes) signature collide
-    # on the same key (e.g. two empty subs both key to '0|'), and assigning
-    # into a scalar-valued hashtable would silently overwrite all but the last,
-    # dropping the rest from the signature-matched comparisons below. Keeping a
-    # list per key preserves every colliding sub so the parity tests compare
-    # all of them.
+    # Group per-sub artifacts by signature into LISTS, not scalars: subs with an
+    # identical (ResourceCount, PopulatedTypes) signature collide on one key (e.g. two empty subs -> '0|'), and a scalar hashtable would overwrite all but the last.
     $script:SeqBySig = @{}
     foreach ($a in $script:SeqArtifacts)
     {
@@ -313,12 +274,8 @@ Describe 'HTML section equivalence' {
     }
 
     It 'Each per-sub HTML renders a section for every populated resource type (empty subs render none)' {
-        # The correct invariant ties HTML sections to the sub's OWN inventory:
-        # a populated sub must render >=1 section, and a legitimately empty sub
-        # (0 populated resource types - e.g. an empty subscription) must render
-        # 0 sections. Asserting "every sub has >=1 section" was wrong: it
-        # false-fails on tenants that contain an empty subscription. Compare the
-        # rendered section count to the populated-type count instead.
+        # Tie HTML section count to the sub's OWN inventory: a populated sub renders
+        # >=1 section, a legitimately empty sub renders 0. A flat "every sub >=1" assertion false-fails on tenants containing an empty subscription.
         foreach ($a in @($script:SeqArtifacts) + @($script:ParArtifacts))
         {
             $Sections = @(Get-HtmlSectionSlugs $a.HtmlPath | Where-Object { $_ })

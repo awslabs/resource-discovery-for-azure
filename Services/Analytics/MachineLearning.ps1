@@ -14,14 +14,11 @@ If ($Task -eq 'Processing')
             $Data = $1.PROPERTIES
             $Timecreated = try { if ($null -ne $Data.creationTime) { [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
-            # The four cross-resource refs (storage/key vault/app insights/container registry) are optional; guard each
-            # before .split('/')[8] or a $null aborts the whole subscription. Absent -> $null (or 'obfuscated' when obfuscating).
             $StorageAcc = if ([string]::IsNullOrEmpty($Data.storageAccount)) { $null } else { $Data.storageAccount.split('/')[8] }
             $KeyVault = if ([string]::IsNullOrEmpty($Data.keyVault)) { $null } else { $Data.keyVault.split('/')[8] }
             $Insight = if ([string]::IsNullOrEmpty($Data.applicationInsights)) { $null } else { $Data.applicationInsights.split('/')[8] }
             $ContainerRegistry = if ([string]::IsNullOrEmpty($Data.containerRegistry)) { $null } else { $Data.containerRegistry.split('/')[8] }
 
-            # Obfuscate cross-reference names when dictionary is populated
             if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
             {
                 $StorageAcc = if (![string]::IsNullOrEmpty($Data.storageAccount) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.storageAccount)) { $ResourceIdDictionary[$Data.storageAccount] } else { 'obfuscated' }
@@ -53,3 +50,4 @@ If ($Task -eq 'Processing')
         $Tmp
     }
 }
+

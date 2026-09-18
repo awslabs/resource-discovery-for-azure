@@ -1,38 +1,11 @@
 #Requires -Version 7.0
-# =============================================================================
-# ResourceInventory.Functions.ps1
-#
-# Shared helper functions for ResourceInventory.ps1. Dot-sourced from the top
-# of that script so they load into its scope. Moved out of the main script to
-# keep the orchestration flow (Variables / RunInventorySetup /
-# ExecuteInventoryProcessing / FinalizeOutputs) readable. No top-level code
-# lives here - definitions only.
-#
-# NOTE: Protect-FreeTextValue is defined Global: on purpose so it stays
-# reachable from the Services/*/*.ps1 collectors, which the orchestrator
-# invokes via '& $Module' (a call operator does NOT inherit the caller's
-# non-Global function table). Keep the Global: scope modifier.
-# =============================================================================
-# Write-Log moved to Functions/Common.Functions.ps1 (defined Global: there) so a
-# single logger is in scope for every entry script AND the Services/*/*.ps1
-# collectors (reached via '& $Module', which only see Global functions).
-# ResourceInventory.ps1 dot-sources Common.Functions.ps1 at startup, so Write-Log
-# is available here exactly as before. Its default behavior is unchanged; it
-# gained additive -NoConsole / -ToDebugLog switches. See that file for detail.
+# Shared helper library for ResourceInventory.ps1 (dot-sourced into its scope; definitions only).
+# Protect-* scrubbers and Write-Log (from Common.Functions.ps1) are Global: so collectors invoked via '& $Module' can reach them.
 
 function GetLocalVersion()
 {
-    # Anchor on this file's OWN location, never the current working directory, so
-    # the version reads correctly regardless of where the tool is launched from -
-    # e.g. an Azure DevOps agent, or a background job (Start-Job) on an AKS pod,
-    # whose working directory is not the repo checkout root. This Functions file
-    # lives one level below the repo root (Functions/) and Version.json sits at
-    # the repo root, hence the parent of $PSScriptRoot. Join-Path builds the path
-    # with the correct separator on Windows and Linux/macOS alike.
-    #
-    # $PSScriptRoot is empty only when this file was not loaded from disk (e.g. an
-    # inline Start-Job -ScriptBlock). Guard it so that case yields a clear message
-    # instead of a cryptic Join-Path/Split-Path binding error.
+    # Resolve Version.json from this file's own dir (parent of $PSScriptRoot), not the CWD,
+    # so agents/background jobs with a different CWD still read it; an empty $PSScriptRoot (not loaded from disk) fails loud.
     if ([string]::IsNullOrWhiteSpace($PSScriptRoot))
     {
         Write-Host 'Cannot resolve the script location ($PSScriptRoot is empty). Run the tool from its files on disk, not an inline script block. Exiting.' -ForegroundColor Red
@@ -63,14 +36,8 @@ function GetLocalVersion()
     return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
 }
 
-# Deterministically tokenize a free-text / identity value into
-# $Global:FreeTextDictionary and return the token, so collectors can replace
-# free-form fields (Description, FriendlyName, CreatedBy, RoleName, container
-# image, etc.) with a reversible token instead of dropping them. Same real value
-# always yields the same prod_/nonprod_ token within a run. Null/empty input
-# returns $null (preserving the previous "absent" shape); when obfuscation is off
-# the dictionary is $null and the original value is returned unchanged. Defined
-# Global so it is reachable from the collectors invoked via '& $Module'.
+# Deterministically tokenize a free-text value into $Global:FreeTextDictionary (same value -> same prod_/nonprod_ token within a run).
+# Global: so collectors invoked via '& $Module' reach it; null/empty -> $null, and with no dictionary (obfuscation off) the value is returned unchanged.
 function Global:Protect-FreeTextValue([string]$Value)
 {
     if ([string]::IsNullOrEmpty($Value)) { return $null }
@@ -83,35 +50,8 @@ function Global:Protect-FreeTextValue([string]$Value)
     return $Global:FreeTextDictionary[$Value]
 }
 
-# Safe-by-construction scrub of a raw diagnostic / exception string so it is safe
-# to place in the SHAREABLE (obfuscated) diagnostics log. Two passes:
-#   1. Dictionary tokenization. $ValueMap is a REAL-value -> token lookup the
-#      caller builds from the run's obfuscation state. NOTE the four core
-#      dictionaries are keyed by the real ARM RESOURCE ID (not by name/RG/sub),
-#      so the caller derives the bare resource NAME, RG name and subscription
-#      GUID from those keys and adds them to $ValueMap, plus tag values and
-#      free-text values. Keys are applied longest-first so a full ARM path is
-#      tokenized as one unit before its shorter sub/RG/name substrings.
-#   2. Structured-identifier masking. Classes a raw exception can carry that the
-#      dictionaries do NOT cover are masked generically so none can ship:
-#      email/UPN -> <email>, IPv4 -> <ip>, Azure data-plane FQDNs -> <host>,
-#      *nix/Windows home paths -> <user>, and any REMAINING raw GUID (e.g. a
-#      tenant GUID) -> <guid>. The email/home-path patterns mirror the leak
-#      scans in Tests/Obfuscation.Tests.ps1 so a scrubbed message cannot trip
-#      them. A prod_/nonprod_ token's GUID is always preceded by '_', so the
-#      (?<!_) lookbehind + \b boundary leave real tokens intact.
-#
-# Intentionally over-inclusive: it may mask a substring that merely coincides
-# with a real value, but it never LEAKS a known value or a structured
-# identifier. Called only for the handful of error strings that go into the
-# shareable diagnostics log (collector failures + per-phase auth-skip messages),
-# never per log line, so the per-message cost (incl. the length sort) is off the
-# hot path. When obfuscation is off the caller does not build the shareable log,
-# so this is never reached in that mode. Defined Global to match
-# Protect-FreeTextValue. Residual note: a bare resource name that is NOT in the
-# report (never inventoried, so not in any dictionary) and is not GUID/host/
-# email/path shaped could still appear in words - the caller keeps this to the
-# obfuscated bundle (shared only with the ingestion party), not a public surface.
+# Over-inclusive scrub of a diagnostic/exception string for the shareable log: dictionary tokenization (keys applied LONGEST-FIRST) then class masking of email/IP/host/path/residual GUID.
+# Must never LEAK a known value or structured identifier; the (?<!_) GUID lookbehind preserves real prod_/nonprod_ tokens. Global: to match Protect-FreeTextValue.
 function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDictionary]$ValueMap)
 {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
@@ -128,13 +68,8 @@ function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
         }
     }
 
-    # Auth artifacts first (highest severity): a SAS signature / token value in a
-    # URL or error must never ship even to the ingestion party. Mask the VALUE of
-    # sig=/signature=/sas=/(access|bearer)token=..., the connection-string secrets
-    # Azure storage / Service Bus / SQL / AAD exception text commonly carries
-    # (AccountKey=, SharedAccessKey=, Password=/pwd=, client_secret=, and any
-    # *key=/*secret=/*token= form), and a 'Bearer <token>' header. ';' terminates
-    # a value so a connection string's next segment survives readable.
+    # Auth artifacts FIRST (highest severity): mask the VALUE of sig=/sas=/*key=/*secret=/*token=/password= and 'Bearer <token>' so a SAS signature or connection-string secret never ships.
+    # ';' terminates a value so a connection string's next segment survives readable.
     $Result = [regex]::Replace($Result, '(?i)\b(sig|signature|sas|accesstoken|access_token|bearertoken|accountkey|sharedaccesskey|sharedaccesssignature|password|pwd|client_secret|clientsecret|[a-z0-9_\-]*(?:key|secret|token))=[^&;\s"''<>]+', '$1=<redacted>')
     $Result = [regex]::Replace($Result, '(?i)\bBearer\s+[A-Za-z0-9._\-]+', 'Bearer <redacted>')
 
@@ -149,24 +84,8 @@ function Global:Protect-DiagnosticText([string]$Text, [System.Collections.IDicti
     return $Result
 }
 
-# Pure helper: given a caught exception from a throttled Azure call, return how
-# many seconds to wait before retrying - honoring the SERVICE'S OWN retry
-# directive when it exposed one, instead of blind exponential guessing. A 429 is
-# a backoff signal, and Azure tells you how long to wait; obeying that both
-# recovers faster and stops a shard hammering an already-throttled, tenant-shared
-# budget (consumption/billing is the most aggressive of the three phases).
-#
-# Reads the throttle header off BOTH $Exception.Response.Headers and
-# $Exception.InnerException.Response.Headers (the metrics Get-AzMetric path wraps
-# the real ErrorResponseException one level down). Header precedence:
-#   1. Retry-After                                       (integer seconds)
-#   2. x-ms-ratelimit-microsoft.consumption-retry-after  (integer seconds)
-#   3. x-ms-user-quota-resets-after                      (hh:mm:ss TimeSpan)
-# The honored value is clamped to [1, MaxSeconds] so a pathological header can
-# never wedge a shard for minutes. When no usable header is present (or it does
-# not parse) the caller's exponential FallbackSeconds is returned unchanged, so
-# behavior is never worse than the pre-existing backoff. No cmdlet calls, no side
-# effects - deterministically unit-testable with synthetic exceptions.
+# Pure helper: seconds to wait before retrying a throttled Azure call, honoring the SERVICE'S OWN retry directive instead of blind exponential backoff.
+# Reads BOTH $Exception.Response.Headers and .InnerException.Response.Headers (metrics wraps one level down); precedence Retry-After > consumption-retry-after > user-quota-resets-after, clamped to [1,MaxSeconds]; falls back to FallbackSeconds when no usable header.
 function Get-RetryWaitSeconds
 {
     param(
@@ -182,12 +101,8 @@ function Get-RetryWaitSeconds
     $ReadHeader = {
         param($Container, $Name)
         if ($null -eq $Container) { return $null }
-        # Enumerate via GetEnumerator(): PowerShell's foreach does NOT iterate an
-        # IDictionary (a generic Dictionary - the ARG/consumption header container
-        # - or a Hashtable) entry-by-entry; it treats it as one scalar object.
-        # GetEnumerator() yields KeyValuePair (Dictionary / HttpResponseHeaders,
-        # the metrics getBatch container) or DictionaryEntry (Hashtable) - both
-        # expose .Key / .Value - so this walks all three real container shapes.
+        # Enumerate via GetEnumerator(): PowerShell's foreach treats an IDictionary as one scalar object, not entry-by-entry,
+        # so this walks all three real container shapes (Dictionary/HttpResponseHeaders -> KeyValuePair, Hashtable -> DictionaryEntry), each exposing .Key/.Value.
         $Enum = $null
         try { $Enum = $Container.GetEnumerator() } catch { return $null }
         if ($null -eq $Enum) { return $null }
@@ -264,37 +179,8 @@ function Get-RetryWaitSeconds
     return $FallbackSeconds
 }
 
-# Runs an Azure Resource Graph query via the native Az.ResourceGraph cmdlet
-# (Search-AzGraph) and returns an object exposing a .data member, mirroring the
-# shape the call sites already consume. A failed query (expired auth, throttling,
-# a malformed KQL string, a transient ARM error) throws with the real error text,
-# so a Resource Graph failure surfaces as a loud, actionable subscription failure
-# instead of a silent "0 resources found" (see #22) - transient failures are
-# retried with backoff first. -Lowercase preserves the exact whole-payload
-# `.tolower()` behavior the original data-fetching call sites relied on
-# (collectors compare against lowercase type strings and self-join on lowercased
-# ids). Native cmdlet = portable across Windows/Linux/macOS with no az.cmd shell
-# boundary, which is why a module cmdlet is preferred over an external CLI for any
-# new call on this path.
-# Classify a Resource Graph failure from the exception's STRUCTURED surface rather
-# than by matching its message text.
-#
-# This matters because the native cmdlet's .Message carries no detail at all - a
-# malformed query, a denied subscription and an oversized response all surface as
-# the same generic line:
-#     Operation returned an invalid status code 'BadRequest'
-# The actual reason lives in the typed body
-# (Microsoft.Azure.Management.ResourceGraph.Models.ErrorResponse):
-#     $Exception.Body.Error.Code            -> 'BadRequest'
-#     $Exception.Body.Error.Details[].Code  -> 'ResponsePayloadTooLarge', 'InvalidQuery', ...
-#     $Exception.Response.StatusCode        -> 400
-# so keying on codes and HTTP status is both precise and stable across service
-# message wording, SDK versions and locales.
-#
-# Text matching is kept ONLY as a last-resort fallback, for failures that carry no
-# structured body at all (a socket/DNS/TLS error is a plain exception, not an
-# ErrorResponseException). Never throws: a classifier that fails cannot be allowed
-# to mask the failure it was asked to describe.
+# Classify a Resource Graph failure from the exception's STRUCTURED surface (Body.Error.Code / Details[].Code / Response.StatusCode), not message text -
+# the native cmdlet's .Message is the same generic 'BadRequest' line for every 400. Text matching is a last-resort fallback for bodyless network errors; never throws.
 function Get-AzGraphErrorInfo
 {
     param($Exception)
@@ -307,12 +193,8 @@ function Get-AzGraphErrorInfo
         IsPayloadTooLarge   = $false
         IsThrottled         = $false
         IsPermanent         = $false
-        # A CLIENT-SIDE materialization failure caused by a resource whose JSON
-        # carries an object key that is the EMPTY STRING. NOT a service error and
-        # NOT permanent in the "give up" sense: the caller recovers it by
-        # re-fetching the same window via the raw ARM REST path and renaming empty
-        # keys before parsing. Kept as its own flag so the caller can route it to
-        # that fallback instead of failing the whole subscription.
+        # A CLIENT-SIDE materialization failure (a resource whose JSON has an EMPTY-STRING object key): not a service error and NOT permanent -
+        # its own flag so the caller recovers the window via the raw ARM REST path instead of failing the whole subscription.
         IsEmptyPropertyName = $false
     }
     if ($null -eq $Exception) { return $Info }
@@ -387,27 +269,12 @@ function Get-AzGraphErrorInfo
         $Text = $Info.Message
         if ($Text -match 'ResponsePayloadTooLarge|Response payload size is \d+, exceeded the limit') { $Info.IsPayloadTooLarge = $true }
         elseif ($Text -match 'TooManyRequests|\b429\b|throttl') { $Info.IsThrottled = $true }
-        # CLIENT-SIDE row materialization failure, not a service error, so retrying is
-        # certain to fail identically - a real shard run burned all 31 attempts on one
-        # before losing the whole subscription. A resource whose JSON carries an
-        # object key that is the EMPTY STRING cannot become a PSObject property:
-        # Search-AzGraph's conversion throws from the PSNoteProperty constructor
-        # ('the value of argument "name" is not valid'), and ConvertFrom-Json refuses
-        # the same payload ('property whose name is an empty string'). Deterministic
-        # per resource, so fail fast and name the cause instead of backing off.
+        # Empty-string JSON key = client-side materialization failure (PSNoteProperty/ConvertFrom-Json both reject it), deterministic per resource,
+        # so fail fast and name the cause rather than burning the retry budget (a real run burned all 31 attempts before losing the subscription).
         elseif ($Text -match 'the value of argument "name" is not valid|property whose name is an empty string')
         {
-            # A resource whose JSON carries an object key that is the EMPTY STRING
-            # cannot become a PSObject property: Search-AzGraph's conversion throws
-            # from the PSNoteProperty constructor ('the value of argument "name" is
-            # not valid'), and ConvertFrom-Json refuses the same payload ('property
-            # whose name is an empty string'). It is user-authored JSON (a Logic App
-            # / policy / template definition is the usual holder), so it is
-            # deterministic per resource and retrying the identical Search-AzGraph
-            # call is futile. It is NOT marked IsPermanent: the caller recovers the
-            # window via the raw ARM REST path, which returns a JSON STRING whose
-            # empty keys are renamed to a sentinel BEFORE parsing, so the resource
-            # is CAPTURED rather than the whole subscription being lost.
+            # Empty-string JSON key (user-authored JSON: Logic App / policy / template) that Search-AzGraph cannot materialize; retrying is futile.
+            # NOT marked IsPermanent - the caller recovers the window via the raw ARM REST path, renaming empty keys to a sentinel so the resource is CAPTURED, not lost.
             $Info.IsEmptyPropertyName = $true
         }
         elseif ($Text -match 'AuthorizationFailed|does not have authorization|\bForbidden\b|\bBadRequest\b|SemanticError|SyntaxError|InvalidQuery|Please provide a valid') { $Info.IsPermanent = $true }
@@ -416,27 +283,12 @@ function Get-AzGraphErrorInfo
     return $Info
 }
 
-# The sentinel an empty-string JSON property name is renamed to when a resource is
-# recovered via the raw-REST fallback. An empty key cannot survive PowerShell
-# object materialization (PSNoteProperty rejects it) or ConvertFrom-Json, so it is
-# renamed rather than dropped - the value is preserved under a stable, greppable
-# name. Chosen to be collision-proof: no real Azure property is named this. NOTE
-# for downstream/server ingestion: this key can appear anywhere inside a resource's
-# free-form 'properties' bag in Inventory_*.json; it is inert (no collector reads
-# it) and marks a resource whose original JSON had an unnamed property.
+# Sentinel that an empty-string JSON property name is renamed to in the raw-REST fallback (an empty key cannot survive PSNoteProperty/ConvertFrom-Json, so it is renamed not dropped).
+# Collision-proof (no real Azure property is named this) and inert downstream; it can appear anywhere in a resource's 'properties' bag in Inventory_*.json.
 $Script:RdaEmptyPropertyNameSentinel = '_rda_emptykey'
 
-# Recover ONE window that Search-AzGraph could not materialize because a resource
-# in it has a JSON object key that is the EMPTY STRING (see Get-AzGraphErrorInfo's
-# IsEmptyPropertyName). Fetches the SAME query/window via the raw Resource Graph
-# REST endpoint, which returns a JSON STRING; the empty keys are renamed to
-# $Script:RdaEmptyPropertyNameSentinel in that string BEFORE any ConvertFrom-Json,
-# so neither PSNoteProperty nor ConvertFrom-Json ever sees an empty name and the
-# resource is CAPTURED intact rather than the subscription being lost.
-#
-# Uses Invoke-AzRestMethod (the house pattern - portable by construction, no `az`
-# CLI). Throws on failure so the caller's existing failure handling still applies
-# if the fallback itself cannot complete.
+# Recover ONE window Search-AzGraph could not materialize because a resource has an EMPTY-STRING JSON key (see IsEmptyPropertyName): re-fetch the same query via the raw ARG REST endpoint,
+# which returns a JSON STRING whose empty keys are renamed to the sentinel BEFORE any ConvertFrom-Json, so the resource is CAPTURED intact. Uses Invoke-AzRestMethod (portable, no `az`); throws on failure.
 function Get-AzGraphRowsViaRest
 {
     param(
@@ -474,13 +326,8 @@ function Get-AzGraphRowsViaRest
         throw ("Resource Graph REST fallback returned HTTP {0}: {1}" -f $Status, $Detail)
     }
 
-    # Rename EMPTY-STRING JSON keys to the sentinel in the raw response TEXT, before
-    # parsing. A JSON object key is a quoted string immediately followed by a colon;
-    # an empty key is the literal "" in key position. Matching "" that is followed
-    # by optional whitespace and a colon targets keys without touching empty string
-    # VALUES (a value is preceded by a colon or a comma/bracket, never itself in key
-    # position). The replace runs on the response string so the empty name is gone
-    # before ConvertFrom-Json, which would otherwise reject it identically.
+    # Rename EMPTY-STRING JSON keys ("" in key position) to the sentinel in the raw response TEXT before parsing, so ConvertFrom-Json never sees an empty name.
+    # The (?<=[{,]\s*)""(?=\s*:) match targets keys only, never empty string VALUES.
     $Sanitized = [regex]::Replace(
         $Response.Content,
         '(?<=[{,]\s*)""(?=\s*:)',
@@ -496,18 +343,8 @@ function Get-AzGraphRowsViaRest
     return @()
 }
 
-# ONE Resource Graph request, with the project's bounded retry around it.
-#
-# Loop control is deliberately NOT expressed with `throw`. In a normal (non-Debug)
-# run ResourceInventory.ps1 sets $ErrorActionPreference = 'SilentlyContinue', and
-# under that preference an UNCAUGHT throw does not terminate - execution simply
-# continues at the next statement. The previous shape used `for (;;)` whose only
-# exits were `break` on success and a `throw` in the failure branch, so on a
-# permanent failure the throw fell through, the backoff ran, and the loop went
-# round again FOREVER. The retry ceiling looked like a bound but was inert, and a
-# subscription with an unfetchable page hung indefinitely instead of failing.
-# Every exit here is now an explicit `break`; the throw happens after the loop,
-# where it is the function's return path rather than its control flow.
+# ONE Resource Graph request with the project's bounded retry around it. Every loop exit is an explicit `break`; the throw happens after the loop.
+# Rationale: under $ErrorActionPreference='SilentlyContinue' an uncaught throw does NOT terminate, so the old for(;;)+throw shape looped FOREVER on a permanent failure and the retry ceiling was inert.
 function Invoke-AzGraphRequest
 {
     param(
@@ -521,12 +358,8 @@ function Invoke-AzGraphRequest
     if ($Subscription) { $GraphParams['Subscription'] = $Subscription }
     if ($Skip -gt 0) { $GraphParams['Skip'] = $Skip }
 
-    # Up to 30 retries (31 attempts) with exponential backoff + jitter, longer when
-    # throttled, honouring a server Retry-After directive when one is present. The
-    # high ceiling lets a shard ride out SUSTAINED tenant-wide ARG throttling rather
-    # than failing a whole subscription on it; per-attempt backoff is still capped
-    # (30s, 60s throttled, 120s server-directed) so the worst case is long but
-    # bounded. Stable internal - deliberately not a script parameter.
+    # Up to 30 retries (31 attempts) with exponential backoff + jitter, longer when throttled, honouring a server Retry-After directive when present.
+    # High ceiling lets a shard ride out SUSTAINED tenant-wide ARG throttling; per-attempt backoff is still capped (30s / 60s throttled / 120s server-directed). Stable internal, not a script param.
     $GraphMaxRetries = 30
     $Rows = $null
     $FailureMessage = $null
@@ -538,36 +371,8 @@ function Invoke-AzGraphRequest
         $AttemptsMade = $Attempt + 1
         try
         {
-            # The intermediate $Response variable is REQUIRED - do not inline this
-            # back to @(Search-AzGraph @GraphParams).
-            #
-            # Search-AzGraph writes ONE PSResourceGraphResponse object to the
-            # pipeline (it does not stream rows), so @(command) collects a 1-element
-            # array WRAPPING the response instead of the rows. Assigning first and
-            # then using @($variable) enumerates the response's IEnumerable, giving
-            # the flat row array every caller and this function's own accumulation
-            # logic assume.
-            #
-            # @($Response) rather than @($Response.Data) deliberately: it is correct
-            # for BOTH shapes - a single enumerable response object AND N streamed
-            # rows - so it survives an SDK output-shape change, and it also handles
-            # the plain array the test mocks return. Live behaviour confirmed on
-            # Az.ResourceGraph 1.2.1. Trade-off to know: if the response type ever
-            # stops being IEnumerable, @() re-wraps SILENTLY (this same bug),
-            # whereas .Data would break loudly.
-            #
-            # The null guard matters: @($null) is a ONE-element array CONTAINING
-            # $null, so on no output at all this would inject a phantom row that
-            # flows through Get-AzGraphRowWindow into $Global:Resources and inflates
-            # the resource count. The old @(command) form yielded @() there.
-            #
-            # This is not cosmetic. With the wrapped form, a 16 MB payload split in
-            # Get-AzGraphRowWindow accumulated N response objects, and the
-            # -Lowercase ConvertTo-Json round-trip then produced N NESTED arrays
-            # rather than one flat row set - so $Global:Resources received arrays
-            # instead of resources and every resource in the split window silently
-            # vanished from the report. Verified against real responses; the unit
-            # tests could not see it because their mock returns a plain array.
+            # $Response is REQUIRED - do NOT inline to @(Search-AzGraph @GraphParams): the cmdlet returns ONE enumerable response object, so @(command) wraps it in a 1-element array
+            # and a split 16 MB payload then silently drops every row in the window. @($Response) (not .Data) enumerates it to the flat row array callers assume; the $null guard avoids @($null)'s phantom row.
             $Response = Search-AzGraph @GraphParams
             $Rows = if ($null -eq $Response) { @() } else { @($Response) }
             $FailureMessage = $null
@@ -592,13 +397,8 @@ function Invoke-AzGraphRequest
                 break
             }
 
-            # A resource in this window has an EMPTY-STRING JSON property name, which
-            # Search-AzGraph cannot materialize (PSNoteProperty). Retrying the same
-            # call is futile - but the data is fine on the service side, so recover
-            # the SAME window via the raw REST path, which renames empty keys to a
-            # sentinel before parsing. The resource is CAPTURED, not dropped, and the
-            # subscription completes. If the REST fallback ITSELF fails, fall through
-            # to the normal failure handling (treat as permanent) rather than looping.
+            # Empty-string JSON key in this window: retrying Search-AzGraph is futile, so recover the SAME window via the raw REST path (which renames empty keys to a sentinel), capturing the resource.
+            # If the REST fallback ITSELF fails, fall through to normal (permanent) failure handling rather than looping.
             if ($ErrorInfo.IsEmptyPropertyName)
             {
                 try
@@ -643,14 +443,8 @@ function Invoke-AzGraphRequest
         }
     }
 
-    # A structured result rather than a throw, so the window splitter can read the
-    # CLASSIFICATION (IsPayloadTooLarge) directly instead of re-deriving it from a
-    # message.
-    #
-    # The property callers rely on: on SUCCESS Rows is never $null - an empty array
-    # is the floor - and Rows is $null exactly when Failure is set. Success is the
-    # only path that assigns Rows, and it breaks immediately, so the three failure
-    # exits (payload-too-large, permanent, retry-exhausted) all leave it $null.
+    # Return a structured result (not a throw) so the window splitter can read the CLASSIFICATION (IsPayloadTooLarge) directly.
+    # Contract callers rely on: on success Rows is never $null (empty array is the floor); Rows is $null exactly when Failure is set.
     return [pscustomobject]@{
         Rows           = $Rows
         Failure        = $Failure
@@ -659,28 +453,8 @@ function Invoke-AzGraphRequest
     }
 }
 
-# Fetch the rows for ONE caller-requested window, splitting it if Azure refuses the
-# response as too large.
-#
-# Resource Graph caps a single response at 16 MB. A full page normally sits far
-# below that, but a resource type whose payload is hundreds of KB each -
-# microsoft.resources/templatespecs/versions is the case that surfaced this, at up
-# to ~794 KB per resource - can push one page over the cap. Because the discovery
-# query is `order by id asc`, those resources are contiguous, so the oversize lands
-# entirely in one page. That page can NEVER succeed: it is not transient, and
-# retrying the identical request is futile.
-#
-# The caller's paging contract must not change - it advances its offset by the page
-# size it asked for - so a smaller page here would silently skip resources. This
-# therefore always returns the FULL requested window, fetched as however many
-# smaller sub-windows it takes. Halving down to a floor of one row is enough for any
-# realistic type; only a SINGLE resource larger than the cap is genuinely
-# unfetchable, and that fails loudly rather than being dropped.
-#
-# Splitting is only sound because the query is ordered (`order by id asc` at every
-# paged call site): sub-windows of an ordered result are disjoint and their
-# concatenation is the whole window. An UNORDERED query must not be split, because
-# Azure gives no stability guarantee across requests - hence the guard below.
+# Fetch the rows for ONE caller-requested window, splitting it into smaller sub-windows if Azure refuses the response as too large (16 MB cap; e.g. templatespecs/versions at ~794 KB each).
+# Always returns the FULL requested window (the caller's paging contract must not change), and only splits an ORDERED query (`order by id asc`) since sub-windows of an ordered result are disjoint and concatenate to the whole.
 function Get-AzGraphRowWindow
 {
     param(
@@ -698,12 +472,8 @@ function Get-AzGraphRowWindow
     $Rows = @()
     $SplitCount = 0
 
-    # Loop control here is explicit for the SAME reason as in Invoke-AzGraphRequest:
-    # a `throw` is not a reliable exit under 'SilentlyContinue'. Using one here would
-    # let execution fall through into the split branch on a NON-payload failure,
-    # splitting forever - which is exactly the unbounded behaviour this whole change
-    # exists to remove. Every fatal path sets $FatalMessage and breaks; the throw
-    # happens once, after the loop.
+    # Loop control is explicit (every fatal path sets $FatalMessage and breaks; the throw happens once, after the loop) for the SAME reason as Invoke-AzGraphRequest:
+    # under 'SilentlyContinue' a `throw` is not a reliable exit and would let a non-payload failure fall into the split branch and split forever.
     $FatalMessage = $null
 
     while ($Pending.Count -gt 0)
@@ -768,78 +538,19 @@ function Invoke-AzGraphQuerySafe
         [switch]$Lowercase
     )
 
-    # Native Az.ResourceGraph query. Replaces the former 'az graph query' CLI
-    # shell-out so the data path is portable by construction across
-    # Windows/Linux/macOS with no az.cmd/cmd.exe argument-quoting boundary.
-    #
-    # Contract preserved for the callers (unchanged): returns an object exposing
-    # a lowercase .data member - the row array for a fetch, or the single row for
-    # a 'summarize count()' probe (so $x.data.count_ keeps working). The lowercase
-    # spelling deliberately mirrors the ARM REST API's own JSON key; it is NOT the
-    # Az SDK's PascalCase PSResourceGraphResponse.Data.
-    #
-    # .data is ALWAYS a flat array of row objects, independent of -Lowercase. That
-    # flattening happens once, at the boundary in Invoke-AzGraphRequest, so
-    # @($x.data).Count is always the row count and -Lowercase controls ONLY casing.
-    # It used to be the ConvertTo-Json round-trip below that incidentally flattened
-    # the response, which meant the shape silently depended on -Lowercase and a
-    # payload split corrupted the row set - see the note in Invoke-AzGraphRequest.
-    #
-    # Paging is
-    # caller-driven via -First (max 1000) / -Skip offset, mirroring the previous
-    # --first/--skip. -Subscription scopes the query (mirrors --subscriptions);
-    # omitting it queries the whole accessible tenant, as before.
-    # The window fetch below builds the per-request parameter set itself, because a
-    # window that Azure refuses as too large is re-fetched as smaller sub-windows
-    # with different First/Skip values.
+    # Native Az.ResourceGraph query - replaces the former 'az graph query' CLI shell-out (portable, no az.cmd/cmd.exe quoting boundary).
+    # Caller contract preserved: returns an object with a lowercase .data member ($x.data / $x.data.count_); .data is ALWAYS a flat row array (flattened once in Invoke-AzGraphRequest) and -Lowercase controls ONLY casing.
 
-    # Bounded retry for TRANSIENT Resource Graph failures (dropped/changed
-    # network mid-run, VPN switch, ARM throttling, 5xx). Without this a single
-    # transient blip during discovery throws and fails the whole subscription
-    # (recorded to FailedAttempts and resumable, but the entire sub restarts).
-    # Up to 30 retries (31 attempts total) with exponential backoff + jitter,
-    # longer backoff when throttled. The high ceiling lets a shard ride out
-    # SUSTAINED Resource Graph throttling at very large scale - many shards share
-    # one tenant-wide ARG budget, so a throttle storm is expected - rather than
-    # failing a whole subscription on it. When the throttling response carries a
-    # server retry directive (Retry-After / x-ms-user-quota-resets-after), that
-    # value is honored via Get-RetryWaitSeconds instead of guessing - a 429 is a
-    # backoff signal and the service tells you how long to wait, so obeying it both
-    # recovers sooner and stops hammering an already-throttled shared budget.
-    # Backoff PER ATTEMPT is still capped (exponential 30s / 60s throttled,
-    # server-directed 120s) + jittered, so the worst case is a long-but-bounded
-    # wait before a genuinely dead query finally gives up. Stable internal;
-    # deliberately NOT promoted to a script param.
-    # A CLEARLY-PERMANENT failure (authorization denied, malformed KQL / bad
-    # request) is NOT retried - it throws immediately, matching the project's
-    # fail-loud-fast stance for genuine access denial rather than burning ~30s
-    # of backoff on an error a retry cannot fix. On the final failed attempt the
-    # throw is identical to the pre-retry behavior, so the per-subscription
-    # catch -> FailedAttempts -> -Resume path is unchanged (see #22).
+    # Bounded retry for TRANSIENT Resource Graph failures (network blip, VPN switch, ARM throttling, 5xx): up to 30 retries with backoff + jitter, honoring a server retry directive via Get-RetryWaitSeconds.
+    # CLEARLY-PERMANENT failures (authorization denied, malformed KQL) throw immediately; the final throw matches pre-retry behavior so the per-sub catch -> FailedAttempts -> -Resume path is unchanged (#22).
     $Rows = @(Get-AzGraphRowWindow -Query $Query -Subscription $Subscription -First $First -Skip $Skip)
 
-    # Reproduce the former whole-payload .ToLower() (keys AND values) when asked.
-    # Search-AzGraph returns typed objects with ORIGINAL casing; every data-fetch
-    # call site passes -Lowercase and downstream collectors/report tests depend on
-    # lowercased type/location/value strings (and on both sides of intra-collector
-    # self-joins being lowercased), so round-trip through JSON to lowercase both.
-    #
-    # ToLowerInvariant(), NOT ToLower(): ToLower() is culture-sensitive, so on a
-    # tr-TR / az-AZ host it maps 'I' to the dotless 'i' and would corrupt JSON KEYS
-    # as well as values - 'subscriptionId' becomes unreadable to every collector.
-    # This file already uses invariant casing elsewhere for the same reason.
+    # Reproduce the former whole-payload .ToLower() (keys AND values) via a JSON round-trip when -Lowercase, since downstream collectors/tests depend on lowercased strings and self-joins.
+    # ToLowerInvariant(), NOT ToLower(): culture-sensitive ToLower() on a tr-TR/az-AZ host maps 'I' to the dotless 'i' and would corrupt JSON KEYS like 'subscriptionId'.
     if ($Lowercase -and $Rows.Count -gt 0)
     {
-        # Defense in depth for the empty-property-name case: the REST fallback in
-        # Get-AzGraphRowsViaRest already renamed empty JSON keys to the sentinel, so
-        # rows reaching here should carry none. But ConvertFrom-Json rejects an
-        # empty property name identically to Search-AzGraph, so if one ever survived
-        # (an SDK shape this path did not sanitize), the round-trip below would
-        # re-throw and lose the window. Rename any empty key in the serialized TEXT
-        # to the sentinel before parsing - same targeted key-position match as the
-        # REST helper - so this round-trip can never be the thing that drops a
-        # resource. On the normal path (no empty keys) the regex matches nothing and
-        # behaviour is byte-for-byte unchanged.
+        # Defense in depth: rename any empty JSON key in the serialized TEXT to the sentinel before this round-trip's ConvertFrom-Json (which rejects an empty name identically to Search-AzGraph),
+        # so the -Lowercase round-trip can never drop a resource. On the normal path (no empty keys) the regex matches nothing and behaviour is byte-for-byte unchanged.
         $Json = ($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant()
         $Json = [regex]::Replace($Json, '(?<=[{,]\s*)""(?=\s*:)', ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
         $Rows = @($Json | ConvertFrom-Json)
@@ -851,27 +562,8 @@ function Invoke-AzGraphQuerySafe
 
 
 
-# Build + write the shareable Diagnostics_*.log that ships INSIDE the per-sub
-# report zip. Extracted from ResourceInventory.ps1's packaging section so it can
-# run for BOTH obfuscated and default (non-obfuscated) runs - the operator asked
-# for a diagnostic log on every run, not just obfuscated ones.
-#
-# Every free-text field that could carry an identifier (collector/phase failure
-# messages and the subscription id) is run through Protect-DiagnosticText:
-# dictionary-tokenized when an obfuscation dictionary exists (obfuscated run),
-# then any residual GUID/email/host/path masked by class. In a default run the
-# dictionaries are empty, so only the class masking applies - the log is still
-# scrubbed, but the surrounding bundle contains real identifiers, so the header
-# says so. Written as a HUMAN-READABLE .log (NOT .json) so the ingestion server
-# does not table-ingest it; the caller adds it to the zip Path array explicitly.
-#
-# Wrapped in try/catch and returns the written file path on success or $null on
-# failure: the diagnostics log is a troubleshooting aid, not the report, so a
-# construction/write error must never break packaging of the actual inventory.
-# Reads the health globals ($Global:CollectorFailures / $Global:MetricsFailedSubs
-# / $Global:ConsumptionFailedSubs) and obfuscation dictionaries directly; the
-# per-run scalars (report name, timestamp, version) and the phase-timing table
-# are passed in so the function is self-contained and unit-testable.
+# Build + write the shareable Diagnostics_*.log that ships inside the per-sub report zip, for BOTH obfuscated and default runs; every free-text field is scrubbed through Protect-DiagnosticText.
+# Written as a HUMAN-READABLE .log (NOT .json, so the ingestion server does not table-ingest it) and wrapped in try/catch returning path or $null - a diagnostics-log error must NEVER break packaging of the actual inventory.
 function Write-RdaShareableDiagnosticsLog
 {
     param(
@@ -886,12 +578,8 @@ function Write-RdaShareableDiagnosticsLog
         # makes a zero record count expected rather than a problem.
         [int]$ConsumptionRecordCount = 0,
         [bool]$ConsumptionRequested = $true,
-        # Metric-query outcome for THIS run, on the same contract as the consumption
-        # pair above: passed in rather than read from $Global:MetricsApiCallCount so
-        # the builder stays self-contained and unit-testable offline, AND so the
-        # caller can hand over a per-subscription figure instead of that global's
-        # run-cumulative one. $MetricsRequested is $false when -SkipMetrics was
-        # passed, which makes a zero call count expected rather than a problem.
+        # Metric-query outcome for THIS run, passed in (not read from the global) so the builder stays self-contained/unit-testable and can take a per-subscription figure;
+        # $MetricsRequested is $false when -SkipMetrics was passed, making a zero call count expected rather than a problem.
         [int]$MetricsApiCallCount = 0,
         [bool]$MetricsRequested = $true,
         [switch]$Obfuscated
@@ -899,14 +587,8 @@ function Write-RdaShareableDiagnosticsLog
 
     try
     {
-        # Real-value -> token scrub map for the free-text failure messages. The
-        # four core dictionaries are keyed by the real ARM RESOURCE ID (value =
-        # token), so derive the bare resource NAME (last path segment), RG name
-        # and subscription GUID from those keys and map each to the matching
-        # token - otherwise a bare name/RG/sub-GUID in an exception message would
-        # NOT be tokenized (only a full ARM path would). Tag values and free-text
-        # values are already real-value-keyed. Empty in a default run (no
-        # dictionaries), leaving Protect-DiagnosticText's class masking to act.
+        # Real-value -> token scrub map for the failure messages: derive bare NAME/RG/sub-GUID from the resource-ID-keyed dictionaries (else a bare name/RG/sub-GUID in an exception would NOT be tokenized), plus tag/free-text values.
+        # Empty in a default run (no dictionaries), leaving Protect-DiagnosticText's class masking to act.
         $DiagScrubMap = @{}
         if ($null -ne $Global:ResourceIdDictionary)
         {
@@ -1019,24 +701,8 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$csItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$csItem.Message) $DiagScrubMap)))
         }
 
-        # Consumption OUTCOME, not just its failures. A header-only Consumption CSV
-        # was previously invisible here: the failure count read 0 (no exception was
-        # raised) and the record count was not reported at all, so the shareable
-        # log looked healthy while the billing data the operator asked for was
-        # missing. The record count is a plain integer - no identifier - so it is
-        # safe in an obfuscated bundle, which is the bundle we normally receive.
-        #
-        # The n/a is gated on a ZERO count, not on the skip flag alone. Records
-        # arriving from a phase that was supposed to be skipped is a contradiction,
-        # and printing 'n/a' over a non-zero figure would hide exactly the anomaly
-        # worth seeing - so that case falls through to the numeric form.
-        #
-        # Get-RunSummaryLogContent in Functions/RunAllSubscriptions.Functions.ps1
-        # now receives the SAME -ConsumptionRequested boolean and applies the same
-        # gate, so the two builders derive this fact identically instead of one of
-        # them re-deriving it from the wrapper's bound parameters. The two lines
-        # ship in the SAME bundle and must never disagree about whether data is
-        # missing, so a cross-surface Pester assertion pins the shared phrase.
+        # Report the consumption record count (a plain integer, safe in an obfuscated bundle), not just failures - a header-only CSV was previously invisible here (failure count 0, count unreported).
+        # n/a is gated on a ZERO count AND -SkipConsumption (records from a supposedly skipped phase fall through to the numeric form); Get-RunSummaryLogContent applies the SAME gate so the two artifacts never disagree.
         $DiagLines.Add('')
         if ($ConsumptionRequested -or $ConsumptionRecordCount -ne 0)
         {
@@ -1071,28 +737,8 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('    - A subscription offer the legacy usage API does not serve.')
         }
 
-        # Metric-query counterpart to the consumption count above, and it exists for the
-        # same reason. A -SkipMetrics run previously left NO trace of the metrics phase
-        # in this shareable log: the auth-skipped count read 0 (nothing failed - the
-        # phase never ran) and the call count was not reported at all, so the log looked
-        # healthy while the metric data the operator asked for was simply absent. The
-        # count is a plain integer, no identifier, so it is safe in an obfuscated bundle.
-        #
-        # Deliberately matches the consumption block in three ways, because the two
-        # figures ship in the same log and any divergence reads as a bug in whichever the
-        # reader saw second: the same gate SHAPE (n/a only when the phase was not
-        # requested AND the count is zero, so calls arriving from a supposedly skipped
-        # phase fall through to the numeric form rather than being hidden behind 'n/a'),
-        # the same N0 + InvariantCulture formatting, and a label matching the RunSummary
-        # Health block's 'Metric-query API calls issued' verbatim so a reader comparing
-        # the two artifacts never has to work out whether two labels mean one thing.
-        #
-        # Placed AFTER the consumption warning, not between it and its count. That
-        # warning has no leading blank line and is two-space indented because it is a
-        # hanging continuation of 'Consumption records collected'; splitting the pair
-        # made a shipped log read 'Metric-query API calls issued: 34' followed by an
-        # indented 'WARNING - consumption was requested but ZERO usage records...',
-        # which scans as a METRICS warning.
+        # Metric-query call count: the counterpart to the consumption count above and for the same reason (a -SkipMetrics run previously left no trace of the phase); a plain integer, safe in an obfuscated bundle.
+        # Deliberately matches the consumption block's gate shape, N0+InvariantCulture formatting, and RunSummary label verbatim, and is placed AFTER the consumption warning so that warning is not split from its count.
         $DiagLines.Add('')
         if ($MetricsRequested -or ($MetricsApiCallCount -ne 0))
         {
@@ -1117,25 +763,8 @@ function Write-RdaShareableDiagnosticsLog
 
 
 
-# Best-effort extraction of a SERVER-DIRECTED retry delay (seconds) from a failed
-# Azure cmdlet's error, so a throttled caller waits EXACTLY as long as the service
-# asks instead of guessing with blind exponential backoff.
-#
-# Azure's Cost Management / Consumption throttle emits the wait time on a 429 via
-# the 'x-ms-ratelimit-microsoft.consumption-retry-after' header (and ARM generally
-# via the standard 'Retry-After'). Get-UsageAggregates (alias -> Get-AzUsageAggregate,
-# Az.Billing) surfaces the failure as a Microsoft.Rest.Azure.CloudException whose
-# .Response.Headers is an IDictionary[string, IEnumerable[string]] (verified against
-# the loaded Az.Billing module), so the header is readable straight off the thrown
-# ErrorRecord. Honoring it is strictly better than blind backoff: it avoids both
-# retrying too early (burning a retry, earning another 429) and waiting far longer
-# than the service actually needs.
-#
-# Header value is per RFC 7231: delta-seconds (an integer) or an HTTP-date. The
-# consumption header is delta-seconds; both forms are handled. Returns the delay in
-# seconds (>= 0) when a usable header is found, otherwise 0 - the caller then falls
-# back to its own backoff. NEVER throws: a diagnostics aid must not itself break the
-# retry loop, so every access is guarded and any oddity degrades to 0.
+# Best-effort extraction of a SERVER-DIRECTED retry delay (seconds) from a failed Azure cmdlet's error (consumption-retry-after header, else the standard Retry-After) so a throttled caller waits exactly as long as the service asks.
+# Handles both RFC 7231 forms (delta-seconds and HTTP-date, parsed invariant/AssumeUniversal); returns >= 0, else 0 so the caller uses its own backoff. NEVER throws - a diagnostics aid must not break the retry loop.
 function Get-RdaRetryAfterSeconds
 {
     param(

@@ -1,35 +1,5 @@
-# Outer Bundle Membership Tests
-#
-# Pins the member set of the ONE artifact an operator sends: the consolidated
-# AllSubscriptions_ResourcesReport_<timestamp>.zip built by Run-AllSubscriptions.ps1.
-#
-# WHY THIS EXISTS
-#
-# Every other suite inspects an INNER per-subscription ResourcesReport_*.zip
-# (Tests/OutputCompleteness.Tests.ps1 binds $env:TEST_ZIP_PATH to one), and
-# Tests/ParallelStreamsAggregation.Tests.ps1 compares two outer bundles against
-# each other without pinning either one's membership. So nothing asserted what the
-# outer bundle may and may not contain.
-#
-# That gap matters because complete InventoryReports folders have arrived from the
-# field repeatedly. The packaging code builds every archive from an explicit path
-# list and cannot produce a folder-zip, but "cannot today" is not a regression
-# guard: a future change to the stage 1/2/3 fold could sweep the inventory root.
-# The must-NOT-contain block below is that guard, and the obfuscation dictionary is
-# the one that actually matters - it is the de-obfuscation key, so shipping it
-# silently undoes -Obfuscate for the entire bundle.
-#
-# INPUT (env var)
-#   $env:TEST_ALLSUB_BUNDLE - path to an AllSubscriptions_*.zip from a completed
-#                             wrapper run. Not set: every test is skipped, so this
-#                             file is inert in suites that have no outer bundle.
-#
-# Deliberately NO auto-discovery from the default InventoryReports directory: that
-# folder accumulates bundles from many runs with different flag combinations, and
-# picking an arbitrary one produces false results (the same reasoning
-# ParallelStreamsAggregation.Tests.ps1 records for removing its auto-discovery).
-#
-# Run with: Invoke-Pester ./Tests/OuterBundleMembership.Tests.ps1 -Output Detailed
+# Outer Bundle Membership Tests: pin the member set of the consolidated AllSubscriptions_*.zip. The must-NOT-contain guard exists because complete InventoryReports folders have shipped from the field; the obfuscation dictionary is the critical exclusion (it is the de-obfuscation key).
+# Input: $env:TEST_ALLSUB_BUNDLE (unset => every test skipped). No auto-discovery: an arbitrary bundle from mixed-flag runs gives false results.
 
 BeforeDiscovery {
     $script:BundlePath = $env:TEST_ALLSUB_BUNDLE
@@ -222,14 +192,8 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
                 return
             }
 
-            # Mode comes from RunSummary.log's header, an independent signal, rather
-            # than the Subscription column this test validates. Get-RunSummaryLogContent
-            # writes 'Non-obfuscated run: ...' only for a non-obfuscated run and
-            # 'Obfuscated run: ...' otherwise. Deriving the mode from the Subscription
-            # column would let a whole-column obfuscation failure - every value a raw
-            # name, so nothing matching ^(prod|nonprod)_ - masquerade as a non-obfuscated
-            # bundle and skip the very leak this test exists to catch. Absent or
-            # ambiguous header: fail closed to obfuscated, the stricter rule.
+            # Derive obfuscation mode from RunSummary.log's header (an independent signal),
+            # NOT the Subscription column under test: deriving it from the column would let a whole-column obfuscation failure masquerade as non-obfuscated and skip this leak check. Absent/ambiguous header fails closed to obfuscated.
             $IsObfuscated = $RunSummary -notmatch 'Non-obfuscated run'
             if (-not $IsObfuscated)
             {

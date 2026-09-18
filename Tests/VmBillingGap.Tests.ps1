@@ -1,23 +1,5 @@
-# VM billing-coverage banner tests
-# Run with: Invoke-Pester ./Tests/VmBillingGap.Tests.ps1 -Output Detailed
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# The inventory (ARM/Resource Graph) lists every VM that EXISTS; the consumption
-# CSV lists VMs that produced a compute-usage record in the billing window. A
-# running VM with no compute-usage record is an anomaly that usually means
-# consumption data was incomplete for that VM's subscription. Summary.ps1
-# cross-checks the count of running VMs against the count of distinct
-# 'Virtual Machines'-meter resources in the consumption CSV and, when the
-# running count materially exceeds the billed count, renders a coverage banner
-# at the top of the report.
-#
-# This test is SELF-CONTAINED: it builds a tiny Inventory JSON and a tiny
-# Consumption CSV in a temp dir, invokes the REAL Extension/Summary.ps1, and
-# asserts the banner is present / absent / scoped correctly. No live Azure, no
-# output zip. The comparison is count-level by design (the inventory and
-# consumption files obfuscate resource ids through different dictionaries, so a
-# per-VM join is impossible in an obfuscated report).
+# VM billing-coverage banner tests: Summary.ps1 flags running VMs that lack a compute-usage record.
+# Count-level by design - inventory and consumption obfuscate ids through different dictionaries, so no per-VM join.
 
 BeforeAll {
     $script:SummaryScript = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Extension', 'Summary.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
@@ -128,15 +110,8 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Match '60%'
     }
 
-    # A whole-number percentage formats identically in every culture, so the
-    # 60% case above cannot detect a culture regression. This case produces a
-    # FRACTIONAL percentage (1 of 3 = 33.3) AND pins the thread to a
-    # comma-decimal culture, so it fails if Summary.ps1 ever stops formatting
-    # GapPct with InvariantCulture. The culture must be pinned explicitly: on a
-    # dot-decimal host the assertion would pass either way and prove nothing.
-    # This path is reachable in production because Merge-RecoveryData invokes
-    # Summary.ps1 with a row-bearing consumption CSV in a session that never
-    # entered GetResourceConsumption(), where the en-US pin was never applied.
+    # Fractional pct (33.3) with the thread pinned to a comma-decimal culture: fails if Summary.ps1
+    # stops formatting GapPct with InvariantCulture. Pin is required - a dot-decimal host would pass either way.
     It 'renders a fractional gap percentage with a dot decimal separator' {
         $Inv = New-TestInventory -RunningVms 3 -DeallocatedVms 0
         $Csv = Join-Path $script:WorkDir 'con_frac.csv'
@@ -196,12 +171,8 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
-    # A CSV that HAS data rows but NONE in the 'Virtual Machines' meter (only
-    # the Storage/Bandwidth noise) is a legitimate real zero, distinct from the
-    # header-only 'coverage unknown' case above: Summary.ps1 treats billed == 0
-    # against running > 0 as a genuine ~100% coverage gap and DOES render the
-    # banner. Without this case a regression that conflated real-zero VM billing
-    # with unknown coverage (no banner) would pass every other test silently.
+    # Data-bearing CSV with zero 'Virtual Machines'-meter rows is a real zero (billed==0 vs running>0 -> ~100% gap, banner shown),
+    # distinct from the header-only 'coverage unknown' case (no banner); guards against conflating the two.
     It 'renders the banner (~100%) for a data-bearing CSV with zero VM-meter rows' {
         $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
         $Csv = Join-Path $script:WorkDir 'con_novm.csv'

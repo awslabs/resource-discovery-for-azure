@@ -45,6 +45,8 @@ param (
     [switch] $IncludeStorageMetrics,
     [switch] $SkipDiskMetrics,
     [switch] $MetricsDetailed,
+    # OPT-IN capacity-planning VM placement CSV, forwarded to ResourceInventory.ps1's -CapacityPlan. Off by default -> no VMPlacement*.csv produced by this stream's subscriptions.
+    [switch] $CapacityPlan,
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
     # No default (matches parent): an absent key must leave ResourceInventory.ps1's 31-day default in force. Unbound this reads 0, NOT 31, so read the effective lookback only via the ContainsKey gate below.
     [ValidateRange(1, 93)][int] $MetricsLookbackDays,
@@ -218,6 +220,7 @@ if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
 if ($MetricsDetailed) { $InventoryPassthrough['MetricsDetailed'] = $true }
+if ($CapacityPlan) { $InventoryPassthrough['CapacityPlan'] = $true }
 if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinutes'] = $MetricsIntervalMinutes }
 # ContainsKey, not a value sentinel - 0 is a real, harmful lookback rather than
 # "unset". Populated from the parent's splat, exactly as the -Debug forward below.

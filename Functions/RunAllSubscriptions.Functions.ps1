@@ -100,7 +100,7 @@ function Get-RecommendedParallelism
         }
         elseif ($IsLinux)
         {
-            $MemLine = Select-String -Path '/proc/meminfo' -Pattern '^MemTotal:\s+(\d+)\s+kB' -ErrorAction Stop | Select-Object -First 1
+            $MemLine = Select-String -LiteralPath '/proc/meminfo' -Pattern '^MemTotal:\s+(\d+)\s+kB' -ErrorAction Stop | Select-Object -First 1
             if ($MemLine) { $RamGB = [math]::Round([double]$MemLine.Matches[0].Groups[1].Value / 1MB, 1) }
         }
         elseif ($IsMacOS)
@@ -801,7 +801,7 @@ function Invoke-PreFlightChecks
     # 2. Disk space probe at the inventory root: a 100+ sub run writes 200-500 MB of zips, and low free space otherwise fails late and confusingly during report generation or zip packaging.
     try
     {
-        $RootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
+        $RootItem = Get-Item -LiteralPath $InventoryRoot -ErrorAction Stop
         $Drive = $RootItem.PSDrive
         if ($null -ne $Drive -and $null -ne $Drive.Free)
         {
@@ -840,13 +840,13 @@ function Invoke-PreFlightChecks
     $ProbePath = Join-Path $InventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
     try
     {
-        Set-Content -Path $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
-        $ProbeRead = Get-Content -Path $ProbePath -Raw -ErrorAction Stop
+        Set-Content -LiteralPath $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $ProbeRead = Get-Content -LiteralPath $ProbePath -Raw -ErrorAction Stop
         if ($ProbeRead -notmatch 'preflight write probe')
         {
             throw "Write probe content mismatch (read back '$ProbeRead')"
         }
-        Remove-Item -Path $ProbePath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $ProbePath -Force -ErrorAction Stop
         Write-Host ("Write probe: OK ({0})" -f $InventoryRoot) -ForegroundColor Green
     }
     catch
@@ -855,7 +855,7 @@ function Invoke-PreFlightChecks
         Write-Host "  This usually means: readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Red
         Write-Host "  Verify the directory is writable and re-run." -ForegroundColor Red
         # Best-effort cleanup in case Set-Content partially succeeded.
-        try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
+        try { if (Test-Path -LiteralPath $ProbePath) { Remove-Item -LiteralPath $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
         Exit-Wrapper -Code 1
     }
@@ -923,10 +923,10 @@ function Get-ResumeStateObject
         }
         # Blob absent/unreadable -> fall through to the local file, if any.
     }
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return $null }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant)
         {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
@@ -1048,7 +1048,7 @@ function Save-CompletedSubscriptionIds
         # Atomic write: serialize to a sibling temp file (same volume), then File.Move(overwrite) - a same-volume rename is atomic, so a crash/SIGKILL/disk-full never leaves a truncated file that Get-CompletedSubscriptionIds would read as "start fresh" and discard all progress.
         # Depth 5 (was 4) so the nested EnumeratedAtStart.SubscriptionIds array serialises fully.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 5 | Set-Content -Path $TmpPath -Encoding utf8
+        $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch
@@ -1122,7 +1122,7 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$InventoryRoot,
         [Parameter(Mandatory = $true)][string]$Tenant
     )
-    return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+    return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
 
 # Reconcile FailedAttempts from multiple streams (plus pre-existing) against the unified CompletedIds: drop any sub now in CompletedIds; when a sub failed in more than one place, the most-recent LastFailedAt wins so a stale failure never shadows a later one.
@@ -1223,10 +1223,10 @@ function Write-Stream
 function Read-StreamState
 {
     param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
     try
     {
-        $Obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
@@ -1818,7 +1818,7 @@ function New-RdaSupportLogBundle
 
         foreach ($Pattern in $WrapperPatterns)
         {
-            foreach ($File in @(Get-ChildItem -Path $InventoryRoot -File -Filter $Pattern -ErrorAction SilentlyContinue))
+            foreach ($File in @(Get-ChildItem -LiteralPath $InventoryRoot -File -Filter $Pattern -ErrorAction SilentlyContinue))
             {
                 if ((& $IsExcluded $File.Name) -or -not (& $PassesSince $File)) { continue }
                 try { Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $Stage $File.Name) -Force; $Collected++ }
@@ -1826,12 +1826,12 @@ function New-RdaSupportLogBundle
             }
         }
 
-        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue))
+        foreach ($SubDir in @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue))
         {
             $DestSubDir = Join-Path $Stage $SubDir.Name
             foreach ($Pattern in $PerSubPatterns)
             {
-                foreach ($File in @(Get-ChildItem -Path $SubDir.FullName -File -Filter $Pattern -ErrorAction SilentlyContinue))
+                foreach ($File in @(Get-ChildItem -LiteralPath $SubDir.FullName -File -Filter $Pattern -ErrorAction SilentlyContinue))
                 {
                     if ((& $IsExcluded $File.Name) -or -not (& $PassesSince $File)) { continue }
                     if (-not (Test-Path -LiteralPath $DestSubDir -PathType Container)) { New-Item -ItemType Directory -Path $DestSubDir -Force | Out-Null }
@@ -1874,10 +1874,11 @@ function New-RdaSupportLogBundle
         $Manifest.Add('  <ResourcesReport*>/DebugLog_*.log     - per-subscription collector heartbeat (START/DONE/FAIL) + metrics diagnostics (LOCAL; real names).')
         $Manifest.Add('  <ResourcesReport*>/ErrorLog_*.log     - per-subscription error log (LOCAL; real names).')
         $Manifest.Add('  <ResourcesReport*>/Transcript_Log_*.txt - per-subscription PowerShell transcript (LOCAL; real names).')
-        $Manifest.ToArray() | Out-File -FilePath (Join-Path $Stage 'MANIFEST.txt') -Encoding utf8
+        $Manifest.ToArray() | Out-File -LiteralPath (Join-Path $Stage 'MANIFEST.txt') -Encoding utf8
 
-        $StageItems = @(Get-ChildItem -Path $Stage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-        Compress-Archive -Path $StageItems -DestinationPath $DestinationPath -Force
+        # -LiteralPath: -Path globs, so '[' or ']' anywhere in the inventory root would match a sibling instead (silently wrong content).
+        $StageItems = @(Get-ChildItem -LiteralPath $Stage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        Compress-Archive -LiteralPath $StageItems -DestinationPath ([WildcardPattern]::Escape($DestinationPath)) -Force
         return $DestinationPath
     }
     catch

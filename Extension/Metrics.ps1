@@ -28,7 +28,7 @@ param(
 if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
 {
     $CommonFunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'
-    if (Test-Path -Path $CommonFunctionsFile -PathType Leaf)
+    if (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf)
     {
         . $CommonFunctionsFile
     }
@@ -743,7 +743,7 @@ if ($Task -eq 'Processing')
                     Protect-RdaMetrics -Metrics $Tmp.Metrics -ResourceIdDictionary $ResourceIdDictionary -ResourceNameDictionary $ResourceNameDictionary -ResourceSubDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary
                 }
                 $BatchOutputPath = $FilePath + "_0.json"
-                $Tmp | ConvertTo-Json -depth 5 -compress | Out-File $BatchOutputPath -Encoding utf8
+                $Tmp | ConvertTo-Json -depth 5 -compress | Out-File -LiteralPath $BatchOutputPath -Encoding utf8
                 $Tmp.Metrics.Clear()
             }
 
@@ -1232,7 +1232,7 @@ if ($Task -eq 'Processing')
             }
 
             $OutputPath = $FilePath + "_" + $RangeIdx + ".json"
-            $Tmp | ConvertTo-Json -depth 5 -compress | Out-File $OutputPath -Encoding utf8
+            $Tmp | ConvertTo-Json -depth 5 -compress | Out-File -LiteralPath $OutputPath -Encoding utf8
             $Tmp.Metrics.Clear()
 
             $RangeIdx++

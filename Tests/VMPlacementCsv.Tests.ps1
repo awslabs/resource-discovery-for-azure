@@ -1,29 +1,5 @@
-# VM Placement CSV Tests
-#
-# OFFLINE unit tests for Extension/VMPlacement.ps1 - the tenant-wide capacity
-# planning CSV. No Azure calls: each test builds synthetic $Global:SmaResources
-# (already-obfuscated collector output) plus a synthetic $Global:Resources
-# (Resource Graph payload), invokes the REAL extension, and parses the CSV it
-# wrote.
-#
-# WHY THESE ASSERTIONS EXIST
-#
-# The file's whole purpose is being summed by a capacity planner, which makes two
-# failure modes far worse than a missing row:
-#
-#   1. A placeholder word in a numeric column. 'Unknown' in DataDiskCount makes the
-#      column mixed-type; Excel SUM() silently skips it and pandas coerces the
-#      column to object. The planner gets a WRONG total rather than an obviously
-#      missing one. Every numeric column must therefore be a number or EMPTY.
-#   2. A misleading 0. Both the VM and VMSS collectors fall back to 0 vCPUs/RAM
-#      when Get-AzComputeResourceSku fails (see Tests/CollectorGuards.Tests.ps1).
-#      No real SKU has 0 vCPU, so 0 there means "lookup failed" and reporting it as
-#      0 understates capacity silently. It must render EMPTY.
-#
-# Scale sets are covered because they are real capacity in a real zone: omitting
-# them understated the estate with nothing in the file to signal the gap.
-#
-# Run with: Invoke-Pester ./Tests/VMPlacementCsv.Tests.ps1 -Output Detailed
+# Offline unit tests for Extension/VMPlacement.ps1 (capacity CSV): assert numeric
+# columns are number-or-EMPTY (a placeholder word or a fallback 0 corrupts SUM).
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
@@ -37,14 +13,8 @@ BeforeAll {
     $script:WorkDir = Join-Path $TmpBase ('VMPlacementTest_' + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
 
-    # The extension calls Write-Log. Define a silent stand-in in THIS scope so the
-    # tests exercise the real logic without needing the orchestrator's logging.
-    # Captures into a GLOBAL, not $script:. This function is defined global: so the
-    # extension can see it, and '$script:' inside a global function does NOT resolve to
-    # the Pester test scope that reads it - so the capture silently collected nothing.
-    # It went unnoticed because no test asserted on the log until the Flexible-warning
-    # test below. -NoConsole is accepted too: the real Write-Log takes it, and an
-    # unbound parameter would make the extension's call fail rather than log.
+    # Silent Write-Log stand-in so tests exercise the real extension without the
+    # orchestrator; MUST be global: and capture into a GLOBAL or nothing is collected.
     function global:Write-Log
     {
         param([string]$Message, [string]$Severity, [switch]$ToDebugLog, [switch]$NoConsole)
@@ -149,21 +119,8 @@ Describe 'VM placement CSV' {
             $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1') `
                 -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1') -Dictionary $null
 
-            # This list IS the VMPlacement.csv column contract: the emitter builds an
-            # ordered hashtable and Export-Csv takes the header from it, so a change
-            # here changes the shipped file for every consumer.
-            #
-            # The last three complete the capacity picture and are not optional:
-            #   OrchestrationMode - Flexible vs Uniform, set on scale-set rows.
-            #   ParentScaleSet    - attributes a Flexible-orchestration VM row to its
-            #                       scale set.
-            #   AksCluster        - marks Kubernetes-managed capacity.
-            # The last two exist specifically to stop double-counting: the report's
-            # AKS section reports the same nodes as NodeSize/Nodes, and a Flexible
-            # VMSS reports both the set and its member VMs, so without these two a
-            # planner counts that capacity twice. See the rationale comments at
-            # Extension/VMPlacement.ps1 around the 'ParentScaleSet' and 'AksCluster'
-            # assignments.
+            # This list IS the VMPlacement.csv column contract (Export-Csv takes the
+            # header from it); ParentScaleSet/AksCluster exist to stop double-counting.
             $Expected = @(
                 'ResourceKind', 'Subscription', 'ResourceGroup', 'Name', 'Location', 'Zone',
                 'Size', 'Instances', 'CPU', 'MemoryGB', 'PowerState', 'AvailabilitySet',
@@ -362,15 +319,8 @@ Describe 'VM placement CSV' {
         }
 
         It 'fails loud with an Error when Resource Graph reports VMs or scale sets but the collectors returned no rows' {
-            # The empty-collector result has TWO causes that must NOT report identically:
-            # a subscription genuinely without VMs (the benign Info skip asserted above),
-            # versus a collector that THREW and left $Result = @() while Resource Graph
-            # still shows the resources. The extension distinguishes them by asking the
-            # Graph payload, and the second case is a fail-loud Severity 'Error' - not a
-            # silent Info skip. Supplying both a VM and a VMSS Graph row against empty
-            # collector output exercises that Error branch (checked for BOTH types), so a
-            # regression collapsing the collector-failure signal back into an Info skip is
-            # caught here.
+            # Empty collector output has two causes: a benign no-VMs Info skip, versus a
+            # collector that threw while Graph still shows capacity (a fail-loud Error).
             $Rows = script:Invoke-Placement -Vms @() -ScaleSets @() `
                 -GraphRows @((script:New-GraphVm -Id 'v1'), (script:New-GraphVmss -Id 's1')) -Dictionary $null
 
@@ -383,15 +333,8 @@ Describe 'VM placement CSV' {
 
 Describe 'The Flexible-orchestration double-counting guard' {
 
-    # This guard protects the ONE number the file exists to produce. A Flexible scale
-    # set's members are first-class microsoft.compute/virtualmachines resources, so they
-    # are ALREADY emitted as individual VirtualMachine rows. Counting the set's
-    # Instances as well would count the same capacity twice and overstate a Flexible
-    # estate by up to 2x - silently, inside SUM(CPU * Instances).
-    #
-    # It had no test at all, which is also how the warning below went missing: the
-    # code's own comment promised "the count is named in a Warning below" and no such
-    # warning existed, so the operator was never told that some rows contribute nothing.
+    # A Flexible scale set's members are already emitted as individual VM rows, so
+    # counting the set's Instances too would double its capacity in SUM(CPU*Instances).
 
     It 'leaves Instances EMPTY on a Flexible scale set, so it adds nothing to the total' {
         $Rows = script:Invoke-Placement `
@@ -455,12 +398,8 @@ Describe 'The Flexible-orchestration double-counting guard' {
     }
 
     It 'leaves Instances EMPTY on an UNMATCHED scale set and names the excluded count in a WARNING' {
-        # A join miss leaves $Placement null, so the orchestration mode is UNKNOWN - the
-        # set could really be Flexible, whose member VMs are already emitted as
-        # VirtualMachine rows. Trusting the '' default and counting its Instances would
-        # re-open the exact double-count the guard prevents, so the cell is left EMPTY
-        # (a missing figure over a wrong total) and the excluded count is named in a
-        # Warning rather than left to be inferred from an empty cell.
+        # A join miss leaves orchestration UNKNOWN (possibly Flexible, whose members are
+        # already VM rows), so Instances is left EMPTY and the excluded count Warned.
         $Rows = script:Invoke-Placement `
             -ScaleSets @([PSCustomObject]@{ ID = '/ss/orphan'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'orphanset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 7; vCPUs = 4; RAM = 16 }) `
             -GraphRows @()

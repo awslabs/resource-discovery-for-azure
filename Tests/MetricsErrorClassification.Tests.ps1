@@ -41,7 +41,8 @@ BeforeAll {
     # Extract the permanent pattern FROM THE SOURCE rather than retyping it. A
     # hardcoded copy keeps passing after the real classifier is weakened, so every
     # logic case below would go green against broken code.
-    $PermMatch = [regex]::Match($script:MetricsSrc, 'if \(\$LastError -match "(?<Rx>invalid status code[^"]*)"\)')
+    # The classification lives in Get-RdaMetricFailureClass (pure, inside the -Parallel block); the loop consumes its result.
+    $PermMatch = [regex]::Match($script:MetricsSrc, 'if \(\$(?:LastError|Message) -match "(?<Rx>invalid status code[^"]*)"\)')
     if (-not $PermMatch.Success)
     {
         throw 'Could not locate the permanent-failure classifier regex in Extension/Metrics.ps1; this test cannot verify what it cannot find.'
@@ -53,13 +54,13 @@ BeforeAll {
 Describe 'Metrics per-call failure classification' {
 
     It 'still has both classification branches' {
-        $script:MetricsSrc | Should -Match ([regex]::Escape("invalid status code '?(?<Status>NotFound|BadRequest)'?")) -Because 'the anchored permanent check must exist'
+        $script:MetricsSrc | Should -Match ([regex]::Escape("invalid status code '?(?<Status>NotFound|BadRequest")) -Because 'the anchored permanent check must exist (it may list further permanent statuses after these two)'
         $script:MetricsSrc | Should -Match ([regex]::Escape("'429|throttl|TooManyRequests|rate limit'")) -Because 'the throttle check must exist'
     }
 
     It 'evaluates the anchored permanent check BEFORE the loose throttle check' {
         # This is the whole finding. Compare source positions.
-        $PermIdx = $script:MetricsSrc.IndexOf("invalid status code '?(?<Status>NotFound|BadRequest)'?")
+        $PermIdx = $script:MetricsSrc.IndexOf("invalid status code '?(?<Status>NotFound|BadRequest")
         $ThrottleIdx = $script:MetricsSrc.IndexOf("'429|throttl|TooManyRequests|rate limit'")
 
         $PermIdx | Should -BeGreaterThan -1
@@ -67,20 +68,21 @@ Describe 'Metrics per-call failure classification' {
         $PermIdx | Should -BeLessThan $ThrottleIdx -Because 'a loose throttle match running first would reclassify a terminal 404/400 as throttling and restore the 4-attempt burn with doubled backoff'
     }
 
-    It 'reaches the throttle branch only as an elseif of the permanent branch' {
+    It 'a permanent classification wins outright: the classifier RETURNS before the loose throttle test runs' {
         # Ordering alone is not enough: two independent `if`s in the right order
-        # would still let both run. The throttle test must be chained.
-        $ThrottleLineNo = (1..$script:MetricsLines.Count | Where-Object {
-                $script:MetricsLines[$_ - 1] -match "429\|throttl\|TooManyRequests\|rate limit"
-            } | Select-Object -First 1)
-
-        $ThrottleLineNo | Should -Not -BeNullOrEmpty
-        $script:MetricsLines[$ThrottleLineNo - 1].TrimStart() |
-            Should -Match '^elseif' -Because 'chaining is what guarantees a permanent classification wins outright'
+        # would still let both run. Inside Get-RdaMetricFailureClass the permanent
+        # branch must return, so the throttle test is never reached for a 404/400.
+        $Fn = [regex]::Match($script:MetricsSrc, '(?s)function Get-RdaMetricFailureClass\s*\{.*?\n                \}').Value
+        $Fn | Should -Not -BeNullOrEmpty
+        $PermIdx = $Fn.IndexOf("invalid status code '?(?<Status>NotFound|BadRequest")
+        $ThrottleIdx = $Fn.IndexOf("'429|throttl|TooManyRequests|rate limit'")
+        $PermIdx | Should -BeGreaterThan -1; $ThrottleIdx | Should -BeGreaterThan $PermIdx
+        $Fn.Substring($PermIdx, $ThrottleIdx - $PermIdx) | Should -Match 'return @\{ Permanent = \$true' -Because 'the permanent branch must return before the throttle test'
     }
 
     It 'takes the recorded outcome FROM the regex match, so it cannot drift from the branch' {
-        $script:MetricsSrc | Should -Match '\$PermanentOutcome\s*=\s*\$Matches\[''Status''\]' -Because 'a hardcoded outcome string could disagree with the status that actually matched'
+        $script:MetricsSrc | Should -Match 'Outcome\s*=\s*\$Matches\[''Status''\]' -Because 'a hardcoded outcome string could disagree with the status that actually matched'
+        $script:MetricsSrc | Should -Match '\$PermanentOutcome\s*=\s*\$FailureClass\.Outcome' -Because 'the loop must take the outcome from the classifier, not restate it'
     }
 }
 

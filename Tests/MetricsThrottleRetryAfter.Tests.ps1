@@ -13,6 +13,9 @@ BeforeAll {
     $FnAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricRetryPlan' }, $true) | Select-Object -First 1
     if (-not $FnAst) { throw 'Get-RdaMetricRetryPlan was not found in Extension/Metrics.ps1' }
     . ([scriptblock]::Create($FnAst.Extent.Text))
+    $ClsAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricFailureClass' }, $true) | Select-Object -First 1
+    if (-not $ClsAst) { throw 'Get-RdaMetricFailureClass was not found in Extension/Metrics.ps1' }
+    . ([scriptblock]::Create($ClsAst.Extent.Text))
 
     # Production defaults, read from the source so the test tracks them.
     $script:MaxRetries = [int]([regex]::Match($script:MetricsSrc, '(?m)^\s*\$MetricMaxRetries\s*=\s*(\d+)').Groups[1].Value)
@@ -115,5 +118,46 @@ Describe 'Retry-After reaches the runspace' {
 
     It 'the retry loop has an explicit exit when the budget is exhausted (the while is no longer bounded by attempts)' {
         $script:MetricsSrc | Should -Match '(?s)while \(-not \$Succeeded\)\s*\{.*?Budget exhausted.*?break'
+    }
+}
+
+Describe 'Get-RdaMetricFailureClass - one failed attempt, classified from its message' {
+    BeforeAll {
+        # Exact text Azure Monitor produced for an invalid bearer in a live simulation (Get-AzMetric, Az.Monitor).
+        $script:Live401 = 'The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: Exception type: ErrorResponseException, Message: Microsoft.Azure.Management.Monitor.Models.ErrorResponseException: Operation returned an invalid status code ''Unauthorized'''
+    }
+
+    It 'treats 401 Unauthorized as permanent (no retries) with its own outcome' {
+        $C = Get-RdaMetricFailureClass -Message $script:Live401
+        $C.Permanent | Should -BeTrue; $C.Outcome | Should -Be 'Unauthorized'; $C.Throttled | Should -BeFalse
+    }
+    It 'recognises the ARM token error codes as Unauthorized' {
+        (Get-RdaMetricFailureClass -Message 'ExpiredAuthenticationToken: The access token expiry UTC time is earlier than current UTC time').Outcome | Should -Be 'Unauthorized'
+        (Get-RdaMetricFailureClass -Message 'InvalidAuthenticationToken: The received access token is not valid').Outcome | Should -Be 'Unauthorized'
+    }
+    It 'treats 403 Forbidden / AuthorizationFailed as permanent Forbidden' {
+        (Get-RdaMetricFailureClass -Message ($script:Live401 -replace 'Unauthorized', 'Forbidden')).Outcome | Should -Be 'Forbidden'
+        (Get-RdaMetricFailureClass -Message 'AuthorizationFailed: The client does not have authorization to perform action').Outcome | Should -Be 'Forbidden'
+    }
+    It 'keeps NotFound and BadRequest permanent, as before' {
+        (Get-RdaMetricFailureClass -Message ($script:Live401 -replace 'Unauthorized', 'NotFound')).Outcome | Should -Be 'NotFound'
+        (Get-RdaMetricFailureClass -Message ($script:Live401 -replace 'Unauthorized', 'BadRequest')).Outcome | Should -Be 'BadRequest'
+    }
+    It 'classifies a 429 as throttled and retryable' {
+        $C = Get-RdaMetricFailureClass -Message ($script:Live401 -replace 'Unauthorized', 'TooManyRequests')
+        $C.Throttled | Should -BeTrue; $C.Permanent | Should -BeFalse; $C.Outcome | Should -Be 'Throttled'
+    }
+    It 'does not read a GUID containing 429 as throttling (permanent check first, anchored status)' {
+        $Msg = "Operation returned an invalid status code 'NotFound' for /subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-429-prod/providers/x"
+        (Get-RdaMetricFailureClass -Message $Msg).Outcome | Should -Be 'NotFound'
+    }
+    It 'falls back to a retryable generic Error' {
+        $C = Get-RdaMetricFailureClass -Message 'Timed out after 120s'
+        $C.Permanent | Should -BeFalse; $C.Throttled | Should -BeFalse; $C.Outcome | Should -Be 'Error'
+    }
+    It 'the phase summary counts and explains access failures' {
+        $script:MetricsSrc | Should -Match 'Unauthorized: \{8\} \| Forbidden: \{9\}'
+        $script:MetricsSrc | Should -Match 'ACCESS FAILURE: '
+        $script:MetricsSrc | Should -Match 'Re-authenticate \(Connect-AzAccount\)'
     }
 }

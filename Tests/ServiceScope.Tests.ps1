@@ -1,25 +1,5 @@
-# Service Scope Tests
-# =============================================================================
-# Validates that a -Service-scoped run produced an inventory containing ONLY the
-# requested service collectors (plus non-service metadata like Version). This is
-# the output-level proof of the -Service filter on ResourceInventory.ps1 and the
-# Run-AllSubscriptions.ps1 wrapper: whatever services were requested, NO other
-# resource type may appear in the inventory.
-#
-# Driven by environment variables (same pattern as the other suites):
-#   $env:TEST_ZIP_PATH          - the output zip to validate (required)
-#   $env:TEST_EXPECTED_SERVICES - comma-separated collector base names that were
-#                                 requested via -Service (e.g. "VirtualMachines,Streamanalytics")
-#
-# When either is unset the whole suite is marked Skipped, so it is inert for the
-# other scenarios / standalone runs and only asserts when the scenario matrix
-# (or an operator) points it at a scoped zip.
-#
-# Run with (point TEST_ZIP_PATH at ONE concrete zip, not a wildcard):
-#   $env:TEST_ZIP_PATH = '/path/to/ResourcesReport_<timestamp>.zip'
-#   $env:TEST_EXPECTED_SERVICES = 'VirtualMachines'
-#   Invoke-Pester ./Tests/ServiceScope.Tests.ps1 -Output Detailed
-# =============================================================================
+# Output-level proof of the -Service filter: a -Service-scoped inventory must contain ONLY the requested collectors (plus non-service metadata like Version).
+# Driven by $env:TEST_ZIP_PATH + $env:TEST_EXPECTED_SERVICES; the whole suite self-skips when either is unset.
 
 BeforeAll {
     # Non-service top-level keys that are always allowed regardless of -Service.

@@ -75,7 +75,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Collected check results: each is { Name, Status (PASS/WARN/FAIL), Detail }.
 $Results = [System.Collections.Generic.List[object]]::new()
 
 function Add-Result
@@ -88,9 +87,6 @@ function Add-Result
     $Results.Add([pscustomobject]@{ Name = $Name; Status = $Status; Detail = $Detail })
 }
 
-# Mask a caller identity for display. Under workload identity the signed-in
-# Account.Id is the UAMI's app (client) id - a real identity value that could
-# leak into captured CI/pod logs, so never print it verbatim.
 function Get-MaskedIdentity
 {
     param([string]$Identity)
@@ -100,8 +96,6 @@ function Get-MaskedIdentity
     return '***'
 }
 
-# Recursively collect the subscription-ID SET under a management-group tree (subscription children have a '*subscriptions*' Type; nested MGs recurse), not a count, so check 4 can name missed subs and is immune to a phantom sub balancing a real one.
-# Mirrors Get-RdaMgSubscriptionId in the wrapper's shared Functions library so preflight and the runtime gate use the same logic.
 function Get-RdaMgSubscriptionId
 {
     param($Node)
@@ -126,9 +120,6 @@ Write-Host ''
 Write-Host '=== RDA node (in-pod) readiness check - runs as the pod workload identity ===' -ForegroundColor Green
 Write-Host ''
 
-# 1. Workload-identity environment present. Without these three the webhook did
-#    not inject a token, so the pod is not wired to the ServiceAccount/UAMI at all
-#    - every downstream check is moot, so this is the exit-2 "cannot run" gate.
 $ClientId = $env:AZURE_CLIENT_ID
 $TenantId = $env:AZURE_TENANT_ID
 $TokenFile = $env:AZURE_FEDERATED_TOKEN_FILE
@@ -152,7 +143,6 @@ else
         -Detail 'AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_FEDERATED_TOKEN_FILE not all set. Add the annotated ServiceAccount and the azure.workload.identity/use=true pod label.'
 }
 
-# 2. Federated sign-in - the exact call entrypoint.ps1 makes for a real shard.
 $SignedIn = $false
 if ($WiEnvPresent -and (Test-Path -LiteralPath $TokenFile))
 {
@@ -183,10 +173,6 @@ if ($WiEnvPresent -and (Test-Path -LiteralPath $TokenFile))
     }
 }
 
-# 3. Resource Graph read - proves the UAMI has Reader and the inventory phase can
-#    run. An identity with Reader but zero in-scope subscriptions returns an empty
-#    result (not an error); that still proves the API call is authorized, so it is
-#    a PASS. Only a thrown auth error is a FAIL.
 if ($SignedIn)
 {
     $AzRg = Get-Module -ListAvailable -Name Az.ResourceGraph | Select-Object -First 1
@@ -220,14 +206,10 @@ if ($SignedIn)
     }
 }
 
-# 4. Subscription coverage: compare subs the identity can ACCESS (Get-AzSubscription)
-#    against the true set under the tenant-root MG (Get-AzManagementGroup -Recurse, GroupId = tenant id). A shortfall AND an unverifiable total are both HARD FAILs - this tool must capture ALL subscriptions.
 if ($SignedIn)
 {
     try
     {
-        # Enumerate ALL subs state-agnostically so the comparison is apples-to-apples
-        # with the state-agnostic MG side; compare ID SETS not counts, so a shortfall names the real missed subs and is immune to a phantom sub balancing the counts.
         $AccessibleSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
         $AccessibleCount = $AccessibleSubs.Count
 
@@ -239,32 +221,21 @@ if ($SignedIn)
         }
         catch
         {
-            # No management-group read (or Az.Resources / Get-AzManagementGroup
-            # unavailable): cannot establish the true set. Leave $MgIds null ->
-            # HARD FAIL below (unverifiable coverage is not acceptable).
             $MgIds = $null
         }
 
         if ($null -eq $MgIds)
         {
-            # MG set unknowable (no MG read, or Get-AzManagementGroup absent): HARD FAIL,
-            # not a warning - completeness cannot be verified and proceeding risks a silently incomplete inventory.
             Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
                 -Detail ("Cannot verify full subscription coverage: the tenant-root management group could not be read (this identity lacks management-group read, or the Az.Resources module / Get-AzManagementGroup is unavailable), so there is no way to confirm the {0} accessible subscription(s) are ALL of them. Grant the identity Reader at the tenant-root management group (GroupId = tenant id) - it inherits to every subscription AND lets this check confirm coverage - then re-run." -f $AccessibleCount)
         }
         elseif ($MgIds.Count -eq 0)
         {
-            # MG read SUCCEEDED but reported zero subscriptions under the root -
-            # implausible for a real tenant (there is at least the one this identity
-            # signed in against), so the MG tree is not returning true membership
-            # and coverage cannot be trusted. Still a HARD FAIL for the same reason.
             Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
                 -Detail ("Cannot verify full subscription coverage: the tenant-root management group was read but reported zero subscriptions, while the identity can access {0} - the management-group hierarchy is not returning its true membership, so coverage cannot be confirmed. Grant the identity Reader at the tenant-root management group (GroupId = tenant id) and ensure it can read the full MG hierarchy, then re-run." -f $AccessibleCount)
         }
         else
         {
-            # Missed subs = present under the tenant-root MG but NOT enumerable by this
-            # identity (compare ID sets case-insensitively). Extra subs the identity sees are not a gap; any missed id is a HARD FAIL, named (capped) so it is actionable.
             $AccessibleIdSet = @{}
             foreach ($S in $AccessibleSubs) { $AccessibleIdSet[([string]$S.Id).ToLowerInvariant()] = $true }
             $MissedIds = @($MgIds | Where-Object { -not $AccessibleIdSet.ContainsKey(([string]$_).ToLowerInvariant()) })
@@ -284,18 +255,11 @@ if ($SignedIn)
     }
     catch
     {
-        # Could not even list subscriptions / evaluate coverage. Cannot guarantee a
-        # complete inventory, so fail hard rather than risk a partial run.
         Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
             -Detail ("Could not evaluate subscription coverage ({0}). Grant the identity Reader at the tenant-root management group so full coverage can be confirmed, then re-run." -f $_.Exception.Message)
     }
 }
 
-# 5. Blob write+delete - only when centralized upload is requested. Proves the
-#    UAMI has Storage Blob Data Contributor on the collection container, which the
-#    per-node -UploadToBlobContainerUri upload needs. Uses -UseConnectedAccount
-#    (passwordless, same as the real upload); writes a tiny probe blob then
-#    deletes it so the check leaves nothing behind.
 if ($SignedIn -and -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
 {
     $AzStorage = Get-Module -ListAvailable -Name Az.Storage | Select-Object -First 1
@@ -306,9 +270,6 @@ if ($SignedIn -and -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
     else
     {
         Add-Result -Name 'Module Az.Storage' -Status 'PASS' -Detail $AzStorage.Version.ToString()
-        # Track the probe artifacts OUTSIDE the try so finally can always clean up,
-        # even if the write succeeds but the in-try delete (or anything after it)
-        # throws - that window must never leave an orphaned probe blob behind.
         $ProbeFile = $null
         $ProbeContext = $null
         $ProbeBlobName = $null
@@ -325,8 +286,6 @@ if ($SignedIn -and -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
                 throw "Could not parse '<account>' and '<container>' from '$UploadToBlobContainerUri'."
             }
 
-            # Probe blob is namespaced + GUID-suffixed so it never collides with a
-            # real shard artifact and is trivial to spot if a delete ever fails.
             $ProbeBlobName = '{0}_rda-readiness-probe/{1}.txt' -f $BlobPrefix, ([guid]::NewGuid().ToString('N'))
             $ProbeFile = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-probe-{0}.txt' -f ([guid]::NewGuid().ToString('N')))
             Set-Content -LiteralPath $ProbeFile -Value 'rda node readiness probe' -Encoding UTF8
@@ -334,10 +293,6 @@ if ($SignedIn -and -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
             $ProbeContext = New-AzStorageContext -StorageAccountName $StorageAccountName -UseConnectedAccount -ErrorAction Stop
             $null = Set-AzStorageBlobContent -File $ProbeFile -Container $ContainerName -Blob $ProbeBlobName -Context $ProbeContext -Force -ErrorAction Stop
             $ProbeWritten = $true
-            # Delete on the happy path so a PASS genuinely reflects both write AND
-            # delete working; a delete failure here is a real permission gap
-            # (Storage Blob Data Contributor grants both) so it surfaces as FAIL,
-            # and the finally block below still removes the orphan.
             Remove-AzStorageBlob -Container $ContainerName -Blob $ProbeBlobName -Context $ProbeContext -Force -ErrorAction Stop
             $ProbeWritten = $false
             Add-Result -Name 'Blob write+delete (upload)' -Status 'PASS' `
@@ -350,8 +305,6 @@ if ($SignedIn -and -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
         }
         finally
         {
-            # Best-effort: if the blob was written but not yet deleted (in-try delete
-            # threw), remove it now so the container is left untouched regardless.
             if ($ProbeWritten -and $ProbeContext -and $ProbeBlobName)
             {
                 Remove-AzStorageBlob -Container $ContainerName -Blob $ProbeBlobName -Context $ProbeContext -Force -ErrorAction SilentlyContinue
@@ -366,7 +319,6 @@ elseif ($SignedIn -and [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
         -Detail 'Skipped - no -UploadToBlobContainerUri given. Pass it to prove the node can upload; omit only if each node keeps its zip locally.'
 }
 
-# --- Render the readiness table -------------------------------------------------
 Write-Host ''
 foreach ($R in $Results)
 {
@@ -380,9 +332,6 @@ $WarnCount = @($Results | Where-Object { $_.Status -eq 'WARN' }).Count
 
 Write-Host ''
 
-# Exit 2 = could not run at all: no workload-identity environment, so the pod is
-# not federated to any identity and no Azure-side check was meaningful. Distinct
-# from exit 1 (federated fine, but a specific capability failed).
 if (-not $WiEnvPresent)
 {
     Write-Host 'CANNOT RUN: no workload-identity environment in this pod. Ensure it uses the annotated ServiceAccount (serviceAccountName: rda-sa) and the azure.workload.identity/use=true label, then re-run.' -ForegroundColor Red
@@ -399,3 +348,4 @@ else
     Write-Host ("NOT READY: {0} check(s) failed, {1} warning(s). Fix the FAILs (usually a missing UAMI role or federated-credential subject), then re-run." -f $FailCount, $WarnCount) -ForegroundColor Red
     exit 1
 }
+

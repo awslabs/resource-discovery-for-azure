@@ -100,18 +100,8 @@ function Get-MaskedIdentity
     return '***'
 }
 
-# Recursively collect the subscription IDs (each subscription child's .Name is its
-# subscription GUID) under a management-group tree returned by Get-AzManagementGroup
-# -Expand -Recurse. Subscription children carry a Type like '/subscriptions'; nested
-# management-group children carry a 'managementGroups' Type and their own .Children,
-# so we recurse into those. Returning the ID SET (not just a count) lets check 4
-# compare it directly against the ids the identity can enumerate - which is more
-# robust than a raw count (immune to a phantom/transitioning subscription that could
-# coincidentally balance a real missing one) and lets it NAME exactly which
-# subscriptions would be silently missed. Establishes the TRUE subscription set under
-# the tenant-root MG, independent of what the running identity can enumerate via
-# Get-AzSubscription. Mirrors Get-RdaMgSubscriptionId in the wrapper's shared
-# Functions library so the preflight and the runtime gate use the same logic.
+# Recursively collect the subscription-ID SET under a management-group tree (subscription children have a '*subscriptions*' Type; nested MGs recurse), not a count, so check 4 can name missed subs and is immune to a phantom sub balancing a real one.
+# Mirrors Get-RdaMgSubscriptionId in the wrapper's shared Functions library so preflight and the runtime gate use the same logic.
 function Get-RdaMgSubscriptionId
 {
     param($Node)
@@ -230,32 +220,14 @@ if ($SignedIn)
     }
 }
 
-# 4. Subscription coverage (tenant-root management-group scope) - the silent
-#    blind-spot guard. Get-AzSubscription only returns subscriptions the identity
-#    holds a role on, so an identity scoped per-subscription can SILENTLY MISS
-#    subscriptions (a report that looks complete but isn't - at scale, potentially
-#    hundreds). The robust fix is Reader at the tenant-root management group, which
-#    inherits to every subscription. Here we compare what the identity can ACCESS
-#    (Get-AzSubscription) against what the tenant-root MG actually CONTAINS
-#    (Get-AzManagementGroup -Recurse). A definite shortfall is a FAIL (subs will be
-#    missed). If the MG cannot be read (no management-group read, or Az.Resources
-#    absent) the total is unknowable - which is itself a HARD FAIL, not a warning:
-#    this tool must capture ALL subscriptions, so an unverifiable coverage claim is
-#    unacceptable. The tenant-root MG's GroupId equals the tenant id.
+# 4. Subscription coverage: compare subs the identity can ACCESS (Get-AzSubscription)
+#    against the true set under the tenant-root MG (Get-AzManagementGroup -Recurse, GroupId = tenant id). A shortfall AND an unverifiable total are both HARD FAILs - this tool must capture ALL subscriptions.
 if ($SignedIn)
 {
     try
     {
-        # Enumerate ALL subscriptions the identity can see (state-agnostic). The MG
-        # side (Get-RdaMgSubscriptionId) also collects every subscription child
-        # regardless of enabled/disabled state, so the comparison is
-        # apples-to-apples: a genuine shortfall reflects a real visibility gap
-        # (subscriptions the identity has no role on), not a state mismatch. We
-        # compare the actual ID SETS (not just counts), mirroring the wrapper's
-        # runtime gate: the missed subscriptions are exactly the ids present under
-        # the tenant-root MG but NOT enumerable by this identity, which is immune to
-        # a phantom/transitioning subscription coincidentally balancing the counts
-        # and lets us NAME which subscriptions would be missed.
+        # Enumerate ALL subs state-agnostically so the comparison is apples-to-apples
+        # with the state-agnostic MG side; compare ID SETS not counts, so a shortfall names the real missed subs and is immune to a phantom sub balancing the counts.
         $AccessibleSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
         $AccessibleCount = $AccessibleSubs.Count
 
@@ -275,14 +247,8 @@ if ($SignedIn)
 
         if ($null -eq $MgIds)
         {
-            # MG set unknowable: the tenant-root management group could not be read -
-            # either this identity has no management-group read, or the Az.Resources
-            # cmdlet Get-AzManagementGroup is not in the image. Either way
-            # completeness cannot be verified, and this tool's purpose is to capture
-            # ALL subscriptions, so it is a HARD FAIL, not a warning - proceeding
-            # could yield a silently incomplete inventory. The fix (Reader at the
-            # tenant-root MG) both guarantees access to every subscription and makes
-            # this check verifiable.
+            # MG set unknowable (no MG read, or Get-AzManagementGroup absent): HARD FAIL,
+            # not a warning - completeness cannot be verified and proceeding risks a silently incomplete inventory.
             Add-Result -Name 'Subscription coverage (MG scope)' -Status 'FAIL' `
                 -Detail ("Cannot verify full subscription coverage: the tenant-root management group could not be read (this identity lacks management-group read, or the Az.Resources module / Get-AzManagementGroup is unavailable), so there is no way to confirm the {0} accessible subscription(s) are ALL of them. Grant the identity Reader at the tenant-root management group (GroupId = tenant id) - it inherits to every subscription AND lets this check confirm coverage - then re-run." -f $AccessibleCount)
         }
@@ -297,16 +263,8 @@ if ($SignedIn)
         }
         else
         {
-            # Compare the actual ID SETS: the missed subscriptions are the ones
-            # present under the tenant-root MG but NOT enumerable by this identity.
-            # Compare case-insensitively - subscription ids are GUIDs but normalise
-            # to be safe. If NOTHING under the root MG is missing, coverage is
-            # complete by definition (any extra subs the identity sees are still
-            # being captured, so they are not a gap); otherwise the missed ids would
-            # be SILENTLY dropped - a HARD FAIL, naming them (capped) so the gap is
-            # actionable. A subscription mid-transition (e.g. Deleting) can briefly
-            # linger in the MG tree while dropping out of Get-AzSubscription; the
-            # FAIL message tells the operator to re-run, which clears that edge.
+            # Missed subs = present under the tenant-root MG but NOT enumerable by this
+            # identity (compare ID sets case-insensitively). Extra subs the identity sees are not a gap; any missed id is a HARD FAIL, named (capped) so it is actionable.
             $AccessibleIdSet = @{}
             foreach ($S in $AccessibleSubs) { $AccessibleIdSet[([string]$S.Id).ToLowerInvariant()] = $true }
             $MissedIds = @($MgIds | Where-Object { -not $AccessibleIdSet.ContainsKey(([string]$_).ToLowerInvariant()) })

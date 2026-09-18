@@ -12,8 +12,6 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            # Timestamps are optional: Get-Date on a null value throws and previously killed the whole Stream
-            # Analytics collector for the subscription. Guard each one and emit $null when the source value is missing.
             $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { try { (get-date $Data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") } catch { $null } }
             $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { try { (get-date $Data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { $null } }
             $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { try { (get-date $Data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { $null } }
@@ -45,3 +43,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

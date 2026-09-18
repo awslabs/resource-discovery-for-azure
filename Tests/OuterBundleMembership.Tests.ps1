@@ -213,4 +213,28 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
                 Should -Be 0 -Because 'obfuscation is deterministic, so a partially-tokenized column indicates a broken join'
         }
     }
+
+    Context 'The -CapacityPlan opt-in gate' {
+
+        # VMPlacement.csv is OPT-IN via -CapacityPlan (mirrors the -IncludeStorageMetrics/
+        # -SkipDiskMetrics volume controls). These two assertions are the with/without
+        # pair, each env-gated so they are inert unless the harness declares which kind
+        # of run produced $env:TEST_ALLSUB_BUNDLE - same TEST_EXPECT_* style as
+        # Tests/MetricsVolumeControls.Tests.ps1. The unconditional 'when present ...'
+        # assertions above already prove placement, when it appears, is well-formed;
+        # these prove the SWITCH is what decides whether it appears at all.
+
+        It 'omits VMPlacement.csv entirely when -CapacityPlan was NOT passed' {
+            if ($env:TEST_EXPECT_NO_CAPACITY_PLAN -ne '1') { Set-ItResult -Skipped -Because 'TEST_EXPECT_NO_CAPACITY_PLAN not set'; return }
+            @($script:EntryNames | Where-Object { $_ -like 'VMPlacement*.csv' }).Count |
+                Should -Be 0 -Because 'without -CapacityPlan no VM placement CSV is produced, aggregated, or folded into the bundle'
+        }
+
+        It 'includes VMPlacement.csv at the root when -CapacityPlan was passed and the tenant has VMs' {
+            if ($env:TEST_EXPECT_CAPACITY_PLAN -ne '1') { Set-ItResult -Skipped -Because 'TEST_EXPECT_CAPACITY_PLAN not set'; return }
+            # A -CapacityPlan run over a tenant with no VMs legitimately produces none,
+            # so the with-VMs precondition is asserted via the harness flag, not inferred.
+            $script:RootEntries | Should -Contain 'VMPlacement.csv' -Because '-CapacityPlan over a tenant with VMs must fold the tenant-wide CSV into the bundle root'
+        }
+    }
 }

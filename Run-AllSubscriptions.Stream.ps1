@@ -61,7 +61,7 @@ param (
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -92,7 +92,7 @@ if ($SubscriptionIds.Count -ne $SubscriptionNames.Count)
                 [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: SubscriptionIds/SubscriptionNames length mismatch' }
             })
         ResourceCounts = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 1
 }
 
@@ -113,7 +113,7 @@ if ($SubscriptionIds.Count -eq 0)
         ConsumptionRecords    = 0
         ConsumptionFailedSubs = @()
         MetricsFailedSubs     = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 0
 }
 
@@ -154,7 +154,7 @@ catch
                 [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
             })
         ResourceCounts = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 1
 }
 
@@ -369,7 +369,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         }
         $DiagLines += ""
 
-        try { $DiagLines | Out-File -FilePath $StreamFailuresPath -Append -Encoding utf8 }
+        try { $DiagLines | Out-File -LiteralPath $StreamFailuresPath -Append -Encoding utf8 }
         catch { Write-Stream ("could not write to stream failures log {0}: {1}" -f $StreamFailuresPath, $_.Exception.Message) 'Yellow' }
 
         $FailedSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $ErrRecord.Exception.Message }
@@ -405,7 +405,7 @@ $Summary = [pscustomobject]@{
 }
 try
 {
-    $Summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
 }
 catch
 {

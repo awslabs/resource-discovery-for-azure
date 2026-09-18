@@ -13,8 +13,6 @@ If ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            # Parent compute VM from properties.virtualMachineResourceId; resolving through $ResourceIdDictionary
-            # yields the SAME obfuscated token the VM collector assigned, preserving the SQL-VM link (else 'obfuscated').
             $ParentVM = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
             {
                 if (![string]::IsNullOrEmpty($Data.virtualMachineResourceId) -and $ResourceIdDictionary.ContainsKey($Data.virtualMachineResourceId)) { $ResourceIdDictionary[$Data.virtualMachineResourceId] } else { 'obfuscated' }
@@ -44,3 +42,4 @@ If ($Task -eq 'Processing')
         $Tmp
     }
 }
+

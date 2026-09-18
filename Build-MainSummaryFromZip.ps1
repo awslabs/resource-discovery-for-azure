@@ -61,8 +61,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Shared function library: New-RdaAllSubHtmlSummaryFromZip + New-RdaAllSubHtmlSummary
-# + the render helpers all live here. Dot-source so they load into this scope.
 $SummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
 if (-not (Test-Path -LiteralPath $SummaryFunctions -PathType Leaf))
 {
@@ -80,7 +78,6 @@ $Params = @{
 }
 if (-not [string]::IsNullOrWhiteSpace($OutputDirectory)) { $Params.OutputDirectory = $OutputDirectory }
 
-# Source the tool version from Version.json if present (display-only header).
 try
 {
     $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
@@ -89,3 +86,4 @@ try
 catch { Write-Verbose ("Could not read Version.json: {0}" -f $_.Exception.Message) }
 
 New-RdaAllSubHtmlSummaryFromZip @Params
+

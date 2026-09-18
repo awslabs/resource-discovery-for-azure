@@ -207,12 +207,8 @@ Describe 'Retained text is capped and single-line' {
         $Result.Length | Should -BeGreaterThan 2000
         $Result.Length | Should -BeLessThan 2100
 
-        # Assert the PROPERTY, not just the marker. A 12-character marker surviving
-        # proves almost nothing: raising $HeadLen to 0.95 * $BodyCap would leave a
-        # ~100-char tail, destroy the 'Valid metrics: a,b,c,...' list this cap exists to
-        # preserve, and still satisfy every assertion above. So require a tail big
-        # enough to hold a realistic list. Azure's Microsoft.Web rejection enumerates
-        # dozens of metric names, several hundred characters in total.
+        # Assert the PROPERTY, not just the marker: a surviving marker proves little, so require a tail big enough
+        # to hold a realistic 'Valid metrics:' list (Azure's Microsoft.Web rejection enumerates hundreds of chars).
         $TailIdx = $Result.IndexOf('chars omitted')
         $TailIdx | Should -BeGreaterThan 0
         $RetainedTail = $Result.Substring($TailIdx)

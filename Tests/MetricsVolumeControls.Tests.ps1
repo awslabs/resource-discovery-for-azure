@@ -1,60 +1,9 @@
-# Metrics Volume Controls Tests
-# =============================================================================
-# Output-level proof of the metric-volume controls on Metrics.ps1
-# (threaded through ResourceInventory.ps1 / the wrappers):
-#   -IncludeStorageMetrics   : Storage Account UsedCapacity records ARE emitted.
-#                              The metric is OPT-IN, so the default emits none and
-#                              this is the assertion that proves the gate opens.
-#   -SkipDiskMetrics         : no Managed Disk metric records are emitted.
-#   -MetricsIntervalMinutes N: the high-frequency SAMPLED utilization series - VM
-#                              (Percentage CPU / Available Memory Bytes), Azure SQL
-#                              DB (cpu_used / dtu_used / cpu_percent) and the OSS DBs
-#                              MariaDB / MySQL / PostgreSQL + Flexible (cpu_percent /
-#                              memory_percent) - carry the N-minute grain.
-#
-# Driven by environment variables (same pattern as the other suites):
-#   $env:TEST_ZIP_PATH                    - the output zip to validate (required)
-#   $env:TEST_EXPECT_NO_STORAGE_METRICS   - '1' => assert 0 'Storage Account' records
-#   $env:TEST_EXPECT_STORAGE_METRICS      - '1' => assert >0 UsedCapacity records
-#   $env:TEST_EXPECT_NO_DISK_METRICS      - '1' => assert 0 'Managed Disk' records
-#   $env:TEST_EXPECT_METRIC_GRAIN_MINUTES - e.g. '60' => assert the VM/SQL sampled
-#                                           series carry that grain (hh:mm:ss)
-#
-# Each assertion is independently gated on its env var, so the suite is inert
-# (all Skipped) for scenarios / standalone runs that do not set them.
-#
-# COVERAGE NOTE (these are necessary, not sufficient, checks): the absence
-# assertions pass when there are 0 records of that Service, which is also true if
-# the target subscription simply has no storage accounts / no attached disks - so
-# a green result confirms "the flag did not leave any such records" but does NOT
-# by itself prove the flag removed something that would otherwise be present
-# (there is no with/without baseline here). Likewise the grain check Skips (not
-# fails) when the subscription has no VM/SQL/OSS-DB sampled series to inspect.
-# Treat these as output-shape smoke tests; the with/without proof is the
-# scenario matrix generating a real zip per flag combination.
-#
-# The grain check deliberately targets ONLY the knob-controlled sampled series
-# (scoped by BOTH Service and Metric) - it does NOT assert on Managed Disk (also
-# 15-min but NOT covered by the interval knob), VM Scale Sets (fixed 1-hr), or
-# the Series='false' capacity reads, which keep their native cadence.
-#
-# Run with (point TEST_ZIP_PATH at ONE concrete zip, not a wildcard):
-#   $env:TEST_ZIP_PATH = '/path/to/ResourcesReport_<timestamp>.zip'
-#   $env:TEST_EXPECT_NO_STORAGE_METRICS = '1'
-#   Invoke-Pester ./Tests/MetricsVolumeControls.Tests.ps1 -Output Detailed
-# =============================================================================
+# Output-level proof of Metrics.ps1 volume controls (-IncludeStorageMetrics/-SkipDiskMetrics/
+# -MetricsIntervalMinutes), each env-gated so inert when unset; necessary-not-sufficient (no with/without baseline).
 
 BeforeAll {
-    # The high-frequency SAMPLED utilization series the -MetricsIntervalMinutes
-    # knob overrides. Kept in lockstep with Extension/Metrics.ps1: these are the
-    # only defs that reference $VmMetricInterval / $SqlMetricInterval / $DbMetricInterval.
-    # The grain check scopes by BOTH Service and Metric name so it targets ONLY the
-    # knob-controlled series: VM (Percentage CPU / Available Memory Bytes), Azure
-    # SQL DB (cpu_used / dtu_used / cpu_percent), and the OSS DBs MariaDB / MySQL /
-    # PostgreSQL + Flexible (cpu_percent / memory_percent). It deliberately excludes
-    # the Series='false' capacity reads (storage_percent, physical_data_read_percent,
-    # log_write_percent), the daily SQL limit reads, and the Managed Disk metrics -
-    # none of which are governed by the knob.
+    # The sampled series the -MetricsIntervalMinutes knob overrides, kept in lockstep
+    # with Extension/Metrics.ps1; scoped by BOTH Service and Metric so only knob-controlled series match.
     $script:GrainTargetServices = @('Virtual Machines', 'SQL Database', 'MariaDB', 'MySQL', 'MySQL Flexible', 'PostgreSQL', 'PostgreSQL Flexible')
     $script:GrainTargetMetrics = @('Percentage CPU', 'Available Memory Bytes', 'cpu_used', 'dtu_used', 'cpu_percent', 'memory_percent')
 
@@ -81,13 +30,8 @@ BeforeAll {
             if ($null -ne $Doc.Metrics) { $script:Metrics += @($Doc.Metrics) }
         }
 
-        # How many storage accounts this subscription actually HAS, read from the
-        # same bundle. Both storage assertions need it:
-        #   - the positive one must not hard-fail on a tenant that simply owns no
-        #     storage account (there is then nothing to collect, and demanding a
-        #     record would be asserting against the tenant, not the code);
-        #   - the absence one is only meaningful when there WAS something to skip,
-        #     so this is what stops it passing vacuously.
+        # Storage-account count from the same bundle: the positive assertion must not
+        # hard-fail on a tenant that owns none, and it stops the absence assertion passing vacuously.
         $script:StorageAccountCount = 0
         foreach ($InvFile in @(Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -Recurse))
         {

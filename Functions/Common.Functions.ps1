@@ -132,7 +132,7 @@ function Write-RdaProgress
             {
                 $Line = '[{0:dd-MM-yyyy} {0:HH:mm:ss}] {1}: {2}' -f (Get-Date), $Activity, $Status
             }
-            Add-Content -Path $HeartbeatLogFile -Value $Line -ErrorAction Stop
+            Add-Content -LiteralPath $HeartbeatLogFile -Value $Line -ErrorAction Stop
         }
         catch
         {
@@ -174,7 +174,7 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
     {
         try
         {
-            ('{0} {1}' -f $DateTime, $Message) | Out-File -FilePath $Global:ErrorLogFile -Append -Encoding utf8
+            ('{0} {1}' -f $DateTime, $Message) | Out-File -LiteralPath $Global:ErrorLogFile -Append -Encoding utf8
         }
         catch
         {
@@ -188,7 +188,7 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
     {
         try
         {
-            ('{0} {1}' -f $DateTime, $Message) | Out-File -FilePath $Global:DebugLogFile -Append -Encoding utf8
+            ('{0} {1}' -f $DateTime, $Message) | Out-File -LiteralPath $Global:DebugLogFile -Append -Encoding utf8
         }
         catch
         {

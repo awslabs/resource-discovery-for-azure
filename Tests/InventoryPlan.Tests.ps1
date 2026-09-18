@@ -1,18 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# InventoryPlan.Tests.ps1
-#
-# OFFLINE unit tests for Get-InventoryPlan in
-# Functions/RunAllSubscriptions.Functions.ps1 - the pure capacity planner behind
-# the -Plan "getting started" switch. No Azure calls; the function is pure, so
-# these run anywhere with Pester v5+.
-#
-# The contract under test: given the eligible subscription count, this host's
-# recommended parallel-stream count, and a per-subscription time estimate, decide
-# whether ONE machine finishes within the single-machine wall-time ceiling, or
-# how many shards to split across so each machine's slice fits under it - and the
-# shards must collectively cover every subscription.
-# =============================================================================
+# Offline unit tests for Get-InventoryPlan (pure capacity planner behind -Plan): decides one machine vs
+# how many shards fit under the single-machine wall-time ceiling, and that the shards cover every subscription.
 
 BeforeAll {
     $RepoRoot = Split-Path $PSScriptRoot -Parent

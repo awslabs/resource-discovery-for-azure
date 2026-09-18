@@ -165,14 +165,8 @@ foreach ($Module in 'Az.Accounts', 'Az.ResourceGraph', 'Az.Resources', 'Az.Compu
     }
 }
 
-# Resolve the target subscription for the remaining checks. When -SubscriptionId
-# names a subscription other than the active context's, the provider and
-# node-size checks (which read the CURRENT context) would silently check the
-# wrong subscription and report a false PASS. So the context is switched for the
-# DURATION OF THIS PROCESS ONLY (-Scope Process: never written to ~/.Azure, so
-# the operator's default subscription in other sessions is untouched) and the
-# original context is restored in the finally below, keeping the script's
-# "changes nothing" contract - the only mutation is transient session state.
+# Resolve target subscription and switch context (-Scope Process only, restored in finally)
+# so provider/node-size checks read the right subscription without touching the operator's default.
 if (-not $SubscriptionId -and $Context) { $SubscriptionId = $Context.Subscription.Id }
 $TargetSubscriptionReady = $true
 $OriginalContext = $Context
@@ -241,12 +235,8 @@ try
         }
         else
         {
-            # Distinguish restriction SCOPE. A 'Location'-type restriction means the
-            # size is not available for this subscription in the region at all (this is
-            # what blocked Standard_B2s in testing) -> FAIL. A 'Zone'-type restriction
-            # only removes some availability zones; the size is still creatable (AKS
-            # lands it in an available zone or non-zonally, as Standard_D2s_v3 did in
-            # testing) -> WARN, not a blocker.
+            # Distinguish restriction scope: a 'Location' restriction means not creatable here -> FAIL;
+            # a 'Zone' restriction only removes some zones, still creatable (AKS picks one) -> WARN.
             $LocationRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Location' }).Count -gt 0
             $ZoneRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Zone' }).Count -gt 0
             if ($LocationRestricted)
@@ -271,12 +261,8 @@ try
             -Detail ("Could not query SKUs ({0})." -f $_.Exception.Message)
     }
 
-    # 6. Can the signed-in caller create the infra and wire up workload identity?
-    #    Creating AKS/ACR needs Contributor (or Owner) on the subscription/RG.
-    #    Creating role assignments + federated credentials for workload identity needs
-    #    Owner or User Access Administrator. We check the caller's role assignments at
-    #    subscription scope - a WARN (not FAIL) when absent, since the rights may be
-    #    granted at a management-group or resource-group scope this check can't see.
+    # 6. Check caller can create infra + workload identity (role assignments + federated creds need
+    #    Owner/User Access Administrator). WARN not FAIL when absent: grant may be at an unseen MG/RG scope.
     if ($Context -and $SubscriptionId)
     {
         try

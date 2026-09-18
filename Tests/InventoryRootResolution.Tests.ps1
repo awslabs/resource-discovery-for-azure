@@ -1,21 +1,5 @@
-# =============================================================================
-# OFFLINE unit tests for Get-RdaInventoryRoot - the single resolver for the
-# directory every run writes under. No Azure, no zip, no env vars required.
-#
-# WHY THIS EXISTS. The root was previously computed inline in SIX places across
-# Run-AllSubscriptions.ps1 and ResourceInventory.ps1, and the wrapper never tells
-# the inner script which one it picked - so the two agreed only because the
-# arithmetic was duplicated identically. On top of that, every creation failure
-# was swallowed to Write-Verbose, and the pre-flight write probe meant to catch it
-# used a bare `throw`, which is DISCARDED under this project's normal
-# $ErrorActionPreference = 'SilentlyContinue'. Net effect on a machine where the
-# path was not writable: "Pre-flight checks passed." followed by a confusing later
-# failure, exit code 0.
-#
-# These tests pin the contract that replaced it, including the two properties that
-# are easy to regress silently: an explicit -OutputDirectory is NEVER redirected,
-# and an empty $HOME never degrades to the filesystem root.
-# =============================================================================
+# OFFLINE unit tests for Get-RdaInventoryRoot, the single resolver for the output root (no Azure/zip/env).
+# Pins the two easily-regressed properties: an explicit -OutputDirectory is NEVER redirected, and an empty $HOME never degrades to the filesystem root.
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
@@ -146,16 +130,8 @@ Describe 'Get-RdaInventoryRoot: child-process agreement' {
     }
 
     It 're-probes instead of failing when the pinned value is stale' {
-        # A leftover value from an earlier shell session must not break a new run.
-        #
-        # The pin has to be unusable WITHOUT depending on privilege. A path at the
-        # filesystem root is not: on Windows the default drive-root ACL lets any
-        # authenticated user create C:\<name>, and on POSIX root can write to /, so
-        # that shape made the probe SUCCEED and the resolver correctly answer
-        # 'Inherited'. Pin a path underneath a FILE instead - no OS can create a
-        # directory there at any privilege level. Pin the CHILD rather than the file
-        # itself so New-Item's -Force clobber semantics never come into play, and
-        # keep it inside $script:Sandbox so AfterAll cleans it up either way.
+        # The stale pin must be unusable WITHOUT relying on privilege (a filesystem-root
+        # path is creatable by root/ACL), so pin a path UNDER A FILE - no OS can mkdir there. Pin the child, not the file, to avoid -Force clobber, and keep it in $script:Sandbox for cleanup.
         $Blocker = Join-Path $script:Sandbox 'blocker-file'
         Set-Content -LiteralPath $Blocker -Value 'not a directory' -Encoding utf8
         Set-RdaInventoryRootForChildren -Path (Join-Path $Blocker 'child')
@@ -272,24 +248,8 @@ Describe 'Output-root wiring (source guards)' {
     # Both remaining hard-fails must be `exit`, matching the -Service gate beside
     # them and the wrapper's Exit-Wrapper copy.
     It 'the inner pre-flight hard-fails with exit, never a bare throw' {
-        # Parsed with the AST rather than matched with a regex over a substring. Two
-        # things defeated the string approach and both produced a test that PASSED
-        # WITHOUT CHECKING ANYTHING:
-        #
-        #   1. Boundary collision. The end anchor 'Pre-flight checks passed.' also
-        #      appears in TWO comments that discuss the historical bug, both BEFORE the
-        #      real Write-Host. IndexOf therefore stopped at the first comment and the
-        #      extracted block excluded the disk-space floor AND the entire write probe -
-        #      i.e. it stopped short of the two gates this test exists for.
-        #   2. Nesting blindness. A flat 'no throw anywhere' rule is wrong: the write
-        #      probe legitimately throws INSIDE a try whose catch converts it to exit 1.
-        #      That is the correct pattern, not the bug. The bug is a throw that reaches
-        #      script scope, where $ErrorActionPreference = 'SilentlyContinue' DISCARDS
-        #      it and the gate silently becomes a no-op.
-        #
-        # So the real invariant is: every throw in the pre-flight function must be
-        # enclosed by a try whose catch terminates the run. That is a question about the
-        # syntax tree, so ask the syntax tree.
+        # Use the AST, not a substring regex: the invariant is that every throw in the
+        # pre-flight function sits inside a try whose catch terminates the run (a throw escaping to script scope is swallowed by SilentlyContinue). String matching failed on anchor collisions and nesting blindness.
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
 
         $PreFlight = $Ast.FindAll({

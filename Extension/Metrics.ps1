@@ -843,6 +843,31 @@ if ($Task -eq 'Processing')
                 # Retry decision for one failed Get-AzMetric attempt. Pure (no sleeping) so it is unit-testable.
                 # Throttled attempts draw on their own budget and wait at least the server's Retry-After (bounded); every
                 # other failure uses the generic budget and 2^attempt backoff. Returns @{ Retry; SleepSeconds } (no jitter).
+                # Classify one failed attempt from its message alone (the Azure body is diagnostics-only). Permanent =
+                # cannot succeed on retry: 404/400 (as before) and now 401/403 - an expired or rejected bearer fails every
+                # remaining call identically, so retrying it 3x with backoff only slowed the failure down (measured: 84s for 12 metrics).
+                function Get-RdaMetricFailureClass
+                {
+                    param([string]$Message)
+                    if ($Message -match "invalid status code '?(?<Status>NotFound|BadRequest|Unauthorized|Forbidden)'?")
+                    {
+                        return @{ Permanent = $true; Outcome = $Matches['Status']; Throttled = $false }
+                    }
+                    if ($Message -match 'ExpiredAuthenticationToken|InvalidAuthenticationToken|AuthenticationFailed|\b401\b')
+                    {
+                        return @{ Permanent = $true; Outcome = 'Unauthorized'; Throttled = $false }
+                    }
+                    if ($Message -match 'AuthorizationFailed|\b403\b')
+                    {
+                        return @{ Permanent = $true; Outcome = 'Forbidden'; Throttled = $false }
+                    }
+                    if ($Message -match '429|throttl|TooManyRequests|rate limit')
+                    {
+                        return @{ Permanent = $false; Outcome = 'Throttled'; Throttled = $true }
+                    }
+                    return @{ Permanent = $false; Outcome = 'Error'; Throttled = $false }
+                }
+
                 function Get-RdaMetricRetryPlan
                 {
                     param(
@@ -1037,12 +1062,13 @@ if ($Task -eq 'Processing')
                                 # Permanent check MUST stay first: the throttle pattern is a loose substring
                                 # and the message echoes the ARM id, so a GUID containing '429' would misclassify. The anchor is the literal 'invalid status code ' prefix; quotes are optional ('?) so an unquoted render still matches (else a permanent BadRequest fails open and burns the full retry budget).
                                 # $PermanentOutcome is taken FROM the match; an unmatched failure falls through to retry (slower, never wrong).
-                                if ($LastError -match "invalid status code '?(?<Status>NotFound|BadRequest)'?")
+                                $FailureClass = Get-RdaMetricFailureClass -Message $LastError
+                                if ($FailureClass.Permanent)
                                 {
                                     $Permanent = $true
-                                    $PermanentOutcome = $Matches['Status']
+                                    $PermanentOutcome = $FailureClass.Outcome
                                 }
-                                elseif ($LastError -match '429|throttl|TooManyRequests|rate limit')
+                                elseif ($FailureClass.Throttled)
                                 {
                                     $Throttled = $true
                                     $ThrottledAttempts++
@@ -1295,9 +1321,13 @@ if ($Task -eq 'Processing')
     # Monitor rejected the request for that resource. Neither is retried.
     $NotFoundCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'NotFound' }).Count
     $BadRequestCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'BadRequest' }).Count
+    # Access failures are permanent too, but unlike 404/400 they are a RUN problem: one 401 means the bearer is
+    # expired/invalid for every remaining call (a "metrics failing" report with an auth cause), one 403 means Monitoring Reader is missing.
+    $UnauthorizedCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Unauthorized' }).Count
+    $ForbiddenCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Forbidden' }).Count
 
     Write-MetricsDiag ("===== Metrics phase summary =====")
-    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
+    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Unauthorized: {8} | Forbidden: {9} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1), $UnauthorizedCount, $ForbiddenCount)
 
     # Self-reported metric-query API-call impact for THIS subscription: per-call = sum of recorded
     # Attempts (one Get-AzMetric per attempt incl. retries); batch = $script:MetricsBatchHttpCalls (one POST per <=50 resources). Both count toward the Azure Monitor "metric queries" meter.
@@ -1325,6 +1355,24 @@ if ($Task -eq 'Processing')
             # that left the costly failures the least explained.
             $StuckBodyNote = if ([string]::IsNullOrWhiteSpace($rec.ErrorBody)) { '' } else { (' | azure: ' + $rec.ErrorBody) }
             Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}{9}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error, $StuckBodyNote)
+        }
+    }
+
+    if (($UnauthorizedCount + $ForbiddenCount) -gt 0)
+    {
+        $AccessSample = $DiagRecords | Where-Object { $_.Outcome -in @('Unauthorized', 'Forbidden') } | Select-Object -First 1
+        $AccessFirstLine = if ([string]::IsNullOrWhiteSpace($AccessSample.Error)) { '(no error text captured)' } else { (([string]$AccessSample.Error) -split "`r?`n")[0].Trim() }
+        if ($UnauthorizedCount -gt 0)
+        {
+            $AuthMsg = ("{0} metric call(s) were rejected with 401 Unauthorized: the access token was expired or invalid, so no metric could be collected with it. Re-authenticate (Connect-AzAccount) and re-run; -Resume keeps what was collected. First error: {1}" -f $UnauthorizedCount, $AccessFirstLine)
+            Write-MetricsDiag ("ACCESS FAILURE: " + $AuthMsg)
+            Write-Log -Message ("[Metrics] " + $AuthMsg) -Severity 'Warning'
+        }
+        if ($ForbiddenCount -gt 0)
+        {
+            $ForbMsg = ("{0} metric call(s) were rejected with 403 Forbidden: this identity lacks Monitoring Reader on those resources (see -Preflight). First error: {1}" -f $ForbiddenCount, $AccessFirstLine)
+            Write-MetricsDiag ("ACCESS FAILURE: " + $ForbMsg)
+            Write-Log -Message ("[Metrics] " + $ForbMsg) -Severity 'Warning'
         }
     }
 

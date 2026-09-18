@@ -14,14 +14,8 @@ If ($Task -eq 'Processing')
             $Data = $1.PROPERTIES
             $Timecreated = try { if ($null -ne $Data.creationTime) { [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
-            # The four cross-resource references (storage / key vault / app insights /
-            # container registry) are *optional* on an Azure ML workspace - a workspace
-            # without one of them returns $null in PROPERTIES rather than the property
-            # being absent. The original line `$data.storageAccount.split('/')[8]` then
-            # fails with "You cannot call a method on a null-valued expression" and
-            # aborts the entire subscription. Guard every reference and emit $null
-            # (or, for obfuscated runs, the literal string 'obfuscated' to match the
-            # rest of this module's lossy fallback pattern) when the field is absent.
+            # The four cross-resource refs (storage/key vault/app insights/container registry) are optional; guard each
+            # before .split('/')[8] or a $null aborts the whole subscription. Absent -> $null (or 'obfuscated' when obfuscating).
             $StorageAcc = if ([string]::IsNullOrEmpty($Data.storageAccount)) { $null } else { $Data.storageAccount.split('/')[8] }
             $KeyVault = if ([string]::IsNullOrEmpty($Data.keyVault)) { $null } else { $Data.keyVault.split('/')[8] }
             $Insight = if ([string]::IsNullOrEmpty($Data.applicationInsights)) { $null } else { $Data.applicationInsights.split('/')[8] }

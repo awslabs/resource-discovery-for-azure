@@ -411,7 +411,7 @@ $ChartsHtml
 </div></body></html>
 "@
 
-    $Html | Out-File -FilePath $HtmlFile -Encoding utf8
+    $Html | Out-File -LiteralPath $HtmlFile -Encoding utf8
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     Write-Host ("  {0} subscription(s), {1} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
 }
@@ -549,7 +549,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     if (-not $KeepOriginalReports)
     {
         $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'
-        if (Test-Path -Path $SummaryScript -PathType Leaf)
+        if (Test-Path -LiteralPath $SummaryScript -PathType Leaf)
         {
             $ReRendered = 0
             foreach ($SubDir in @(Get-ChildItem -LiteralPath $OutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue))
@@ -592,7 +592,9 @@ function New-RdaAllSubHtmlSummaryFromZip
     {
         $PackageZipPath = $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
         if (Test-Path -LiteralPath $PackageZipPath) { Remove-Item -LiteralPath $PackageZipPath -Force -ErrorAction SilentlyContinue }
-        Compress-Archive -Path (Join-Path $OutputDirectory '*') -DestinationPath $PackageZipPath -Force
+        # Enumerate literally, then zip literally: a '*' glob under a folder containing '[' or ']' would match a sibling folder instead.
+        $PackageItems = @(Get-ChildItem -LiteralPath $OutputDirectory -Force | Select-Object -ExpandProperty FullName)
+        Compress-Archive -LiteralPath $PackageItems -DestinationPath ([WildcardPattern]::Escape($PackageZipPath)) -Force
         Write-Host ("Portable summary bundle (links survive extraction): {0}" -f $PackageZipPath) -ForegroundColor Green
     }
 

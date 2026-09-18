@@ -277,9 +277,11 @@ Describe 'It is DIAGNOSTICS ONLY - the body must not reach control flow or outpu
     It 'does not participate in the permanent-vs-throttle classification' {
         # The classification must remain a function of $LastError alone. If the body
         # ever fed a branch here, a malformed body would change retry behaviour.
-        $ClassBlock = [regex]::Match($script:MetricsSrc, '(?s)if \(\$LastError -match "invalid status code.*?\$Throttled = \$true\s*\r?\n\s*\}').Value
-        $ClassBlock | Should -Not -BeNullOrEmpty -Because 'the classification block must be findable'
-        $ClassBlock | Should -Not -Match 'CallErrorBody' -Because 'the response body must never influence a retry or skip decision'
+        # Classification lives in Get-RdaMetricFailureClass and is called with the message alone.
+        $ClassBlock = [regex]::Match($script:MetricsSrc, '(?s)function Get-RdaMetricFailureClass\s*\{.*?\n                \}').Value
+        $ClassBlock | Should -Not -BeNullOrEmpty -Because 'the classification function must be findable'
+        $ClassBlock | Should -Not -Match 'CallErrorBody|ErrorBody' -Because 'the response body must never influence a retry or skip decision'
+        $script:MetricsSrc | Should -Match 'Get-RdaMetricFailureClass -Message \$LastError\s*$' -Because 'the loop must classify from $LastError only'
     }
 
     It 'never reaches the metrics OUTPUT object, only the diagnostics bag' {

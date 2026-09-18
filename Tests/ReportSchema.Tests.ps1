@@ -1,15 +1,5 @@
-# Report Schema Validation Tests
-# Validates that the HTML report is present and structurally correct, and that
-# every inventory resource type with data surfaces as a section in the report.
-#
-# The report format changed from Excel (.xlsx worksheets) to a self-contained
-# HTML file produced by Extension/Summary.ps1. These tests therefore validate
-# the HTML structure (service <details> sections keyed by id="svc-<slug>")
-# instead of worksheet names/columns. Column-level schema correctness is now
-# covered by the inventory-JSON-driven tests (the JSON is the source the HTML
-# renders from).
-#
-# Run with: Invoke-Pester ./Tests/ReportSchema.Tests.ps1 -Output Detailed
+# Validates the HTML report structure (service <details> sections keyed by id="svc-<slug>") and that every
+# inventory resource type with data gets a section. Column-level schema lives in the JSON-driven tests.
 
 Describe 'Report Schema Validation' {
     BeforeAll {

@@ -491,7 +491,7 @@ if ($Task -eq 'Processing')
         {
             $Subscription = $SubLookup[$app.subscriptionId]
 
-            # Do NOT narrow on 'kind': a Flex Consumption app and a working Linux Dedicated app
+            # Do NOT narrow this on 'kind': a FlexConsumption (FC1) app and a working Linux Dedicated app
             # share identical kind/reserved values yet need opposite answers, so '-notmatch linux' would silently drop valid Linux metrics (the real discriminator is the plan SKU).
             if ($app.kind -match 'functionapp')
             {

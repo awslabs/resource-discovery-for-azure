@@ -1,28 +1,8 @@
 #!/usr/bin/env pwsh
 #Requires -Version 7.0
 
-# Run-AllSubscriptions.Stream.ps1
-#
-# Worker script invoked by Run-AllSubscriptions.ps1 when -ParallelStreams > 1.
-# Each instance of this worker:
-#   - Runs as a separate `pwsh` background job (fresh process, fresh AppDomain).
-#   - Owns its own slice of the subscription list.
-#   - Owns its own resume-state file (.resume-state-<TenantID>-stream-<N>.json),
-#     so the streams cannot race on a shared file.
-#   - Imports an Az PowerShell context from a shared snapshot file written by
-#     the parent wrapper, so authentication is not re-prompted per stream.
-#   - Calls ResourceInventory.ps1 once per subscription in its slice.
-#   - Emits structured progress lines to stdout (prefixed [stream-N]) so the
-#     parent wrapper can collate output across streams.
-#   - Writes a per-stream JSON summary at the end so the parent can aggregate
-#     resource counts, consumption results, and failures into the final
-#     wrapper-level summary.
-#
-# Start-Job runs this script block in a fresh runspace (separate process) where
-# the parent's functions and variables are NOT in scope, so the wrapper passes
-# everything via explicit parameters. Shared helper functions are dot-sourced
-# below from this worker's OWN $PSScriptRoot (Functions/RunAllSubscriptions.Functions.ps1)
-# - the same file the parent loads - rather than inherited from the parent.
+# Parallel-stream worker (one Start-Job background process per subscription slice), invoked by Run-AllSubscriptions.ps1 when -ParallelStreams > 1.
+# Runs in a fresh runspace with NO parent scope, so all inputs arrive via params and helpers are dot-sourced from its OWN $PSScriptRoot; writes a per-stream summary JSON the parent aggregates.
 
 param (
     [Parameter(Mandatory = $true)] [string]   $TenantID,
@@ -32,12 +12,7 @@ param (
     [Parameter(Mandatory = $true)] [string]   $AzContextPath,
     [Parameter(Mandatory = $true)] [string]   $StreamSummaryPath,
     [Parameter(Mandatory = $true)] [string]   $StreamFailuresPath,
-    # SubscriptionIds / SubscriptionNames are intentionally NOT Mandatory.
-    # PowerShell rejects empty arrays passed to Mandatory [string[]] params,
-    # which would hard-fail the worker before any logging runs. The parent
-    # currently guarantees non-empty slices via [Math]::Min(StreamCount, subs)
-    # but a future change to the slicing logic should not silently break the
-    # worker's binding. Default to @() and guard the body explicitly.
+    # NOT Mandatory: a Mandatory [string[]] rejects the empty array, hard-failing the worker before any logging runs; default to @() and let the body guard explicitly.
     [string[]] $SubscriptionIds = @(),
     [string[]] $SubscriptionNames = @(),
 
@@ -66,23 +41,11 @@ param (
     # per-call path on any failure). See the -UseMetricsBatch notes in
     # Extension/Metrics.ps1.
     [switch] $UseMetricsBatch,
-    # Metric-volume controls forwarded by the parent wrapper on to
-    # ResourceInventory.ps1. -IncludeStorageMetrics OPTS IN to the Storage Account
-    # UsedCapacity metric, which is NOT collected by default. -SkipDiskMetrics drops
-    # the Managed Disk I/O metrics; -MetricsIntervalMinutes overrides the VM / SQL /
-    # OSS-DB utilization grain (0 = native); -MetricsLookbackDays sets how many days
-    # of history the lookback-bound trend series cover. See the notes in
-    # Extension/Metrics.ps1.
+    # Metric-volume controls forwarded to ResourceInventory.ps1: -IncludeStorageMetrics OPTS IN to the (default-off) Storage UsedCapacity metric; -MetricsIntervalMinutes 0 = native grain.
     [switch] $IncludeStorageMetrics,
     [switch] $SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
-    # No default, matching the parent: the parent sends this key ONLY when the
-    # operator passed it, so an absent key must leave ResourceInventory.ps1's 31-day
-    # default in force rather than a copy of it held here. Same [ValidateRange] as
-    # the parent so a bad value cannot reach the metrics phase by this path either.
-    # Consequence of having no default: when unbound this variable reads 0, NOT 31,
-    # so anything needing the EFFECTIVE lookback must go through the same
-    # ContainsKey gate used below rather than reading the variable directly.
+    # No default (matches parent): an absent key must leave ResourceInventory.ps1's 31-day default in force. Unbound this reads 0, NOT 31, so read the effective lookback only via the ContainsKey gate below.
     [ValidateRange(1, 93)][int] $MetricsLookbackDays,
     # Collector scope forwarded to ResourceInventory.ps1's -Service filter. The
     # parent (Run-AllSubscriptions.ps1) already normalized + validated it and
@@ -111,14 +74,8 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 $Tag = "[stream-$StreamId]"
 
 
-# SubscriptionIds and SubscriptionNames are paired positionally by the parent,
-# which is expected to pass equal-length arrays. The param comment above states
-# the worker must NOT silently depend on that guarantee: if the arrays arrive
-# mismatched, the empty-slice guard (which keys only on Ids.Count) and the
-# per-sub loop (which bounds on [Math]::Min of the two counts) would silently
-# drop the unpaired subs and still report Status 'ok'. Fail loud here, before
-# the empty-slice guard and the Az import, writing a 'failed-to-start' summary
-# so the parent sees the stream could not begin rather than a missing summary.
+# Fail loud on unequal Ids/Names counts: a mismatch would let the empty-slice guard and the [Math]::Min-bounded loop silently drop unpaired subs yet still report Status 'ok'.
+# Runs before the empty-slice guard and Az import, writing a 'failed-to-start' summary so the parent sees a stream that could not begin rather than a missing one.
 if ($SubscriptionIds.Count -ne $SubscriptionNames.Count)
 {
     $MismatchReason = "SubscriptionIds count ({0}) does not match SubscriptionNames count ({1}); parent must pass equal-length, positionally-paired arrays" -f $SubscriptionIds.Count, $SubscriptionNames.Count
@@ -206,14 +163,8 @@ catch
 # Each stream owns a separate file. No races, no locking, simple semantics.
 $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId)
 
-# Optional per-stream blob mirror (AKS pod-reschedule durability). $StreamBlobArgs
-# is EMPTY when no state-blob container was forwarded, so Write-StreamState below
-# takes the local-only path unchanged. The blob name is shard+stream-namespaced so
-# it (a) never collides with another shard pod's stream in the SHARED container and
-# (b) matches the prefix the parent's Get-StateBlobNames lists on when it folds
-# per-stream blobs back into the unified state. The worker has already imported the
-# Az context snapshot above, so -UseConnectedAccount resolves; a context-build blip
-# falls back to local-only rather than killing the stream.
+# Optional per-stream state-blob mirror (AKS pod-reschedule durability); an empty container URI leaves Write-StreamState on the local-only path.
+# Blob name is shard+stream-namespaced so it never collides in the SHARED container and matches the prefix the parent's Get-StateBlobNames folds back on.
 $StreamBlobArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($StateBlobContainerUri))
 {
@@ -271,11 +222,7 @@ if ($MetricsIntervalMinutes -gt 0) { $InventoryPassthrough['MetricsIntervalMinut
 if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $InventoryPassthrough['MetricsLookbackDays'] = $MetricsLookbackDays }
 if ($Service -and $Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
-# Forward -Debug on to the inner script, mirroring the sequential path in
-# Run-AllSubscriptions.ps1. This stream is a background job, which does NOT
-# inherit the parent's $DebugPreference, so the wrapper forwards -Debug to this
-# script explicitly and this line carries it the last hop. Without both hops
-# -Debug is accepted and silently ignored for every parallel run.
+# Forward -Debug to the inner script: a background job does NOT inherit the parent's $DebugPreference, so without this last hop -Debug is silently ignored for every parallel run.
 # [bool] so an explicit -Debug:$false is honoured rather than inverted.
 if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = [bool]$PSBoundParameters['Debug'] }
 
@@ -296,13 +243,7 @@ $FailedSubs = @()
 # report, not just a failed subscription.
 $ArchiveWriteFailures = @()
 
-# The inner script's $Global:ConsumptionRecordCount / $Global:ConsumptionFailedSubs
-# are *running totals*: ResourceInventory.ps1 only nil-initializes them once and
-# then accumulates with += across every subscription it processes in this
-# worker's scope. Reset them to known-zero state up-front so the worker reads
-# the entire-slice running total once after the loop, instead of summing
-# per-iteration snapshots (which would double-count: 100, 300, 600 for three
-# 100-record subs).
+# Reset to known-zero: ResourceInventory.ps1 accumulates these as running totals (+=) across subs in this worker's scope, so read them once after the loop rather than per-iteration (which double-counts).
 $Global:ConsumptionRecordCount = 0
 $Global:ConsumptionFailedSubs = @()
 
@@ -342,19 +283,8 @@ for ($i = 0; $i -lt $PairCount; $i++)
 
     try
     {
-        # Clear $LASTEXITCODE first. It is a SHARED, STICKY variable and the inner
-        # script runs with `&` in this worker's runspace, so a completion path that
-        # does not call `exit` leaves the PREVIOUS subscription's value in place.
-        # Without this reset, one subscription in this stream's slice exiting
-        # non-zero would make every later subscription in the slice look like it
-        # failed too, even though their reports were written correctly.
-        #
-        # $Global:ZipOutputFile is sticky the same way: the inner script has early
-        # gates that leave with a BARE `Exit` (code 0) before an archive path
-        # exists, and without this reset that subscription would be recorded as
-        # successful carrying the PREVIOUS subscription's archive path, then pass
-        # the parent's output verification "by exact path" against another
-        # subscription's file.
+        # Reset both before the inner `&` call: $LASTEXITCODE and $Global:ZipOutputFile are sticky across invocations.
+        # A stale non-zero exit would mark later subs failed; a stale ZipOutputFile would attribute the previous sub's archive to this one and pass the parent's by-path verification.
         $global:LASTEXITCODE = 0
         $Global:ZipOutputFile = $null
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
@@ -443,12 +373,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         catch { Write-Stream ("could not write to stream failures log {0}: {1}" -f $StreamFailuresPath, $_.Exception.Message) 'Yellow' }
 
         $FailedSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $ErrRecord.Exception.Message }
-        # Persist the failure to the per-stream state file. The parent
-        # wrapper will fold these entries into the unified FailedAttempts
-        # list when it merges per-stream state at run end. Persisting on
-        # every failure (rather than only at end-of-stream) means a worker
-        # that is killed mid-slice still surfaces its partial failure
-        # history to the next -ResumeFailedOnly invocation.
+        # Persist failure to per-stream state on every failure (not just end-of-stream) so a worker killed mid-slice still surfaces partial history to the next -ResumeFailedOnly run.
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
             -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts @StreamBlobArgs
@@ -456,14 +381,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
 }
 
 # ---- Per-stream summary ------------------------------------------------------
-#
-# Single JSON file the parent wrapper aggregates across all streams.
-#
-# Read the consumption totals from the inner-script globals once, here, after
-# the entire slice has been processed. The inner script accumulates these
-# across all subs in this worker's scope (see the reset at the top of the
-# loop), so a single read at the end gives the correct slice total without
-# the per-iteration double-counting trap.
+# Single JSON file the parent aggregates. Read the running-total globals ONCE here, after the whole slice, to avoid the per-iteration double-counting trap.
 $ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }

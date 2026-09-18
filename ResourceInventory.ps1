@@ -24,6 +24,8 @@ param ($TenantID,
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
+    # -MetricsDetailed restores the native (finer) sampling grain; the default is hourly, matching upstream.
+    [switch]$MetricsDetailed,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
@@ -937,7 +939,7 @@ function ExecuteInventoryProcessing()
 
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -IncludeStorageMetrics:$IncludeStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsIntervalMinutes $MetricsIntervalMinutes
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -IncludeStorageMetrics:$IncludeStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsDetailed:$MetricsDetailed -MetricsIntervalMinutes $MetricsIntervalMinutes
         }
     }
 

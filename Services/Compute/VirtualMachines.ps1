@@ -17,8 +17,6 @@ If ($Task -eq 'Processing')
         }
         catch
         {
-            # Catch per-region SKU lookup failure so it can't abort the whole VM collector (a terminating
-            # exception isn't caught by SilentlyContinue). Skip the region's map (sizes fall back to '0'); Verbose-only trace.
             Write-Verbose ("VirtualMachines: SKU lookup skipped for '{0}': {1}. CPU/Memory fall back to '0' for VMs in that region." -f $location, $_.Exception.Message)
             $Skus = $null
         }
@@ -119,3 +117,4 @@ If ($Task -eq 'Processing')
         $Tmp
     }
 }
+

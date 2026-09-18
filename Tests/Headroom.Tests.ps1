@@ -1,17 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# Headroom.Tests.ps1
-#
-# OFFLINE unit tests for Get-HeadroomAdjustedConcurrency in
-# Functions/RunAllSubscriptions.Functions.ps1 - the pure helper behind the
-# -HeadRoom API-throttle knob. No Azure calls; the function is pure, so these
-# run anywhere with Pester v5+.
-#
-# Contract under test: given a chosen metrics-collection concurrency and an
-# API-headroom percentage, return the concurrency scaled DOWN to leave that
-# percentage of the shared Azure API throttle budget in reserve - floored, never
-# below 1, with the percentage clamped to [0,90] and 0 a no-op.
-# =============================================================================
+# Offline unit tests for Get-HeadroomAdjustedConcurrency (pure, behind -HeadRoom): scales concurrency DOWN
+# to reserve that % of the API throttle budget - floored, never below 1, % clamped to [0,90], 0 a no-op.
 
 BeforeAll {
     $RepoRoot = Split-Path $PSScriptRoot -Parent

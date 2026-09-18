@@ -19,8 +19,6 @@ if ($Task -eq 'Processing')
         }
         catch
         {
-            # Catch per-region SKU lookup failure so it can't abort the whole VMSS collector (a terminating
-            # exception isn't caught by SilentlyContinue). Skip the region's map (sizes fall back to '0'); Verbose-only trace.
             Write-Verbose ("VMSS: SKU lookup skipped for '{0}': {1}. vCPUs/RAM fall back to '0' for scale sets in that region." -f $location, $_.Exception.Message)
             $Skus = $null
         }
@@ -69,11 +67,6 @@ if ($Task -eq 'Processing')
             $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
             $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
 
-            # Emit tags as a { Name, Value } list, matching the VirtualMachines and
-            # AKS collectors. Tag KEYS are kept verbatim; tag VALUES are obfuscated
-            # deterministically by the per-collector Tags loop in ResourceInventory.ps1
-            # (keyed on this 'Tags' field + { Name, Value } shape), so no special
-            # handling is needed here.
             $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
             $Obj = @{
@@ -106,3 +99,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

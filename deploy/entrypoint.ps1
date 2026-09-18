@@ -1,14 +1,6 @@
 #Requires -Version 7.0
-# AKS workload-identity entrypoint for a single RDA horizontal shard.
-#
-# The workload-identity webhook injects AZURE_CLIENT_ID / AZURE_TENANT_ID /
-# AZURE_FEDERATED_TOKEN_FILE and projects a signed federated token into the pod -
-# NO client secret is stored, mounted, or relayed. Each pod signs itself in,
-# derives its shard index from the indexed-Job completion index, and runs the
-# wrapper for THIS shard only.
-#
-# Sign-in uses the Az PowerShell module (Connect-AzAccount), so the pod runtime
-# has NO dependency on the az CLI.
+# AKS workload-identity entrypoint for one RDA shard: signs the pod in via a
+# projected federated token (no client secret) using Az.Accounts, not the az CLI.
 $ErrorActionPreference = 'Stop'
 
 # Shard identity. An indexed Job sets JOB_COMPLETION_INDEX per pod (0..N-1);
@@ -18,13 +10,8 @@ $IndexPresent = -not [string]::IsNullOrWhiteSpace("$($env:JOB_COMPLETION_INDEX)"
 $ShardIndex = if ($IndexPresent) { [int]$env:JOB_COMPLETION_INDEX } else { 0 }
 $ShardCount = if (-not [string]::IsNullOrWhiteSpace("$($env:SHARD_COUNT)")) { [int]$env:SHARD_COUNT } else { 1 }
 
-# Guard against silent shard collapse. With SHARD_COUNT>1, every pod MUST receive
-# a distinct JOB_COMPLETION_INDEX (a completionMode: Indexed Job supplies it). If
-# the index is absent - e.g. the Job is not Indexed, or the image is run outside a
-# Job with SHARD_COUNT set by hand - every pod would default to shard 0, collect
-# the SAME 1/N slice, and silently drop the other N-1 slices of the tenant. That
-# is exactly the kind of silent partial collection this tool must never do, so
-# fail loud instead of producing a deceptively "successful" partial run.
+# Fail loud when SHARD_COUNT>1 but no per-pod JOB_COMPLETION_INDEX: otherwise every
+# pod defaults to shard 0 and silently drops the other N-1 tenant slices.
 if ($ShardCount -gt 1 -and -not $IndexPresent)
 {
     throw "SHARD_COUNT is $ShardCount but JOB_COMPLETION_INDEX is not set, so every pod would run shard 0 and the other $($ShardCount - 1) slice(s) would be silently skipped. Use a Job with 'completionMode: Indexed' (see deploy/k8s/job.yaml), which injects JOB_COMPLETION_INDEX per pod."
@@ -49,42 +36,8 @@ Write-Host ("[entrypoint] shard {0} of {1}; HeadRoom {2}%; signing in via worklo
 
 Import-Module Az.Accounts -ErrorAction Stop
 
-# KNOWN LIMITATION - long-running shards and the projected token lifetime.
-#
-# The federated token is read ONCE here. Kubernetes projects it into the pod with
-# a bounded lifetime and REWRITES the file on rotation, so the value captured in
-# $Federated goes stale even though the file on disk is fresh. Az.Accounts holds
-# the assertion it was handed, so a shard whose wall time exceeds that lifetime can
-# fail on refresh partway through - surfacing as an authentication error mid-run
-# rather than at sign-in, which is what makes it look like a permissions problem.
-#
-# The two token lifetimes are NOT correlated, and this is the part worth knowing:
-# the Entra access token obtained below lasts 24 hours, while the Kubernetes
-# service-account token defaults to 3600 seconds (1 hour). It is the Kubernetes one
-# that governs whether a refresh can succeed, so 1 hour is the practical boundary.
-#
-# This sign-in matches Microsoft's official workload-identity sample, so the
-# pattern itself is correct; the gap is that the sample assumes a short-lived
-# process. Empirical verification past the token lifetime is still OUTSTANDING and
-# needs a real AKS run of that length - it has NOT been measured here, so treat
-# 1 hour as the configured default rather than an observed failure point.
-#
-# Operator mitigations, in order of preference:
-#   1. Keep each shard's wall time under the token lifetime by raising the shard
-#      count (-ShardCount / SHARD_COUNT) so each node owns fewer subscriptions.
-#      Use Run-AllSubscriptions.ps1 -Plan to size this before running.
-#   2. Raise the projected token expiry via the annotation
-#      azure.workload.identity/service-account-token-expiration on the
-#      ServiceAccount or pod template (default 3600, max 86400 = 24h). The webhook
-#      injects the projected volume, so this is an annotation, NOT an
-#      expirationSeconds edit in job.yaml. See deploy/AKS-WorkloadIdentity-Setup.md
-#      section 10.
-#   3. Re-run the affected shard with RESUME=true (forwarded as -Resume); completed subscriptions are
-#      skipped, so a token expiry costs only the unfinished remainder.
-#
-# A code fix (re-reading $TokenFile and re-authenticating on token expiry) is a
-# change to the auth flow and is deliberately NOT made here without a run past the
-# token lifetime to verify it - see the review-board finding for this file.
+# The federated token is read once here; a shard running longer than the projected
+# Kubernetes SA-token lifetime (default 1h) can fail auth mid-run (not fixed here).
 $Federated = (Get-Content -Raw $TokenFile).Trim()
 Connect-AzAccount -ServicePrincipal -ApplicationId $ClientId -Tenant $TenantId -FederatedToken $Federated -ErrorAction Stop | Out-Null
 Write-Host ("[entrypoint] signed in as: {0}" -f (Get-AzContext).Account.Id)
@@ -107,16 +60,8 @@ if ("$($env:SKIP_CONSUMPTION)" -eq 'true') { $WrapperArgs.SkipConsumption = $tru
 # narrows that to the subscriptions that previously failed.
 if ("$($env:RESUME)" -eq 'true') { $WrapperArgs.Resume = $true }
 if ("$($env:RESUME_FAILED_ONLY)" -eq 'true') { $WrapperArgs.ResumeFailedOnly = $true }
-# Coverage / access gate override. By default the wrapper HARD-STOPS a shard if
-# it cannot verify full subscription coverage (identity can read every
-# subscription under the tenant-root management group) or cannot read a
-# subscription it enumerated - the tool's purpose is to capture ALL subscriptions,
-# so an unverifiable/partial run is refused. The correct production fix is to grant
-# the UAMI Reader at the tenant-root management group (it inherits to every
-# subscription AND makes coverage verifiable). Set ALLOW_PARTIAL_ACCESS=true only
-# for a deliberate partial/test run (e.g. a first demo before MG-root Reader is in
-# place): it downgrades that hard stop to a loud warning and proceeds with whatever
-# subscriptions this identity can currently see. Forwards to -AllowPartialAccess.
+# ALLOW_PARTIAL_ACCESS=true forwards -AllowPartialAccess, downgrading the wrapper's
+# unverifiable-coverage hard stop to a warning; only for a deliberate partial run.
 if ("$($env:ALLOW_PARTIAL_ACCESS)" -eq 'true') { $WrapperArgs.AllowPartialAccess = $true }
 # Metrics data-plane batch fast-path (metrics:getBatch). Opt-in; forwards to the
 # wrapper's -UseMetricsBatch (VM/disk/storage/SQL/scale-set/Cosmos, with per-call
@@ -142,21 +87,11 @@ if (-not [string]::IsNullOrWhiteSpace("$($env:PARALLEL_STREAMS)"))
         Write-Host ("[entrypoint] PARALLEL_STREAMS '{0}' is not a positive integer; ignoring (wrapper will auto-tune)." -f "$($env:PARALLEL_STREAMS)")
     }
 }
-# Per-node upload. When UPLOAD_BLOB_URI is set, each pod ships its finalized
-# consolidated zip to the shared blob container (blob name is made unique per
-# shard by the wrapper), so an operator running N pods collects all output from
-# one container instead of exec-ing into every node. Passwordless: the wrapper
-# uploads via the SAME workload identity signed in above (Storage Blob Data
-# Contributor on the target). Omit the env var to keep each zip node-local.
+# UPLOAD_BLOB_URI makes each pod upload its final zip to a shared container
+# (passwordless, via the same workload identity); omit to keep each zip node-local.
 if (-not [string]::IsNullOrWhiteSpace("$($env:UPLOAD_BLOB_URI)")) { $WrapperArgs.UploadToBlobContainerUri = $env:UPLOAD_BLOB_URI }
-# Blob-backed resume state (AKS pod-reschedule durability). A pod's local disk is
-# destroyed on eviction/reschedule, so the resume/state file is mirrored to blob
-# and read back blob-first when a shard's pod is rescheduled. Prefer an explicit
-# STATE_BLOB_URI; otherwise reuse the SAME container as UPLOAD_BLOB_URI (state
-# lives under a dedicated _state/ subfolder, shard-namespaced, so it never
-# collides with the report zips). Passwordless via the SAME workload identity as
-# the upload (Storage Blob Data Contributor on the target). Leave both unset to
-# keep state node-local.
+# State blob mirror for pod-reschedule durability (local disk is lost on reschedule):
+# explicit STATE_BLOB_URI, else the UPLOAD_BLOB_URI container's _state/ subfolder.
 $StateBlobUri = if (-not [string]::IsNullOrWhiteSpace("$($env:STATE_BLOB_URI)")) { $env:STATE_BLOB_URI }
 elseif (-not [string]::IsNullOrWhiteSpace("$($env:UPLOAD_BLOB_URI)")) { $env:UPLOAD_BLOB_URI }
 else { '' }

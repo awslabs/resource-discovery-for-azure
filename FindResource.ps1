@@ -117,8 +117,6 @@ param(
     [ValidateNotNullOrEmpty()]
     [string[]] $Path,
 
-    # Valid collector names are read from the Services tree at bind time (completer + validator below),
-    # not a hardcoded [ValidateSet] that would drift; $PSCommandPath because $PSScriptRoot is empty in an attribute scriptblock.
     [Parameter(Mandatory = $true)]
     [ArgumentCompleter({
             param($CommandName, $ParameterName, $WordToComplete, $CommandAst, $FakeBoundParameters)
@@ -128,9 +126,6 @@ param(
             @($Names | Sort-Object -Unique | Where-Object { $_ -like "$WordToComplete*" })
         })]
     [ValidateScript({
-            # Captured FIRST. Inside the Where-Object below, $_ rebinds to the
-            # pipeline item, so comparing $_ to $_ would match every name and the
-            # "did you mean" hint would list the entire collector set.
             $Requested = [string]$_
 
             $ServiceDir = Join-Path (Split-Path -Parent $PSCommandPath) 'Services'
@@ -142,8 +137,6 @@ param(
             $Valid = @($Names | Sort-Object -Unique)
             if ($Requested -in $Valid) { return $true }
 
-            # "Did you mean" hint: match on a shared 3-char prefix (not 4) so a dropped/transposed
-            # letter like 'VMWre' still shares the stem with 'VMWare' - the very typo shape this catches.
             $Stem = $Requested
             if ($Stem.Length -gt 3) { $Stem = $Stem.Substring(0, 3) }
             $Near = @($Valid | Where-Object { $_ -like ('{0}*' -f $Stem) })
@@ -170,14 +163,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Set when an output file cannot be written, so the run can exit 4
-# ("scanned, but a result could not be written") instead of the exit 0
-# a scan-only failure would otherwise report.
 $Script:WriteFailed = $false
 
-# Common.Functions.ps1 first: it owns Write-RdaProgress, which the scan uses for
-# progress on a long run. It is pure function definitions, so dot-sourcing it
-# standalone establishes no orchestrator state.
 foreach ($Library in @('Functions/Common.Functions.ps1', 'Functions/FindResource.Functions.ps1'))
 {
     $LibraryPath = Join-Path $PSScriptRoot $Library
@@ -207,8 +194,6 @@ if ($CsvPath)
 {
     if ($Rows.Count -gt 0)
     {
-        # Project through the UNION of all rows' field names: Export-Csv takes its header from the first
-        # object only and drops later columns - schemas differ across resource types / bundle vintages and parallel arrival order.
         $Union = Get-RdaRowField -Rows $Rows
         try
         {
@@ -217,18 +202,12 @@ if ($CsvPath)
         }
         catch
         {
-            # Reported as itself. Left unguarded under $ErrorActionPreference =
-            # 'Stop' this would abort after the scan and exit 1, which the exit
-            # contract defines as "nothing was scanned" - a misleading answer to
-            # what is actually an output-path problem.
             Write-Host ('  ERROR: could not write {0}: {1}' -f $CsvPath, $_.Exception.Message) -ForegroundColor Red
             $Script:WriteFailed = $true
         }
     }
     else
     {
-        # Said explicitly rather than leaving an absent file to be interpreted as
-        # a failed run.
         Write-Host ('  No rows matched, so {0} was NOT written.' -f $CsvPath) -ForegroundColor Yellow
     }
 }
@@ -239,9 +218,6 @@ if ($JsonPath)
     {
         try
         {
-            # -AsArray so the top-level shape is invariant. Without it a single
-            # match serialises as an object and two or more as an array, forcing
-            # every consumer to special-case the one-match run.
             $Rows | ConvertTo-Json -Depth 6 -AsArray | Set-Content -LiteralPath $JsonPath -Encoding UTF8
             Write-Host ('  Wrote {0} row(s) to {1}' -f $Rows.Count, $JsonPath) -ForegroundColor Cyan
         }
@@ -257,12 +233,8 @@ if ($JsonPath)
     }
 }
 
-# Rows go to the pipeline so the caller can post-process them; the summary above
-# went to the host, so a pipe into Export-Csv stays clean.
 $Rows
 
-# Exit code 3 keeps the exit code and summary in agreement: a scan that refused a revealed bundle or could not
-# enumerate a subtree is NOT a confirmed zero and must not exit 0. (An empty match on a complete scan is success.)
 if ([int]$Result.SourceCount -eq 0) { exit 1 }
 if (@($Result.Failures).Count -gt 0) { exit 2 }
 if ((@($Result.Missing).Count -gt 0) -or
@@ -271,3 +243,4 @@ if ((@($Result.Missing).Count -gt 0) -or
     (@($Result.Skipped).Count -gt 0)) { exit 3 }
 if ($Script:WriteFailed) { exit 4 }
 exit 0
+

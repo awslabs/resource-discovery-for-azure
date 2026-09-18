@@ -117,7 +117,8 @@ Describe 'Retry-After reaches the runspace' {
     }
 
     It 'the retry loop has an explicit exit when the budget is exhausted (the while is no longer bounded by attempts)' {
-        $script:MetricsSrc | Should -Match '(?s)while \(-not \$Succeeded\)\s*\{.*?Budget exhausted.*?break'
+        # The give-up branch (else of the retry decision) must break out of the unbounded while.
+        $script:MetricsSrc | Should -Match '(?s)while \(-not \$Succeeded\)\s*\{.*?if \(\$Plan\.Retry\).*?else\s*\{\s*\$CallOutcome = .*?\n\s*break\s*\n\s*\}'
     }
 }
 

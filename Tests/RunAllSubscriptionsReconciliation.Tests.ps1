@@ -1,35 +1,5 @@
-# Run-AllSubscriptions.ps1 Reconciliation Logic Tests
-#
-# Unit-tests small, self-contained functions in Run-AllSubscriptions.ps1 in
-# isolation, without running the wrapper itself (which requires a live Azure
-# session, a tenant, and spins up real -Resume state / background jobs).
-#
-#   - Get-StreamResumeStateFiles: discovers every per-stream resume-state
-#     file on disk for a tenant (fixes the "orphaned resume files when
-#     -ParallelStreams shrinks across -Resume" bug: iterating 0..StreamCount-1
-#     missed files left behind by an earlier, larger-StreamCount run).
-#   - Merge-FailedAttempts: reconciles FailedAttempts entries gathered from
-#     multiple streams against the unified CompletedIds list, keeping the
-#     MOST RECENT LastFailedAt when the same sub Id appears more than once
-#     (fixes the "stale failure metadata won reconciliation" bug: the old
-#     inline code sorted by Attempts count instead of LastFailedAt recency).
-#   - Get-WrapperExitCode: decides the wrapper's machine-facing exit code
-#     (0/3/4/5) from two independent health signals - auth-skip (Metrics
-#     and/or Consumption skipped for lack of a usable Azure token) and
-#     collector failures (#22, a Services/*/*.ps1 collector threw). Guards
-#     against one problem masking the other in the exit code when both occur
-#     in the same run.
-#
-# Run with: Invoke-Pester ./Tests/RunAllSubscriptionsReconciliation.Tests.ps1 -Output Detailed
-#
-# The functions under test used to be defined inline in Run-AllSubscriptions.ps1,
-# whose body executes side-effecting code immediately after its param() block
-# (pre-flight checks, tenant resolution, az/Az PowerShell auth) - so this test
-# had to AST-parse the script and dot-source only the target functions. They
-# now live in Functions/RunAllSubscriptions.Functions.ps1, a definitions-only
-# file with NO top-level side effects, so we can dot-source it wholesale here.
-# The same file is dot-sourced at runtime by both Run-AllSubscriptions.ps1 and
-# its stream worker, so this test exercises the exact code that ships.
+# Unit tests for Run-AllSubscriptions.ps1's pure reconciliation/exit-code/access-gate/summary helpers,
+# dot-sourcing the definitions-only Functions/RunAllSubscriptions.Functions.ps1 (the exact file loaded at runtime) so no live Azure session is needed.
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'
@@ -191,12 +161,8 @@ Describe 'Get-WrapperExitCode' {
 }
 
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
-    # Regression: -Existing was typed [System.Collections.IEnumerable], but when
-    # the list holds exactly one prior failure PowerShell collapses it to a lone
-    # PSCustomObject at the call site (e.g. $FailedAttempts = Add-FailedAttempt ...).
-    # A PSCustomObject is not IEnumerable, so the second failure threw:
-    # "Cannot process argument transformation on parameter 'Existing'".
-    # The parameter is now [object] and normalized with @(...) internally.
+    # A one-element result collapses to a scalar PSCustomObject (not IEnumerable), which the old
+    # [IEnumerable] params rejected with an argument-transformation throw; params are now [object], @()-normalized.
 
     It 'Add-FailedAttempt accepts a single (scalar) prior entry without throwing' {
         $First = Add-FailedAttempt -Existing @() -Id 'sub-1' -Name 'Sub One' -Reason 'first failure'
@@ -291,13 +257,8 @@ Describe 'Get-ConsumptionAccessOutcome classification' {
 }
 
 Describe 'Interrupted-parallel-run stream-state fold-in (F2)' {
-    # Reproduces the exact startup fold-in Run-AllSubscriptions.ps1 performs when
-    # -Resume/-ResumeFailedOnly runs after a PARALLEL run was killed before its
-    # end-of-run merge: discover per-stream files, read their Completed /
-    # FailedAttempts (the same keys Write-StreamState persists), union the
-    # completed ids, and reconcile failures via Merge-FailedAttempts. Guards the
-    # "-ResumeFailedOnly wrongly reports Nothing to retry" bug at the helper level
-    # (the wrapper body itself needs a live Azure session to run end to end).
+    # Reproduces the -Resume/-ResumeFailedOnly fold-in of unmerged per-stream files at the helper level
+    # (guards the "-ResumeFailedOnly reports Nothing to retry" bug; the wrapper body itself needs a live Azure session).
     BeforeEach {
         $script:F2Dir = Join-Path $script:TestRoot ("f2_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $script:F2Dir -Force | Out-Null
@@ -456,24 +417,8 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
     }
 
     It 'renders STRING-shaped failed subscriptions, the shape production actually passes' {
-        # REGRESSION GUARD for a shipped defect. Every -FailedSubscriptions append site in
-        # Run-AllSubscriptions.ps1 pushes a plain STRING - a bare subscription name from
-        # the two per-sub catch blocks, a 'stream-N (no summary)' / '(corrupt summary)'
-        # marker, or a name-first '<name> (stream-N: <reason>)'. Every fixture that reached
-        # THIS renderer, however, was a [pscustomobject]: $script:Failed above, and
-        # $AllFailed / $SomeFailed in Tests/ConsumptionZeroRecordWarning.Tests.ps1.
-        # (Tests/AllSubHtmlSummary.Tests.ps1 does drive the real string shape, but into a
-        # different consumer - New-RdaAllSubHtmlSummary - which already handled it.)
-        #
-        # The renderer used to read only .Name / .Id, which on a string resolve to $null,
-        # so a shipped non-obfuscated RunSummary.log rendered EVERY failed subscription as
-        # the literal '  - ()'. The object-shaped fixtures kept this suite green while the
-        # artefact an operator actually reads said nothing. This test pins the branch
-        # production takes, so reverting the renderer fails here.
-        #
-        # The last element is an OBJECT carrying an Id but no Name, covering the renderer's
-        # other new branch - the ToString() fallback that stops such an element rendering
-        # as a blank line.
+        # Pins the STRING shape production actually passes: the renderer once read only .Name/.Id (both $null on a
+        # string), rendering every failed sub as '  - ()'; object-shaped fixtures hid it. Last element is an Id-only object for the ToString() fallback.
         $StringShaped = @(
             'Contoso-Prod-Sub'
             'stream-2 (no summary)'
@@ -634,15 +579,8 @@ Describe 'Expand-ServiceFilter' {
 }
 
 Describe 'Test-BackgroundJobSupport' {
-    # Backs the wrapper's "fall back to sequential when Start-Job is unavailable"
-    # guard. The real trigger it defends against - Start-Job throwing
-    # synchronously on a Windows host under a WDAC/AppLocker system-wide
-    # ConstrainedLanguage policy - is Windows-only and cannot be reproduced on
-    # the Linux/macOS runner (which takes the early -not $IsWindows return). So
-    # these tests cover the platform-agnostic contract only: it returns a real
-    # boolean, reports $true when jobs ARE usable in the current session, and
-    # never leaks its probe job. The Windows failure path is exercised
-    # out-of-band per windows-cross-os-testing.md.
+    # Covers only the platform-agnostic contract: the real trigger (Start-Job throwing under a Windows WDAC/AppLocker
+    # ConstrainedLanguage policy) is Windows-only, so the non-Windows runner takes the early return; the $false path is tested out-of-band.
     It 'returns a boolean' {
         Test-BackgroundJobSupport | Should -BeOfType [bool]
     }
@@ -728,32 +666,8 @@ Describe 'FailedAttempts null-serialization regression' {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Read-once projection of the resume state
-#
-# Get-CompletedSubscriptionIds, Get-FailedAttempts and Get-StartSnapshot are
-# three thin projections over ONE resume-state object, and each reads that state
-# for itself. A caller wanting two or three of them would therefore download the
-# same state blob two or three times, one network round trip apiece. The -State
-# parameter lets a caller read once and project many.
-#
-# Run-AllSubscriptions.ps1 IS that caller: it reads the state once via
-# Get-ResumeStateObject and hands it to all three readers with -State. So these
-# tests pin a live path, not a hypothetical API contract - and the source guards in
-# Tests/ResumeCycle.Tests.ps1 assert the wrapper keeps doing it that way.
-#
-# An earlier revision of this note said no shipped caller existed and that the
-# wrapper projected inline. Both stopped being true when the wrapper was wired
-# through the readers; the note is corrected here because it was the comment most
-# likely to convince a future reader that -State is unused and removable.
-#
-# The bypass is proven two ways. WITHOUT a mock, by pointing -Path at a file that
-# does not exist: if a reader consulted the path it would see no state and return
-# empty, so a correct projection can only have come from -State. That covers the
-# LOCAL-file path only. The mock-based Its then pin the read count at exactly zero
-# and carry a positive control proving the mock is reachable, which is what covers
-# the blob round trip the -Path trick cannot reach.
-# ---------------------------------------------------------------------------
+# Get-CompletedSubscriptionIds/Get-FailedAttempts/Get-StartSnapshot each read the resume state themselves; -State lets
+# one read serve all three (avoiding a blob re-download per reader). No-read is proven via an absent -Path plus a mock with a positive control.
 Describe 'Resume-state readers: read-once projection via -State' {
 
     BeforeAll {
@@ -817,14 +731,8 @@ Describe 'Resume-state readers: read-once projection via -State' {
             Should -Throw -Because 'the mock must be reachable from inside Resolve-ResumeState, or the zero above proves nothing'
     }
 
-    # Omitting -State remains valid and back-compatible; every shipped call site now
-    # passes it, so the only omitted-State callers left are these tests.
-    #
-    # This It has a role none of its siblings can cover: it is the ONLY unmocked
-    # proof that the self-read actually projects correct DATA off a real file. The
-    # -Times 3 test and the two positive controls all mock Get-ResumeStateObject, so
-    # they only prove the read was dispatched, not that its result is right. Do not
-    # delete this as redundant.
+    # The only UNMOCKED proof the self-read projects correct data off a real file;
+    # the mocked siblings only prove the read was dispatched, so this is not redundant.
     It 'still reads for itself when -State is OMITTED, so that shape stays valid' {
         @(Get-CompletedSubscriptionIds -Path $script:RealPath -Tenant 't') | Should -Be @('s1', 's2')
         @(Get-FailedAttempts -Path $script:RealPath -Tenant 't').Count | Should -Be 1
@@ -882,32 +790,8 @@ Describe 'Resume-state readers: read-once projection via -State' {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Report-archive loss detection
-#
-# Covers the packaging/verification seam that previously let a whole
-# subscription's report vanish while the run reported success:
-# ResourceInventory.ps1 swallowed a Compress-Archive failure (the run-wide
-# 'SilentlyContinue' discarded non-terminating errors, the catch used
-# Write-Error which neither rethrows nor sets an exit code) and then logged
-# 'Reporting Data File' unconditionally, so the wrapper counted the sub
-# complete and consolidated a bundle one report short.
-#
-# Two of the three regressions in this area were invisible to parse, review and
-# pure-helper unit tests, and only a live run caught them - so the guards below
-# assert against the wrapper/inner SOURCE as well as the behaviour:
-#
-#   1. $LASTEXITCODE is SHARED and STICKY. Adding a real `exit` to the inner
-#      script's tail meant one failing subscription made every LATER
-#      subscription in the same runspace look like it exited non-zero, failing
-#      subs whose reports were written correctly. Each `&` invocation must reset
-#      it first.
-#   2. A failed sub is correctly EXCLUDED from the expected-archive count, so
-#      the per-subscription output verification gate has nothing to compare and
-#      stays silent. Without the exit-code override the run would exit 0 with a
-#      report missing from the bundle - visible to a human, invisible to
-#      automation.
-# ---------------------------------------------------------------------------
+# Source+behaviour guards for the packaging seam where a swallowed Compress-Archive failure shipped a bundle one report short.
+# Load-bearing: $LASTEXITCODE is shared/sticky (reset before each `&`) and a failed sub is excluded from the archive count, so only the exit-code override catches the loss.
 
 Describe 'Report-archive loss detection: source guards' {
     BeforeAll {
@@ -1269,44 +1153,15 @@ Describe 'Report-archive loss detection: exit code' {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Blob container URI parsing: single owner
-#
-# The wrapper used to parse -UploadToBlobContainerUri with its own inline copies of
-# the [System.Uri] / Host.Split('.') / AbsolutePath.Trim('/').Split('/', 2)
-# sequence, character-for-character identical to Split-BlobContainerUri, which it
-# already calls for -StateBlobContainerUri. Identical copies of a parser are how the
-# upload path and the state path come to disagree about what a container URL means -
-# and the disagreement would surface as blobs written to the wrong prefix, not as an
-# error.
-#
-# SCOPE, stated precisely: this guards Run-AllSubscriptions.ps1 and
-# Functions/RunAllSubscriptions.Functions.ps1 only. A fourth copy still lives in
-# deploy/Test-NodeReadiness.ps1, left deliberately because that script is a
-# self-contained in-pod preflight that dot-sources nothing, so it cannot reach the
-# shared helper without acquiring a dependency it is designed not to have. The
-# guard is therefore not a repo-wide "exactly one copy" claim.
-#
-# A behavioural test cannot reach those blocks (they sit inline in the wrapper's
-# upload sections, behind a live blob account), so this guards the SOURCE, the same
-# way the report-archive guards above do.
-# ---------------------------------------------------------------------------
+# Source guard: only Split-BlobContainerUri may parse a container URI - duplicate inline copies drift and silently write blobs to the wrong prefix.
+# deploy/Test-NodeReadiness.ps1 keeps its own copy deliberately (it dot-sources nothing) and is out of scope; behavioural tests can't reach the inline upload blocks.
 Describe 'Blob container URI parsing has one owner in the wrapper and its shared functions' {
 
     BeforeAll {
         $script:UriRepoRoot = Split-Path $PSScriptRoot -Parent
 
-        # CODE ONLY - every comment token is removed before matching. A guard that
-        # reads comments traps itself: the comments explaining this very consolidation
-        # name the patterns being banned, so a later clarity edit to one of them would
-        # fail the guard with a completely misleading message.
-        #
-        # Tokenized via the PowerShell parser rather than a '^\s*#' line filter,
-        # because a line filter misses a TRAILING comment on a line of real code and
-        # misses the interior lines of a <# ... #> block, both of which would
-        # reintroduce the self-trap. Fails LOUD on an unparseable or empty result: a
-        # silently empty string would make every 'Should -Not -Match' ban below pass
-        # vacuously, which is the worst possible failure mode for a guard.
+        # Strip comments before matching (the guard's own comments name the banned patterns, so a line filter would self-trap);
+        # parser-based to catch trailing and block comments, and fails loud on empty/unparseable so the Should -Not -Match bans can't pass vacuously.
         function Get-CodeOnly
         {
             param([string]$Path)
@@ -1318,13 +1173,8 @@ Describe 'Blob container URI parsing has one owner in the wrapper and its shared
             $null = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$ParseErrors)
             if ($ParseErrors -and $ParseErrors.Count -gt 0) { throw "Get-CodeOnly: $Path does not parse: $($ParseErrors[0].Message)" }
 
-            # Excise the comment tokens' character ranges from the RAW text rather than
-            # re-joining the code tokens. Re-joining would insert or drop whitespace and
-            # break the very patterns being searched for - joining with a space turns
-            # "Host.Split(" into "Host . Split (", joining with nothing welds
-            # "function Split-BlobContainerUri" into one word. Removing extents leaves
-            # every code character exactly where it was. Walk backwards so each removal
-            # cannot invalidate the offsets of the ones not yet processed.
+            # Excise comment extents from the raw text rather than re-joining code tokens (which would alter whitespace and break the searched patterns);
+            # walk backwards so each removal cannot invalidate the offsets not yet processed.
             $Raw = Get-Content -LiteralPath $Path -Raw
             $Comments = @($Tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)
             $Builder = [System.Text.StringBuilder]::new($Raw)
@@ -1415,22 +1265,13 @@ $b = 2
     }
 
     It 'the wrapper calls the shared helper at exactly the three places it needs container parts' {
-        # Exactly three, matching the sibling assertion's exact count rather than a
-        # weaker "at least": the -StateBlobContainerUri setup, the upload WRITE PROBE,
-        # and the real upload. The probe and the upload must agree, or the probe would
-        # confirm access to a location the upload does not use. A fourth call site is
-        # not automatically wrong - but it should be a deliberate edit to this number,
-        # not something that slides in unnoticed.
+        # Exactly three call sites (state setup, upload write probe, real upload): the probe and upload must parse
+        # identically, or the probe confirms access to a location the upload never uses.
         $Calls = @([regex]::Matches($script:UriWrapperSrc, 'Split-BlobContainerUri\s+-Uri'))
 
         $Calls.Count | Should -Be 3 -Because 'the state path, the upload write probe and the upload itself must all go through the one parser'
     }
 
-    # NOTE: this Describe deliberately contains no behavioural equivalence test.
-    # An earlier draft had one that re-implemented the removed inline expressions as
-    # its "expected" oracle - but those expressions are character-identical to
-    # Split-BlobContainerUri's body, so it compared an expression with itself and
-    # could not fail for any input. Split-BlobContainerUri's behaviour is pinned
-    # against LITERAL expected values in Tests/BlobStateReconciliation.Tests.ps1,
-    # which is the right owner for it. This Describe guards structure only.
+    # Structure-only guard: no behavioural equivalence test, because its oracle would be character-identical to
+    # Split-BlobContainerUri (comparing an expression with itself, never failing). Its behaviour is pinned in Tests/BlobStateReconciliation.Tests.ps1.
 }

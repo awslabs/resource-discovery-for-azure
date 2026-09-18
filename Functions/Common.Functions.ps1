@@ -1,6 +1,4 @@
 #Requires -Version 7.0
-# Cross-cutting helper functions shared by the entry-point scripts, dot-sourced into each script's scope.
-# Definitions only - no top-level code.
 
 function Write-RdaProgress
 {
@@ -80,7 +78,6 @@ function Write-RdaProgress
         [switch]   $Completed
     )
 
-    # Build the "(index of total)" or "(index)" suffix once.
     if ($Total -gt 0)
     {
         $Percent = [int](($Index / $Total) * 100)
@@ -107,9 +104,6 @@ function Write-RdaProgress
         Write-Progress -Activity $Activity -Id $Id -Status $Status
     }
 
-    # Non-interactive fallback: Write-Progress renders nothing in redirected /
-    # non-interactive hosts, so emit a plain line there (or when forced) so a
-    # parent process or transcript still sees movement. Skip on -Completed.
     if (-not $Completed -and -not $BarOnly)
     {
         $HostIsInteractive = ([Environment]::UserInteractive -and -not [Console]::IsOutputRedirected)
@@ -119,7 +113,6 @@ function Write-RdaProgress
         }
     }
 
-    # Durable heartbeat (best-effort; never throws).
     if (-not [string]::IsNullOrEmpty($HeartbeatLogFile))
     {
         try
@@ -136,22 +129,14 @@ function Write-RdaProgress
         }
         catch
         {
-            # Best-effort only - progress reporting must never break a run.
         }
     }
 }
 
-# Write-Log: the single logging entry point; Global: so collectors invoked via '&' can see it. -NoConsole/-ToDebugLog are additive (default output unchanged).
-# The -ToDebugLog file ($Global:DebugLogFile) is UNSCRUBBED and ships inside the zip on a default (non-obfuscated) run, so never write a credential or token to it.
 function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsole, [switch]$ToDebugLog)
 {
     $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
 
-    # Tag each line with the current subscription (first 8 chars of its GUID)
-    # when one is in scope. Read via Get-Variable so it resolves the script-scope
-    # $SubscriptionID up the call chain without throwing when no subscription is
-    # in scope (e.g. a standalone full-tenant run) - in that case no tag is added
-    # and the output is byte-for-byte unchanged.
     $SubId = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
     $SubTag = if (-not [string]::IsNullOrEmpty($SubId)) { '[{0}] ' -f $SubId.Substring(0, [Math]::Min(8, $SubId.Length)) } else { '' }
     $Message = $SubTag + $Message
@@ -168,8 +153,6 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
     }
 
-    # Errors-only local sink: append error-severity messages to $Global:ErrorLogFile when set.
-    # LOCAL-ONLY - it carries raw exception text with real Azure identifiers, so never add it to the obfuscated (server-bound) zip without scrubbing first.
     if ($Severity -eq 'Error' -and -not [string]::IsNullOrEmpty($Global:ErrorLogFile))
     {
         try
@@ -178,12 +161,9 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
         catch
         {
-            # Never let an error-log write failure interrupt the run.
         }
     }
 
-    # Consolidated debug log sink (opt-in via -ToDebugLog) into $Global:DebugLogFile; silent best-effort.
-    # UNSCRUBBED, and its zipping is MODE-DEPENDENT: LOCAL-only under -Obfuscate, INCLUDED in the zip on a default run.
     if ($ToDebugLog -and -not [string]::IsNullOrEmpty($Global:DebugLogFile))
     {
         try
@@ -192,13 +172,10 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
         catch
         {
-            # Never let a debug-log write failure interrupt the run.
         }
     }
 }
 
-# Return $true only if $Path is a real, NON-EMPTY leaf file - the single definition of "the report archive is on disk".
-# A 0-byte file (AV/DLP quarantine or a cut-off write) or a directory at that path is not usable; shared so both packaging sides apply the SAME test and cannot drift.
 function Test-ReportArchiveUsable
 {
     param([string]$Path)
@@ -215,27 +192,15 @@ function Test-ReportArchiveUsable
     }
 }
 
-
-# Resolve and prove-writable the ONE output root; returns a result object (Ok/Path/Source/IsFallback/Message) rather than throwing (a bare throw is swallowed under this project's $ErrorActionPreference = 'SilentlyContinue').
-# An explicit -OutputDirectory is NEVER silently redirected (unusable -> Ok=$false); only the DEFAULT location degrades to the temp dir, and the chosen path is pinned into $env:RDA_INVENTORY_ROOT so -ParallelStreams child processes use the same directory.
 function Get-RdaInventoryRoot
 {
     [CmdletBinding()]
     param(
-        # An operator-supplied -OutputDirectory. Never silently redirected.
         [string]$Requested,
 
-        # Ignore $env:RDA_INVENTORY_ROOT. Used by the process that ESTABLISHES the
-        # root so it re-probes rather than trusting a value left over in its own
-        # environment from an earlier run in the same shell.
         [switch]$NoInherit
     )
 
-    # Create + prove writable in one step. A Test-Path/permission inspection is not
-    # enough: DLP products, read-only mounts and ACL edge cases all present as a
-    # directory that exists and looks fine until something writes to it. The probe
-    # file is removed again, and a cleanup failure does not fail the probe - the
-    # write itself already succeeded, which is the thing being established.
     $TestRoot = {
         param([string]$Candidate)
 
@@ -273,7 +238,6 @@ function Get-RdaInventoryRoot
 
     $Trim = { param([string]$P) $P.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 
-    # 1. Explicit -OutputDirectory. Pass or fail, never redirect.
     if (-not [string]::IsNullOrWhiteSpace($Requested))
     {
         $Explicit = & $Trim $Requested
@@ -289,7 +253,6 @@ function Get-RdaInventoryRoot
         }
     }
 
-    # 2. A root already established by a parent process in this run.
     if (-not $NoInherit -and -not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT))
     {
         $Inherited = & $Trim $env:RDA_INVENTORY_ROOT
@@ -300,14 +263,9 @@ function Get-RdaInventoryRoot
                 Message = ("Output directory: {0}" -f $Inherited)
             }
         }
-        # Fall through and re-probe rather than failing: a stale value from an
-        # earlier shell session must not break this run.
         Write-Verbose ("Inherited RDA_INVENTORY_ROOT '{0}' unusable ({1}); re-probing." -f $Inherited, $Err)
     }
 
-    # 3. Preferred default, then the temp fallback. $HOME is only a candidate when
-    # it is actually set - otherwise "$HOME/InventoryReports" degrades to the
-    # filesystem root, which is the exact silent failure this ordering prevents.
     $Candidates = @()
     if ($PSVersionTable.Platform -eq 'Unix')
     {
@@ -317,8 +275,6 @@ function Get-RdaInventoryRoot
     {
         $WinBase = if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) { $env:SystemDrive + '\' } else { 'C:\' }
         $Candidates += (Join-Path $WinBase 'InventoryReports')
-        # A locked-down estate frequently refuses the drive root but allows the
-        # user profile, so try that before giving up on a persistent location.
         if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $Candidates += (Join-Path $env:USERPROFILE 'InventoryReports') }
     }
     $Candidates += (Join-Path ([IO.Path]::GetTempPath()) 'InventoryReports')
@@ -351,8 +307,6 @@ function Get-RdaInventoryRoot
     }
 }
 
-# Pin the resolved root so child processes (the -ParallelStreams stream workers)
-# use the SAME directory as their parent instead of re-probing independently.
 function Set-RdaInventoryRootForChildren
 {
     [CmdletBinding()]
@@ -360,8 +314,6 @@ function Set-RdaInventoryRootForChildren
     $env:RDA_INVENTORY_ROOT = $Path
 }
 
-# Consumption/billing error classification: returns $true only for an unambiguous AUTHORIZATION denial (the caller then ABANDONS that subscription's billing data).
-# Throttling, auth-expiry, 5xx and 404 are deliberately NOT denials - a false denial throws away retrievable billing data, while a missed one only costs wasted backoff.
 function Test-RdaConsumptionDenial
 {
     [CmdletBinding()]
@@ -370,20 +322,10 @@ function Test-RdaConsumptionDenial
 
     if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
 
-    # Authorization/permission denial signatures. Every branch is anchored with (?<![\w-])...(?![\w-]), NOT plain \b,
-    # because a billing exception echoes resource ids/names back and \b treats '-' as a boundary, so a name like 'rg-forbidden-01' would otherwise match and wrongly abandon retrievable data.
     $DenialPattern = '(?i)(' + (@(
-            # (?<!un) rather than \b. \b excluded 'Unauthorized' correctly but ALSO
-            # excluded 'LinkedAuthorizationFailed', which is a REAL ARM error code, so the
-            # 401 fix had introduced a false NEGATIVE. A negative lookbehind on 'un' says
-            # exactly what is meant: any 'authoriz' except the unauthenticated one.
-            '(?<!un)authoriz'                           # Authorization / AuthorizationFailed / LinkedAuthorizationFailed / not authorized
-            '(?<![\w-])forbidden(?![\w-])'              # the HTTP 403 reason phrase, how ARM actually renders it
-            '\(403\)'                                   # '(403)' when only the numeric status is present
-            # \s? and a 40-char gap because .NET renders 'Response status code does not
-            # indicate success: 403 (Forbidden).' - a 27-char gap that the previous
-            # {0,15} could not span - and 'StatusCode: 403' as a single token. \D cannot
-            # cross another digit, so this still cannot reach the 403 inside a request id.
+            '(?<!un)authoriz'
+            '(?<![\w-])forbidden(?![\w-])'
+            '\(403\)'
             '\bstatus\s?code\D{0,40}403\b'
             'does not have (?:authorization|permission|access|the required)'
             '\bnot authorized\b'
@@ -395,8 +337,6 @@ function Test-RdaConsumptionDenial
     return [bool]($ErrorMessage -match $DenialPattern)
 }
 
-# Recognise a FAILED AUTHENTICATION (expired/invalid/missing token) - the class a token REFRESH can fix - as distinct from an authorization DENIAL and from THROTTLING.
-# 403 / AuthorizationFailed are intentionally ABSENT (those are denials owned by Test-RdaConsumptionDenial, which the caller checks first).
 function Test-RdaAuthExpiry
 {
     [CmdletBinding()]
@@ -408,14 +348,15 @@ function Test-RdaAuthExpiry
     $AuthExpiryPattern = '(?i)(' + (@(
             'ExpiredAuthenticationToken'
             'InvalidAuthenticationToken'
-            'AuthenticationFailed'                       # the ARM error CODE for a rejected/failed bearer. Verified against the live ARM server: a malformed or otherwise unusable token returns '{ "error": { "code": "AuthenticationFailed", "message": "Authentication failed." } }' as a 401. Like its two sibling *AuthenticationToken codes above it is a compound identifier that cannot appear inside a resource name, so it needs no hyphen anchoring. It is a 401 (authentication), NOT a 403 - it stays out of Test-RdaConsumptionDenial so the loop refreshes and retries rather than abandoning the subscription.
-            '\baccess token\b[^.]{0,40}\bexpir'          # 'the access token expiry ...' / 'access token has expired'
+            'AuthenticationFailed'
+            '\baccess token\b[^.]{0,40}\bexpir'
             '\btoken\b[^.]{0,20}\bhas expired\b'
-            '\bauthentication failed\b'                  # the human-readable message form ('Authentication failed.') that accompanies the AuthenticationFailed code, in case only the message survives. \b-anchored like the phrase branches above; it is a two-word auth phrase with no hyphen-in-name hazard.
-            '\(401\)'                                    # '(401)' when only the numeric status is present
-            '\bstatus\s?code\D{0,40}401\b'               # '... status code does not indicate success: 401'
-            '(?<![\w-])unauthorized(?![\w-])'            # the HTTP 401 reason phrase. Anchored with (?<![\w-])...(?![\w-]) - NOT plain \b - because \b treats '-' as a boundary, so a resource group or id echoed back in a billing exception ('rg-unauthorized-01') would otherwise trip a false auth-expiry match and a spurious token refresh. Same guard the denial predicate uses.
+            '\bauthentication failed\b'
+            '\(401\)'
+            '\bstatus\s?code\D{0,40}401\b'
+            '(?<![\w-])unauthorized(?![\w-])'
         ) -join '|') + ')'
 
     return [bool]($ErrorMessage -match $AuthExpiryPattern)
 }
+

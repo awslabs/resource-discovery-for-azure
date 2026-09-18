@@ -1,13 +1,6 @@
 #Requires -Version 7.0
-# =============================================================================
-# Common.Functions.ps1
-#
-# Cross-cutting helper functions shared by the entry-point scripts
-# (Run-AllSubscriptions.ps1, Run-AllSubscriptions.Stream.ps1,
-# ResourceInventory.ps1, Reveal.ps1). Dot-sourced from the top
-# of each so the functions load into that script's scope. Definitions only -
-# no top-level code.
-# =============================================================================
+# Cross-cutting helper functions shared by the entry-point scripts, dot-sourced into each script's scope.
+# Definitions only - no top-level code.
 
 function Write-RdaProgress
 {
@@ -148,49 +141,8 @@ function Write-RdaProgress
     }
 }
 
-# =============================================================================
-# Write-Log
-#
-# The single logging entry point for the whole tool. Moved here (from
-# ResourceInventory.Functions.ps1) and defined Global: so EVERYTHING that logs
-# routes through it - the orchestrator, the wrapper scripts, the metrics
-# extension, and the Services/*/*.ps1 collectors (which run via '& $Module' and
-# therefore only see Global functions, exactly like Protect-FreeTextValue).
-#
-# Default behavior is UNCHANGED from the original: with no switches it writes a
-# severity-colored line to the console and, for Error severity, appends to the
-# local error sink ($Global:ErrorLogFile). The two switches are purely additive
-# so existing callers are byte-for-byte unaffected:
-#   -NoConsole   suppress the console line (for high-volume diagnostics that
-#                must NOT flood the terminal - metrics phase, per-collector
-#                heartbeat). The line still goes to any file sink selected.
-#   -ToDebugLog  also append the line to the consolidated debug log
-#                ($Global:DebugLogFile) - the one file the heartbeat and metrics
-#                diagnostics share. Its contents are UNSCRUBBED (real
-#                service/resource names, raw exception text), and its zipping
-#                posture is MODE-DEPENDENT: LOCAL-only under -Obfuscate, but
-#                INCLUDED in the zip on a default (non-obfuscated) run, whose
-#                report already carries real names. So treat anything written
-#                here as potentially shipping to a report consumer, and never
-#                write a credential or token to it.
-#
-# NOTE on scope: the per-line '[<8-char sub>]' tag is read via Get-Variable so it
-# resolves the caller's script-scope $SubscriptionID without throwing when none
-# is set. From a collector invoked via '&' that lookup may not cross the scope
-# boundary, in which case the tag is simply omitted (the debug/error log
-# filenames are already SubscriptionID-tagged, so nothing is lost).
-#
-# Deliberately NOT baked in (kept separate on purpose):
-#   - Progress UI: that is Write-RdaProgress above (a bar, not a log line).
-#   - Obfuscation scrubbing (Protect-DiagnosticText): only the SHAREABLE
-#     Diagnostics_*.log needs scrubbing, and it is built once at packaging time
-#     from aggregated health globals - NOT line-by-line here. Scrubbing every
-#     log line would be slow and would destroy the local logs' raw
-#     troubleshooting value, so it stays out of the hot path.
-#   - Per-call logging from inside ForEach-Object -Parallel workers: concurrent
-#     appends to one file are not safe. Those paths record into a thread-safe
-#     bag and are logged as an aggregated summary on the main thread instead.
-# =============================================================================
+# Write-Log: the single logging entry point; Global: so collectors invoked via '&' can see it. -NoConsole/-ToDebugLog are additive (default output unchanged).
+# The -ToDebugLog file ($Global:DebugLogFile) is UNSCRUBBED and ships inside the zip on a default (non-obfuscated) run, so never write a credential or token to it.
 function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsole, [switch]$ToDebugLog)
 {
     $DateTime = "[{0:dd-MM-yyyy} {0:HH:mm:ss}]" -f (Get-Date)
@@ -216,17 +168,8 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
     }
 
-    # Errors-only local sink: when an error-log path has been established append
-    # error-severity messages to a dedicated, timestamped file.
-    #
-    # IMPORTANT: this log is written LOCALLY ONLY and is deliberately NOT added
-    # to the obfuscated (server-bound) zip. Error-severity messages can
-    # interpolate raw $_.Exception.Message text and local paths (e.g. collector
-    # failures, reconnect failures, HTML-gen failures) that carry real Azure
-    # identifiers the obfuscation layer never touches. Shipping this file would
-    # leak them. Do NOT add $Global:ErrorLogFile to the Compress-Archive Path
-    # array without first scrubbing/obfuscating its contents. It is kept on disk
-    # for local troubleshooting only, at the same trust level as the transcript.
+    # Errors-only local sink: append error-severity messages to $Global:ErrorLogFile when set.
+    # LOCAL-ONLY - it carries raw exception text with real Azure identifiers, so never add it to the obfuscated (server-bound) zip without scrubbing first.
     if ($Severity -eq 'Error' -and -not [string]::IsNullOrEmpty($Global:ErrorLogFile))
     {
         try
@@ -239,14 +182,8 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
     }
 
-    # Consolidated debug log sink (opt-in via -ToDebugLog): the single file the
-    # per-collector heartbeat and the metrics-phase diagnostics share
-    # ($Global:DebugLogFile). UNSCRUBBED - it carries real service/resource names
-    # and, for FAIL lines, raw exception text. Zipping posture is MODE-DEPENDENT:
-    # LOCAL-only under -Obfuscate, INCLUDED in the zip on a default run. Silent
-    # best-effort like the error sink; nothing is written until the global path
-    # exists, so callers before setup (or a standalone extension run) are
-    # unaffected.
+    # Consolidated debug log sink (opt-in via -ToDebugLog) into $Global:DebugLogFile; silent best-effort.
+    # UNSCRUBBED, and its zipping is MODE-DEPENDENT: LOCAL-only under -Obfuscate, INCLUDED in the zip on a default run.
     if ($ToDebugLog -and -not [string]::IsNullOrEmpty($Global:DebugLogFile))
     {
         try
@@ -260,27 +197,8 @@ function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
     }
 }
 
-# Return $true only if $Path is a real, NON-EMPTY file - the single definition of
-# "this subscription's report archive is actually on disk".
-#
-# Presence alone is not enough. A 0-byte file is not a report, and it is exactly
-# what a truncating antivirus/DLP quarantine, or a write cut off mid-flush by an
-# out-of-space or ephemeral-storage eviction, leaves behind.
-#
-# -PathType Leaf matters independently: a DIRECTORY sitting at the archive path is
-# not an archive either, and it also blocks the write outright.
-#
-# This lives in Common.Functions.ps1 because BOTH sides of the packaging seam must
-# apply the SAME standard, and both dot-source this file:
-#   - ResourceInventory.ps1 checks its own archive before it reports success, and
-#   - Run-AllSubscriptions.ps1's per-subscription output verification re-checks it
-#     at the end of the run (a quarantine can strike in between).
-# Two separate definitions would drift, and the failure mode of that drift is the
-# wrapper consolidating an archive the inner script would have rejected.
-#
-# Pure and side-effect free, so it is unit-testable without a live run. Any error
-# reading the item returns $false: an archive we cannot confirm is not one we
-# should claim.
+# Return $true only if $Path is a real, NON-EMPTY leaf file - the single definition of "the report archive is on disk".
+# A 0-byte file (AV/DLP quarantine or a cut-off write) or a directory at that path is not usable; shared so both packaging sides apply the SAME test and cannot drift.
 function Test-ReportArchiveUsable
 {
     param([string]$Path)
@@ -298,54 +216,8 @@ function Test-ReportArchiveUsable
 }
 
 
-# Resolve the ONE directory this run writes everything under, and guarantee it is
-# actually usable before anything derives a path from it.
-#
-# WHY THIS IS SHARED. The root used to be computed inline as
-#   if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
-# in SIX separate places across Run-AllSubscriptions.ps1 and ResourceInventory.ps1.
-# The wrapper does NOT tell the inner script where it chose - the inner script
-# derives its own - so the two agreed only because the arithmetic was duplicated
-# identically. Any per-site divergence (a fallback applied in one place but not
-# another) would leave the wrapper consolidating from a directory the inner script
-# never wrote to. One function removes that class of bug by construction.
-#
-# WHY A FALLBACK AT ALL. The previous behaviour on a machine where that path is
-# not writable was: creation fails, the failure is swallowed to Write-Verbose
-# (invisible by default), and the run continues and fails later somewhere
-# confusing. Verified failure modes:
-#   - $HOME unset or empty (daemon, container, `sudo -E`, some CI runners). The
-#     Unix branch then produced the literal '/InventoryReports' - the FILESYSTEM
-#     ROOT - which a normal user cannot create.
-#   - A managed macOS/Windows estate where MDM/DLP blocks writes to that path.
-#   - Windows C:\ root writes refused without elevation.
-# The tool should still produce a report in those cases rather than demand the
-# operator diagnose a path problem, so an unwritable preferred location degrades
-# to the OS temp directory with a LOUD warning naming where the output went.
-#
-# EXPLICIT REQUESTS ARE NEVER SILENTLY REDIRECTED. When the caller passed
-# -OutputDirectory they named a location on purpose, very often a mount or share
-# they intend to collect from. Quietly writing somewhere else would be worse than
-# failing, so an unusable explicit path returns Ok=$false and the caller hard-fails.
-# Only the DEFAULT location is allowed to degrade.
-#
-# PROCESS AGREEMENT. The chosen path is pinned into $env:RDA_INVENTORY_ROOT, which
-# child processes inherit. -ParallelStreams launches stream workers as separate
-# pwsh processes, so this is what makes a fallback chosen by the parent bind for
-# every worker instead of each one re-probing and possibly deciding differently.
-# It is an internal implementation detail, NOT a supported operator knob, and it is
-# deliberately not a script parameter: adding one would change the wrapper's
-# parameter surface and its passthrough key sets.
-#
-# Returns a result object rather than throwing, because the two callers hard-fail
-# differently (the wrapper calls Exit-Wrapper, the inner script uses exit 1) and
-# because a bare throw at script scope is SWALLOWED under this project's normal
-# $ErrorActionPreference = 'SilentlyContinue'.
-#   Ok         - $true when Path is created and proven writable
-#   Path       - the resolved root (no trailing separator)
-#   Source     - 'Explicit' | 'Inherited' | 'Default' | 'Fallback'
-#   IsFallback - $true when the preferred location was unusable
-#   Message    - operator-facing detail; caller decides the severity
+# Resolve and prove-writable the ONE output root; returns a result object (Ok/Path/Source/IsFallback/Message) rather than throwing (a bare throw is swallowed under this project's $ErrorActionPreference = 'SilentlyContinue').
+# An explicit -OutputDirectory is NEVER silently redirected (unusable -> Ok=$false); only the DEFAULT location degrades to the temp dir, and the chosen path is pinned into $env:RDA_INVENTORY_ROOT so -ParallelStreams child processes use the same directory.
 function Get-RdaInventoryRoot
 {
     [CmdletBinding()]
@@ -488,31 +360,8 @@ function Set-RdaInventoryRootForChildren
     $env:RDA_INVENTORY_ROOT = $Path
 }
 
-# =============================================================================
-# Consumption / billing error classification
-# =============================================================================
-# Does this billing error mean "you are not allowed", as opposed to "try again"?
-#
-# It lives HERE rather than beside either caller because BOTH entry points need
-# it and both dot-source this file:
-#   - Run-AllSubscriptions.ps1 : the up-front access gate, via
-#     Get-ConsumptionAccessOutcome in Functions/RunAllSubscriptions.Functions.ps1,
-#     which delegates to this function so the signatures are defined once.
-#   - ResourceInventory.ps1    : the per-page retry loop around Get-UsageAggregates,
-#     which must ABANDON a denial immediately instead of retrying it.
-#
-# One owner matters here specifically: the two callers draw opposite conclusions
-# from the same verdict (the gate STOPS the run, the retry loop STOPS RETRYING),
-# so two copies of the pattern drifting apart would make the run's behaviour
-# depend on which copy saw the error first.
-#
-# Returns $true only for an unambiguous AUTHORIZATION denial. Everything else -
-# throttling, a token that needs refreshing, Conditional Access, a 5xx, an
-# unsupported-API 404, a transient "Error while copying content to a stream" - is
-# deliberately NOT a denial, because those can succeed on a retry and the
-# expensive mistake is abandoning a subscription's billing data that was
-# retrievable. A missed denial only costs some wasted backoff; a false denial
-# costs the data.
+# Consumption/billing error classification: returns $true only for an unambiguous AUTHORIZATION denial (the caller then ABANDONS that subscription's billing data).
+# Throttling, auth-expiry, 5xx and 404 are deliberately NOT denials - a false denial throws away retrievable billing data, while a missed one only costs wasted backoff.
 function Test-RdaConsumptionDenial
 {
     [CmdletBinding()]
@@ -521,48 +370,8 @@ function Test-RdaConsumptionDenial
 
     if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
 
-    # Authorization / permission denial signatures across ARM and the billing APIs.
-    #
-    # Every branch below is deliberately anchored, because this predicate decides
-    # whether to ABANDON a subscription's billing data. Each loose form that was
-    # here before had a way to fire on something retryable:
-    #
-    #   'authoriz'  -> also matched UNAUTHORIZED, i.e. HTTP 401. A 401 is a failed
-    #                  AUTHENTICATION (missing, expired or invalid token), which is
-    #                  exactly the transient class that succeeds after a refresh.
-    #                  Classifying it as a denial abandoned recoverable data.
-    #                  KNOWN RESIDUAL, accepted deliberately: an interaction-required
-    #                  or revoked refresh token is a PERMANENT 401, and the retry loop
-    #                  does not re-auth, so it now burns the full budget (~26 min for
-    #                  that subscription) before failing where it used to fail at once.
-    #                  That is the correct trade under this function's asymmetry - the
-    #                  alternative abandons recoverable billing data on every ordinary
-    #                  token expiry - but it is a cost, not a free win.
-    #   'does not have'
-    #               -> matched any sentence with that phrase, including benign ones
-    #                  such as a scope that "does not have any usage data". Only the
-    #                  ARM permission phrasing counts.
-    #   '\b403\b'   -> \b treats '-' as a boundary, so an id or URL echoed back in a
-    #                  billing exception ('rg-403-prod') read as a 403. The bare number
-    #                  now needs HTTP-status context around it.
-    #   'RBAC'      -> unbounded, so it hit the letters inside a longer token.
-    #
-    # The asymmetry that drives all of this: a MISSED denial costs wasted backoff before
-    # failing in the same place anyway, while a FALSE denial throws away billing data that
-    # was retrievable. So when in doubt, not a denial.
-    #
-    # One qualification on that asymmetry, because it is load-bearing and easy to
-    # over-apply: it is NOT symmetric between the two callers. At the wrapper's up-front
-    # gate a false denial stops the WHOLE RUN, so precision matters most there; but that
-    # gate probes only the first eligible subscription, so a MISSED denial is paid as
-    # ~26 minutes of pointless backoff on EVERY subscription. Neither direction is cheap
-    # at scale - this reasoning must not be read as licence to loosen the pattern.
-    # A hyphen is a NON-word character, so '\b' offers no protection against a resource
-    # name: '\bforbidden\b' matches inside 'rg-forbidden-01' and '\bRBAC\b' matches inside
-    # 'rg-rbac-prod'. Since a billing exception echoes ids and resource groups back, the
-    # word-class guards below exclude hyphen on BOTH sides - (?<![\w-]) ... (?![\w-]) -
-    # which still matches every real rendering ('(403) Forbidden', "'Forbidden'",
-    # 'Forbidden.') while refusing the embedded-in-a-name case. All verified both ways.
+    # Authorization/permission denial signatures. Every branch is anchored with (?<![\w-])...(?![\w-]), NOT plain \b,
+    # because a billing exception echoes resource ids/names back and \b treats '-' as a boundary, so a name like 'rg-forbidden-01' would otherwise match and wrongly abandon retrievable data.
     $DenialPattern = '(?i)(' + (@(
             # (?<!un) rather than \b. \b excluded 'Unauthorized' correctly but ALSO
             # excluded 'LinkedAuthorizationFailed', which is a REAL ARM error code, so the
@@ -586,28 +395,8 @@ function Test-RdaConsumptionDenial
     return [bool]($ErrorMessage -match $DenialPattern)
 }
 
-# Recognise a FAILED AUTHENTICATION (an expired, invalid, or missing access
-# token) as distinct from an authorization DENIAL and from THROTTLING. This is
-# the class that a token REFRESH can fix, so the consumption retry loop uses it
-# to decide when to re-establish the Azure context (via Test-DataPlaneAuthReady)
-# before retrying the same page - the gap that previously let an interactive
-# session's token lapse mid-subscription and then burned the whole retry budget
-# against a dead token before failing (see the KNOWN RESIDUAL note in
-# Test-RdaConsumptionDenial above).
-#
-# Kept deliberately separate from Test-RdaConsumptionDenial: a 401 / expired
-# token must NOT be a denial (a denial is abandoned; this is refreshed and
-# retried), and it must NOT be read as throttling (throttling backs off but does
-# not re-auth). The signatures below are the authentication-failure renderings
-# ARM and the Az/MSAL stack actually produce, anchored the same way the denial
-# predicate is so an id or URL echoed back in an exception cannot trip them:
-#   ExpiredAuthenticationToken / InvalidAuthenticationToken - ARM error codes
-#   AuthenticationFailed / 'Authentication failed.'          - ARM 401 for a rejected bearer (verified against the live server)
-#   'the access token ... expired' / 'token ... has expired' - MSAL / Az renderings
-#   '(401)' / 'status code ... 401' / 'Unauthorized'         - the HTTP 401 status
-# 403 / AuthorizationFailed are intentionally ABSENT: those are denials, owned by
-# Test-RdaConsumptionDenial. A message that is BOTH (rare) is treated as a denial
-# because the caller checks Test-RdaConsumptionDenial first.
+# Recognise a FAILED AUTHENTICATION (expired/invalid/missing token) - the class a token REFRESH can fix - as distinct from an authorization DENIAL and from THROTTLING.
+# 403 / AuthorizationFailed are intentionally ABSENT (those are denials owned by Test-RdaConsumptionDenial, which the caller checks first).
 function Test-RdaAuthExpiry
 {
     [CmdletBinding()]

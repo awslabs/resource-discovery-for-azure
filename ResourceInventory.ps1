@@ -1478,116 +1478,26 @@ function ExecuteInventoryProcessing()
                             # against an already-obfuscated value below.
                             $Prefix = if ($UsageDataExport[$Item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $UsageDataExport[$Item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
 
-                            # Obfuscate the consumption ResourceUri while PRESERVING the ARM path structure (resourcegroups/<rg>/providers/<rp>/<type>[/...]/<name>): the dashboard categorises rows by parsing the provider+type and the mc_* RG marker (AKS/VMSS/ACI/ACR/Kusto), which a flat opaque token (the previous behaviour) destroyed - making AKS/VMSS rows invisible. Obfuscate ONLY the identifying segments (sub id, RG name, resource name) and keep the rest (incl. the mc_ prefix) intact.
+                            # Obfuscate the consumption ResourceUri while PRESERVING the ARM path structure via the shared Build-ObfuscatedResourceUri helper (Functions/ResourceInventory.Functions.ps1): the dashboard categorises rows by parsing provider+type and the mc_* RG marker (AKS/VMSS/ACI/ACR/Kusto), which a flat opaque token destroys - making those rows invisible. See the helper for the segment-walk contract.
                             $RawUri = $InstanceObject.'Microsoft.Resources'.resourceUri
-                            $ObfuscatedUri = $RawUri
 
                             # Per-run caches keyed by REAL value, so the same real sub id / RG / resource name always maps to the same token within a run. Kept SEPARATE from $ResourceIdDictionary because that dictionary's public contract (the ObfuscationDictionary file) maps obfuscated FULL Azure ids to real values - don't pollute it with bare sub/RG/name fragments.
                             if (-not $script:ConsumptionSubCache) { $script:ConsumptionSubCache = @{} }
                             if (-not $script:ConsumptionRgCache) { $script:ConsumptionRgCache = @{} }
                             if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
 
-                            # Cross-dataset link (consumption <-> inventory/metrics): if this row's real resourceUri IS an inventoried resource, the LEAF name segment must REUSE the exact token inventory/metrics assigned via $Global:ResourceIdDictionary (not a fresh one) or the consumption row cannot join back - the whole point of the tool. Ids are ingested lowercased and $RawUri is lowercased, so a direct ContainsKey is correct.
-                            # READ-ONLY against the dictionary (keeps the ObfuscationDictionary contract clean and does not reintroduce the flat-token regression); $null when the resource is not inventoried, in which case the leaf falls back to the per-name cache.
-                            $InventoryLeafToken = if ($null -ne $Global:ResourceIdDictionary -and $Global:ResourceIdDictionary.ContainsKey($RawUri)) { $Global:ResourceIdDictionary[$RawUri] } else { $null }
-
-                            if ($RawUri -match '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
+                            # Cross-link diagnostic (case-drift early warning): a TOP-LEVEL resourceUri absent from $Global:ResourceIdDictionary is legitimate for resources deleted between the graph scan and the billing pull, or a -Service-narrowed inventory. Since the dictionary is OrdinalIgnoreCase, this no longer signals a lowercasing regression - it means the uri is genuinely absent. Only the top-level case is surfaced (child rows would flood), routed to the debug log ONLY (-NoConsole / -ToDebugLog) since $RawUri is a real id. Top-level == the leaf name sits at provider-relative index 2 (a 3- or 4-segment provider tail), matching Build-ObfuscatedResourceUri's leaf rule.
+                            if ($RawUri -match '^/subscriptions/[^/]+(/resourcegroups/[^/]+)?/providers/(.+)$')
                             {
-                                $RealSub = $matches[1]
-                                $RealRg = $matches[3]
-                                $RealProv = $matches[5]   # e.g. 'microsoft.compute/<type>/<name>[/<subtype>/<name2>]'
-
-                                $ObfSub = if ($script:ConsumptionSubCache.ContainsKey($RealSub)) { $script:ConsumptionSubCache[$RealSub] } else
+                                $DiagProvCount = ($Matches[2] -split '/').Count
+                                if (($DiagProvCount -eq 3 -or $DiagProvCount -eq 4) -and -not ($null -ne $Global:ResourceIdDictionary -and $Global:ResourceIdDictionary.ContainsKey($RawUri)))
                                 {
-                                    $V = $Prefix + 'sub_' + [guid]::NewGuid().ToString()
-                                    $script:ConsumptionSubCache[$RealSub] = $V; $V
-                                }
-
-                                $RebuiltUri = '/subscriptions/' + $ObfSub
-
-                                if (-not [string]::IsNullOrEmpty($RealRg))
-                                {
-                                    $ObfRg = if ($script:ConsumptionRgCache.ContainsKey($RealRg)) { $script:ConsumptionRgCache[$RealRg] } else
-                                    {
-                                        # Preserve the AKS-managed-RG marker so the dashboard can
-                                        # still detect AKS-managed resources after obfuscation.
-                                        $IsMc = $RealRg -match '^mc_'
-                                        $Tag = if ($IsMc) { 'mc_' } else { '' }
-                                        $V = $Prefix + 'rg_' + $Tag + [guid]::NewGuid().ToString()
-                                        $script:ConsumptionRgCache[$RealRg] = $V; $V
-                                    }
-                                    $RebuiltUri += '/resourcegroups/' + $ObfRg
-                                }
-
-                                if (-not [string]::IsNullOrEmpty($RealProv))
-                                {
-                                    # $realProv = '<rp>/<type>[/<name>[/<subtype>/<name2>...]]': keep the resource provider (segment 0) and every TYPE segment so categorisation works, and obfuscate only NAME segments. After the provider the path alternates type-name, so in provider-relative index space TYPE segments are odd (1,3,5) and NAME segments even (2,4,6).
-                                    $ProvParts = $RealProv -split '/'
-                                    # The LEAF resource-name segment is the last name segment (largest even index >= 2): only THAT reuses the inventory token (it identifies THIS resource, which inventory/metrics keyed on). Intermediate name segments are parent resources' identities and stay on the per-name cache.
-                                    $LeafNameIndex = -1
-                                    for ($Li = $ProvParts.Count - 1; $Li -ge 2; $Li--)
-                                    {
-                                        if ($Li % 2 -eq 0) { $LeafNameIndex = $Li; break }
-                                    }
-
-                                    # Cross-link diagnostic (case-drift early warning): a TOP-LEVEL uri ($LeafNameIndex -eq 2) absent from $Global:ResourceIdDictionary is legitimate for resources deleted between the graph scan and the billing pull, or a -Service-narrowed inventory. Since the dictionary is now OrdinalIgnoreCase, this no longer signals a lowercasing regression - it means the uri is genuinely absent.
-                                    # Only the top-level case is surfaced (child rows would flood), routed to the debug log ONLY (-NoConsole / -ToDebugLog) since $RawUri is a real id; a no-op before the debug-log path is set.
-                                    if ($LeafNameIndex -eq 2 -and $null -eq $InventoryLeafToken)
-                                    {
-                                        Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; the dictionary is case-insensitive, so this means the resource is genuinely absent - deleted between the graph scan and the billing pull, or outside a -Service-narrowed inventory): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
-                                    }
-
-                                    $Rebuilt = @()
-                                    for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
-                                    {
-                                        $Part = $ProvParts[$Pi]
-                                        $IsNameSegment = ($Pi -ge 2 -and ($Pi % 2 -eq 0))
-                                        if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
-                                        {
-                                            if ($Pi -eq $LeafNameIndex -and $null -ne $InventoryLeafToken)
-                                            {
-                                                # Reuse inventory/metrics token so this
-                                                # consumption row's leaf id matches the
-                                                # SAME resource in Inventory_*.json /
-                                                # Metrics_*.json (cross-dataset link).
-                                                $Rebuilt += $InventoryLeafToken
-                                            }
-                                            else
-                                            {
-                                                $ObfName = if ($script:ConsumptionNameCache.ContainsKey($Part)) { $script:ConsumptionNameCache[$Part] } else
-                                                {
-                                                    $V = $Prefix + [guid]::NewGuid().ToString()
-                                                    $script:ConsumptionNameCache[$Part] = $V; $V
-                                                }
-                                                $Rebuilt += $ObfName
-                                            }
-                                        }
-                                        else
-                                        {
-                                            $Rebuilt += $Part
-                                        }
-                                    }
-                                    $RebuiltUri += '/providers/' + ($Rebuilt -join '/')
-                                }
-
-                                $ObfuscatedUri = $RebuiltUri
-                            }
-                            else
-                            {
-                                # Non-ARM-shape uri (e.g. system-namespace placeholder): hash it to a stable token via the local name cache so the obfuscation dictionary file only ever contains real-Azure-id -> obfuscated mappings. Guard the null/empty case explicitly - hashtable.ContainsKey($null) THROWS, which the per-sub catch would swallow, truncating that sub's consumption.
-                                if ([string]::IsNullOrEmpty($RawUri))
-                                {
-                                    $ObfuscatedUri = 'obfuscated'
-                                }
-                                else
-                                {
-                                    if (-not $script:ConsumptionNameCache.ContainsKey($RawUri))
-                                    {
-                                        $script:ConsumptionNameCache[$RawUri] = $Prefix + [guid]::NewGuid().ToString()
-                                    }
-                                    $ObfuscatedUri = $script:ConsumptionNameCache[$RawUri]
+                                    Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; the dictionary is case-insensitive, so this means the resource is genuinely absent - deleted between the graph scan and the billing pull, or outside a -Service-narrowed inventory): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
                                 }
                             }
+
+                            # Sub/RG are NOT joined to any shared dictionary here ($null): they use the consumption caches only, exactly as before. Only the LEAF name reuses the inventory token, read-only, via $Global:ResourceIdDictionary keyed by $RawUri.
+                            $ObfuscatedUri = Build-ObfuscatedResourceUri -RawUri $RawUri -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $Global:ResourceIdDictionary -SubCache $script:ConsumptionSubCache -RgCache $script:ConsumptionRgCache -NameCache $script:ConsumptionNameCache
 
                             $UsageDataExport[$Item].ResourceId = $ObfuscatedUri
                             $InstanceObject.'Microsoft.Resources'.resourceUri = $ObfuscatedUri

@@ -42,6 +42,11 @@ Describe '-MetricsDetailed is wired through' {
         $script:MetricsSrc | Should -Match 'Get-RdaMetricGrainPlan -MetricsIntervalMinutes \$MetricsIntervalMinutes -MetricsDetailed:\$MetricsDetailed'
         ([regex]::Matches($script:MetricsSrc, "Composite Disk [^\n]*Interval = \`$DiskMetricInterval")).Count | Should -Be 4 -Because 'all four disk I/O definitions must follow the plan'
         $script:MetricsSrc | Should -Not -Match "Composite Disk [^\n]*Interval = '00:15:00'"
+        # VM / SQL / OSS-DB sampled series consume the plan's variables, and no sampled definition hardcodes a sub-hourly grain.
+        ([regex]::Matches($script:MetricsSrc, 'Interval = \$VmMetricInterval')).Count | Should -BeGreaterOrEqual 2
+        ([regex]::Matches($script:MetricsSrc, 'Interval = \$SqlMetricInterval')).Count | Should -BeGreaterOrEqual 3
+        ([regex]::Matches($script:MetricsSrc, 'Interval = \$DbMetricInterval')).Count | Should -BeGreaterOrEqual 10
+        $script:MetricsSrc | Should -Not -Match "MetricName = '[^']+'[^\n]*Interval = '00:(15|30):00'" -Because 'a hardcoded 15/30-minute grain would bypass the plan'
     }
     It 'ResourceInventory.ps1 declares it and forwards it to Extension/Metrics.ps1' {
         $Src = Get-Content -Raw -LiteralPath (Join-Path $script:Repo 'ResourceInventory.ps1')

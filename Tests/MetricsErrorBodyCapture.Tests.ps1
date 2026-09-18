@@ -281,7 +281,7 @@ Describe 'It is DIAGNOSTICS ONLY - the body must not reach control flow or outpu
         $ClassBlock = [regex]::Match($script:MetricsSrc, '(?s)function Get-RdaMetricFailureClass\s*\{.*?\n                \}').Value
         $ClassBlock | Should -Not -BeNullOrEmpty -Because 'the classification function must be findable'
         $ClassBlock | Should -Not -Match 'CallErrorBody|ErrorBody' -Because 'the response body must never influence a retry or skip decision'
-        $script:MetricsSrc | Should -Match 'Get-RdaMetricFailureClass -Message \$LastError\s*$' -Because 'the loop must classify from $LastError only'
+        $script:MetricsSrc | Should -Match '(?m)Get-RdaMetricFailureClass -Message \$LastError\s*$' -Because 'the loop must classify from $LastError only'
     }
 
     It 'never reaches the metrics OUTPUT object, only the diagnostics bag' {

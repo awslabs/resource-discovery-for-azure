@@ -13,9 +13,6 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            # A hub whose properties.locations is empty must still yield one row
-            # (previously it was silently dropped). Normalize to a single null
-            # entry so the hub appears with null Location/Role in that edge case.
             $Locations = @($Data.locations)
             if ($Locations.Count -eq 0) { $Locations = @($null) }
 
@@ -45,3 +42,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

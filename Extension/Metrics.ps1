@@ -11,67 +11,20 @@ param(
     [Alias('ResourceResourceGroupDictionary')]$ResourceGroupDictionary, # Map dictionary to obfuscate resource group names
     $Obfuscate, # Boolean flag toggle indicating whether sensitive infrastructure details should be masked
     $MetricsLookbackDays = 31, # Default tracking duration window determining how far back to ask Azure for data
-    # Scale controls for very large tenants, reducing Azure Monitor API-call COUNT
-    # and per-subscription metric memory.
-    #
-    #   -IncludeStorageMetrics : OPT-IN. Collect the Storage Account 'UsedCapacity'
-    #       metric. DEFAULT IS OFF, because it costs one metric-query call per
-    #       storage account and a tenant with a very large storage estate spends a
-    #       large share of the metrics phase on a single capacity figure. Pass it
-    #       when storage capacity is actually wanted.
-    #   -SkipDiskMetrics : opt-out. Skip the four Managed Disk composite I/O
-    #       metrics (4 calls per attached disk).
+    # Scale knobs for large tenants that cut Azure Monitor call count:
+    # -IncludeStorageMetrics is opt-in (1 call/storage account); -SkipDiskMetrics is opt-out (4 calls/attached disk).
     [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
-    # Override the sampling grain (TimeGrain) of the high-frequency utilization
-    # series: VM (Percentage CPU / Available Memory Bytes, native 15 min), Azure
-    # SQL DB (cpu_used / dtu_used / cpu_percent, native 30 min), and the OSS DBs
-    # MariaDB / MySQL / PostgreSQL + Flexible (cpu_percent / memory_percent, native
-    # 60 min). 0 = keep each metric's native cadence. This does NOT change API-call
-    # count (one call per resource+metric
-    # regardless of grain) - it only reduces DATA-POINT volume (memory / JSON size
-    # / post-processing). Each series' own aggregation is unchanged by the grain
-    # (VM CPU and the DB series stay 'Maximum'; VM 'Available Memory Bytes' stays
-    # 'Minimum'), so a coarser grain still captures each bucket's extreme - the
-    # peak busy-ness, or the low-water available-memory point - e.g. 60 = the
-    # hourly extreme, just at lower temporal resolution. The daily SQL
-    # limit/capacity reads and the disk/storage metrics
-    # are intentionally NOT affected. 0 = keep each family's native default (VM 15 /
-    # SQL 30 / OSS-DB 60 min; byte-identical to a run without the knob). A set value
-    # (5/15/30/60) is applied UNIFORMLY to all three families as the operator's
-    # explicit choice - honoured as-is, not clamped. Coarser than a family's default
-    # reduces that family's data-point volume; finer increases it (the operator's
-    # call - e.g. 30 for finer OSS-DB fidelity than its 60-min default). All four
-    # values are supported: every controlled metric is stored at Azure's PT1M base
-    # grain (validated against the Microsoft Learn supported-metrics reference).
+    # Sampling grain for the VM/SQL/OSS-DB utilization series; 0 (default) keeps each
+    # family's native cadence (byte-identical), a set 5/15/30/60 applies uniformly and changes data-point volume only, not API-call count.
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
-    # EXPERIMENTAL (default OFF): fetch the batchable services' metrics through the
-    # Azure Monitor data-plane metrics:getBatch API (one REST call per <=50
-    # resources, all aggregations in one request) instead of one Get-AzMetric per
-    # (resource, metric). Batchable services are VMs, managed disks, storage
-    # accounts, SQL databases, VM scale sets, and Cosmos DB (see $BatchNamespaceMap
-    # below); every other service stays on the per-call path.
-    # Falls back to the per-call path on ANY batch failure
-    # (e.g. Microsoft.Insights RP not registered, narrow RBAC, regional issue),
-    # so metrics are never lost. When omitted, behaviour is byte-identical to the
-    # established per-call path.
-    #
-    # SIDE-EFFECT (opt-in only): because getBatch REQUIRES the Microsoft.Insights
-    # resource provider, passing this switch makes the tool ATTEMPT to register
-    # that provider on the subscription if it is not already registered (a
-    # control-plane write). This is intentional - opting in is the operator's
-    # consent to "help enable" the data plane. It is best-effort and idempotent:
-    # if the identity/org policy disallows the registration it is logged and the
-    # run falls back to the per-call path (no failure, no data loss).
+    # EXPERIMENTAL (default OFF): fetch batchable services via metrics:getBatch; falls back to per-call on any failure (no data lost) and is byte-identical when omitted.
+    # SIDE-EFFECT of opting in: attempts to register the Microsoft.Insights RP (a control-plane write), which getBatch requires.
     [switch]$UseMetricsBatch
 )
 
-# Shared cross-cutting helpers (Write-RdaProgress). This extension is invoked via
-# `& $MetricPath` from ResourceInventory.ps1, which already dot-sources this file,
-# so the function is normally in scope. Re-load it here (only if not already
-# defined) so the extension stays self-contained and progress never no-ops just
-# because of how it was invoked. Best-effort: a missing file must not break the
-# metrics phase.
+# Re-load Write-RdaProgress from Common.Functions when not already defined, so progress
+# does not no-op when this extension is invoked via `& $MetricPath`; best-effort, a missing file must not break the metrics phase.
 if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
 {
     $CommonFunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'
@@ -83,51 +36,15 @@ if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
 
 if ($Task -eq 'Processing')
 {
-    # ---------------------------------------------------------------------
-    # Metrics diagnostics -> consolidated LOCAL debug log, NOT the terminal.
-    # ---------------------------------------------------------------------
-    # On a large multi-subscription run the per-call and end-of-phase [Metrics]
-    # lines flooded the console (and, coming from concurrent runspaces, made it
-    # look frozen until a keypress forced a repaint). They now route through the
-    # single shared logger with -NoConsole (off the terminal) + -ToDebugLog
-    # (append to $Global:DebugLogFile, the same file the per-collector heartbeat
-    # writes). Write-MetricsDiag is a THIN wrapper - it only prefixes '[Metrics] '
-    # so the consolidated log stays readable, then delegates to Write-Log; it has
-    # NO independent log-sink logic of its own. Write-Log is Global (defined in
-    # Functions/Common.Functions.ps1) so it is in scope here even though this
-    # extension is invoked via '& $MetricPath'. When no $Global:DebugLogFile is
-    # set (e.g. a standalone extension run) Write-Log's -ToDebugLog is a silent
-    # no-op, so nothing ever lands on the terminal either way.
+    # Metrics diagnostics go to the LOCAL debug log, never the terminal: per-call lines
+    # from concurrent runspaces flooded the console. Thin '[Metrics] ' prefix delegating to Write-Log.
     function Write-MetricsDiag([string]$Line)
     {
         Write-Log -Message ('[Metrics] ' + $Line) -NoConsole -ToDebugLog
     }
 
-    # -----------------------------------------------------------------------
-    # Obfuscation of metric records (shared by the per-call and batch paths).
-    # Mutates each metric hashtable in place, mapping the real resource ID to
-    # its deterministic obfuscated value via the shared dictionaries (with the
-    # same prod_/nonprod_ fallback the per-call path has always used). Extracted
-    # to a single implementation so the per-call and batch fast-path produce
-    # IDENTICAL obfuscation - divergent copies could break determinism.
-    # -----------------------------------------------------------------------
-    # Read one obfuscation map safely. Returns the mapped token, or the standard
-    # 'obfuscated' sentinel when the map is absent or lacks the key.
-    #
-    # MEASURED, not assumed: indexing a Dictionary[string,string] with a missing key
-    # does NOT throw under PowerShell - its indexer adapter swallows the
-    # KeyNotFoundException and yields $null. So the risk here is not a crash, it is a
-    # SILENT NULL: Protect-RdaMetrics checks ContainsKey on the ID map only, so a
-    # dictionary seeded from a previous run (-ObfuscationDictionary) whose maps are
-    # not perfectly parallel produces a record with a tokenised ID and null
-    # Name/Subscription/ResourceGroup. That is a nulled-out field where the rest of
-    # the codebase - including the third branch of this very function - uses the
-    # 'obfuscated' sentinel, and the no-null-obfuscated-fields assertion in the PII
-    # suite treats a null there as a defect.
-    #
-    # The sentinel is also the only safe fallback: it cannot put a real identifier
-    # into the shared JSON. The try/catch is belt-and-braces for a map type whose
-    # ContainsKey behaves differently, and costs nothing on the normal path.
+    # Read one obfuscation map, returning the 'obfuscated' sentinel on a missing key -
+    # a missing key yields a silent $null (not a throw), which the PII no-null assertion flags. Shared per-call/batch so both obfuscate identically (divergent copies break determinism).
     function Get-RdaMappedValue
     {
         param($Map, [string]$Key)
@@ -150,18 +67,8 @@ if ($Task -eq 'Processing')
             $OriginalId = $metric.ID
             if (![string]::IsNullOrEmpty($OriginalId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($OriginalId))
             {
-                # ContainsKey is checked on the ID dictionary ONLY, so the three
-                # companion maps are read for a key nobody verified they hold. A
-                # missing key yields $null under PowerShell rather than throwing
-                # (measured - see Get-RdaMappedValue), which is worse than a crash
-                # here: the record ships with a tokenised ID and a null Name,
-                # Subscription and ResourceGroup, and nothing says why. Reachable on a
-                # run seeded with -ObfuscationDictionary, where the four maps come from
-                # a file and are not guaranteed to be parallel.
-                #
-                # Fall back to the 'obfuscated' sentinel per field, matching the third
-                # branch of this function. When all four maps agree - the normal case -
-                # behaviour is byte-for-byte unchanged.
+                # ContainsKey is checked on the ID map ONLY; the three companion maps use the
+                # per-field 'obfuscated' sentinel because a missing key yields a silent $null (tokenised ID + null Name/Sub/RG), reachable via -ObfuscationDictionary with non-parallel maps.
                 $metric.ID = $ResourceIdDictionary[$OriginalId]
                 $metric.Name = Get-RdaMappedValue $ResourceNameDictionary $OriginalId
                 $metric.Subscription = Get-RdaMappedValue $ResourceSubDictionary $OriginalId
@@ -185,12 +92,8 @@ if ($Task -eq 'Processing')
                 }
                 else
                 {
-                    # No usable resource id (empty/null), or no dictionary available:
-                    # this record cannot be correlated, so blank the descriptive fields
-                    # to the standard 'obfuscated' sentinel rather than risk leaving a
-                    # real Name/Subscription/ResourceGroup in the shared JSON. Defensive:
-                    # metric records normally always carry a resource id, but a missing
-                    # one must fail closed (no PII), not fall through unmasked.
+                    # No usable resource id or no dictionary: blank the descriptive fields to the
+                    # 'obfuscated' sentinel so a missing id fails closed (no real PII in the shared JSON) rather than falling through unmasked.
                     $metric.ID = 'obfuscated'
                     $metric.Name = 'obfuscated'
                     $metric.Subscription = 'obfuscated'
@@ -200,13 +103,8 @@ if ($Task -eq 'Processing')
         }
     }
 
-    # -----------------------------------------------------------------------
-    # Build ONE metric record (the 16-field hashtable) from a single getBatch
-    # per-metric result, using the SAME downstream math as the per-call path:
-    # pick the aggregation column named by the def, keep null intervals, then
-    # 95th-percentile + Measure collapse. Kept identical to the inline per-call
-    # computation so batch output matches the frozen Metrics_*.json schema.
-    # -----------------------------------------------------------------------
+    # Build one 16-field metric record from a getBatch per-metric result using the SAME
+    # math as the per-call path (aggregation column, keep nulls, 95th-percentile + Measure), so batch output matches the frozen Metrics_*.json schema.
     function New-RdaMetricObject
     {
         param($Def, $MetricResult)
@@ -237,12 +135,8 @@ if ($Task -eq 'Processing')
         }
         else
         {
-            # Percentile over NON-null values only. $MetricQueryResults keeps its null
-            # intervals (needed for the Measure/Series below and for MetricCount), but
-            # Sort-Object places nulls first, so including them here both skewed the
-            # index low and could land it in the null region (serializing MetricPercentile
-            # as null) once nulls exceeded ~5% of the window. The count>0 guard above
-            # ensures at least one non-null remains.
+            # 95th percentile over NON-null values only: Sort-Object places nulls first, so
+            # including them skews the index low and can serialize MetricPercentile as null once nulls exceed ~5% of the window.
             $MetricQueryResultsSorted = @($MetricQueryResults | Where-Object { $null -ne $_ } | Sort-Object)
             $MetricPercentileIndex = [math]::Ceiling(0.95 * $MetricQueryResultsSorted.Count) - 1
             $MetricPercentile = $MetricQueryResultsSorted[$MetricPercentileIndex]
@@ -261,13 +155,8 @@ if ($Task -eq 'Processing')
                 'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
                 default
                 {
-                    # Kept in step with the per-call path's Measure switch deliberately.
-                    # This function's contract is that batch output is computed IDENTICALLY
-                    # to the inline per-call path, so a guard added there and omitted here
-                    # would leave the same silent-wrong-value seam open on the batch route
-                    # while the comment above claimed parity. An unhandled Measure would
-                    # otherwise put the RAW per-interval ARRAY into the scalar MetricValue
-                    # field. Note $_ is the switched-on Measure value, not a pipeline item.
+                    # Mirror the per-call Measure switch: an unhandled Measure would put the RAW
+                    # per-interval array into the scalar MetricValue field, so throw to keep batch/per-call parity. ($_ is the switched-on Measure value, not a pipeline item.)
                     throw ("Unhandled Measure '{0}' for metric '{1}' - the per-interval values could not be collapsed to a single figure." -f $_, $Def.MetricName)
                 }
             }
@@ -293,16 +182,8 @@ if ($Task -eq 'Processing')
         }
     }
 
-    # -----------------------------------------------------------------------
-    # Fetch metrics for a set of same-namespace metric defs via the Azure
-    # Monitor data-plane metrics:getBatch API. Groups by subscription + region
-    # (the endpoint is regional, one subscription per call), chunks resource ids
-    # to the 50-per-call limit, and requests all needed metric names + all
-    # aggregations in a single call. Returns an array of metric hashtables in the
-    # per-call shape. THROWS on any HTTP/parse failure so the caller can fall back.
-    # The Get-AzMetricsBatch cmdlet is deliberately NOT used - it ignores the Az
-    # context; we mint the data-plane token and call REST for portability.
-    # -----------------------------------------------------------------------
+    # Fetch same-namespace metric defs via the Azure Monitor metrics:getBatch API: group by
+    # subscription+region, chunk ids to 50/call, request all names+aggregations at once; THROWS on any failure so the caller falls back. Uses raw REST (not Get-AzMetricsBatch, which ignores the Az context).
     function Invoke-RdaMetricsBatch
     {
         param($Defs, $MetricNamespace)
@@ -328,12 +209,8 @@ if ($Task -eq 'Processing')
             $Endpoint = "https://$Region.metrics.monitor.azure.com"
             $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
             $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLower() })
-            # InvariantCulture is REQUIRED, not cosmetic: these two strings go on the wire
-            # as the metrics:getBatch timespan. A format string with no provider takes the
-            # calendar from CurrentCulture, so a th-TH host would send a 2569- window and an
-            # ar-SA host a 1448- one. Azure Monitor then either rejects the request or
-            # answers with an empty window - degrading the service to the per-call path at
-            # best, and silently writing ZEROED metrics that are never re-queued at worst.
+            # InvariantCulture is REQUIRED: without it a non-Gregorian CurrentCulture (e.g. th-TH,
+            # ar-SA) sends a wrong-calendar timespan that Azure rejects or answers empty, silently writing zeroed metrics.
             $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
             $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
             $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
@@ -348,12 +225,8 @@ if ($Task -eq 'Processing')
             $ResourceIds = @($Group.Group | Select-Object -ExpandProperty Id -Unique)
             for ($Offset = 0; $Offset -lt $ResourceIds.Count; $Offset += 50)
             {
-                # Pre-emptive token refresh: Azure tokens expire after ~60-75 min. For
-                # very large subscriptions the chunk loop can run for 30+ min across many
-                # region groups. Rather than failing mid-batch and falling back to the
-                # per-call path (wasteful), check the token's ExpiresOn before each chunk
-                # and refresh only when within 5 minutes of expiry. Cheap: a local
-                # DateTimeOffset comparison, no API call unless actually needed.
+                # Pre-emptive token refresh before each chunk (tokens expire ~60-75 min; the loop
+                # can run 30+ min): refresh only within 5 min of expiry to avoid failing mid-batch and falling back to per-call.
                 if ($null -ne $TokenObj.ExpiresOn -and $TokenObj.ExpiresOn -lt [DateTimeOffset]::UtcNow.AddMinutes(5))
                 {
                     $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
@@ -380,12 +253,8 @@ if ($Task -eq 'Processing')
                     foreach ($Def in $ResourceDefs)
                     {
                         $MetricResult = @($ResourceResult.value | Where-Object { ([string]$_.name.value) -ieq ([string]$Def.MetricName) })[0]
-                        # Only emit a record when the metric was actually RETURNED for
-                        # this resource. A def whose metric is ABSENT from the response
-                        # is left unsatisfied so the caller re-queues it to the per-call
-                        # path (rather than emitting a silent zero). A metric that IS
-                        # present but has an empty window still yields a legitimate
-                        # zeroed record via New-RdaMetricObject.
+                        # Emit only when the metric was RETURNED: an absent metric is left
+                        # unsatisfied so the caller re-queues it per-call (not a silent zero). A present-but-empty window still yields a legitimate zeroed record.
                         if ($null -ne $MetricResult)
                         {
                             $Results.Add((New-RdaMetricObject -Def $Def -MetricResult $MetricResult))
@@ -398,24 +267,9 @@ if ($Task -eq 'Processing')
         return $Results.ToArray()
     }
 
-    # -----------------------------------------------------------------------
-    # Opt-in prerequisite helper: runs ONLY when -UseMetricsBatch is set, to
-    # "help enable" the data-plane path the operator asked for. Best-effort:
-    #   - Ensures the Microsoft.Insights resource provider is Registered on the
-    #     current-context subscription (a HARD prerequisite for metrics:getBatch;
-    #     an unregistered RP is what makes getBatch 403 even for an Owner).
-    # SCOPE: acts on the CURRENT Az-context subscription. This extension is
-    # invoked once per subscription by ResourceInventory.ps1 (the collector/
-    # extension contract), with the context already set to that subscription and
-    # $Resources scoped to it, so current-context registration is the correct
-    # subscription. (If this ever runs for defs spanning multiple subscriptions,
-    # registration would need to iterate them.)
-    # Permission is deliberately NOT pre-checked with ARM checkAccess: that API
-    # was observed to return false negatives for a valid Owner, so a pre-check
-    # would wrongly disable batch. The batch attempt itself is the reliable
-    # permission check; the caller classifies a 403 in its fallback path.
-    # Never throws - on any problem it logs and lets the batch attempt proceed
-    # (which falls back to per-call if the data plane is still unavailable).
+    # Opt-in helper (only when -UseMetricsBatch): best-effort register Microsoft.Insights on the
+    # current-context subscription, a hard prerequisite for getBatch (an unregistered RP 403s even an Owner).
+    # Never throws and does NOT pre-check permission (ARM checkAccess gives false negatives) - the batch attempt is the real permission check.
     function Initialize-RdaMetricsBatchPrereq
     {
         try
@@ -476,29 +330,9 @@ if ($Task -eq 'Processing')
     # Establish an offset timestamp rolled back exactly 24 hours ago
     $MetricTimeOneDay = (Get-Date).AddDays(-1)
 
-    # High-frequency utilization-series grain (operator-selectable). Each family has
-    # a native default cadence the tool ships with - VM 15 min, Azure SQL DB 30 min,
-    # OSS-DB (MariaDB / MySQL / PostgreSQL + Flexible) 60 min. When
-    # -MetricsIntervalMinutes is 0 (default) each family keeps its native default, so
-    # output is byte-identical to a run without the knob. When set (5/15/30/60) the
-    # operator's chosen grain is applied UNIFORMLY to all three families and honoured
-    # AS-IS (not clamped): the operator may deliberately pick a grain finer than a
-    # family's default - e.g. 30 on OSS-DB whose default is 60 - to better
-    # characterise bursty load, keep every utilisation series at one cadence for
-    # downstream analysis, or match an external 30-min window. That trade is theirs:
-    # a grain finer than a family's default increases that family's data-point volume,
-    # a coarser one reduces it.
-    #
-    # Support: validated against Microsoft Learn (supported-metrics reference) -
-    # EVERY metric the knob controls (VM Percentage CPU / Available Memory Bytes, SQL
-    # cpu_used/dtu_used/cpu_percent, OSS-DB cpu_percent/memory_percent) is stored at
-    # Azure's PT1M base grain, so all of 5/15/30/60 are individually supported for
-    # them. FromMinutes(n).ToString() yields the same 'hh:mm:ss' string the defs have
-    # always carried (60 -> '01:00:00', 30 -> '00:30:00', 15 -> '00:15:00', 5 ->
-    # '00:05:00'), consumed unchanged by both the per-call (Get-AzMetric -TimeGrain)
-    # and batch ([TimeSpan] cast) paths. The daily SQL limit/capacity reads, the
-    # *_percent storage capacity reads (Series='false'), VMSS/CosmosDB, and the
-    # disk/storage metrics keep their own literals and are unaffected.
+    # High-frequency utilization-series grain (VM/SQL/OSS-DB). 0 (default) keeps each family's
+    # native cadence (VM 15 / SQL 30 / OSS-DB 60 min; byte-identical); a set 5/15/30/60 applies uniformly, honoured as-is (all validated at Azure's PT1M base grain).
+    # Only these utilization series are affected; the daily/storage/VMSS/CosmosDB reads keep their own literals.
     $VmMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '00:15:00' }
     $SqlMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '00:30:00' }
     $DbMetricInterval = if ($MetricsIntervalMinutes -gt 0) { ([TimeSpan]::FromMinutes($MetricsIntervalMinutes)).ToString() } else { '01:00:00' }
@@ -565,20 +399,8 @@ if ($Task -eq 'Processing')
         }
     }
 
-    # Define Managed Disk Metrics
-    #
-    # Actual disk performance (IOPS + throughput) for ATTACHED managed disks.
-    # VMDisk.ps1 already records each disk's PROVISIONED ceiling
-    # (diskIOPSReadWrite / diskMBpsReadWrite); these metrics capture what the
-    # disk actually DID, so the two together are what drive storage right-sizing.
-    #
-    # Scoped to attached disks (ManagedBy populated): unattached disks have no
-    # meaningful I/O, and querying them only burns Azure Monitor read budget
-    # against the ~12k reads/hour/subscription ceiling. The 'Composite Disk ...'
-    # names are the per-disk composite metrics Azure Monitor exposes on the
-    # microsoft.compute/disks scope (read+write split). Series='true' so the
-    # engine produces both the 95th-percentile peak (MetricPercentile) and the
-    # average (MetricValue) for each, exactly like the VM CPU/memory series.
+    # Define Managed Disk Metrics: composite I/O (IOPS + throughput) for ATTACHED disks only
+    # (ManagedBy populated) - unattached disks have no meaningful I/O and querying them burns the ~12k reads/hour/subscription budget. Series='true' emits 95th-percentile peak + average.
     $ManagedDisks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' -and -not [string]::IsNullOrEmpty($_.ManagedBy) }
 
     if ($ManagedDisks -and -not $SkipDiskMetrics)
@@ -669,13 +491,8 @@ if ($Task -eq 'Processing')
         {
             $Subscription = $SubLookup[$app.subscriptionId]
 
-            # Do NOT narrow this on 'kind'. It was measured in the sandbox that a
-            # Flex Consumption app and a working Linux Dedicated app share the
-            # IDENTICAL kind ('functionapp,linux') and reserved ('true') values, yet
-            # need OPPOSITE answers - the Flex app publishes neither old execution
-            # metric while the Dedicated one returns real data. So '-notmatch linux'
-            # would silently drop valid Linux metrics. The real discriminator is the
-            # hosting plan SKU (FC1 / FlexConsumption), not kind.
+            # Do NOT narrow on 'kind': a Flex Consumption app and a working Linux Dedicated app
+            # share identical kind/reserved values yet need opposite answers, so '-notmatch linux' would silently drop valid Linux metrics (the real discriminator is the plan SKU).
             if ($app.kind -match 'functionapp')
             {
                 $MetricDefs.Add([PSCustomObject]@{ MetricIndex = $MetricCountId++; MetricName = 'FunctionExecutionCount'; StartTime = $MetricStartTime; EndTime = $MetricEndTime; Interval = '1.00:00:00'; Aggregation = 'Total'; Measure = 'Sum'; Id = $app.Id; SubName = $Subscription.Name; ResourceGroup = $app.ResourceGroup; Name = $app.Name; Location = $app.Location; Service = 'Functions'; Series = 'false' })
@@ -820,17 +637,8 @@ if ($Task -eq 'Processing')
     # against the Azure Monitor "metric queries" billing meter.
     $script:MetricsBatchHttpCalls = 0
 
-    # ---------------------------------------------------------------------
-    # OPTIONAL data-plane batch fast-path for VM / disk / storage / SQL / scale-set / Cosmos DB metrics (default OFF).
-    # ---------------------------------------------------------------------
-    # When -UseMetricsBatch is set, fetch these services' metrics through the
-    # Azure Monitor metrics:getBatch API (one REST call per <=50 resources, all
-    # aggregations in one request) instead of one Get-AzMetric per
-    # (resource, metric). Each batchable service is fetched with its OWN metric
-    # namespace; the produced records accumulate into the "_0" chunk. Every def
-    # NOT satisfied by batch (a per-service failure, an empty/partial response,
-    # or a non-batchable service) is left on the per-call loop below - metrics
-    # are never lost (fail-safe, not fail-silent).
+    # OPTIONAL batch fast-path (default OFF): with -UseMetricsBatch, fetch batchable services via
+    # metrics:getBatch per OWN namespace into the "_0" chunk. Any def not satisfied (failure, partial, or non-batchable) stays on the per-call loop below so metrics are never lost.
     if ($UseMetricsBatch)
     {
         # Batchable service -> its Azure Monitor metric namespace. Ordered so the
@@ -949,15 +757,8 @@ if ($Task -eq 'Processing')
 
     $WarningPreference = "SilentlyContinue"
 
-    # ---------------------------------------------------------------------
-    # Metrics collection diagnostics + resilience configuration
-    # ---------------------------------------------------------------------
-    # Capture the Az context ONCE in the parent. ForEach-Object -Parallel runs
-    # each item in a fresh runspace that does NOT inherit the parent's Az
-    # session, so without passing this through explicitly (-DefaultProfile)
-    # the first Get-AzMetric in each runspace can stall on an implicit token
-    # acquisition or fail outright - a prime suspect for the metrics phase
-    # appearing to "hang". Captured here, passed in via $using below.
+    # Capture the Az context ONCE in the parent: ForEach-Object -Parallel runspaces do NOT inherit
+    # the parent's Az session, so without passing it via -DefaultProfile ($using below) the first Get-AzMetric can stall or fail - the prime cause of the metrics phase "hanging".
     $MetricAzContext = $null
     try
     {
@@ -970,12 +771,8 @@ if ($Task -eq 'Processing')
         Write-MetricsDiag "WARNING: could not capture Az context for parallel runspaces; metric calls will rely on per-runspace context autosave."
     }
 
-    # Resilience knobs for the per-call Get-AzMetric wrapper. These are stable
-    # internals rather than script parameters: a 120s client-side timeout per
-    # call and up to 3 retries (exponential backoff) handles transient ARM
-    # throttling/hangs without exposing extra knobs to the operator. Adjust here
-    # if Azure Monitor behaviour changes; they were deliberately NOT promoted to
-    # parameters to keep the script surface small.
+    # Resilience knobs (120s per-call timeout, 3 retries w/ backoff) for the Get-AzMetric wrapper:
+    # deliberately internal constants, NOT operator parameters, to keep the script surface small.
     $MetricTimeoutSeconds = 120
     $MetricMaxRetries = 3
 
@@ -1001,12 +798,8 @@ if ($Task -eq 'Processing')
         if ($Defs.Count -ge $RangeBatch -or $MetricsProcessed -ge $MetricCount)
         {
             $BatchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            # Bar-only progress: the metrics phase runs inside the non-interactive
-            # parallel stream worker, where one stdout line per batch would clutter
-            # the parent's demuxed output on a large tenant. -BarOnly renders the
-            # Write-Progress bar interactively (no-op otherwise, no stdout line).
-            # The per-batch dispatch detail is preserved as Write-Verbose below and
-            # in the end-of-phase diagnostics summary.
+            # Bar-only progress: a per-batch stdout line would clutter the parent's demuxed output;
+            # -BarOnly renders the bar interactively (no-op otherwise) while the detail stays in Write-Verbose and the diagnostics summary.
             Write-RdaProgress -Activity 'Metrics collection' -CurrentItem ("batch {0} ({1} call(s))" -f $RangeIdx, $Defs.Count) -Index $MetricsProcessed -Total $MetricCount -BarOnly
             Write-Verbose ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $RangeIdx, $Defs.Count, $MetricsProcessed, $MetricCount)
 
@@ -1016,27 +809,15 @@ if ($Task -eq 'Processing')
                 $CallMaxRetries = $using:MetricMaxRetries
                 $DiagBag = $using:MetricDiagnostics
 
-                # Per-call progress was previously written to the console with
-                # Write-Host for EVERY metric definition (thousands per sub). From
-                # concurrent runspaces that flood is what made the terminal appear
-                # frozen until a keypress forced a repaint. The per-call outcome
-                # (including this "processing" detail) is still recorded in
-                # $diagBag below and surfaced in the end-of-phase diagnostics
-                # summary, so nothing is lost from the log - only the live console
-                # spam is removed. Warnings (retry) and errors (giving up) below
-                # are intentionally kept on the console.
+                # Per-call progress is deliberately NOT written to the console here: Write-Host per
+                # metric from concurrent runspaces froze the terminal. The outcome is still recorded in $diagBag and the end-of-phase summary; retry warnings/errors below stay on the console.
 
                 $MetricError = $false
                 $MetricName = $_.MetricName
                 $MetricService = $_.Service
 
-                # Per-call diagnostics, reported back to the parent so the metrics
-                # phase can show exactly which calls stalled. Outcome is one of:
-                #   Success                      - data returned
-                #   Timeout / Throttled / Error  - retried up to $CallMaxRetries
-                #   NotFound / BadRequest        - permanent, abandoned after 1 attempt
-                # This list is the outcome contract the phase summary counts on; keep
-                # it in step with the classification in the retry loop below.
+                # Per-call diagnostics reported to the parent. Outcome contract the phase summary
+                # counts on: Success; Timeout/Throttled/Error (retried up to $CallMaxRetries); NotFound/BadRequest (permanent, one attempt). Keep in step with the retry-loop classification.
                 $CallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
                 $CallOutcome = 'Success'
                 $CallAttempts = 0
@@ -1046,26 +827,9 @@ if ($Task -eq 'Processing')
                 # Metrics_*.json. See Get-RdaMetricErrorBody below for why it matters.
                 $CallErrorBody = $null
 
-                # Pull Azure Monitor's response body out of a failed call.
-                #
-                # WHY. $_.Exception.Message for a rejected metric call is a generic
-                # line ("Operation returned an invalid status code 'BadRequest'") that
-                # says the request was refused but not WHY. The body underneath does:
-                # it distinguishes a metric that does not exist for this resource type
-                # from an unsupported time grain (which -MetricsIntervalMinutes can
-                # cause, making it OUR bug) from a resource deleted after discovery.
-                # Without it, a tool-side 400 is indistinguishable from a benign
-                # resource-side one, which is exactly how 219 Linux function apps
-                # burned ~2.5 hours before anyone could see the cause.
-                #
-                # Defined INSIDE the -Parallel scriptblock deliberately: a function
-                # declared at file scope is not visible in these runspaces, so this has
-                # to be per-runspace rather than shared.
-                #
-                # CONTRACT: never throws, and returns $null when it finds nothing. A
-                # diagnostic aid must not be able to break the phase it is describing,
-                # so every step is wrapped and failure degrades to $null rather than
-                # propagating.
+                # Pull Azure Monitor's response body out of a failed call: $_.Exception.Message only
+                # says a request was refused, the body says WHY (metric invalid vs unsupported grain (our bug via -MetricsIntervalMinutes) vs resource deleted). Defined INSIDE the -Parallel block (file-scope functions are invisible in these runspaces).
+                # CONTRACT: never throws, returns $null when it finds nothing - a diagnostic aid must not break the phase it describes.
                 function Get-RdaMetricErrorBody
                 {
                     param($ErrorRecord)
@@ -1102,15 +866,8 @@ if ($Task -eq 'Processing')
                                 $Key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Current)
                                 if (-not $Visited.Add($Key)) { break }
 
-                                # Only text-bearing members. A '.Response.ContentStream'
-                                # probe used to sit here and was DEAD: the guard below
-                                # rejects anything that is a [System.IO.Stream], which is
-                                # exactly what that member returns, so it could never
-                                # contribute. Reading it for real would also be wrong here
-                                # - the SDK has usually already consumed the stream by the
-                                # time the exception surfaces, so it would be at EOF, and
-                                # draining a live one inside a diagnostic helper could
-                                # disturb the very error being described.
+                                # Only text-bearing members: a [System.IO.Stream] is rejected by the
+                                # guard below, and draining the SDK's (usually already-consumed) response stream inside a diagnostic helper could disturb the error being described.
                                 foreach ($Probe in @(
                                         { $Current.Response.Content },
                                         { $Current.Body }
@@ -1158,21 +915,8 @@ if ($Task -eq 'Processing')
                         $Rendered = ([string]$Rendered) -replace '\s+', ' '
                         $Rendered = $Rendered.Trim()
 
-                        # Keep the HEAD and the TAIL when capping, not just the head. The
-                        # actionable part of Azure Monitor's rejection is frequently at the
-                        # END: "Failed to find metric configuration for provider:
-                        # Microsoft.Web, resource Type: sites, metric: X, Valid metrics:
-                        # a,b,c,..." puts the list of metrics the resource DOES publish
-                        # last, and that list is the whole answer to "what should we have
-                        # asked for". A head-only cap at 500 chars discarded precisely that
-                        # and left a line that restated the status. The budget is also
-                        # raised, because these bodies routinely run past 500 characters and
-                        # this text goes to the local debug log, not to the report.
-                        # Only truncate when doing so actually SAVES bytes. head + tail +
-                        # marker is ~26 characters longer than the cap, so a body just past
-                        # the cap (2001-2026 chars) would come out LONGER than it went in -
-                        # a truncation that costs bytes instead of saving them, and loses
-                        # the middle for nothing.
+                        # Keep HEAD and TAIL when capping: Azure's actionable "Valid metrics: a,b,c..."
+                        # list is often at the END, which a head-only cap discarded. Only truncate when it saves bytes (head+tail+marker exceeds a body just past the cap).
                         $BodyCap = 2000
                         $TruncationMarkerBudget = 32
                         if ($Rendered.Length -gt ($BodyCap + $TruncationMarkerBudget))
@@ -1229,25 +973,11 @@ if ($Task -eq 'Processing')
                         $CallAttempts = $Attempt + 1
                         $TimedOut = $false
                         $Throttled = $false
-                        # Reset the captured body PER ATTEMPT, exactly like $TimedOut and
-                        # $Throttled above. Without this it was write-once-and-linger: a
-                        # body captured on a failed attempt 1 survived into a SUCCESSFUL
-                        # attempt 2, so the diagnostics record came out as
-                        # Outcome='Success' with a non-null ErrorBody describing an error
-                        # that no longer applied. Anyone reading the log would be chasing
-                        # a failure that had already recovered. Resetting here also means
-                        # the retained body always belongs to the FINAL attempt, which is
-                        # the one whose outcome is being reported.
+                        # Reset the captured body PER ATTEMPT: otherwise a body from a failed attempt 1
+                        # lingers into a successful attempt 2, reporting Outcome='Success' with a stale ErrorBody. Keeps the retained body tied to the final (reported) attempt.
                         $CallErrorBody = $null
-                        # A PERMANENT failure can never succeed on a retry, so retrying
-                        # one only burns wall-clock and Azure Monitor metric-query quota.
-                        # Two are seen routinely on real runs: a 404 for a resource that
-                        # was deleted between the Resource Graph snapshot and this call
-                        # (common with short-lived container / scale-set disks), and a 400
-                        # for a metric that is not valid for the resource. $PermanentOutcome
-                        # carries the observed HTTP status forward as the recorded Outcome,
-                        # so the phase summary reports the status as fact and names the
-                        # likely cause as likely - see the reporting block at the end.
+                        # A PERMANENT failure (404 deleted-after-discovery, 400 metric-invalid) can never
+                        # succeed on retry, so skip the retries; $PermanentOutcome carries the observed HTTP status forward as the recorded Outcome.
                         $Permanent = $false
                         $PermanentOutcome = $null
 
@@ -1267,45 +997,13 @@ if ($Task -eq 'Processing')
                             {
                                 $LastError = $_.Exception.Message
 
-                                # Azure's response body, for the diagnostics log only.
-                                # Captured BEFORE the classification below purely for
-                                # readability - it is deliberately NOT used by any branch
-                                # of that classification. The permanent-vs-throttle
-                                # decision stays a function of $LastError alone, so this
-                                # capture cannot change retry behaviour even if the body
-                                # is missing, malformed or unexpected.
+                                # Azure's response body, diagnostics log only: deliberately NOT read by the
+                                # classification below (permanent-vs-throttle stays a function of $LastError alone), so it cannot change retry behaviour.
                                 $CallErrorBody = Get-RdaMetricErrorBody -ErrorRecord $_
 
-                                # Order matters, and the permanent check MUST stay first.
-                                # The throttle pattern below is a loose substring match, and
-                                # the exception message echoes the full ARM resource id - a
-                                # GUID containing '429' would otherwise be read as throttling
-                                # and drag a terminal failure back onto the 4-attempt path
-                                # (with the doubled throttle backoff) that this block exists
-                                # to avoid. The anchor that does the work is the literal
-                                # 'invalid status code ' PREFIX, not the quotes, so it cannot
-                                # match a genuine TooManyRequests message; checking it first
-                                # is strictly safer.
-                                #
-                                # The QUOTES ARE OPTIONAL ('?), and that matters. The pattern
-                                # used to require them, which made the classifier depend on an
-                                # SDK formatting detail nothing pins. If a version or locale
-                                # ever renders the status unquoted, a permanent BadRequest
-                                # stops being recognised and gets retried for the full budget
-                                # - i.e. it fails OPEN, silently, in the direction that costs
-                                # wall-clock and Azure Monitor quota. Verified that making
-                                # them optional closes both unquoted renderings while keeping
-                                # every negative case negative: a real throttle, a '404'
-                                # inside a resource id, and 'NotFound' used as a resource NAME
-                                # all still fail to match, because none of them carries the
-                                # 'invalid status code ' prefix immediately before the status.
-                                #
-                                # A bare '404' / 'ResourceNotFound' substring is still NOT
-                                # matched, for the same reason. $PermanentOutcome is taken FROM
-                                # the match so the recorded outcome cannot drift from the
-                                # branch that set it. An unmatched permanent failure falls
-                                # through to the retry path - slower, never wrong - which is
-                                # the correct way for this classifier to fail.
+                                # Permanent check MUST stay first: the throttle pattern is a loose substring
+                                # and the message echoes the ARM id, so a GUID containing '429' would misclassify. The anchor is the literal 'invalid status code ' prefix; quotes are optional ('?) so an unquoted render still matches (else a permanent BadRequest fails open and burns the full retry budget).
+                                # $PermanentOutcome is taken FROM the match; an unmatched failure falls through to retry (slower, never wrong).
                                 if ($LastError -match "invalid status code '?(?<Status>NotFound|BadRequest)'?")
                                 {
                                     $Permanent = $true
@@ -1332,22 +1030,13 @@ if ($Task -eq 'Processing')
 
                         if ($Succeeded)
                         {
-                            # Per-call success was previously logged to the console
-                            # (one DarkGreen line per metric). Removed to stop the
-                            # concurrent-runspace console flood; the success is still
-                            # recorded in $diagBag below (Outcome='Success') and
-                            # counted in the end-of-phase summary. The break MUST stay
-                            # - it is the retry-loop exit on a successful call.
+                            # Per-call success is no longer logged to the console (it flooded concurrent
+                            # runspaces); still recorded in $diagBag. The break MUST stay - it is the retry-loop exit on success.
                             break
                         }
 
-                        # Failed attempt - decide whether to retry. The per-call
-                        # retry / giving-up detail is deliberately NOT written to
-                        # the console: from concurrent runspaces it flooded the
-                        # terminal. The final per-metric Outcome, Attempts and
-                        # Error are recorded in the diagnostics bag below and
-                        # surfaced in the end-of-phase summary (written to the
-                        # debug log), so nothing diagnostic is lost.
+                        # Failed attempt - decide whether to retry. Retry/giving-up detail is deliberately
+                        # NOT written to the console (concurrent-runspace flood); the final Outcome/Attempts/Error land in the diagnostics bag and summary.
                         if (-not $Permanent -and $Attempt -lt $CallMaxRetries)
                         {
                             # Exponential backoff: 2^attempt seconds, capped, plus
@@ -1378,13 +1067,8 @@ if ($Task -eq 'Processing')
                         throw ("Get-AzMetric failed after {0} attempt(s): {1}" -f $CallAttempts, $LastError)
                     }
 
-                    # Total interval count Azure Monitor returned for this metric,
-                    # including intervals that carry no datapoint. This is the
-                    # denominator for coverage / %TimeOn-style derivations: for a VM's
-                    # 'Percentage CPU' series, MetricCount / MetricTotalCount * 100 is
-                    # the fraction of the window the VM was actually running (%TimeOn).
-                    # Captured here, before the Measure switch below collapses
-                    # $metricQueryResults to a scalar.
+                    # Total interval count (incl. empty intervals) - the denominator for %TimeOn/coverage
+                    # (MetricCount / MetricTotalCount). Captured before the Measure switch collapses the results to a scalar.
                     $MetricTotalCount = @($MetricQuery.Data).Count
 
                     $MetricQueryResults = 0
@@ -1414,35 +1098,9 @@ if ($Task -eq 'Processing')
                         }
                         default
                         {
-                            # An aggregation this switch does not know silently left
-                            # $MetricQueryResults at its 0 initialiser, so the metric
-                            # shipped as a REAL-LOOKING ZERO after a SUCCESSFUL call -
-                            # the worst failure shape available, because a zero for CPU
-                            # or storage reads as "idle" rather than "not measured".
-                            # Today the five Azure Monitor aggregations are all covered,
-                            # so this is unreachable; it exists so that ADDING a metric
-                            # definition with an unhandled or misspelled Aggregation
-                            # fails visibly instead of fabricating data.
-                            #
-                            # THROW rather than setting the outcome inline. Three reasons,
-                            # all of them found by measurement:
-                            #   1. The catch below is already the canonical failure shape
-                            #      (MetricValue 0, MetricError true, CallOutcome promoted
-                            #      only if still 'Success', CallErrorMsg from the
-                            #      exception), so reusing it cannot drift from it.
-                            #   2. Nulling the value did NOT fail visibly. $null.Where()
-                            #      yields Count 0, which falls into the count-eq-0 branch
-                            #      that RESETS the value to 0 with MetricError false -
-                            #      reproducing the exact silent zero this branch exists to
-                            #      prevent.
-                            #   3. It keeps MetricValue numeric. A $null there would be a
-                            #      value-type change on the Metrics_*.json contract that
-                            #      server ingestion binds on, which needs owner approval.
-                            #
-                            # $_ is the SWITCHED-ON VALUE inside a switch action block, not
-                            # the outer pipeline item - verified - so $_ is the aggregation
-                            # string and $_.Aggregation would render empty. $MetricName is
-                            # the outer capture from the top of this block.
+                            # An unhandled Aggregation would leave $MetricQueryResults at its 0 initialiser -
+                            # a real-looking zero after a successful call (reads as "idle", not "not measured"). Unreachable today (all 5 aggregations covered); exists so a misspelled Aggregation fails visibly.
+                            # THROW (not null): the catch is the canonical failure shape, nulling hits the count-eq-0 branch that re-creates the silent zero, and MetricValue must stay numeric. ($_ is the switched-on value, not the pipeline item.)
                             throw ("Unhandled Aggregation '{0}' for metric '{1}' - no value could be read from the response." -f $_, $MetricName)
                         }
                     }
@@ -1486,14 +1144,8 @@ if ($Task -eq 'Processing')
                             'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
                             default
                             {
-                                # Same silent-wrong-value seam as the Aggregation switch
-                                # above: an unhandled Measure left $MetricQueryResults as
-                                # the RAW ARRAY of per-interval values instead of the
-                                # intended scalar, which then reached the output field as a
-                                # collection. Throw for the same three reasons given there
-                                # (canonical catch, nulling does not fail visibly, and
-                                # MetricValue must stay numeric). $_ is the switched-on
-                                # Measure value here, not the pipeline item.
+                                # Same silent-wrong-value seam as the Aggregation switch: an unhandled Measure
+                                # left $MetricQueryResults as the RAW per-interval array instead of a scalar. Throw for the same reasons (canonical catch, nulling doesn't fail visibly, MetricValue stays numeric). ($_ is the switched-on Measure value.)
                                 throw ("Unhandled Measure '{0}' for metric '{1}' - the per-interval values could not be collapsed to a single figure." -f $_, $MetricName)
                             }
                         }
@@ -1510,13 +1162,8 @@ if ($Task -eq 'Processing')
                     $MetricError = $true
                     if ($CallOutcome -eq 'Success') { $CallOutcome = 'Error' }
                     $CallErrorMsg = $_.Exception.Message
-                    # No Write-Error here: this runs in a ForEach-Object -Parallel
-                    # worker, so a Write-Error surfaced one error-stream record per
-                    # failed metric - on a large multi-sub run that is exactly the
-                    # noise this change removes. The failure is not lost: it is
-                    # recorded in $diagBag below (Outcome='Error', Error=$callErrorMsg)
-                    # and surfaced in the end-of-phase summary written to the debug
-                    # log, and $metricError still flags the metric record ($obj) below.
+                    # No Write-Error here: in a ForEach-Object -Parallel worker it surfaced one error-stream
+                    # record per failed metric (the flood this removes). The failure still lands in $diagBag (Outcome='Error') and $MetricError flags the record below.
                 }
 
                 $CallStopwatch.Stop()
@@ -1618,13 +1265,8 @@ if ($Task -eq 'Processing')
     Write-MetricsDiag ("===== Metrics phase summary =====")
     Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
 
-    # Self-reported metric-query API-call impact for THIS subscription. The per-call
-    # path issues one Get-AzMetric HTTP call per attempt (retries included), so sum
-    # the recorded Attempts; the batch path issues one metrics:getBatch POST per
-    # <=50-resource chunk ($script:MetricsBatchHttpCalls). Both count toward the
-    # Azure Monitor "metric queries" meter (10,000,000 calls free per billing account
-    # per month, then charged per Azure Monitor pricing). Use -SkipMetrics to issue
-    # zero; -UseMetricsBatch lowers the count vs the per-call path.
+    # Self-reported metric-query API-call impact for THIS subscription: per-call = sum of recorded
+    # Attempts (one Get-AzMetric per attempt incl. retries); batch = $script:MetricsBatchHttpCalls (one POST per <=50 resources). Both count toward the Azure Monitor "metric queries" meter.
     $PerCallHttpCalls = if ($DiagRecords.Count -gt 0) { [int]($DiagRecords | Measure-Object -Property Attempts -Sum).Sum } else { 0 }
     $BatchHttpCalls = [int]$script:MetricsBatchHttpCalls
     Write-MetricsDiag ("Metric-query API calls issued (this subscription): {0} total | per-call Get-AzMetric incl. retries: {1} | getBatch POSTs: {2}. Counts toward the Azure Monitor 'metric queries' meter (10,000,000 free/account/month)." -f ($PerCallHttpCalls + $BatchHttpCalls), $PerCallHttpCalls, $BatchHttpCalls)
@@ -1652,16 +1294,8 @@ if ($Task -eq 'Processing')
         }
     }
 
-    # Rejected outright by Azure Monitor and abandoned after ONE attempt, so these
-    # cost almost no time. Reported separately from the stuck/failed calls above,
-    # but NOT silently: a 404 is nearly always the resource (deleted after discovery),
-    # whereas a 400 may equally be OUR request being wrong - a TimeGrain or an
-    # aggregation this resource does not support, or a metric definition aimed at the
-    # wrong resource type. Since the status alone cannot separate those, what makes a
-    # tool-side 400 diagnosable is printing the metric, interval and aggregation we
-    # actually asked for. The first line of the Azure message is appended too in case
-    # the SDK carried extra detail; for a CloudException it often adds nothing beyond
-    # the status, so it is a bonus rather than the evidence.
+    # Permanent rejections (abandoned after one attempt), reported separately but NOT silently:
+    # a 404 is usually a deleted resource, but a 400 may be OUR request (bad TimeGrain/aggregation/metric), so the report prints the metric, interval and aggregation asked for to make a tool-side 400 diagnosable.
     if (($NotFoundCount + $BadRequestCount) -gt 0)
     {
         Write-MetricsDiag ("Metrics not collected for these resources (permanent, not retried - no data was available to collect):")

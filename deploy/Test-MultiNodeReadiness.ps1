@@ -62,7 +62,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Collected check results: each is { Name, Status (PASS/WARN/FAIL), Detail }.
 $Results = [System.Collections.Generic.List[object]]::new()
 
 function Add-Result
@@ -75,9 +74,6 @@ function Add-Result
     $Results.Add([pscustomobject]@{ Name = $Name; Status = $Status; Detail = $Detail })
 }
 
-# Mask a caller identity for display. Account.Id is usually a UPN/email (user) or
-# an app id (service principal) - real identity PII that could leak into captured
-# CI logs, so never print it verbatim.
 function Get-MaskedIdentity
 {
     param([string]$Identity)
@@ -85,10 +81,8 @@ function Get-MaskedIdentity
     if ([string]::IsNullOrWhiteSpace($Identity)) { return '<unknown>' }
     if ($Identity -match '^(.)(.*)(@.+)$')
     {
-        # UPN: keep first char + domain, mask the local part.
         return ('{0}***{1}' -f $Matches[1], $Matches[3])
     }
-    # Service-principal app id / GUID: keep a short prefix only.
     if ($Identity.Length -gt 6) { return ($Identity.Substring(0, 6) + '***') }
     return '***'
 }
@@ -97,14 +91,8 @@ Write-Host ''
 Write-Host '=== RDA multi-node (AKS) readiness check - read-only, nothing is created ===' -ForegroundColor Green
 Write-Host ''
 
-# 1. PowerShell 7+
-# Unconditional PASS: '#Requires -Version 7.0' above means PowerShell refuses to run this
-# file at all below 7, so reaching this line already proves the check. The FAIL branch that
-# used to sit here could never execute, and a preflight offering a result it cannot reach is
-# worse than one that does not offer it.
 Add-Result -Name 'PowerShell 7+' -Status 'PASS' -Detail $PSVersionTable.PSVersion.ToString()
 
-# 2. Azure CLI present + signed in (the AKS setup commands use `az`).
 $AzCli = Get-Command az -ErrorAction SilentlyContinue
 if (-not $AzCli)
 {
@@ -113,11 +101,6 @@ if (-not $AzCli)
 else
 {
     Add-Result -Name 'Azure CLI installed' -Status 'PASS' -Detail $AzCli.Source
-    # `az account show` returns non-zero when not logged in. With
-    # $ErrorActionPreference = 'Stop' on PowerShell 7.4+, a non-zero native exit
-    # is itself terminating ($PSNativeCommandUseErrorActionPreference defaults on),
-    # which would abort the whole preflight instead of recording a FAIL row -
-    # so the call runs with that preference off and the exit code is read after.
     $null = & { $PSNativeCommandUseErrorActionPreference = $false; az account show 2>$null }
     if ($LASTEXITCODE -eq 0)
     {
@@ -129,7 +112,6 @@ else
     }
 }
 
-# 3. Az PowerShell context + the modules the tool needs.
 $Context = $null
 try
 {
@@ -148,10 +130,6 @@ else
     Add-Result -Name 'Az PowerShell signed in' -Status 'PASS' -Detail (Get-MaskedIdentity $Context.Account.Id)
 }
 
-# Az.Accounts + Az.ResourceGraph are what the RDA tool itself needs; Az.Resources
-# (Get-AzResourceProvider / Get-AzRoleAssignment) and Az.Compute
-# (Get-AzComputeResourceSku) are what THIS preflight's own checks call - verify
-# all four so a missing dependency is an actionable FAIL rather than an opaque WARN.
 foreach ($Module in 'Az.Accounts', 'Az.ResourceGraph', 'Az.Resources', 'Az.Compute')
 {
     $Found = Get-Module -ListAvailable -Name $Module | Select-Object -First 1
@@ -165,8 +143,6 @@ foreach ($Module in 'Az.Accounts', 'Az.ResourceGraph', 'Az.Resources', 'Az.Compu
     }
 }
 
-# Resolve target subscription and switch context (-Scope Process only, restored in finally)
-# so provider/node-size checks read the right subscription without touching the operator's default.
 if (-not $SubscriptionId -and $Context) { $SubscriptionId = $Context.Subscription.Id }
 $TargetSubscriptionReady = $true
 $OriginalContext = $Context
@@ -182,13 +158,12 @@ if ($Context -and $SubscriptionId -and $Context.Subscription.Id -ne $Subscriptio
     catch
     {
         Add-Result -Name 'Target subscription selected' -Status 'FAIL' -Detail ("Cannot select subscription {0}: {1}" -f $SubscriptionId, $_.Exception.Message)
-        $TargetSubscriptionReady = $false   # the provider / node-size checks below must not run against the wrong subscription
+        $TargetSubscriptionReady = $false
     }
 }
 try
 {
 
-    # 4. Resource providers AKS + ACR require.
     foreach ($Provider in 'Microsoft.ContainerService', 'Microsoft.ContainerRegistry')
     {
         if (-not $TargetSubscriptionReady)
@@ -217,11 +192,6 @@ try
         }
     }
 
-    # 5. An x64 node VM size is actually available in the target region.
-    #    WHY: some subscriptions/regions only offer Arm64 B-series (e.g. Standard_B2s
-    #    was rejected as "not allowed" in testing) and the amd64 PowerShell container
-    #    image cannot be scheduled on Arm64 nodes. Confirm the chosen x64 size is
-    #    offered AND not restricted before the AKS create.
     try
     {
         if (-not $TargetSubscriptionReady) { throw ("target subscription {0} could not be selected" -f $SubscriptionId) }
@@ -235,8 +205,6 @@ try
         }
         else
         {
-            # Distinguish restriction scope: a 'Location' restriction means not creatable here -> FAIL;
-            # a 'Zone' restriction only removes some zones, still creatable (AKS picks one) -> WARN.
             $LocationRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Location' }).Count -gt 0
             $ZoneRestricted = @($Sku.Restrictions | Where-Object { $_.Type -eq 'Zone' }).Count -gt 0
             if ($LocationRestricted)
@@ -261,16 +229,11 @@ try
             -Detail ("Could not query SKUs ({0})." -f $_.Exception.Message)
     }
 
-    # 6. Check caller can create infra + workload identity (role assignments + federated creds need
-    #    Owner/User Access Administrator). WARN not FAIL when absent: grant may be at an unseen MG/RG scope.
     if ($Context -and $SubscriptionId)
     {
         try
         {
             $Scope = "/subscriptions/$SubscriptionId"
-            # A service-principal context (e.g. a CI identity) does not resolve via
-            # -SignInName (that is for user UPNs); query by -ApplicationId instead so
-            # the RBAC check is meaningful for both user and SP callers.
             if ($Context.Account.Type -eq 'ServicePrincipal')
             {
                 $MyRoles = @(Get-AzRoleAssignment -ApplicationId $Context.Account.Id -Scope $Scope -ErrorAction Stop |
@@ -313,15 +276,12 @@ try
 }
 finally
 {
-    # Restore the operator's original context even if a check threw. Process-scoped
-    # only, so nothing on disk changed; this puts the SESSION back exactly as found.
     if ($ContextSwitched -and $OriginalContext)
     {
         try { $null = Set-AzContext -Context $OriginalContext -Scope Process -ErrorAction Stop } catch { Write-Warning ("Could not restore the original Az context: {0}" -f $_.Exception.Message) }
     }
 }
 
-# --- Render the readiness table -------------------------------------------------
 Write-Host ''
 foreach ($R in $Results)
 {
@@ -341,9 +301,6 @@ Write-Host '  - Monitoring Reader             (metrics)                  at the 
 Write-Host '  - Storage Blob Data Contributor (output upload)            on the collection storage account' -ForegroundColor Gray
 Write-Host ''
 
-# Exit 2 = the check could not meaningfully run: not signed in to Azure at all
-# (neither an Az PowerShell context nor an az CLI session), so every Azure-side
-# check is moot. Distinct from exit 1 (signed in, but a specific requirement failed).
 $AzurePsOk = @($Results | Where-Object { $_.Name -eq 'Az PowerShell signed in' -and $_.Status -eq 'PASS' }).Count -gt 0
 $AzCliOk = @($Results | Where-Object { $_.Name -eq 'Azure CLI signed in' -and $_.Status -eq 'PASS' }).Count -gt 0
 if (-not $AzurePsOk -and -not $AzCliOk)
@@ -362,3 +319,4 @@ else
     Write-Host ("NOT READY: {0} check(s) failed, {1} warning(s). Resolve the FAILs above, then re-run." -f $FailCount, $WarnCount) -ForegroundColor Red
     exit 1
 }
+

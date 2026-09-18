@@ -106,34 +106,13 @@ Describe "Consumption Prefix Consistency" {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Task 3 additive coverage (Property P7 — prefix fidelity + type hints).
-# Requirements 3.1, 3.2, 3.3, 3.4.
-#
-# The existing Describe blocks above validate that whatever prefix appears in
-# the fixture is well-formed and consistent, but they cannot exercise the
-# non-prod pattern set or the d-/t-/s- segment hints when the fixture contains
-# only prod-classified resources (empty TagMap/FreeTextMap, prod-only sample
-# data). These blocks close that gap two ways, without weakening anything above:
-#   1. Classifier-logic assertions that exercise the EXACT prefix regex the
-#      source uses, so the full non-prod set (3.1) and the prod default (3.2)
-#      are verified independently of fixture contents. The same regex literal is
-#      used per class in ResourceInventory.ps1 (resource name L951, subscription
-#      L977, resource group L987, tag value L1630), which is Requirement 3.3.
-#   2. Fixture-content assertions that lock the type-hint contract (3.4): the
-#      databricks/aks/vmss hints appear only on the obfuscated NAME, never on the
-#      obfuscated ID (source L958 builds the ID with no hint; L961-969 apply the
-#      hint to the name only).
-# ---------------------------------------------------------------------------
+# Additive coverage: exercise the EXACT prefix regex the source uses so the non-prod set and prod default are verified
+# independent of a prod-only fixture, and lock the type-hint contract - databricks/aks/vmss hints appear on the obfuscated NAME only, never the ID.
 
 Describe "Classifier Fidelity — non-prod set and prod default (P7)" {
     BeforeAll {
-        # Mirror of the prod/nonprod classifier used identically across all four
-        # classes in ResourceInventory.ps1 (L951 name, L977 subscription,
-        # L987 resource group, L1630 tag value; also Protect-FreeTextValue at
-        # Functions/ResourceInventory.Functions.ps1 L74).
-        # Replicated here because a prod-only fixture cannot supply non-prod
-        # sample data to drive the classification through the ZIP.
+        # Mirror of the prod/nonprod classifier used identically across all four classes in ResourceInventory.ps1;
+        # replicated here because a prod-only fixture cannot supply non-prod sample data to drive classification through the ZIP.
         function script:Get-ExpectedObfuscationPrefix([string]$Value)
         {
             if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-')

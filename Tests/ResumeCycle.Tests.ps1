@@ -1,32 +1,5 @@
-# Sequential -Resume cycle tests (offline / deterministic)
-#
-# Exercises the multi-subscription wrapper's SEQUENTIAL resume contract end to
-# end WITHOUT a live Azure run. The wrapper body (Run-AllSubscriptions.ps1)
-# authenticates + enumerates + has top-level side effects, so it cannot be
-# dot-sourced; like Tests/RunAllSubscriptionsReconciliation.Tests.ps1, we
-# instead drive the REAL shared state helpers (Get-ResumeStateObject /
-# Save-CompletedSubscriptionIds / Get-SubscriptionDelta) through the wrapper's
-# EXACT seed / skip / append / persist expressions and assert the observable
-# resume behaviour:
-#
-#   - a fresh run seeds an empty completed list by projecting through the
-#     wrapper's own Get-CompletedSubscriptionIds -State $SeedState reader (which
-#     returns @() by construction), so the first append is a real array push
-#     (never a $null-collapse -> string concatenation),
-#   - completing a subset persists a real multi-element completed set,
-#   - a -Resume run skips exactly the already-completed subs and processes the
-#     remainder,
-#   - a -Resume run after everything completed skips ALL subs, and
-#   - Get-SubscriptionDelta reports no gaps once the responsible set is done.
-#
-# The behavioural tests run a faithful COPY of the wrapper's seed expression, so
-# they exercise the production seed shape but cannot by themselves catch a
-# regression in the wrapper SOURCE. A dedicated source-guard It therefore asserts
-# the real seed line in Run-AllSubscriptions.ps1 keeps its outer @(...) wrapper -
-# the exact thing whose removal reintroduces the $null-collapse bug that parse +
-# review + the pure-helper unit tests all missed.
-#
-# Run with: Invoke-Pester ./Tests/ResumeCycle.Tests.ps1 -Output Detailed
+# Offline tests of the wrapper's sequential -Resume contract: drive the real state
+# helpers through its exact seed/skip/append/persist so the first += is an array push, never a $null-collapse.
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RunAllSubscriptions.Functions.ps1'
@@ -51,15 +24,8 @@ BeforeAll {
 
     $script:Tenant = 'tenant-resume-cycle'
 
-    # Model the wrapper's sequential loop over an ordered subscription list,
-    # exactly mirroring its seed / skip / append / persist expressions so the
-    # test fails if any of them regress:
-    #   seed:    $SeedState = Get-ResumeStateObject -Path $f -Tenant $t
-    #            $CompletedIds = @(Get-CompletedSubscriptionIds -Path $f -Tenant $t -State $SeedState)
-    #   skip:    if ($Resume -and ($CompletedIds -contains $Sub.Id)) { skip }
-    #   append:  if (-not ($CompletedIds -contains $Sub.Id)) { $CompletedIds += $Sub.Id }
-    #   persist: Save-CompletedSubscriptionIds -Ids $CompletedIds ...
-    # $FailWhenId lets a test simulate a sub that fails (never marked complete).
+    # Models the wrapper's sequential loop, mirroring its seed/skip/append/persist
+    # expressions so a regression in any of them fails here; $FailWhenId simulates a failing sub.
     function Invoke-SequentialResumeRun
     {
         param(
@@ -68,20 +34,8 @@ BeforeAll {
             [switch]$Resume,
             [string[]]$FailWhenId = @()
         )
-        # Seed EXACTLY as the wrapper does (Run-AllSubscriptions.ps1): read the
-        # state object ONCE via Get-ResumeStateObject, then project the completed
-        # list by passing that already-read state to Get-CompletedSubscriptionIds.
-        #
-        # This harness previously reproduced a hand-rolled
-        # `@(if ($SeedState -and ...) { ... } else { @() })` expression, because that
-        # is what the wrapper did. The wrapper now projects through the reader, so
-        # this mirrors the reader call instead - the point of the harness is to be
-        # faithful to the production seed shape, whatever that shape is.
-        #
-        # The outer @(...) is retained exactly as the wrapper retains it: the reader
-        # already returns @(), so the $null-collapse that turns the first += into
-        # string concatenation is prevented by the callee, but the wrapper still
-        # wraps and the source guard below still asserts it does.
+        # Seed EXACTLY as the wrapper does: read state once, project via
+        # Get-CompletedSubscriptionIds; the outer @(...) keeps the first += an array push, not string concat.
         $SeedState = Get-ResumeStateObject -Path $StateFile -Tenant $script:Tenant
         $CompletedIds = @(Get-CompletedSubscriptionIds -Path $StateFile -Tenant $script:Tenant -State $SeedState)
         $Processed = @()
@@ -125,17 +79,8 @@ Describe 'Sequential -Resume cycle' {
     }
 
     It 'the wrapper seeds the completed-ids list as an @()-wrapped array (source guard against the $null-collapse regression)' {
-        # The behavioural tests below run a faithful COPY of the wrapper's seed
-        # expression, so they cannot by themselves catch a regression in the
-        # wrapper SOURCE. This guard reads the real seed line in
-        # Run-AllSubscriptions.ps1 and asserts it keeps its outer @(...) wrapper -
-        # the exact thing whose removal lets an empty fresh-run result collapse
-        # to $null and turns the first += into string concatenation.
-        #
-        # The seed now projects through Get-CompletedSubscriptionIds rather than a
-        # hand-rolled @(if ... else @()), which is strictly safer because the reader
-        # returns @() by construction. The @(...) at the call site is still required
-        # here: it is the guarantee that does not depend on the callee's internals.
+        # Source guard: the behavioural copies can't catch a wrapper SOURCE regression,
+        # so assert the real seed line keeps its outer @(...) (whose removal reintroduces the $null-collapse).
         $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
         Test-Path $WrapperPath | Should -BeTrue
         $CodeLines = @(Get-Content -Path $WrapperPath | Where-Object { $_ -notmatch '^\s*#' })

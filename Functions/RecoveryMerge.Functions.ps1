@@ -48,7 +48,7 @@ function Merge-RecoveryData
     #    without needing culture-aware date parsing. -----------------------------
     function Get-ConsumptionCsvStats([string]$Path)
     {
-        $Rows = @(Import-Csv -Path $Path -ErrorAction Stop)
+        $Rows = @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
         $Starts = @($Rows | ForEach-Object { $_.UsageStartTime } | Where-Object { $_ } | Sort-Object -Unique)
         $Ends = @($Rows | ForEach-Object { $_.UsageEndTime } | Where-Object { $_ } | Sort-Object -Unique)
         [PSCustomObject]@{
@@ -64,7 +64,7 @@ function Merge-RecoveryData
         param([string]$DictionaryPath, [string]$InventoryPath)
 
         $DictKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        $Dict = Get-Content -Path $DictionaryPath -Raw | ConvertFrom-Json
+        $Dict = Get-Content -LiteralPath $DictionaryPath -Raw | ConvertFrom-Json
         foreach ($MapProp in $Dict.PSObject.Properties)
         {
             # Only object-valued properties are token maps; skip scalar metadata
@@ -76,7 +76,7 @@ function Merge-RecoveryData
         }
 
         # Collect the DISTINCT obfuscation tokens in the inventory text. The pattern matches per-resource tokens the ID/Name fields carry: flat prod_/nonprod_<guid> plus the optional type hint (prod_aks_/prod_vmss_/prod_databricks_) - including the hinted forms strengthens the guard (they were previously invisible). Consumption-style tokens (prod_sub_/prod_rg_) live in the CSV, not the inventory JSON, so never enter this scan.
-        $InventoryText = Get-Content -Path $InventoryPath -Raw
+        $InventoryText = Get-Content -LiteralPath $InventoryPath -Raw
         $InventoryTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_(?:databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))
         {
@@ -95,7 +95,7 @@ function Merge-RecoveryData
     function Get-BundleFile
     {
         param([string]$Directory, [string]$Filter, [switch]$Optional)
-        $MatchingFiles = @(Get-ChildItem -Path $Directory -Filter $Filter -File -ErrorAction SilentlyContinue |
+        $MatchingFiles = @(Get-ChildItem -LiteralPath $Directory -Filter $Filter -File -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending)
         if (@($MatchingFiles).Count -gt 1)
         {
@@ -113,8 +113,8 @@ function Merge-RecoveryData
         return $Found
     }
 
-    if (-not (Test-Path -Path $GapBundlePath -PathType Container)) { throw ("Merge-RecoveryData: GapBundlePath not found: {0}" -f $GapBundlePath) }
-    if (-not (Test-Path -Path $RecoveryBundlePath -PathType Container)) { throw ("Merge-RecoveryData: RecoveryBundlePath not found: {0}" -f $RecoveryBundlePath) }
+    if (-not (Test-Path -LiteralPath $GapBundlePath -PathType Container)) { throw ("Merge-RecoveryData: GapBundlePath not found: {0}" -f $GapBundlePath) }
+    if (-not (Test-Path -LiteralPath $RecoveryBundlePath -PathType Container)) { throw ("Merge-RecoveryData: RecoveryBundlePath not found: {0}" -f $RecoveryBundlePath) }
 
     $GapInventoryFile = Get-BundleFile -Directory $GapBundlePath      -Filter 'Inventory_*.json'
     $RecoveryInventoryFile = Get-BundleFile -Directory $RecoveryBundlePath -Filter 'Inventory_*.json'
@@ -127,8 +127,8 @@ function Merge-RecoveryData
     {
         try
         {
-            $GapDictCheck = Get-Content -Path $GapDictionaryFile.FullName -Raw | ConvertFrom-Json
-            $RecoveryDictCheck = Get-Content -Path $RecoveryDictionaryFile.FullName -Raw | ConvertFrom-Json
+            $GapDictCheck = Get-Content -LiteralPath $GapDictionaryFile.FullName -Raw | ConvertFrom-Json
+            $RecoveryDictCheck = Get-Content -LiteralPath $RecoveryDictionaryFile.FullName -Raw | ConvertFrom-Json
             $GapIdKeys = @($GapDictCheck.ResourceIdMap.PSObject.Properties.Name)
             $RecoveryIdKeys = @($RecoveryDictCheck.ResourceIdMap.PSObject.Properties.Name)
             if (@($GapIdKeys).Count -gt 0 -and @($RecoveryIdKeys).Count -gt 0)
@@ -181,8 +181,8 @@ function Merge-RecoveryData
     }
 
     # -- Load inventories -----------------------------------------------------
-    $GapInventory = Get-Content -Path $GapInventoryFile.FullName -Raw | ConvertFrom-Json
-    $RecoveryInventory = Get-Content -Path $RecoveryInventoryFile.FullName -Raw | ConvertFrom-Json
+    $GapInventory = Get-Content -LiteralPath $GapInventoryFile.FullName -Raw | ConvertFrom-Json
+    $RecoveryInventory = Get-Content -LiteralPath $RecoveryInventoryFile.FullName -Raw | ConvertFrom-Json
 
     # Determine which service keys to splice in. Default = every collector key the
     # recovery run produced (excluding the 'Version' marker); -Service narrows it.
@@ -229,7 +229,7 @@ function Merge-RecoveryData
     # "<ReportName>_<stamp>" base so the rebuilt bundle keeps the run's identity.
     $BundleBase = $GapInventoryFile.BaseName -replace '^Inventory_', ''
 
-    if (-not (Test-Path -Path $OutputPath -PathType Container))
+    if (-not (Test-Path -LiteralPath $OutputPath -PathType Container))
     {
         New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
     }
@@ -243,7 +243,7 @@ function Merge-RecoveryData
 
     # -- Write the merged inventory (depth 100 + compressed, matching the
     #    original serialization in ResourceInventory.ps1) ----------------------
-    $GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File -FilePath $OutInventoryFile
+    $GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File -LiteralPath $OutInventoryFile
 
     # -- Consumption source. Default carries the gap CSV forward (an inventory gap does not affect the whole-subscription consumption file). -RecoverConsumption whole-file REPLACES it with the recovery bundle's CSV (for a missing/truncated gap CSV). Consumption ResourceUris use a per-run obfuscation scheme independent of the inventory dictionary (ARM path preserved for categorisation, own sub/rg/name tokens minted), so a replaced file is internally consistent and categorises correctly despite differing tokens. If the source has none, write a canonical empty file.
     $ConsumptionSource = 'gap'
@@ -282,18 +282,18 @@ function Merge-RecoveryData
     }
     if ($ConsumptionSourceFile)
     {
-        Copy-Item -Path $ConsumptionSourceFile.FullName -Destination $OutConsumptionFile -Force
+        Copy-Item -LiteralPath $ConsumptionSourceFile.FullName -Destination $OutConsumptionFile -Force
     }
     else
     {
-        "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -FilePath $OutConsumptionFile -Encoding utf8
+        "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $OutConsumptionFile -Encoding utf8
     }
     # -- Metrics source. Default carries ALL gap Metrics_*.json forward verbatim (one file per batch, so picking only the newest would silently drop batches). -RecoverMetrics whole-file REPLACES them, REBASED to the output bundle name; metrics IDs are obfuscated via the seeded ResourceIdMap so a seeded recovery matches the merged inventory. Canonical empty file only if the source has none.
     # Record every Metrics_*.json this merge writes so the re-zip packages exactly what THIS run produced; globbing $OutputPath would silently bundle stale or foreign JSON in a reused output folder.
     $WrittenMetricsFiles = [System.Collections.Generic.List[string]]::new()
     if ($RecoverMetrics)
     {
-        $RecoveryMetricsFiles = @(Get-ChildItem -Path $RecoveryBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
+        $RecoveryMetricsFiles = @(Get-ChildItem -LiteralPath $RecoveryBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
         if ($RecoveryMetricsFiles.Count -eq 0)
         {
             throw ("Merge-RecoveryData: -RecoverMetrics was requested but the recovery bundle '{0}' has no Metrics_*.json. Re-run the recovery WITHOUT -SkipMetrics." -f $RecoveryBundlePath)
@@ -305,7 +305,7 @@ function Merge-RecoveryData
             $Suffix = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
             $RebasedName = 'Metrics_' + $BundleBase + $Suffix + '.json'
             $RebasedPath = Join-Path $OutputPath $RebasedName
-            Copy-Item -Path $MetricsFile.FullName -Destination $RebasedPath -Force
+            Copy-Item -LiteralPath $MetricsFile.FullName -Destination $RebasedPath -Force
             $WrittenMetricsFiles.Add($RebasedPath)
         }
         $MetricsSource = 'recovery'
@@ -318,19 +318,19 @@ function Merge-RecoveryData
     }
     else
     {
-        $GapMetricsFiles = @(Get-ChildItem -Path $GapBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
+        $GapMetricsFiles = @(Get-ChildItem -LiteralPath $GapBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
         if ($GapMetricsFiles.Count -gt 0)
         {
             foreach ($MetricsFile in $GapMetricsFiles)
             {
                 $CopiedPath = Join-Path $OutputPath $MetricsFile.Name
-                Copy-Item -Path $MetricsFile.FullName -Destination $CopiedPath -Force
+                Copy-Item -LiteralPath $MetricsFile.FullName -Destination $CopiedPath -Force
                 $WrittenMetricsFiles.Add($CopiedPath)
             }
         }
         else
         {
-            @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -FilePath $OutMetricsFile -Encoding utf8
+            @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -LiteralPath $OutMetricsFile -Encoding utf8
             $WrittenMetricsFiles.Add($OutMetricsFile)
         }
         $MetricsSource = 'gap'
@@ -344,10 +344,10 @@ function Merge-RecoveryData
     $DictionaryMerged = $false
     if ($GapDictionaryFile)
     {
-        $MergedDictionary = Get-Content -Path $GapDictionaryFile.FullName -Raw | ConvertFrom-Json
+        $MergedDictionary = Get-Content -LiteralPath $GapDictionaryFile.FullName -Raw | ConvertFrom-Json
         if ($RecoveryDictionaryFile)
         {
-            $RecoveryDictionary = Get-Content -Path $RecoveryDictionaryFile.FullName -Raw | ConvertFrom-Json
+            $RecoveryDictionary = Get-Content -LiteralPath $RecoveryDictionaryFile.FullName -Raw | ConvertFrom-Json
             foreach ($MapProp in $RecoveryDictionary.PSObject.Properties)
             {
                 $MapName = $MapProp.Name
@@ -366,14 +366,14 @@ function Merge-RecoveryData
                 }
             }
         }
-        $MergedDictionary | ConvertTo-Json -Depth 5 | Out-File -FilePath $OutDictionaryFile -Encoding utf8
+        $MergedDictionary | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $OutDictionaryFile -Encoding utf8
         $DictionaryMerged = $true
     }
 
     # -- Regenerate the HTML report from the merged inventory via Summary.ps1.
     #    Located relative to this functions file (Functions/ -> ../Extension). --
     $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'
-    if (-not (Test-Path -Path $SummaryScript -PathType Leaf))
+    if (-not (Test-Path -LiteralPath $SummaryScript -PathType Leaf))
     {
         throw ("Merge-RecoveryData: report generator not found at '{0}'." -f $SummaryScript)
     }
@@ -385,8 +385,9 @@ function Merge-RecoveryData
     #    dictionary is deliberately NOT zipped. Only files produced above are
     #    packaged, never whatever else the (possibly reused) output folder holds. --
     $ZipPaths = @($OutHtmlFile, $OutConsumptionFile, $OutInventoryFile) + @($WrittenMetricsFiles)
-    if (Test-Path -Path $OutZipFile) { Remove-Item -Path $OutZipFile -Force }
-    Compress-Archive -Path $ZipPaths -CompressionLevel Fastest -DestinationPath $OutZipFile
+    # -LiteralPath: -Path globs, so '[' or ']' in the output folder would zip a sibling folder's files instead (silently wrong content).
+    if (Test-Path -LiteralPath $OutZipFile) { Remove-Item -LiteralPath $OutZipFile -Force }
+    Compress-Archive -LiteralPath $ZipPaths -CompressionLevel Fastest -DestinationPath ([WildcardPattern]::Escape($OutZipFile))
 
     # -- Report what was done -------------------------------------------------
     return [PSCustomObject]@{

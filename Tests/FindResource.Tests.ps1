@@ -472,6 +472,27 @@ Describe 'FindResource.ps1 entry point' {
         $Out | Should -Match 'INFLATED'
     }
 
+    It 'exits 0 when a subscription was read more than once but NO rows matched (nothing to inflate)' {
+        # Coverage is set-based, so a repeated read can add a row or a covered
+        # subscription but never remove one: with zero rows the zero is still
+        # proven, the summary keeps its confirmed-zero verdict, and the exit code
+        # must agree with it. The duplicate is still reported, but not as INFLATED.
+        $DupZero = Join-Path $Script:TestRoot 'entry-dupzero'
+        New-Item -ItemType Directory -Path $DupZero -Force | Out-Null
+        $Inner = Join-Path $DupZero 'ResourcesReport_202601010000000000096.zip'
+        New-PerSubZip -ZipPath $Inner -Stamp '202601010000000000096' -AvsCount 0
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $DupZero 'AllSubscriptions_ResourcesReport_a.zip') -Force
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $DupZero 'AllSubscriptions_ResourcesReport_b.zip') -Force
+        Remove-Item -LiteralPath $Inner -Force
+
+        $Out = pwsh -NoProfile -File $Script:EntryPoint -Path $DupZero -ResourceType 'VMWare' 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0
+        $Out | Should -Match 'This is a confirmed zero'
+        $Out | Should -Match 'read twice'
+        $Out | Should -Match 'nothing was INFLATED'
+        $Out | Should -Not -Match 'may be INFLATED'
+    }
+
     It 'exits 2 when an inventory could not be read' {
         # A malformed inventory is a read failure, not a clean read - and like
         # exit 3, that has to reach a caller reading only $LASTEXITCODE, since the

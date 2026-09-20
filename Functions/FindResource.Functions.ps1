@@ -852,9 +852,71 @@ function Write-RdaFindSummary
     }
     else
     {
-        $SubsWith = @($Rows | Group-Object RdaReportId).Count
+        # Group by the row's Subscription field - that is the identity that best
+        # answers "which subscription has this resource", which is this tool's
+        # whole stated purpose. A row with no (or empty) Subscription field falls
+        # back to its RdaReportId (the per-subscription report stamp) so nothing
+        # is silently dropped from the list. The printed count and the printed
+        # list MUST stay consistent, so the count line is the number of distinct
+        # groups produced here - NOT the old raw Group-Object RdaReportId count,
+        # which could differ when a report's rows carry a different Subscription
+        # value or when several reports share one subscription.
+        $Groups = $Rows | Group-Object -Property {
+            $Sub = $_.Subscription
+            if (($null -ne $Sub) -and ("$Sub".Trim() -ne '')) { "sub`0$Sub" }
+            else { "stamp`0{0}" -f $_.RdaReportId }
+        }
+        $Groups = @($Groups)
+
         Write-Host ('  Matching resources        : {0}' -f $Rows.Count) -ForegroundColor Green
-        Write-Host ('  Subscriptions containing  : {0}' -f $SubsWith) -ForegroundColor Green
+        Write-Host ('  Subscriptions containing  : {0}' -f $Groups.Count) -ForegroundColor Green
+
+        # List each containing subscription with its per-subscription match
+        # count, so the operator can see WHICH subscription holds the resource
+        # rather than only how many do. Bounded so a very large estate does not
+        # flood the console - the full list is always in -CsvPath output.
+        $ListCap = 50
+        $Shown = 0
+        $LooksObfuscated = $false
+        foreach ($G in ($Groups | Sort-Object -Property Count -Descending))
+        {
+            if ($Shown -ge $ListCap) { break }
+
+            # The grouping key is "<kind>`0<value>"; split it back into the kind
+            # and the human-facing identity.
+            $Parts = $G.Name -split "`0", 2
+            $Kind = $Parts[0]
+            $Identity = $Parts[1]
+
+            $Suffix = ''
+            if ($Kind -eq 'stamp')
+            {
+                # No Subscription field on these rows: make it clear the value is
+                # a report stamp, not a subscription name.
+                $Suffix = ' (report stamp)'
+            }
+            elseif ($Identity -match '^(prod|nonprod)_')
+            {
+                # An obfuscated report (-Obfuscate) tokenises the subscription.
+                # We do NOT de-obfuscate here (that is Reveal.ps1's job) - just
+                # note once that some values may be masked.
+                $LooksObfuscated = $true
+            }
+
+            $MatchWord = if ($G.Count -eq 1) { 'match' } else { 'matches' }
+            Write-Host ('    - {0,-40}{1} ({2} {3})' -f $Identity, $Suffix, $G.Count, $MatchWord) -ForegroundColor Green
+            $Shown++
+        }
+
+        if ($Groups.Count -gt $ListCap)
+        {
+            Write-Host ('    ... and {0} more (see -CsvPath for the full list)' -f ($Groups.Count - $ListCap)) -ForegroundColor Green
+        }
+
+        if ($LooksObfuscated)
+        {
+            Write-Host '    (some subscription values look obfuscated; use Reveal.ps1 to un-mask)' -ForegroundColor DarkGray
+        }
 
         foreach ($Field in @($Result.SumBy))
         {

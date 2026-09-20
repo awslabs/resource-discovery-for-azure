@@ -214,6 +214,55 @@ Describe 'Write-RdaFindSummary - only a complete scan earns "confirmed zero"' {
         $Out | Should -Match 'read twice'
         $Out | Should -Match 'INFLATED'
     }
+
+    It 'NAMES the containing subscriptions, not just the count, when matches exist' {
+        # The tool's stated purpose is to say WHICH subscription holds the type.
+        # Two distinct subscriptions, so the summary must name BOTH - a plain
+        # count line alone would not tell the operator which sub to look in.
+        $Rows = @(
+            [pscustomobject]@{ Subscription = 'invented_sub_alpha'; RdaReportId = '202601010000000000101' }
+            [pscustomobject]@{ Subscription = 'invented_sub_alpha'; RdaReportId = '202601010000000000101' }
+            [pscustomobject]@{ Subscription = 'invented_sub_beta';  RdaReportId = '202601010000000000102' }
+        )
+        $R = New-RdaFindResult -Rows $Rows -UnitsRead 2 -ReadCount 2 -SourceCount 2 `
+            -TypePresence @{ 'VMWare' = 2 } -ResourceType @('VMWare')
+        $Out = Write-RdaFindSummary -Result $R 6>&1 | Out-String
+
+        $Out | Should -Match 'Subscriptions containing  : 2'
+        $Out | Should -Match 'invented_sub_alpha'
+        $Out | Should -Match 'invented_sub_beta'
+        # The per-subscription match count is surfaced next to each name.
+        $Out | Should -Match 'invented_sub_alpha.*2 matches'
+        $Out | Should -Match 'invented_sub_beta.*1 match'
+    }
+
+    It 'falls back to the report stamp for a row with no Subscription field, dropping nothing' {
+        # A row lacking a Subscription field must still appear in the list, keyed
+        # by its report stamp and clearly labelled as such.
+        $Rows = @(
+            [pscustomobject]@{ Subscription = 'invented_sub_gamma'; RdaReportId = '202601010000000000103' }
+            [pscustomobject]@{ RdaReportId = '202601010000000000104' }  # no Subscription field
+        )
+        $R = New-RdaFindResult -Rows $Rows -UnitsRead 2 -ReadCount 2 -SourceCount 2 `
+            -TypePresence @{ 'VMWare' = 2 } -ResourceType @('VMWare')
+        $Out = Write-RdaFindSummary -Result $R 6>&1 | Out-String
+
+        $Out | Should -Match 'Subscriptions containing  : 2'
+        $Out | Should -Match 'invented_sub_gamma'
+        $Out | Should -Match '202601010000000000104.*\(report stamp\)'
+    }
+
+    It 'flags that values may be obfuscated when a subscription looks like an -Obfuscate token' {
+        $Rows = @(
+            [pscustomobject]@{ Subscription = 'prod_invented-obfuscation-token'; RdaReportId = '202601010000000000105' }
+        )
+        $R = New-RdaFindResult -Rows $Rows -UnitsRead 1 -ReadCount 1 -SourceCount 1 `
+            -TypePresence @{ 'VMWare' = 1 } -ResourceType @('VMWare')
+        $Out = Write-RdaFindSummary -Result $R 6>&1 | Out-String
+
+        $Out | Should -Match 'prod_invented-obfuscation-token'
+        $Out | Should -Match 'obfuscated'
+    }
 }
 
 Describe 'Get-RdaInventorySource - nothing is dropped silently' {

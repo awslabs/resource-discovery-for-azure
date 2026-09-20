@@ -672,7 +672,14 @@ function Find-RdaResource
         $DuplicateUnits = @($Named)
         Write-Host ('  WARNING: {0} inventory read(s) were duplicates ({1} attempts, {2} distinct subscriptions).' -f
             ($Attempts - $UnitIds.Count), $Attempts, $UnitIds.Count) -ForegroundColor Yellow
-        Write-Host '  Matched-row counts and any -SumBy total may therefore be INFLATED.' -ForegroundColor Yellow
+        if ($Rows.Count -gt 0)
+        {
+            Write-Host '  Matched-row counts and any -SumBy total may therefore be INFLATED.' -ForegroundColor Yellow
+        }
+        else
+        {
+            Write-Host '  No rows matched, so nothing was INFLATED; the duplicate source is still worth removing.' -ForegroundColor Yellow
+        }
     }
 
     return New-RdaFindResult -Rows $Rows -SourceCount $Sources.Count `
@@ -978,8 +985,19 @@ function Write-RdaFindSummary
     $Attempts = [int]$Result.UnitReadAttempts
     if ($Attempts -gt $UnitsRead)
     {
-        Write-Host ('  Subscriptions read twice  : {0} duplicate read(s) of {1} attempts (row counts and any sum may be INFLATED)' -f
-            ($Attempts - $UnitsRead), $Attempts) -ForegroundColor Red
+        # A repeated read can add a row or a covered subscription but never remove
+        # one, so with zero matched rows nothing was inflated and the confirmed-zero
+        # verdict above stands; the exit code makes the same distinction.
+        if ($Rows.Count -gt 0)
+        {
+            Write-Host ('  Subscriptions read twice  : {0} duplicate read(s) of {1} attempts (row counts and any sum may be INFLATED)' -f
+                ($Attempts - $UnitsRead), $Attempts) -ForegroundColor Red
+        }
+        else
+        {
+            Write-Host ('  Subscriptions read twice  : {0} duplicate read(s) of {1} attempts (no rows matched, so nothing was INFLATED)' -f
+                ($Attempts - $UnitsRead), $Attempts) -ForegroundColor Yellow
+        }
         foreach ($D in (@($Result.DuplicateUnits) | Select-Object -First 5))
         {
             Write-Host ('    {0}' -f $D) -ForegroundColor Red

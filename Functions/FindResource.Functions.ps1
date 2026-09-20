@@ -932,6 +932,15 @@ function Write-RdaFindSummary
             }
         }
 
+        if ($TypesNone.Count -gt 0)
+        {
+            Write-Host ''
+            foreach ($T in $TypesNone)
+            {
+                Write-Host ('  NOTE: the [{0}] key was present in NO inventory read, so nothing above speaks to' -f $T) -ForegroundColor Red
+                Write-Host ('  {0} at all - its absence is unproven, not confirmed.' -f $T) -ForegroundColor Red
+            }
+        }
         if ($TypesPartial.Count -gt 0)
         {
             Write-Host ''

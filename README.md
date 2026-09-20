@@ -546,7 +546,7 @@ A wrong "no" is the worst answer this tool could give, so it only calls a zero a
 | `PARTIAL SCAN` | A path was missing or refused, a subtree was unreadable, or a bundle was skipped. |
 | `NOTHING WAS SCANNED` | No bundles were found. Check the path. |
 
-Exit codes mirror this, so an automated caller reading only `$LASTEXITCODE` reaches the same conclusion: `0` complete (a confirmed result), `1` nothing scanned, `2` read failures, `3` scope or coverage incomplete (a path lost, or the key absent from some or all inventories read - the `CANNOT CONFIRM ABSENCE` and `PARTIAL COVERAGE` verdicts), `4` output file could not be written. Only `0` means the scan proved what it reports.
+Exit codes mirror this, so an automated caller reading only `$LASTEXITCODE` reaches the same conclusion: `0` complete (a confirmed result), `1` nothing scanned, `2` read failures, `3` scope or coverage incomplete (a path lost, the key absent from some or all inventories read - the `CANNOT CONFIRM ABSENCE` and `PARTIAL COVERAGE` verdicts - or a subscription read more than once, which can inflate the counts), `4` output file could not be written. When more than one applies the lowest code wins. Only `0` means the scan proved what it reports.
 
 De-obfuscated reports produced by `Reveal.ps1` are **refused and reported**, never read, so a revealed copy left on disk cannot leak real identifiers into the results.
 

@@ -436,6 +436,42 @@ Describe 'FindResource.ps1 entry point' {
         $LASTEXITCODE | Should -Be 3
     }
 
+    It 'exits 3 AND names the uncovered type when one requested type matched rows and another was in NO inventory' {
+        # Rows for VirtualMachines put the summary in its rows>0 branch, where it
+        # used to say nothing about VMWare being absent from every inventory - an
+        # exit 3 the operator could not explain from the printed text. Invoked via
+        # -Command (not -File) because this case binds an ARRAY to -ResourceType;
+        # the trailing 'exit $LASTEXITCODE' is load-bearing, because -Command on
+        # its own collapses a script's non-zero exit code to 1.
+        $MixNone = Join-Path $Script:TestRoot 'entry-mixnone'
+        New-Item -ItemType Directory -Path $MixNone -Force | Out-Null
+        New-PerSubZip -ZipPath (Join-Path $MixNone 'ResourcesReport_202601010000000000094.zip') -Stamp '202601010000000000094' -OmitVMWare
+
+        $Cmd = '& "{0}" -Path "{1}" -ResourceType VirtualMachines,VMWare; exit $LASTEXITCODE' -f $Script:EntryPoint, $MixNone
+        $Out = pwsh -NoProfile -Command $Cmd 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 3
+        $Out | Should -Match 'VMWare\] key was present in NO inventory read'
+    }
+
+    It 'exits 3 when a subscription was read more than once (INFLATED counts)' {
+        # The same per-sub zip packed into two consolidated bundles is one
+        # subscription read twice. The summary already flags the counts as
+        # INFLATED; a caller reading only $LASTEXITCODE must not see the 0 that
+        # says "confirmed total". Stamp-less outer names keep both bundles as
+        # distinct sources, so the duplicate is the inner read, not the outer.
+        $Dup = Join-Path $Script:TestRoot 'entry-dup'
+        New-Item -ItemType Directory -Path $Dup -Force | Out-Null
+        $Inner = Join-Path $Dup 'ResourcesReport_202601010000000000095.zip'
+        New-PerSubZip -ZipPath $Inner -Stamp '202601010000000000095' -AvsCount 1
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $Dup 'AllSubscriptions_ResourcesReport_a.zip') -Force
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $Dup 'AllSubscriptions_ResourcesReport_b.zip') -Force
+        Remove-Item -LiteralPath $Inner -Force
+
+        $Out = pwsh -NoProfile -File $Script:EntryPoint -Path $Dup -ResourceType 'VMWare' 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 3
+        $Out | Should -Match 'INFLATED'
+    }
+
     It 'exits 2 when an inventory could not be read' {
         # A malformed inventory is a read failure, not a clean read - and like
         # exit 3, that has to reach a caller reading only $LASTEXITCODE, since the

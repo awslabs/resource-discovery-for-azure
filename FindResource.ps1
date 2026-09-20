@@ -99,14 +99,19 @@
       0  the scan completed and covered everything requested
       1  nothing was scanned - no report bundles were found under -Path
       2  the scan completed but some inventories could not be read
-      3  the scan completed but did NOT cover everything requested: a path was
+      3  the scan completed but did NOT prove what it reports: a path was
          missing or refused, a subtree could not be enumerated, a bundle was
-         skipped, OR the requested key was absent from some or all of the
+         skipped, the requested key was absent from some or all of the
          inventories read (the summary's CANNOT CONFIRM ABSENCE and PARTIAL
-         COVERAGE verdicts). The counts are a lower bound, so a zero is NOT a
-         confirmed absence. This code exists so a caller reading only
-         $LASTEXITCODE reaches the same conclusion the printed summary does.
+         COVERAGE verdicts and its LOWER BOUND note), OR a subscription was
+         read more than once (the summary's INFLATED warning). A zero is then
+         NOT a confirmed absence and a total is NOT a confirmed total. This
+         code exists so a caller reading only $LASTEXITCODE reaches the same
+         conclusion the printed summary does.
       4  the scan completed but -CsvPath or -JsonPath could not be written
+
+    When more than one condition applies, the lowest matching code is returned
+    (1 before 2 before 3 before 4), so a read failure outranks a coverage gap.
 
     A large match set is best piped or assigned rather than left to format to the
     console, since the rows are emitted to the pipeline after the summary.
@@ -244,7 +249,9 @@ if ((@($Result.Missing).Count -gt 0) -or
     (@($Result.Unreadable).Count -gt 0) -or
     (@($Result.Skipped).Count -gt 0)) { exit 3 }
 $Coverage = Get-RdaTypeCoverage -Result $Result
-if (@($Coverage.Values | Where-Object { $_ -ne 'Full' }).Count -gt 0) { exit 3 }
+if ((@($Coverage.Keys).Count -eq 0) -or
+    (@($Coverage.Values | Where-Object { $_ -ne 'Full' }).Count -gt 0) -or
+    ([int]$Result.UnitReadAttempts -gt [int]$Result.UnitsRead)) { exit 3 }
 if ($Script:WriteFailed) { exit 4 }
 exit 0
 

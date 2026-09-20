@@ -557,6 +557,8 @@ The sections below cover both entry points, so each row is tagged where it matte
 **Wrapper only** means the reverse.
 Everything untagged is accepted by both, and the wrapper forwards it to the inner script unchanged.
 
+> For the **why behind each parameter** — the reasoning, invariants, and trade-offs behind every switch — see the parameter reference under [`docs/variables/`](docs/variables/README.md). The full documentation index is at [`docs/README.md`](docs/README.md).
+
 ### Core Parameters
 
 | Parameter | Type | Description | Example |

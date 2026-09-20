@@ -352,3 +352,11 @@ recoverable with `-Resume`.
 
 *All identifiers in this document are illustrative placeholders, not real
 Azure values.*
+
+---
+
+## See also
+
+For the `-Obfuscate` / `-ObfuscationDictionary` parameters this document
+explains, see
+[variables/scaling-sharding-output.md](variables/scaling-sharding-output.md).

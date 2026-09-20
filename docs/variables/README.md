@@ -13,6 +13,9 @@ code is protecting, and the trade-offs that motivated a given design. Where a
 behavioural claim is made it cites the file and approximate line so a reader can
 verify it against the source.
 
+> **Parent index:** this reference is one section of the whole documentation
+> set. See [docs/README.md](../README.md) for the full index of docs.
+
 ## Parameter groups
 
 The parameters are split into three groups, each documented on its own page:

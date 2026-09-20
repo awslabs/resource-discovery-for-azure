@@ -12,6 +12,10 @@ just want to know how many machines to use, skip to
 recover an interrupted run or catch a subscription added later, see
 [Resuming, retrying, and adding subscriptions later](#resuming-retrying-and-adding-subscriptions-later).
 
+> **See also:** for the `-ShardCount` / `-ShardIndex` parameters and how they
+> compose with `-ParallelStreams`, see
+> [variables/scaling-sharding-output.md](variables/scaling-sharding-output.md).
+
 ## The problem it solves
 
 Say you have 10 machines and a very large tenant. You want each machine to do a

@@ -323,3 +323,13 @@ standalone script disconnects and reconnects to be *safe*; the wrapper sets
 `-RunAllSubs` on each child to *reuse* the one good context it already holds. The
 two paths are two sides of the same design decision about where authentication
 should happen.
+
+---
+
+## See also
+
+- [Top-level README](../../README.md) — the task-oriented "how do I run this"
+  guide.
+- [docs/README.md](../README.md) — the full documentation index.
+- [variables/README.md](README.md) — the parameter-reference index this page
+  belongs to.

@@ -180,6 +180,10 @@ single-report concept and is **not** surfaced by the wrapper.
 
 ## `RunAllSubs` — the anchor example
 
+> **See also:** [why two scripts](../architecture-two-scripts.md) — the
+> architectural rationale for the inner-worker / wrapper split that `RunAllSubs`
+> connects.
+
 - **Type:** `switch`
 - **Declared on:** `ResourceInventory.ps1` (`param()`, line ~16).
 

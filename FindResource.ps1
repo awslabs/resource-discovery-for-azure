@@ -99,11 +99,13 @@
       0  the scan completed and covered everything requested
       1  nothing was scanned - no report bundles were found under -Path
       2  the scan completed but some inventories could not be read
-      3  the scan completed but did NOT cover everything requested (a path was
-         missing or refused, a subtree could not be enumerated, or a bundle was
-         skipped). The counts are a lower bound, so a zero is NOT a confirmed
-         absence. This code exists so a caller reading only $LASTEXITCODE reaches
-         the same conclusion the printed summary does.
+      3  the scan completed but did NOT cover everything requested: a path was
+         missing or refused, a subtree could not be enumerated, a bundle was
+         skipped, OR the requested key was absent from some or all of the
+         inventories read (the summary's CANNOT CONFIRM ABSENCE and PARTIAL
+         COVERAGE verdicts). The counts are a lower bound, so a zero is NOT a
+         confirmed absence. This code exists so a caller reading only
+         $LASTEXITCODE reaches the same conclusion the printed summary does.
       4  the scan completed but -CsvPath or -JsonPath could not be written
 
     A large match set is best piped or assigned rather than left to format to the
@@ -241,6 +243,8 @@ if ((@($Result.Missing).Count -gt 0) -or
     (@($Result.Rejected).Count -gt 0) -or
     (@($Result.Unreadable).Count -gt 0) -or
     (@($Result.Skipped).Count -gt 0)) { exit 3 }
+$Coverage = Get-RdaTypeCoverage -Result $Result
+if (@($Coverage.Values | Where-Object { $_ -ne 'Full' }).Count -gt 0) { exit 3 }
 if ($Script:WriteFailed) { exit 4 }
 exit 0
 

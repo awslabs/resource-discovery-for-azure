@@ -411,6 +411,31 @@ Describe 'FindResource.ps1 entry point' {
         $LASTEXITCODE | Should -Be 3
     }
 
+    It 'exits 3 when NO inventory read carried the key (CANNOT CONFIRM ABSENCE)' {
+        # A clean, complete scan of bundles that predate the collector prints
+        # CANNOT CONFIRM ABSENCE, and that verdict has to reach a caller reading
+        # only $LASTEXITCODE - it was exiting 0, indistinguishable from a
+        # confirmed zero.
+        $NoKey = Join-Path $Script:TestRoot 'entry-nokey'
+        New-Item -ItemType Directory -Path $NoKey -Force | Out-Null
+        New-PerSubZip -ZipPath (Join-Path $NoKey 'ResourcesReport_202601010000000000091.zip') -Stamp '202601010000000000091' -OmitVMWare
+
+        pwsh -NoProfile -File $Script:EntryPoint -Path $NoKey -ResourceType 'VMWare' > $null 2>&1
+        $LASTEXITCODE | Should -Be 3
+    }
+
+    It 'exits 3 when only SOME inventories carried the key (PARTIAL COVERAGE)' {
+        # One inventory carries the key with zero rows, one lacks the key. The
+        # zero is a lower bound, so this is exit 3 like any other partial result.
+        $SomeKey = Join-Path $Script:TestRoot 'entry-somekey'
+        New-Item -ItemType Directory -Path $SomeKey -Force | Out-Null
+        New-PerSubZip -ZipPath (Join-Path $SomeKey 'ResourcesReport_202601010000000000092.zip') -Stamp '202601010000000000092' -AvsCount 0
+        New-PerSubZip -ZipPath (Join-Path $SomeKey 'ResourcesReport_202601010000000000093.zip') -Stamp '202601010000000000093' -OmitVMWare
+
+        pwsh -NoProfile -File $Script:EntryPoint -Path $SomeKey -ResourceType 'VMWare' > $null 2>&1
+        $LASTEXITCODE | Should -Be 3
+    }
+
     It 'exits 2 when an inventory could not be read' {
         # A malformed inventory is a read failure, not a clean read - and like
         # exit 3, that has to reach a caller reading only $LASTEXITCODE, since the

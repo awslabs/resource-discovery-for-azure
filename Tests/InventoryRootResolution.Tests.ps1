@@ -8,13 +8,22 @@ BeforeAll {
     $script:Sandbox = Join-Path ([IO.Path]::GetTempPath()) ("RdaRootTests_" + [guid]::NewGuid().ToString('N'))
     New-Item -Path $script:Sandbox -ItemType Directory -Force | Out-Null
 
-    # Saved so the suite cannot leak state into the rest of the run.
+    # Saved so the suite cannot leak state into the rest of the run. Remove (not set to
+    # $null, which leaves an empty-string env var) so the resolver sees a genuinely-unset
+    # variable, and so AfterAll can restore true absence when it was unset to begin with.
     $script:SavedPin = $env:RDA_INVENTORY_ROOT
-    $env:RDA_INVENTORY_ROOT = $null
+    Remove-Item Env:\RDA_INVENTORY_ROOT -ErrorAction SilentlyContinue
 }
 
 AfterAll {
-    $env:RDA_INVENTORY_ROOT = $script:SavedPin
+    if ($null -eq $script:SavedPin)
+    {
+        Remove-Item Env:\RDA_INVENTORY_ROOT -ErrorAction SilentlyContinue
+    }
+    else
+    {
+        $env:RDA_INVENTORY_ROOT = $script:SavedPin
+    }
     if ($script:Sandbox -and (Test-Path $script:Sandbox))
     {
         Get-ChildItem -Path $script:Sandbox -Recurse -Force -ErrorAction SilentlyContinue |
@@ -226,7 +235,15 @@ Describe 'Output-root wiring (source guards)' {
             ))
         {
             $CodeLines = @($Pair.Src -split "`n" | Where-Object { $_ -notmatch '^\s*#' })
-            $Offenders = @($CodeLines | Where-Object { $_ -match '\$HOME/InventoryReports' -or $_ -match 'C:\\InventoryReports' })
+            # Catch both the literal "$HOME/InventoryReports" / "C:\InventoryReports" forms
+            # AND a Join-Path-style inline derivation (e.g. Join-Path $HOME 'InventoryReports'),
+            # which is the very shape the resolver itself uses and would otherwise slip past a
+            # literal-only match.
+            $Offenders = @($CodeLines | Where-Object {
+                    $_ -match '\$HOME/InventoryReports' -or
+                    $_ -match 'C:\\InventoryReports' -or
+                    ($_ -match 'Join-Path' -and $_ -match 'InventoryReports')
+                })
             $Offenders -join ' | ' | Should -BeNullOrEmpty -Because "$($Pair.Name) must resolve the root via Get-RdaInventoryRoot, not inline"
         }
     }
@@ -250,25 +267,15 @@ Describe 'Output-root wiring (source guards)' {
     It 'the inner pre-flight hard-fails with exit, never a bare throw' {
         # Use the AST, not a substring regex: the invariant is that every throw in the
         # pre-flight function sits inside a try whose catch terminates the run (a throw escaping to script scope is swallowed by SilentlyContinue). String matching failed on anchor collisions and nesting blindness.
-        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
-
-        $PreFlight = $Ast.FindAll({
-                param($n)
-                $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'InvokePreFlightChecks'
-            }, $true) | Select-Object -First 1
-
-        if (-not $PreFlight)
-        {
-            # Not a function - locate the block by its banner comment and parse the
-            # enclosing scriptblock instead, so this test cannot silently pass if the
-            # code is restructured.
-            $Start = $script:InvSrc.IndexOf('# === Pre-flight checks ===')
-            $Start | Should -BeGreaterThan 0 -Because 'the pre-flight block must be locatable'
-            $End = $script:InvSrc.LastIndexOf('Write-Host "Pre-flight checks passed."')
-            $End | Should -BeGreaterThan $Start -Because 'the real completion line, not a comment mentioning it'
-            $PreFlight = [System.Management.Automation.Language.Parser]::ParseInput(
-                $script:InvSrc.Substring($Start, $End - $Start), [ref]$null, [ref]$null)
-        }
+        # In ResourceInventory.ps1 the pre-flight is an inline script block (NOT a
+        # function), so locate it by its banner comment and parse the enclosing
+        # scriptblock. This test cannot silently pass if the code is restructured.
+        $Start = $script:InvSrc.IndexOf('# === Pre-flight checks ===')
+        $Start | Should -BeGreaterThan 0 -Because 'the pre-flight block must be locatable'
+        $End = $script:InvSrc.LastIndexOf('Write-Host "Pre-flight checks passed."')
+        $End | Should -BeGreaterThan $Start -Because 'the real completion line, not a comment mentioning it'
+        $PreFlight = [System.Management.Automation.Language.Parser]::ParseInput(
+            $script:InvSrc.Substring($Start, $End - $Start), [ref]$null, [ref]$null)
 
         $Throws = @($PreFlight.FindAll({
                     param($n) $n -is [System.Management.Automation.Language.ThrowStatementAst]

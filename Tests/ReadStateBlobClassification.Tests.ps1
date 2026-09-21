@@ -48,6 +48,12 @@ BeforeAll {
     $Global:ProbeThrows = $false
     $Global:Payload = '{"TenantID":"t1","CompletedSubscriptionIds":["sub-a","sub-b"]}'
 
+    # Read-StateBlob backs off with 'Start-Sleep -Seconds $Attempt' between retries. This
+    # suite is OFFLINE and drives the all-fail / late-success branches repeatedly, so the
+    # real sleeps would add tens of seconds of pure wall-clock. Stub it to a no-op; nothing
+    # under test depends on real elapsed time.
+    function Global:Start-Sleep { param([int]$Seconds, [int]$Milliseconds) }
+
     function Global:Get-AzStorageBlobContent
     {
         [CmdletBinding()]
@@ -115,6 +121,10 @@ BeforeAll {
 AfterAll {
     Remove-Item Function:\Get-AzStorageBlobContent -ErrorAction SilentlyContinue
     Remove-Item Function:\Get-AzStorageBlob -ErrorAction SilentlyContinue
+    Remove-Item Function:\Start-Sleep -ErrorAction SilentlyContinue
+    # Clear the BeforeAll-created global driver variables so a full Invoke-Pester ./Tests/
+    # session does not carry this suite's state into later files.
+    Remove-Variable -Name DlCalls, DlFailUntil, DlAlwaysFail, BlobExists, ProbeThrows, Payload -Scope Global -ErrorAction SilentlyContinue
 }
 
 Describe 'Happy path: a readable blob is parsed and returned' {
@@ -237,7 +247,9 @@ Describe 'Source guards' {
 
     It 'retries rather than giving up on the first failure' {
         $Src = [regex]::Match($script:Src, '(?s)function Read-StateBlob.*?\n\}').Value
-        $Src | Should -Match 'for \(\$Attempt = 1; \$Attempt -le \$MaxAttempts'
+        # Match the loop's shape (a for-loop bounded by MaxAttempts) without pinning the
+        # iterator's spelling, so a benign rename of the loop variable does not fail this.
+        $Src | Should -Match 'for \(.*-le \$MaxAttempts'
     }
 
     It 'uses a FRESH temp file per attempt, so a partial download is never re-read' {
@@ -245,7 +257,7 @@ Describe 'Source guards' {
         $TmpAssign = @([regex]::Matches($Src, '\$Tmp = Join-Path')).Count
         $TmpAssign | Should -Be 1
         # and it must be INSIDE the loop, after the for
-        $Src.IndexOf('$Tmp = Join-Path') | Should -BeGreaterThan $Src.IndexOf('for ($Attempt = 1')
+        $Src.IndexOf('$Tmp = Join-Path') | Should -BeGreaterThan $Src.IndexOf('for (')
     }
 
     It 'classifies with an existence probe, not by matching exception text' {

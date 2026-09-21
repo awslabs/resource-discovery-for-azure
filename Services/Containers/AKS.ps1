@@ -34,6 +34,10 @@ if ($Task -eq 'Processing')
                     'NodeSize'                  = $2.vmSize;
                     'OSDiskSize'                = $2.osDiskSizeGB;
                     'Nodes'                     = $2.count;
+                    # Compare against the string 'true' rather than a bare truth test: enableAutoScaling
+                    # can arrive as a real bool, as $null, or as the stringified 'false' depending on the
+                    # source path, and a bare test would treat the non-empty string 'false' as $true. Do
+                    # not align this with the $null -ne tests below.
                     'Autoscale'                 = if ($2.enableAutoScaling -eq 'true') { 'true' } else { 'false' };
                     'AutoscaleMax'              = if ($null -ne $2.maxCount) { $2.maxCount } else { '0' };
                     'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' };

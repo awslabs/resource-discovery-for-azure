@@ -111,6 +111,7 @@ Describe 'Sequential -Resume cycle' {
         # the state blob again - a network round trip per projection, on the recovery
         # path where the blob is least likely to be fast.
         $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
+        Test-Path $WrapperPath | Should -BeTrue -Because 'a moved/renamed wrapper must fail with a clear missing-file message, not a misleading "read once" count of 0'
         $CodeLines = @(Get-Content -Path $WrapperPath | Where-Object { $_ -notmatch '^\s*#' })
 
         $Reads = @($CodeLines | Where-Object { $_ -match '=\s*Get-ResumeStateObject' })

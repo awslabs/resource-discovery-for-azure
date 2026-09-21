@@ -1187,3 +1187,60 @@ Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
         $Dict.Values | Should -Contain $Rows[0].Tags[0].Value -Because "the shared token must be the one real dictionary entry produced, not a spurious second entry"
     }
 }
+
+# 21. AKS Autoscale field: the emitted 'Autoscale' column must reflect enableAutoScaling
+# faithfully. The collector compares against the string 'true' (AKS.ps1) rather than a bare
+# truth test, because enableAutoScaling can arrive as a real bool, as $null (pool omits it),
+# or as the stringified 'false'. A bare truth test would treat the non-empty string 'false'
+# as $true and report autoscale ON for a pool that has it OFF. This exercises the ACTUAL
+# collector against pools covering all three shapes.
+Describe "AKS Autoscale field reflects enableAutoScaling faithfully" {
+    BeforeAll {
+        $script:AksModule = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Containers', 'AKS.ps1'
+        $script:AutoSub = @([PSCustomObject]@{ id = 'sub-auto'; Name = 'sub-auto' })
+        $script:AutoCluster = [PSCustomObject]@{
+            id             = 'prod_' + [guid]::NewGuid().ToString()
+            RESOURCEGROUP  = 'rg-aks-auto'
+            NAME           = 'aks-auto'
+            LOCATION       = 'eastus'
+            TYPE           = 'microsoft.containerservice/managedclusters'
+            subscriptionId = 'sub-auto'
+            sku            = [PSCustomObject]@{ name = 'Base'; tier = 'Free' }
+            tags           = [PSCustomObject]@{ environment = 'prod' }
+            PROPERTIES     = [PSCustomObject]@{
+                kubernetesVersion = '1.29'
+                networkProfile    = [PSCustomObject]@{ loadBalancerSku = 'Standard' }
+                agentPoolProfiles = @(
+                    # Pool with autoscale genuinely ON, with bounds.
+                    [PSCustomObject]@{ name = 'poolon'; type = 'VirtualMachineScaleSets'; mode = 'System'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 3; maxPods = 30; orchestratorVersion = '1.29'; enableAutoScaling = $true; maxCount = 5; minCount = 1 }
+                    # Pool with autoscale explicitly OFF as the stringified 'false'.
+                    [PSCustomObject]@{ name = 'pooloff'; type = 'VirtualMachineScaleSets'; mode = 'User'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29'; enableAutoScaling = 'false' }
+                    # Pool that omits enableAutoScaling entirely (property is $null).
+                    [PSCustomObject]@{ name = 'poolabsent'; type = 'VirtualMachineScaleSets'; mode = 'User'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
+                )
+            }
+        }
+        $script:AutoRows = & $script:AksModule -Sub $script:AutoSub -Resources @($script:AutoCluster) -Task 'Processing' -ResourceIdDictionary $null
+    }
+
+    It "reports Autoscale 'true' for a pool with enableAutoScaling `$true" {
+        $Row = @($script:AutoRows) | Where-Object { $_.NodePoolName -eq 'poolon' }
+        $Row.Autoscale | Should -Be 'true'
+        $Row.AutoscaleMax | Should -Be 5
+        $Row.AutoscaleMin | Should -Be 1
+    }
+
+    It "reports Autoscale 'false' for a pool whose enableAutoScaling is the string 'false' (not treated as truthy)" {
+        $Row = @($script:AutoRows) | Where-Object { $_.NodePoolName -eq 'pooloff' }
+        $Row.Autoscale | Should -Be 'false' -Because "the non-empty string 'false' must NOT be read as autoscale ON"
+        $Row.AutoscaleMax | Should -Be '0'
+        $Row.AutoscaleMin | Should -Be '0'
+    }
+
+    It "reports Autoscale 'false' with '0' bounds for a pool that omits enableAutoScaling" {
+        $Row = @($script:AutoRows) | Where-Object { $_.NodePoolName -eq 'poolabsent' }
+        $Row.Autoscale | Should -Be 'false'
+        $Row.AutoscaleMax | Should -Be '0'
+        $Row.AutoscaleMin | Should -Be '0'
+    }
+}

@@ -1,8 +1,17 @@
 # Validates the HTML report structure (service <details> sections keyed by id="svc-<slug>") and that every
 # inventory resource type with data gets a section. Column-level schema lives in the JSON-driven tests.
 
-Describe 'Report Schema Validation' {
-    BeforeAll {
+BeforeAll {
+    # Shared fixture builder. Defined in a file-level BeforeAll (so Pester v5 makes it
+    # available at run time to every Describe's own BeforeAll) rather than inline in one
+    # Describe. Both Describes call it to populate the same $script: state — the 'HTML
+    # section invariants' Describe must not silently skip (fail-open) just because it ran
+    # in isolation, was reordered, or a sibling's BeforeAll threw. One owner for the setup.
+    function script:Initialize-ReportSchemaFixture
+    {
+        # Idempotent: if a sibling Describe already extracted this run's zip, reuse it.
+        if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) { return }
+
         $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
         {
             Get-ChildItem -Path $PSScriptRoot -Filter 'ResourcesReport_*.zip' |
@@ -33,17 +42,23 @@ Describe 'Report Schema Validation' {
             $script:SectionSlugs = @($SvcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
         }
 
-        # Helper mirroring Summary.ps1's slug rule so tests can map a service
-        # name to its expected section id.
-        function script:Get-ServiceSlug([string]$Name)
-        {
-            return ($Name -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
-        }
-
         $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
         $script:InventoryJson = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
 
         $script:ObfuscationSectionPattern = '^(prod|nonprod)-(databricks-|aks-|vmss-)?[0-9a-f]{8}-'
+    }
+
+    # Helper mirroring Summary.ps1's slug rule so tests can map a service
+    # name to its expected section id.
+    function script:Get-ServiceSlug([string]$Name)
+    {
+        return ($Name -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
+    }
+}
+
+Describe 'Report Schema Validation' {
+    BeforeAll {
+        script:Initialize-ReportSchemaFixture
     }
 
     AfterAll {
@@ -85,6 +100,11 @@ Describe 'Report Schema Validation' {
 # ============================================================
 Describe 'HTML section invariants' {
     BeforeAll {
+        # Populate the fixture from THIS Describe too, so the parity check cannot
+        # fail-open (silently skip) when run in isolation, reordered, or after the
+        # first Describe's BeforeAll threw. Idempotent: reuses an existing extract.
+        script:Initialize-ReportSchemaFixture
+
         # "Fixture present" depends only on having an HTML report + inventory to
         # compare - NOT on the section count. If we folded SectionSlugs.Count
         # into this gate, a regression where Summary.ps1 emits an HTML with zero
@@ -127,5 +147,13 @@ Describe 'HTML section invariants' {
                 Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }).Count
         if ($PopulatedCount -eq 0) { Set-ItResult -Skipped -Because 'inventory has no populated resource types'; return }
         $script:SectionSlugs.Count | Should -BeGreaterThan 0 -Because 'a populated inventory must render at least one service section'
+    }
+
+    AfterAll {
+        # Clean up when this Describe created/owns the extract (e.g. run in isolation).
+        if ($script:ExtractPath -and (Test-Path $script:ExtractPath))
+        {
+            Remove-Item -Path $script:ExtractPath -Recurse -Force
+        }
     }
 }

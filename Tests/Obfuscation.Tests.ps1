@@ -199,13 +199,16 @@ Describe "Inventory ID Obfuscation" {
 # ============================================================
 Describe "Inventory Name Obfuscation" {
     It "Should have all resource names matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($resource in $script:AllResources)
         {
             if ($null -ne $resource.Name)
             {
+                $Checked++
                 $resource.Name | Should -Match $script:ObfuscationPattern -Because "Resource Name '$($resource.Name)' should be obfuscated"
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no resource carried a non-null Name to assert against" }
     }
 }
 
@@ -214,13 +217,16 @@ Describe "Inventory Name Obfuscation" {
 # ============================================================
 Describe "Inventory Subscription Obfuscation" {
     It "Should have all subscription fields matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($resource in $script:AllResources)
         {
             if ($null -ne $resource.Subscription)
             {
+                $Checked++
                 $resource.Subscription | Should -Match $script:ObfuscationPattern -Because "Subscription '$($resource.Subscription)' should be obfuscated"
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no resource carried a non-null Subscription to assert against" }
     }
 }
 
@@ -229,13 +235,16 @@ Describe "Inventory Subscription Obfuscation" {
 # ============================================================
 Describe "Inventory ResourceGroup Obfuscation" {
     It "Should have all resource group fields matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($resource in $script:AllResources)
         {
             if ($null -ne $resource.ResourceGroup)
             {
+                $Checked++
                 $resource.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "ResourceGroup '$($resource.ResourceGroup)' should be obfuscated"
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no resource carried a non-null ResourceGroup to assert against" }
     }
 }
 
@@ -244,6 +253,7 @@ Describe "Inventory ResourceGroup Obfuscation" {
 # ============================================================
 Describe "Metrics Obfuscation" {
     It "Should have all metric IDs and names matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($metricsFile in $script:MetricsFiles)
         {
             $MetricsData = Get-Content $metricsFile.FullName -Raw | ConvertFrom-Json
@@ -251,22 +261,27 @@ Describe "Metrics Obfuscation" {
             {
                 if ($null -ne $metric.ID)
                 {
+                    $Checked++
                     $metric.ID | Should -Match $script:ObfuscationPattern -Because "Metric ID should be obfuscated"
                 }
                 if ($null -ne $metric.Name)
                 {
+                    $Checked++
                     $metric.Name | Should -Match $script:ObfuscationPattern -Because "Metric Name should be obfuscated"
                 }
                 if ($null -ne $metric.Subscription)
                 {
+                    $Checked++
                     $metric.Subscription | Should -Match $script:ObfuscationPattern -Because "Metric Subscription should be obfuscated"
                 }
                 if ($null -ne $metric.ResourceGroup)
                 {
+                    $Checked++
                     $metric.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "Metric ResourceGroup should be obfuscated"
                 }
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no metric carried an obfuscatable field to assert against" }
     }
 }
 

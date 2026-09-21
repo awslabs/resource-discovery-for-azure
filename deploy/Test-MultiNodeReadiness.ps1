@@ -20,7 +20,8 @@
     It verifies, on THIS workstation / for the target subscription:
       1. PowerShell 7+.
       2. Azure CLI present and signed in (the documented AKS setup uses `az`).
-      3. Az PowerShell modules the tool itself needs (Az.Accounts, Az.ResourceGraph).
+      3. Az PowerShell modules the tool itself needs (Az.Accounts, Az.ResourceGraph,
+         Az.Resources, Az.Compute).
       4. The resource providers AKS + ACR need are registered.
       5. An x64 node VM size is actually available in the target region (some
          subscriptions/regions only offer Arm64 B-series, which the amd64 container

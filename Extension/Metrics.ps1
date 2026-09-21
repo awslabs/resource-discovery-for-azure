@@ -123,7 +123,7 @@ if ($Task -eq 'Processing')
         }
         $MetricTotalCount = $DataPoints.Count
 
-        $Agg = ([string]$Def.Aggregation).ToLower()
+        $Agg = ([string]$Def.Aggregation).ToLowerInvariant()
         $MetricQueryResults = @($DataPoints | ForEach-Object { $_.$Agg })
         $MetricQueryResultsCount = ($MetricQueryResults.Where({ $null -ne $_ }).Count)
         $MetricPercentile = 0
@@ -200,7 +200,7 @@ if ($Task -eq 'Processing')
 
             $Endpoint = "https://$Region.metrics.monitor.azure.com"
             $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
-            $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLower() })
+            $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLowerInvariant() })
             $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
             $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
             $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)

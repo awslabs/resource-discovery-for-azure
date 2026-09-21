@@ -52,14 +52,16 @@ if ([string]::IsNullOrEmpty($SubscriptionID))
         'microsoft.documentdb/databaseaccounts'
         'microsoft.web/sites'
     )
-    $Best = $null; $BestCount = -1
+    # First-match selection: stop at the first enabled subscription that has any
+    # metric-eligible resource. If none do, fall back to the first enabled one.
+    $Best = $null; $BestCount = 0
     foreach ($s in @(Get-AzSubscription -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' }))
     {
         $null = Set-AzContext -Subscription $s.Id -ErrorAction SilentlyContinue
         $C = 0
         foreach ($t in $MetricTypes) { try { $C += @(Get-AzResource -ResourceType $t -ErrorAction SilentlyContinue).Count } catch {} }
-        if ($C -gt $BestCount) { $BestCount = $C; $Best = $s }
-        if ($C -gt 0) { break }
+        if ($null -eq $Best) { $Best = $s; $BestCount = $C }
+        if ($C -gt 0) { $Best = $s; $BestCount = $C; break }
     }
     if ($null -eq $Best) { throw "No enabled subscription found in the current context." }
     $SubscriptionID = $Best.Id

@@ -1107,7 +1107,7 @@ function ExecuteInventoryProcessing()
             {
                 if (![string]::IsNullOrEmpty($ResourceGroup))
                 {
-                    Write-Log -Message ("Cannot filter consumption by resource group." -f $sub.Name) -Severity 'Info'
+                    Write-Log -Message "Cannot filter consumption by resource group." -Severity 'Info'
                 }
 
                 if ($SubscriptionID -ne $sub.Id)

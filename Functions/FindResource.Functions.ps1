@@ -155,6 +155,29 @@ function Get-RdaInventorySource
         '{0} (de-obfuscated report, refused by the PII guard: it carries real identifiers)' -f $FullName
     }
 
+    # Count the per-subscription reports inside a consolidated bundle by reading
+    # only its central directory (no extraction). Used to tell the operator HOW
+    # MUCH coverage a skipped bundle represents, so a single skip line for a
+    # many-subscription bundle is not mistaken for a trivial loss. Returns -1 if
+    # the bundle cannot be inspected.
+    $CountBundleReports = {
+        param([string]$FullName)
+        $Zip = $null
+        try
+        {
+            $Zip = [System.IO.Compression.ZipFile]::OpenRead($FullName)
+            return @($Zip.Entries | Where-Object { $_.Name -like 'ResourcesReport*.zip' }).Count
+        }
+        catch
+        {
+            return -1
+        }
+        finally
+        {
+            if ($null -ne $Zip) { $Zip.Dispose() }
+        }
+    }
+
     foreach ($P in $Path)
     {
         $Item = $null
@@ -236,7 +259,20 @@ function Get-RdaInventorySource
         {
             foreach ($Found in $Bundles)
             {
-                $Skipped.Add(('{0} (skipped: extracted reports were found alongside it, so its contents were not opened to avoid double counting)' -f $Found.FullName))
+                $ReportCount = & $CountBundleReports $Found.FullName
+                $Magnitude = if ($ReportCount -gt 0)
+                {
+                    ' containing {0} per-subscription report(s)' -f $ReportCount
+                }
+                elseif ($ReportCount -eq 0)
+                {
+                    ' (no per-subscription reports found inside)'
+                }
+                else
+                {
+                    ' (contents not inspectable)'
+                }
+                $Skipped.Add(('{0}{1} (skipped: extracted reports were found alongside it, so its contents were not opened to avoid double counting)' -f $Found.FullName, $Magnitude))
             }
         }
 

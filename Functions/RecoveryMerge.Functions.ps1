@@ -103,7 +103,13 @@ function Merge-RecoveryData
             $RecoveryIdKeys = @($RecoveryDictCheck.ResourceIdMap.PSObject.Properties.Name)
             if (@($GapIdKeys).Count -gt 0 -and @($RecoveryIdKeys).Count -gt 0)
             {
-                $SharedIdKeys = @($RecoveryIdKeys | Where-Object { $_ -in $GapIdKeys })
+                # Case-insensitive HashSet membership makes the overlap check
+                # linear instead of the O(n*m) array scan '$_ -in $GapIdKeys'
+                # would incur on a large tenant's dictionary, matching the
+                # HashSet approach Test-DictionaryMatchesInventory already uses.
+                $GapIdKeySet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($GapKey in $GapIdKeys) { [void]$GapIdKeySet.Add($GapKey) }
+                $SharedIdKeys = @($RecoveryIdKeys | Where-Object { $GapIdKeySet.Contains($_) })
                 if (@($SharedIdKeys).Count -eq 0)
                 {
                     Add-MergeWarning ('the recovery and gap obfuscation dictionaries share NO ResourceIdMap tokens. This almost always means the recovery run was NOT seeded with the gap bundle''s dictionary (-ObfuscationDictionary <gap dict>). Cross-references in the recovered service(s) will carry mismatched tokens and will not join, so the merged bundle''s referential integrity is likely broken. Re-run the recovery seeded with the gap dictionary, or confirm the two bundles belong together.')

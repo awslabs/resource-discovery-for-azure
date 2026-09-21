@@ -38,6 +38,13 @@
         case-sensitive downstream group. It now stamps the inventory's actual
         (canonical-by-production) key name.
 
+    M1  (865) A consolidated bundle skipped because an extracted report sat
+        beside it produced a single advisory line that named the bundle but not
+        how much coverage it represented, so a one-line skip of a
+        many-subscription bundle read like a trivial loss. The advisory now
+        states the per-subscription report count read from the bundle's central
+        directory (no extraction).
+
     All fixture data is invented. No real subscription, tenant, resource or
     customer identifier appears anywhere in this file.
 #>
@@ -251,5 +258,36 @@ Describe 'P1 (892): emitted RdaResourceType uses the inventory key casing, not t
         $Result = Find-RdaResource -Path $Zip -ResourceType 'vmware' -ThrottleLimit 2
         # One inventory, key present -> Full coverage for the queried type.
         (Get-RdaTypeCoverage -Result $Result)['vmware'] | Should -Be 'Full'
+    }
+}
+
+Describe 'M1 (865): a skipped bundle reports how much coverage it represents' {
+
+    It 'includes the per-subscription report count in the skip advisory' {
+        # A folder holding BOTH an extracted report (Inventory_*.json) and a
+        # consolidated bundle: the bundle is skipped to avoid double counting.
+        # The advisory must state HOW MANY per-subscription reports the skipped
+        # bundle held, so a single skip line for a many-subscription bundle is not
+        # mistaken for a trivial loss.
+        $Dir = Join-Path $Script:TestRoot ('m1-{0}' -f ([guid]::NewGuid().ToString('N')))
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        # (a) an extracted report so the bundle is skipped, not read.
+        Set-Content -LiteralPath (Join-Path $Dir 'Inventory_ResourcesReport_20260101000000000aa11.json') -Value '{ "Version": "9.9.9" }' -Encoding UTF8
+
+        # (b) a consolidated bundle carrying 3 per-subscription report members.
+        $BundleStaging = Join-Path $Script:TestRoot ('bundlestage_{0}' -f ([guid]::NewGuid().ToString('N')))
+        New-Item -ItemType Directory -Path $BundleStaging -Force | Out-Null
+        foreach ($N in 1..3)
+        {
+            Set-Content -LiteralPath (Join-Path $BundleStaging ('ResourcesReport_2026010100000000000{0}.zip' -f $N)) -Value 'x' -Encoding UTF8
+        }
+        $Bundle = Join-Path $Dir 'AllSubscriptions_ResourcesReport_20260101_000000.zip'
+        Compress-Archive -Path (Join-Path $BundleStaging '*') -DestinationPath $Bundle -Force
+        Remove-Item -LiteralPath $BundleStaging -Recurse -Force -ErrorAction SilentlyContinue
+
+        $Result = Get-RdaInventorySource -Path $Dir
+        $SkipLine = @($Result.Skipped | Where-Object { $_ -like '*AllSubscriptions_*' })[0]
+        $SkipLine | Should -Not -BeNullOrEmpty -Because 'the bundle must be skipped when an extracted report sits beside it'
+        $SkipLine | Should -Match 'containing 3 per-subscription report' -Because 'the skip advisory must state the coverage magnitude'
     }
 }

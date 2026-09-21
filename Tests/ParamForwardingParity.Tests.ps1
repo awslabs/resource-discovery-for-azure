@@ -181,10 +181,16 @@ Describe 'Wrapper-only options are deliberately not forwarded' {
         # after them, -HeadRoom would silently stop applying.
         $HeadRoomIdx = $script:WrapperSrc.IndexOf('Get-HeadroomAdjustedConcurrency')
         $SeqIdx = $script:WrapperSrc.IndexOf("InventoryPassthrough['ConcurrencyLimit']")
-        $ParIdx = $script:WrapperSrc.IndexOf('WorkerArgs.ConcurrencyLimit')
-        if ($ParIdx -lt 0) { $ParIdx = $script:WrapperSrc.IndexOf('ConcurrencyLimit   = $ConcurrencyLimit') }
+        # The worker args set ConcurrencyLimit as a key in the @{ } literal, not via
+        # a '.' accessor, so an IndexOf('WorkerArgs.ConcurrencyLimit') never matches
+        # and a fixed-whitespace literal match breaks the moment the hashtable is
+        # realigned. Match the assignment with a whitespace-insensitive regex and
+        # use its index, so this asserts ORDER, not formatting.
+        $ParMatch = [regex]::Match($script:WrapperSrc, 'ConcurrencyLimit\s*=\s*\$ConcurrencyLimit')
+        $ParIdx = if ($ParMatch.Success) { $ParMatch.Index } else { -1 }
 
         $HeadRoomIdx | Should -BeGreaterThan -1 -Because 'the headroom reduction must exist to be ordered'
+        $ParIdx | Should -BeGreaterThan -1 -Because 'the worker-args ConcurrencyLimit assignment must be found regardless of whitespace'
         $SeqIdx | Should -BeGreaterThan $HeadRoomIdx -Because 'the sequential passthrough must be built AFTER the headroom reduction'
         $ParIdx | Should -BeGreaterThan $HeadRoomIdx -Because 'the worker args must be built AFTER the headroom reduction'
     }

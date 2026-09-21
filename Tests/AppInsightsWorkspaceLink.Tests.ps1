@@ -100,6 +100,17 @@ Describe 'Workspace-based App Insights component' {
         $Rec.WorkspaceResourceId | Should -BeExactly $script:WsId -Because 'the field name says ResourceId, so a non-obfuscated run carries the id'
     }
 
+    It 'emits the raw workspace id when the dictionary is non-null but EMPTY (Count -eq 0)' {
+        # The collector's guard is "$null -ne $Dict -and $Dict.Count -gt 0"; a
+        # non-null but empty dictionary falls through to the raw-id branch exactly
+        # like $null does. The $null case is covered above; this pins the Count-0
+        # edge so a future guard rewrite that dropped the Count check (and started
+        # emitting 'obfuscated' for every id against an empty dict) would fail here.
+        $Rec = Invoke-Collector -Path $script:AiCollector -Resources @(New-ComponentRecord -WorkspaceResourceId $script:WsId) -Dictionary (New-Dictionary)
+
+        $Rec.WorkspaceResourceId | Should -BeExactly $script:WsId -Because 'an empty dictionary is not an obfuscation pass, so the raw id is carried'
+    }
+
     It 'resolves to the workspace token when the workspace is in the dictionary' {
         $Dict = New-Dictionary -Entries @{ $script:WsId = $script:WsToken }
 

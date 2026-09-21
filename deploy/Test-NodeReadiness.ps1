@@ -36,9 +36,13 @@
          -ServicePrincipal -FederatedToken) - the exact call entrypoint.ps1 makes.
       3. Az.ResourceGraph present and a Search-AzGraph query succeeds - proves the
          UAMI has Reader somewhere and the inventory phase can run.
-      4. Subscription coverage: the count the identity can enumerate
-         (Get-AzSubscription) equals the true count under the tenant-root
-         management group (Get-AzManagementGroup -Recurse). A shortfall - OR any
+      4. Subscription coverage: the SET of subscription IDs the identity can
+         enumerate (Get-AzSubscription) covers the true set under the tenant-root
+         management group (Get-AzManagementGroup -Expand -Recurse; -Expand
+         populates the .Children the traversal walks). The comparison is by ID
+         set, case-insensitively - NOT by count, because a phantom or
+         transitioning subscription can balance a real missing one and hide a
+         gap. Any missed ID - OR any
          inability to verify the true total - is a HARD FAIL, because a
          per-subscription-scoped identity silently misses subscriptions and this
          tool must capture ALL of them. The robust fix is Reader at the

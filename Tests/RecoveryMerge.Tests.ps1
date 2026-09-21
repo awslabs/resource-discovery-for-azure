@@ -193,6 +193,33 @@ Describe 'Merge-RecoveryData -Service selection and fail-loud guards' {
         { Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output } |
             Should -Throw -ExpectedMessage '*nothing to merge*'
     }
+
+    It 'does NOT throw on an empty recovery inventory when -RecoverConsumption is set: rebuilds consumption only, leaving the gap inventory untouched' {
+        # Complement of the "nothing to merge" throw above: the guard only fires
+        # when NO recover switch is set. With -RecoverConsumption (or -RecoverMetrics)
+        # an empty recovery inventory is intentional - the operator is recovering a
+        # data phase, not service keys - so the merge proceeds, splices no keys, and
+        # the gap inventory is carried forward verbatim.
+        $C = New-Case
+        $GapCsv = "$script:CsvHeader`n{},Compute,m1,GAP-METER,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        $RecCsv = "$script:CsvHeader`n{},Compute,m1,REC-METER,eastus,vm,9,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $GapCsv
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3' }) -ConsumptionCsv $RecCsv
+
+        $Result = $null
+        { $script:NoThrowResult = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue } |
+            Should -Not -Throw
+        $Result = $script:NoThrowResult
+
+        @($Result.MergedServiceKeys | Where-Object { $_ }) | Should -HaveCount 0 -Because 'an empty recovery inventory splices no service keys'
+        $Result.ConsumptionSource | Should -Be 'recovery' -Because '-RecoverConsumption still rebuilds the consumption phase'
+
+        # The gap inventory must be untouched - its VirtualMachines key survives.
+        $Merged = Get-Content -Path $Result.OutputInventory -Raw | ConvertFrom-Json
+        $Merged.PSObject.Properties.Name | Should -Contain 'VirtualMachines' -Because 'the gap inventory is carried forward when only a data phase is recovered'
+        $OutCsv = Join-Path $C.Output ('Consumption_{0}.csv' -f $script:GapBase)
+        (Get-Content -Path $OutCsv -Raw) | Should -Match 'REC-METER'
+    }
 }
 
 Describe 'Merge-RecoveryData consumption handling' {
@@ -501,6 +528,32 @@ Describe 'Merge-RecoveryData guards (advisory warnings)' {
         $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue
 
         @($Result.Warnings).Count | Should -Be 0
+    }
+
+    It 'warns and uses the newest when a bundle folder holds more than one Inventory match' {
+        # Get-BundleFile emits a non-fatal advisory when a folder holds >1 file
+        # matching a filter (the "InventoryRoot pointed at many runs" trap) and
+        # proceeds with the newest. Drive it by planting a SECOND Inventory_*.json
+        # in the gap folder with a newer timestamp, then assert both that the
+        # advisory fired and that the newer inventory (its DecoyOnly key) was used.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) })
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        # Second, NEWER inventory in the same gap folder (a different base so the
+        # 'Inventory_*.json' filter matches two files).
+        $NewerBase = 'GapReport_20260601_000000'
+        $NewerInventoryPath = Join-Path $C.Gap ('Inventory_{0}.json' -f $NewerBase)
+        ([ordered]@{ Version = '3.2.3'; DecoyOnly = @((New-Record 'decoy01')) } | ConvertTo-Json -Depth 100) | Out-File -FilePath $NewerInventoryPath -Encoding utf8
+        (Get-Item -LiteralPath $NewerInventoryPath).LastWriteTime = (Get-Date).AddMinutes(5)
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -Service 'AppServices' -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match "files match 'Inventory_\*\.json'" -Because 'a folder with two inventories must raise the multi-match advisory'
+        # The newest inventory (DecoyOnly, no VirtualMachines) was the one read.
+        $Merged = Get-Content -Path $Result.OutputInventory -Raw | ConvertFrom-Json
+        $Merged.PSObject.Properties.Name | Should -Contain 'DecoyOnly' -Because 'Get-BundleFile uses the newest match'
+        $Merged.PSObject.Properties.Name | Should -Not -Contain 'VirtualMachines' -Because 'the older inventory must not be the one used'
     }
 }
 

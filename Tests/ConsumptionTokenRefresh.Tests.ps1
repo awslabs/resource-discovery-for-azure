@@ -204,3 +204,134 @@ Describe 'A mid-loop reconnect must re-pin the subscription scope before retryin
         $Tail | Should -Match 'avoid attributing another subscription' -Because 'the abandonment reason must name the cross-subscription-attribution hazard it prevents'
     }
 }
+
+Describe 'A token that lapses AGAIN mid-loop is refreshed a second time (intra-page gap)' {
+
+    # THE DEFECT THIS GUARDS (WARNING 726). The per-page guard above stops a
+    # PERMANENT 401 from reconnecting on every one of the 30 attempts. But the
+    # retry loop can run long on its own: each retry sleeps a server-directed
+    # Retry-After clamped to 300s, so up to $ConsumptionMaxRetries attempts is
+    # ~26 minutes worst case - long enough for even a freshly reconnected token to
+    # reach its own policy lifetime. The original once-per-page boolean, once set,
+    # blocked ALL further refreshes: a token that lapsed a SECOND time mid-loop
+    # could not be refreshed, so the loop burned its remaining budget against a
+    # dead token and failed the subscription. Only interactive sessions were bitten
+    # (a service principal / managed identity re-issues its own token silently).
+    #
+    # THE FIX. A SUCCESSFUL reconnect re-arms the per-page guard (its fresh token
+    # can lapse again and deserves another refresh); a reconnect that yields NO
+    # usable token leaves the guard closed (a permanent 401 rides out the budget and
+    # fails loud, unchanged). The number of re-arms is bounded so an every-attempt
+    # expiry that keeps "succeeding" then immediately lapsing still terminates
+    # rather than reconnecting forever.
+    #
+    # The loop is inline in the paging code (not a separately callable function),
+    # so the structure is asserted from source, matching this file's existing
+    # approach; the bounded re-arm CONTRACT is then exercised behaviourally against
+    # a faithful model of the exact guard-transition the source implements.
+
+    It 'bounds the total mid-loop refreshes per page' {
+        $script:InvSrc | Should -Match '\$ConsumptionAuthRefreshMax = \d+' -Because 'an every-attempt expiry that keeps succeeding-then-lapsing must be capped so it cannot reconnect forever'
+        $script:InvSrc | Should -Match '\$ConsumptionAuthRefreshCount = 0' -Because 'the per-page refresh counter must be initialised per page, alongside the boolean guard'
+        $script:InvSrc | Should -Match '\$ConsumptionAuthRefreshCount\+\+' -Because 'each refresh attempt must advance the bounded counter'
+    }
+
+    It 're-arms the per-page guard only AFTER a successful, correctly re-pinned reconnect' {
+        # The re-arm ($ConsumptionAuthRefreshedThisPage = $false) must sit inside the
+        # $RepinOk success branch, after the re-pin - not in the reconnect-failed
+        # path, and not before the scope has been restored. Otherwise a permanent
+        # 401 (no usable token) would keep reconnecting every attempt, the exact
+        # storm the guard exists to prevent.
+        $RepinOkIdx = $script:InvSrc.IndexOf('if ($RepinOk)')
+        $RepinOkIdx | Should -BeGreaterThan -1
+        $Tail = $script:InvSrc.Substring($RepinOkIdx)
+        # The re-arm is gated by the bounded counter, inside the success branch.
+        $Tail | Should -Match '\$ConsumptionAuthRefreshCount -lt \$ConsumptionAuthRefreshMax' -Because 'the guard may only re-arm while the bounded refresh budget remains'
+    }
+
+    It 'the re-arm is gated by the bounded counter, not unconditional' {
+        # Guards against a future edit that re-opens the guard on every successful
+        # reconnect with no cap - which would let an every-attempt succeed-then-lapse
+        # token reconnect indefinitely.
+        $ReArmIdx = $script:InvSrc.IndexOf('$ConsumptionAuthRefreshCount -lt $ConsumptionAuthRefreshMax')
+        $ReArmIdx | Should -BeGreaterThan -1
+        $Window = $script:InvSrc.Substring($ReArmIdx, [math]::Min(280, $script:InvSrc.Length - $ReArmIdx))
+        $Window | Should -Match '\$ConsumptionAuthRefreshedThisPage = \$false' -Because 'the re-arm of the boolean guard must be the body governed by the bounded-counter check'
+    }
+
+    It 'a reconnect that yields no usable token does NOT re-arm the guard (permanent 401 rides out the budget)' {
+        # The re-arm lives in the $RepinOk success branch only. The reconnect-failed
+        # (else) branch must NOT re-open the guard, so a permanent 401 reconnects at
+        # most once then fails loud, exactly as before the intra-page fix.
+        $FailBranchIdx = $script:InvSrc.IndexOf('did not yield a usable token')
+        $FailBranchIdx | Should -BeGreaterThan -1
+        # From the failed-reconnect log to the end of the catch's auth branch there
+        # must be no guard re-arm.
+        $AttemptIdx = $script:InvSrc.IndexOf('$ConsumptionAttempt++', $FailBranchIdx)
+        $AttemptIdx | Should -BeGreaterThan $FailBranchIdx
+        $FailWindow = $script:InvSrc.Substring($FailBranchIdx, $AttemptIdx - $FailBranchIdx)
+        $FailWindow | Should -Not -Match '\$ConsumptionAuthRefreshedThisPage = \$false' -Because 'a permanent 401 (no usable token after reconnect) must keep the guard closed and ride out the budget'
+    }
+
+    Context 'the bounded re-arm contract (behavioural model of the exact source transition)' {
+
+        # A faithful model of the guard transition the source implements, so the
+        # CONTRACT - not just the presence of tokens - is exercised: refresh only
+        # when the guard is open and the error is an expiry; re-arm only after a
+        # successful reconnect while budget remains; never re-arm after a failed
+        # reconnect. This is a model, not the inline loop itself (which is not
+        # separately callable); the source guards above pin that the real code
+        # matches this shape.
+        BeforeAll {
+            function Invoke-RefreshModel {
+                param(
+                    [int]$RefreshMax = 3,
+                    # A closure returning $true if the Nth reconnect attempt yields a usable token.
+                    [scriptblock]$ReconnectSucceeds,
+                    [int]$MaxAttempts = 30
+                )
+                $Refreshed = $false          # $ConsumptionAuthRefreshedThisPage
+                $RefreshCount = 0            # $ConsumptionAuthRefreshCount
+                $Reconnects = 0
+                for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++)
+                {
+                    # Every attempt hits an auth-expiry (worst case for this model).
+                    if ((-not $Refreshed))
+                    {
+                        $Refreshed = $true
+                        $RefreshCount++
+                        $Reconnects++
+                        if (& $ReconnectSucceeds $RefreshCount)
+                        {
+                            if ($RefreshCount -lt $RefreshMax) { $Refreshed = $false }
+                        }
+                        # failed reconnect: guard stays closed (no re-arm).
+                    }
+                }
+                [pscustomobject]@{ Reconnects = $Reconnects; RefreshCount = $RefreshCount }
+            }
+        }
+
+        It 'refreshes more than once when the token keeps lapsing after successful reconnects' {
+            # The core of 726: a second lapse after a good reconnect gets a second
+            # refresh (the old boolean stopped at exactly one).
+            $r = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $true }
+            $r.RefreshCount | Should -BeGreaterThan 1
+        }
+
+        It 'never exceeds the bounded refresh budget even if every attempt lapses' {
+            $r = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $true }
+            $r.RefreshCount | Should -Be 3
+            $r.Reconnects | Should -Be 3
+        }
+
+        It 'reconnects at most ONCE when the reconnect never yields a usable token (permanent 401)' {
+            # A permanent 401: the reconnect "returns" but Test-DataPlaneAuthReady
+            # reports no usable token, so the guard is never re-armed and the loop
+            # rides out its budget without a reconnect storm.
+            $r = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $false }
+            $r.Reconnects | Should -Be 1
+            $r.RefreshCount | Should -Be 1
+        }
+    }
+}

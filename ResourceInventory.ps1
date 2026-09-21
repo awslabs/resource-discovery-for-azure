@@ -1174,6 +1174,21 @@ function ExecuteInventoryProcessing()
                     $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
                     $ConsumptionAuthRefreshedThisPage = $false
+                    # The retry loop can run long: up to $ConsumptionMaxRetries attempts, each
+                    # sleeping a server-directed Retry-After clamped to 300s (~26 min worst case),
+                    # which can outlive the token this page started with. The per-page guard below
+                    # ($ConsumptionAuthRefreshedThisPage) stops a PERMANENT 401 reconnecting on every
+                    # attempt, but on its own it also blocks a legitimate SECOND lapse: once a
+                    # reconnect has succeeded, a token that expires again LATER in the same loop could
+                    # not be refreshed, so the loop would burn its remaining budget against a dead
+                    # token and fail loud. To close that intra-page gap without reopening the reconnect
+                    # storm the guard prevents, a SUCCESSFUL reconnect re-arms the guard (its fresh
+                    # token can lapse again and deserves another refresh); a reconnect that yields no
+                    # usable token leaves the guard closed (a permanent 401 rides out the budget and
+                    # fails loud, unchanged). Total re-arms are capped so an every-attempt expiry that
+                    # keeps "succeeding" then immediately lapsing still terminates.
+                    $ConsumptionAuthRefreshMax = 3
+                    $ConsumptionAuthRefreshCount = 0
                     while ($true)
                     {
                         try
@@ -1192,7 +1207,8 @@ function ExecuteInventoryProcessing()
                             if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
                             {
                                 $ConsumptionAuthRefreshedThisPage = $true
-                                Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting one Azure re-authentication before retrying this page." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                                $ConsumptionAuthRefreshCount++
+                                Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting Azure re-authentication (refresh {2}/{3} for this page) before retrying this page." -f $sub.Name, $_.Exception.Message, $ConsumptionAuthRefreshCount, $ConsumptionAuthRefreshMax) -Severity 'Warning'
                                 if (Test-DataPlaneAuthReady -Phase 'Consumption')
                                 {
                                     # Test-DataPlaneAuthReady reconnects with Connect-AzAccount and no
@@ -1218,6 +1234,15 @@ function ExecuteInventoryProcessing()
                                     if ($RepinOk)
                                     {
                                         Write-Log -Message ("Consumption: Azure context re-established and re-pinned to {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                        # The reconnect produced a usable, correctly-scoped token. That
+                                        # token can itself lapse later in a long retry loop, so re-arm the
+                                        # per-page guard to permit another refresh on a genuine SECOND
+                                        # expiry - bounded by $ConsumptionAuthRefreshMax so this cannot
+                                        # become an unbounded reconnect loop against an every-attempt expiry.
+                                        if ($ConsumptionAuthRefreshCount -lt $ConsumptionAuthRefreshMax)
+                                        {
+                                            $ConsumptionAuthRefreshedThisPage = $false
+                                        }
                                     }
                                     else
                                     {
@@ -1227,6 +1252,10 @@ function ExecuteInventoryProcessing()
                                 }
                                 else
                                 {
+                                    # No usable token after reconnect: a permanent 401 (revoked /
+                                    # interaction-required). Leave the guard CLOSED so we do not reconnect
+                                    # again this page - the remaining retries ride out the budget and fail
+                                    # loud, unchanged from the original behaviour.
                                     Write-Log -Message ("Consumption: re-authentication for {0} did not yield a usable token; the remaining retries will still be attempted but may not recover." -f $sub.Name) -Severity 'Warning'
                                 }
                             }

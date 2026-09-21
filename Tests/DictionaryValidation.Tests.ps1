@@ -42,10 +42,15 @@ BeforeAll {
 
     # The optional type-prefix group (databricks_, aks_, vmss_) covers the
     # legitimate variants the obfuscator emits for resources whose IDs do not
-    # fit the standard ARM shape. See ResourceInventory.ps1 lines 650-655 and
-    # 1030-1034 for where these are produced.
+    # fit the standard ARM shape. These tokens are produced in ResourceInventory.ps1
+    # by the obfuscation switch that special-cases the databricks_/aks_/vmss_
+    # resource types (search for the 'databricks_' token literal); line numbers are
+    # intentionally not cited here because they drift.
     $script:ObfuscationPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-    $script:AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}'
+    # Require the FULL subscription GUID plus a trailing resource path, so a
+    # truncated/malformed value like '/subscriptions/12345678-1234' cannot pass the
+    # 'values should be real Azure resource IDs' check.
+    $script:AzureIdPattern = '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/'
 }
 
 AfterAll {

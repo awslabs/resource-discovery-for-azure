@@ -57,13 +57,20 @@ Describe 'LoginSession restores the caller''s $DebugPreference, not a literal' {
     }
 
     It 'saves BEFORE it suppresses, so the captured value is the caller''s' {
-        $SaveIdx = $script:LoginText.IndexOf('$SavedDebugPref = $DebugPreference')
-        $SuppressIdx = $script:LoginText.IndexOf('$DebugPreference = "SilentlyContinue"')
-        $RestoreIdx = $script:LoginText.IndexOf('$DebugPreference = $SavedDebugPref')
+        # Use regex matches (not literal IndexOf) to locate each statement, so a
+        # harmless reformatting of spacing/quotes in the source cannot make an
+        # IndexOf return -1 and fail this ordering check while the shape checks
+        # above (which use \s* regexes) still pass - the two must agree.
+        $SaveMatch = [regex]::Match($script:LoginText, '\$SavedDebugPref\s*=\s*\$DebugPreference')
+        $SuppressMatch = [regex]::Match($script:LoginText, '\$DebugPreference\s*=\s*"SilentlyContinue"')
+        $RestoreMatch = [regex]::Match($script:LoginText, '\$DebugPreference\s*=\s*\$SavedDebugPref')
 
-        $SaveIdx | Should -BeGreaterThan -1
-        $SuppressIdx | Should -BeGreaterThan $SaveIdx -Because 'saving after suppressing would capture SilentlyContinue and restore that instead'
-        $RestoreIdx | Should -BeGreaterThan $SuppressIdx
+        $SaveMatch.Success | Should -BeTrue
+        $SuppressMatch.Success | Should -BeTrue
+        $RestoreMatch.Success | Should -BeTrue
+
+        $SuppressMatch.Index | Should -BeGreaterThan $SaveMatch.Index -Because 'saving after suppressing would capture SilentlyContinue and restore that instead'
+        $RestoreMatch.Index | Should -BeGreaterThan $SuppressMatch.Index
     }
 }
 
@@ -79,13 +86,18 @@ Describe 'No hardcoded Continue restore survives anywhere in the script' {
     }
 }
 
-Describe 'The save/restore round-trip honours every state the binder can produce' {
+Describe 'The save/restore round-trip honours every preference value the binder can produce' {
 
     # Illustrates, over the same three-line idiom the function uses, WHY the source shape
     # asserted in the first two Describes is the correct one. On its own the round-trip is
     # pure logic that would pass regardless of ResourceInventory.ps1, so each case FIRST
     # couples to the code under test: it asserts the LIVE source restores the saved value and
     # never a literal, so a regression in LoginSession fails here too, not only in Describe 1.
+    #
+    # NOTE: the -Debug binder produces only TWO distinct $DebugPreference VALUES -
+    # 'Continue' (-Debug) and 'SilentlyContinue' (no -Debug and -Debug:$false both). The
+    # three cases below enumerate the three binder INPUTS on purpose (the -Debug:$false
+    # opt-out is the one that regressed), even though two of them share the same value.
     It 'round-trips <Label> unchanged' -ForEach @(
         @{ Label = 'SilentlyContinue (no -Debug, the production default)'; Incoming = 'SilentlyContinue' }
         @{ Label = 'Continue (-Debug passed)'; Incoming = 'Continue' }

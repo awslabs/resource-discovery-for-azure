@@ -98,6 +98,7 @@ Describe 'Get-StateBlobName' {
         $Tokens = $null
         $ParseErrors = $null
         $null = [System.Management.Automation.Language.Parser]::ParseInput($Raw, [ref]$Tokens, [ref]$ParseErrors)
+        @($ParseErrors).Count | Should -Be 0 -Because 'if discovery failed to tokenize, comment-excision and the _state/ / Get-StateBlobStreamPrefix bans below would evaluate against partial input'
         $Builder = [System.Text.StringBuilder]::new($Raw)
         foreach ($C in @($Tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending))
         {

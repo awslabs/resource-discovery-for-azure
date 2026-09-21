@@ -230,7 +230,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         Write-Stream ("ERROR processing {0}: {1}" -f $SubName, $ErrRecord.Exception.Message) 'Red'
 
         $DiagLines = @()
-        $DiagLines += "==== Failure for subscription: $SubName ($SubId) [$Tag] ===="
+        $DiagLines += "==== Failure for subscription: $SubName ($SubId) $Tag ===="
         $DiagLines += "Timestamp: $(Get-Date -Format 'o')"
         $DiagLines += "Message:   $($ErrRecord.Exception.Message)"
         $DiagLines += "Type:      $($ErrRecord.Exception.GetType().FullName)"

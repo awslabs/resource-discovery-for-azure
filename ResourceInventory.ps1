@@ -1195,7 +1195,35 @@ function ExecuteInventoryProcessing()
                                 Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting one Azure re-authentication before retrying this page." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
                                 if (Test-DataPlaneAuthReady -Phase 'Consumption')
                                 {
-                                    Write-Log -Message ("Consumption: Azure context re-established for {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                    # Test-DataPlaneAuthReady reconnects with Connect-AzAccount and no
+                                    # -Subscription, so a successful reconnect can leave the context on the
+                                    # identity's DEFAULT subscription rather than $sub. Get-UsageAggregates
+                                    # reads the context's subscription, so retrying now without re-pinning
+                                    # would attribute another subscription's usage rows to $sub. Re-pin and
+                                    # re-verify exactly as the per-sub loop does before its first page; if the
+                                    # scope cannot be restored, abandon this subscription rather than write
+                                    # cross-subscription billing data.
+                                    $RepinOk = $false
+                                    $RepinError = $null
+                                    try
+                                    {
+                                        $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                                        $RepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+                                    }
+                                    catch
+                                    {
+                                        $RepinError = $_.Exception.Message
+                                    }
+
+                                    if ($RepinOk)
+                                    {
+                                        Write-Log -Message ("Consumption: Azure context re-established and re-pinned to {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                    }
+                                    else
+                                    {
+                                        Write-Log -Message ("Consumption: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's consumption to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($RepinError) { " ($RepinError)" } else { ' (context did not match the target after Set-AzContext)' })) -Severity 'Error'
+                                        throw
+                                    }
                                 }
                                 else
                                 {

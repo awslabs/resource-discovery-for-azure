@@ -51,7 +51,7 @@ BeforeAll {
         $script:Consumption = if ($CsvFile)
         {
             $Content = Get-Content $CsvFile.FullName -ErrorAction SilentlyContinue
-            if ($null -ne $Content -and $Content.Count -gt 1) { Import-Csv $CsvFile.FullName } else { @() }
+            if ($null -ne $Content -and $Content.Count -gt 1) { @(Import-Csv $CsvFile.FullName) } else { @() }
         }
         else { @() }
 
@@ -270,6 +270,10 @@ Describe "Cross-dataset linkage" {
         foreach ($Key in $Shared)
         {
             $Key | Should -Match $script:TokenPattern -Because "a cross-dataset join key must be a deterministic prod_/nonprod_ token"
+            # Intentional defense-in-depth: a value matching the anchored $TokenPattern
+            # above can never contain '/subscriptions/', so this negative check cannot
+            # independently fail today. It is kept as an explicit guard against a future
+            # loosening of $TokenPattern that would let a raw ARM path slip through.
             $Key | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "a join key must never be a raw ARM path in an obfuscated run (determinism + PII)"
         }
     }

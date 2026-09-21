@@ -230,7 +230,7 @@ function Get-RetryWaitSeconds
     if ($Raw)
     {
         $Span = [TimeSpan]::Zero
-        if ([TimeSpan]::TryParse($Raw.Trim(), [ref]$Span) -and $Span.TotalSeconds -ge 1)
+        if ([TimeSpan]::TryParse($Raw.Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [ref]$Span) -and $Span.TotalSeconds -ge 1)
         {
             return [math]::Min($Span.TotalSeconds, $MaxSeconds)
         }
@@ -673,6 +673,19 @@ function Write-RdaShareableDiagnosticsLog
 
         if ($ConsumptionRequested -and $ConsumptionRecordCount -eq 0 -and $ConsumpSkips.Count -eq 0)
         {
+            # LIMITATION (accepted): $ConsumpSkips reads $Global:ConsumptionFailedSubs,
+            # which is run-CUMULATIVE, not per-subscription, under the wrapper - the
+            # inner ResourceInventory.ps1 nil-initializes it once and '+=' per
+            # subscription within the same process (only Run-AllSubscriptions.Stream.ps1
+            # resets it, per stream). So in a multi-sub run one earlier subscription's
+            # billing failure suppresses this zero-records warning for every LATER
+            # subscription, even where those rows were genuinely all excluded by scope.
+            # This is bounded: the fetched/written counts and the full failure list are
+            # still printed above, so the operator is not left without the reason.
+            # Scoping the guard to the current subscription would require threading a
+            # current-subscription id parameter into this function - out of scope for
+            # this diagnostics writer, and the sibling guard at the 'records collected'
+            # line already behaves this way.
             $DiagLines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')
             $DiagLines.Add('  and no subscription reported a billing error. The billing API answered')
             $DiagLines.Add('  successfully with no rows, so the Consumption CSV holds only its header.')

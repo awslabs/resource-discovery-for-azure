@@ -158,3 +158,49 @@ Describe 'The retry loop refreshes a lapsed token before retrying the page' {
         $script:InvSrc | Should -Not -Match '\$Global:ConsumptionAuthRefreshedThisPage' -Because 'the guard is per-page local state, not a run-wide global'
     }
 }
+
+Describe 'A mid-loop reconnect must re-pin the subscription scope before retrying' {
+
+    # THE DEFECT THIS GUARDS. Test-DataPlaneAuthReady reconnects with
+    # Connect-AzAccount and NO -Subscription, and its success test only checks
+    # that a context plus a mintable token exist - never the selected
+    # subscription. A SUCCESSFUL mid-loop reconnect can therefore leave the
+    # context on the identity's default subscription. Get-UsageAggregates reads
+    # the context's subscription, so retrying the page without re-pinning would
+    # write ANOTHER subscription's usage rows into this one's Consumption_*.csv -
+    # a cross-subscription billing-data leak. The per-sub loop already pins with
+    # Set-AzContext -Subscription $sub.id and verifies the match before its first
+    # page; the reconnect path must restore that same scope.
+
+    It 're-pins the context to $sub.id after a successful reconnect' {
+        $script:InvSrc | Should -Match 'Set-AzContext -Subscription \$sub\.id' -Because 'the reconnect can reset the context to the identity default subscription, so the loop must re-pin to the current subscription before retrying'
+    }
+
+    It 're-verifies the context actually matched $sub.id after re-pinning' {
+        $script:InvSrc | Should -Match '\(Get-AzContext\)\.Subscription\.Id -eq \$sub\.id' -Because 'Set-AzContext succeeding is not proof the scope is correct; the loop must confirm the context matches the target subscription'
+    }
+
+    It 'the re-pin happens INSIDE the auth-expiry refresh branch (after the reconnect helper)' {
+        # The re-pin must sit after the Test-DataPlaneAuthReady success check, so
+        # it corrects the scope that the reconnect may have moved. If the ONLY
+        # Set-AzContext re-pin were the one at the top of the per-sub loop, a
+        # reconnect could still silently move the scope for the rest of the page's
+        # retries.
+        $RefreshIdx = $script:InvSrc.IndexOf("Test-DataPlaneAuthReady -Phase 'Consumption'")
+        $RepinAfter = $script:InvSrc.IndexOf('Set-AzContext -Subscription $sub.id', $RefreshIdx)
+        $RefreshIdx | Should -BeGreaterThan -1
+        $RepinAfter | Should -BeGreaterThan $RefreshIdx -Because 'the scope re-pin must follow the reconnect it is correcting for'
+    }
+
+    It 'abandons the subscription when the scope cannot be restored (throws, not retries)' {
+        # If the reconnect cannot be re-scoped to $sub, retrying would attribute
+        # the wrong subscription's billing to this one. Abandoning (throw) routes
+        # the subscription into the failed-subs list instead of writing a
+        # mis-attributed Consumption_*.csv - the same fail-closed choice the
+        # first-page context switch makes.
+        $RefreshIdx = $script:InvSrc.IndexOf("Test-DataPlaneAuthReady -Phase 'Consumption'")
+        $Tail = $script:InvSrc.Substring($RefreshIdx)
+        $Tail | Should -Match 'could not be re-pinned' -Because 'a failed re-pin must be logged as an error explaining the abandonment'
+        $Tail | Should -Match 'avoid attributing another subscription' -Because 'the abandonment reason must name the cross-subscription-attribution hazard it prevents'
+    }
+}

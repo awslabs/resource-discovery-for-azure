@@ -119,7 +119,12 @@ function Write-RdaProgress
         {
             if ($Completed)
             {
-                $Line = '[{0:dd-MM-yyyy} {0:HH:mm:ss}] {1}: complete ({2} item(s))' -f (Get-Date), $Activity, $Total
+                # In count-only mode (-Total omitted / 0) use the final -Index for the
+                # item count, since $Total is 0 and would otherwise log 'complete (0
+                # item(s))' regardless of how many items the loop processed. Callers
+                # that clear the bar with -Completed can pass the final index.
+                $CompletedCount = if ($Total -gt 0) { $Total } else { $Index }
+                $Line = '[{0:dd-MM-yyyy} {0:HH:mm:ss}] {1}: complete ({2} item(s))' -f (Get-Date), $Activity, $CompletedCount
             }
             else
             {

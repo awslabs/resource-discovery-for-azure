@@ -36,6 +36,7 @@ Related reading:
 | `-SkipMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip) |
 | `-SkipConsumption` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip) |
 | `-SkipMarketplace` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip Marketplace collector only) |
+| `-SkipFoundryCoverage` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip Foundry coverage collector only) |
 | `-SkipDiskMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip disk I/O metrics) |
 | `-IncludeStorageMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (opt-in) |
 | `-MetricsDetailed` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = native cadences) |
@@ -240,6 +241,60 @@ but not the Marketplace one — for example when you already know the tenant has
 Marketplace purchases and want to shave the extra call. Leave it **on** (the
 default) for any run where third-party/Marketplace spend could matter (e.g. an ISV
 offer purchased through Azure Marketplace / Azure AI Foundry).
+
+---
+
+## `-SkipFoundryCoverage`
+
+- **Type:** `[switch]`
+- **Declared on:** `ResourceInventory.ps1` (param block) and
+  `Run-AllSubscriptions.ps1` (param block).
+- **Default:** off. When absent, the **additive Azure AI Foundry model
+  billing-plane coverage collector** runs (as part of the consumption phase).
+  When present, only that collector is skipped; the first-party consumption
+  phase and the Marketplace collector are unaffected.
+
+### What it does
+
+The Foundry coverage collector probes every deployed Azure AI Foundry /
+CognitiveServices model against **both** billing planes — the Azure Retail
+Prices catalog (Azure-metered) and the Azure Marketplace / CCU plane (via a
+per-subscription `Get-AzConsumptionMarketplace` read) — and emits one row per
+deployed model into a separate `FoundryModelCoverage_<ReportName>_<timestamp>.csv`
+with a `CoverageStatus` (`AzureMetered`, `AzureMetered+Marketplace`,
+`MarketplaceOnly`, `UNPRICED`, or `Unknown-<reason>` when a plane could not be
+probed) so a Marketplace-only model (e.g. Claude via CCU) or an entirely
+uncovered model is flagged loudly rather than silently dropped by a downstream
+pricing pipeline. `UNPRICED` is emitted only when **both** planes were
+successfully probed and both came back negative; any probe gap yields
+`Unknown-<reason>`, never a false `UNPRICED`.
+
+- The phase is gated on
+  `!$SkipConsumption.IsPresent -and !$SkipFoundryCoverage.IsPresent` — it needs
+  the same billing / Cost Management Reader access and Azure context as the
+  first-party phase to probe the Marketplace plane, so `-SkipConsumption`
+  implies it is skipped too, and `-SkipFoundryCoverage` turns off **only** this
+  collector while leaving first-party consumption and the Marketplace collector
+  on. It performs its own per-subscription Marketplace read, independent of and
+  idempotent with the Marketplace collector's.
+- As with the other phases, finalization guarantees a well-formed output: when
+  the phase is skipped (or produced no rows) RDA writes a **header-only**
+  `FoundryModelCoverage_*.csv` so downstream tooling always finds a schema-valid
+  file.
+
+In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
+like `-SkipMarketplace` (`$InventoryPassthrough['SkipFoundryCoverage'] = $true`),
+on both the sequential and parallel-stream paths.
+
+### Why it exists / when to use it
+
+The collector reuses the existing Cost Management Reader / Billing Reader
+requirement, so it needs no extra role, and it makes one additional Marketplace
+read per subscription. Use `-SkipFoundryCoverage` when you want first-party (and
+Marketplace) consumption but not the per-model coverage reconciliation — for
+example when the tenant deploys no Azure AI Foundry models. Leave it **on** (the
+default) for any run where a Marketplace-only or uncovered Foundry model could
+otherwise be silently dropped from downstream pricing.
 
 ---
 

@@ -456,7 +456,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 |------|-------------|
 | `Consumption_ResourcesReport_(date).csv` | Cost and billing data (first-party Azure usage) |
 | `Marketplace_ResourcesReport_(date).csv` | Azure Marketplace / third-party SaaS usage (additive; see [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas)). Empty header-only file when there are no Marketplace charges (a confirmed zero) |
-| `FoundryModelCoverage_ResourcesReport_(date).csv` | Azure AI Foundry per-deployed-model billing-plane coverage (additive). One row per deployed model with its detected billing plane(s) and a `CoverageStatus` of `AzureMetered` / `MarketplaceOnly` / `UNPRICED` (plus `Unknown-*` when a plane could not be probed), so a Marketplace-only model (e.g. Claude via CCU) is flagged, never silently dropped. Empty header-only file when no Foundry model deployments exist (a confirmed zero) |
+| `FoundryModelCoverage_ResourcesReport_(date).csv` | Azure AI Foundry per-deployed-model billing-plane coverage (additive). One row per deployed model with its detected billing plane(s) and a `CoverageStatus` of `AzureMetered` / `AzureMetered+Marketplace` / `MarketplaceOnly` / `UNPRICED` (plus `Unknown-*` when a plane could not be probed), so a Marketplace-only model (e.g. Claude via CCU) is flagged, never silently dropped. Empty header-only file when no Foundry model deployments exist (a confirmed zero) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |

@@ -456,6 +456,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 |------|-------------|
 | `Consumption_ResourcesReport_(date).csv` | Cost and billing data (first-party Azure usage) |
 | `Marketplace_ResourcesReport_(date).csv` | Azure Marketplace / third-party SaaS usage (additive; see [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas)). Empty header-only file when there are no Marketplace charges (a confirmed zero) |
+| `FoundryModelCoverage_ResourcesReport_(date).csv` | Azure AI Foundry per-deployed-model billing-plane coverage (additive). One row per deployed model with its detected billing plane(s) and a `CoverageStatus` of `AzureMetered` / `MarketplaceOnly` / `UNPRICED` (plus `Unknown-*` when a plane could not be probed), so a Marketplace-only model (e.g. Claude via CCU) is flagged, never silently dropped. Empty header-only file when no Foundry model deployments exist (a confirmed zero) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
@@ -577,6 +578,7 @@ Everything untagged is accepted by both, and the wrapper forwards it to the inne
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
 | `SkipMarketplace` | Switch | Skip **only** the additive Azure Marketplace / third-party SaaS consumption collector (`Get-AzConsumptionMarketplace` → `Marketplace_*.csv`); first-party consumption is unaffected. Implied by `-SkipConsumption`. Reuses the same Cost Management Reader / Billing Reader access — no new role. See [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas). | False | `-SkipMarketplace` |
+| `SkipFoundryCoverage` | Switch | Skip **only** the additive Azure AI Foundry model billing-plane coverage collector (`FoundryModelCoverage_*.csv`); first-party consumption and Marketplace are unaffected. Implied by `-SkipConsumption` (it needs the same Cost Management Reader / Billing Reader access to probe the Marketplace plane — no new role). The phase probes both billing planes per deployed Foundry model and flags Marketplace-only (e.g. Claude/CCU) and coverage-gap (`UNPRICED`) models so none is silently dropped. | False | `-SkipFoundryCoverage` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
 | `IncludeStorageMetrics` | Switch | **Opt in** to the Storage Account `UsedCapacity` metric. It is **not collected by default**, because it costs one metric-query call per storage account and on a tenant with a very large storage estate that single capacity figure can dominate the metrics phase. Pass this when storage capacity is actually wanted. | False | `-IncludeStorageMetrics` |
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
@@ -656,7 +658,7 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 ### Run-AllSubscriptions Wrapper Parameters
 
 These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`,
-`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipMarketplace`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipMarketplace`, `-SkipFoundryCoverage`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
 `-MetricsIntervalMinutes`, `-MetricsLookbackDays`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
 `ResourceInventory.ps1`, so they behave the same in both contexts (see
 [Performance Parameters](#performance-parameters) for the metric-volume controls).
@@ -676,6 +678,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
 | `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
 | `SkipMarketplace` | Switch | Forwarded. Skip **only** the additive Marketplace consumption collector (`Marketplace_*.csv`); first-party consumption still runs. Implied by `-SkipConsumption`. | False | `-SkipMarketplace` |
+| `SkipFoundryCoverage` | Switch | Forwarded. Skip **only** the additive Foundry model billing-plane coverage collector (`FoundryModelCoverage_*.csv`); first-party consumption and Marketplace still run. Implied by `-SkipConsumption`. | False | `-SkipFoundryCoverage` |
 | `CapacityPlan` | Switch | Forwarded. **Opt in** to the tenant-wide `VMPlacement.csv` capacity-planning CSV. Off by default, so no `VMPlacement*.csv` is produced, aggregated, or folded into the bundle unless this is passed. See [Performance Parameters](#performance-parameters). | False | `-CapacityPlan` |
 | `Service` | String[] | Forwarded. Scope collection to ONLY these service collectors (by their `Services/*.ps1` base name, e.g. `VirtualMachines`, `Streamanalytics`), across every in-scope subscription — the rest are not collected. Useful for a migration that only cares about certain workloads. Accepts a comma list as one token or a PowerShell array; unknown names fail fast up front with the valid list. Omit to collect all services. | *(all)* | `-Service VirtualMachines,Streamanalytics` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |

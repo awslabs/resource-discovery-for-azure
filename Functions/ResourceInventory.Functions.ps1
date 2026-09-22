@@ -198,6 +198,453 @@ function Global:ConvertTo-RdaMarketplaceRow
     }
 }
 
+function Global:Get-RdaFoundryModelMatchTokens
+{
+    # Normalizes a free-form model/meter string into a lower-cased set of alphanumeric
+    # tokens, used by Test-RdaRetailPriceMatch to compare a deployed model's identity
+    # against a Retail Prices catalog entry WITHOUT a hardcoded model->meter table.
+    #
+    # WHY. There is no clean join key between a deployment's properties.model.name
+    # (e.g. 'gpt-4o', 'claude-opus-5') and a Retail Prices meterName/skuName/productName
+    # (e.g. 'Azure OpenAI GPT5', '5.4 opt Dz 1M Tokens') - the catalog names are
+    # marketing-shaped and abbreviated (report.md 4.3). So we compare on normalized
+    # token OVERLAP rather than an exact key. Purely mechanical, so it lives in a pure
+    # helper and is unit-tested.
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
+
+    # Lower-case, split on any non-alphanumeric run, drop empties and 1-char noise.
+    $Lower = $Value.ToLowerInvariant()
+    $Parts = [regex]::Split($Lower, '[^a-z0-9]+') | Where-Object { $_.Length -ge 2 }
+    return @($Parts | Select-Object -Unique)
+}
+
+function Global:Test-RdaRetailPriceMatch
+{
+    # Decides whether a single deployed model has a CONFIDENT match among the supplied
+    # Azure Retail Prices catalog items (serviceName eq 'Foundry Models'), returning the
+    # matched productName/meterName so the server team can audit the match (report.md 4.3).
+    #
+    # CONSERVATIVE + PER-MODEL (report.md 4.2/4.3): the match is decided at the individual
+    # catalog-item granularity, never at vendor granularity - a vendor like Cohere/Llama/
+    # Mistral can be PARTIALLY present (some SKUs metered, others not), so "the vendor has
+    # meters" is NOT proof this SKU is metered. A match requires BOTH:
+    #   1. the model's vendor discriminator (ModelFormat, e.g. 'OpenAI') to appear in the
+    #      catalog item's tokens, AND
+    #   2. the distinctive tokens of the model's name/version (e.g. 'gpt','4o') to be
+    #      covered by the catalog item's tokens.
+    # A miss is NOT proof of absence (it may be a naming mismatch) - the caller combines
+    # this with the Marketplace probe before ever emitting UNPRICED (report.md 4.3/10).
+    param(
+        [Parameter(Mandatory = $true)]$Model,
+        $CatalogItems
+    )
+
+    $Result = [pscustomobject]@{
+        Matched      = $false
+        RetailMatch  = '(no confident Retail Prices match)'
+    }
+
+    if ($null -eq $CatalogItems -or @($CatalogItems).Count -eq 0) { return $Result }
+
+    $ModelName = "$($Model.ModelName)"
+    $ModelFormat = "$($Model.ModelFormat)"
+
+    $NameTokens = @(Get-RdaFoundryModelMatchTokens -Value $ModelName)
+    $FormatTokens = @(Get-RdaFoundryModelMatchTokens -Value $ModelFormat)
+
+    # A model with no usable name tokens cannot be confidently matched - be conservative.
+    if ($NameTokens.Count -eq 0) { return $Result }
+
+    foreach ($Item in @($CatalogItems))
+    {
+        if ($null -eq $Item) { continue }
+
+        $ItemText = @(
+            "$($Item.productName)"
+            "$($Item.meterName)"
+            "$($Item.skuName)"
+            "$($Item.armSkuName)"
+        ) -join ' '
+        $ItemTokens = @(Get-RdaFoundryModelMatchTokens -Value $ItemText)
+        if ($ItemTokens.Count -eq 0) { continue }
+
+        # Condition 1: vendor discriminator present (when we have one to check).
+        $VendorOk = $true
+        if ($FormatTokens.Count -gt 0)
+        {
+            $VendorOk = @($FormatTokens | Where-Object { $ItemTokens -contains $_ }).Count -gt 0
+        }
+        if (-not $VendorOk) { continue }
+
+        # Condition 2: the model's distinctive name tokens are covered by the item's
+        # tokens. Require ALL name tokens (drift-safe: a partial coincidental token
+        # overlap must not count as a confident match).
+        $NameCovered = @($NameTokens | Where-Object { $ItemTokens -notcontains $_ }).Count -eq 0
+        if (-not $NameCovered) { continue }
+
+        $Result.Matched = $true
+        $Result.RetailMatch = ("{0} / {1}" -f "$($Item.productName)", "$($Item.meterName)").Trim(' /')
+        return $Result
+    }
+
+    return $Result
+}
+
+function Global:Test-RdaMarketplaceModelMatch
+{
+    # Decides whether a deployed model is covered by the Marketplace plane, by looking for
+    # a Marketplace/CCU row (PSMarketplace-shaped) whose PublisherName/OfferName corresponds
+    # to the model's vendor (report.md 5.2). Because CCU is billed as a SINGLE AGGREGATED
+    # line per subscription/offer (report.md 2.1/5.2), we do NOT expect one row per model:
+    # any attributable Marketplace row for the model's vendor is Marketplace-plane evidence.
+    #
+    # Returns the matched row (for CCU quantity/cost) and whether the CCU could be tied to a
+    # SPECIFIC deployment (PerModel) or only to the offer aggregate (AggregatedOffer).
+    param(
+        [Parameter(Mandatory = $true)]$Model,
+        $MarketplaceRows
+    )
+
+    $Result = [pscustomobject]@{
+        Matched        = $false
+        Row            = $null
+        CcuAttribution = $null
+    }
+
+    if ($null -eq $MarketplaceRows -or @($MarketplaceRows).Count -eq 0) { return $Result }
+
+    $VendorTokens = @(Get-RdaFoundryModelMatchTokens -Value "$($Model.ModelFormat) $($Model.ModelName)")
+    $AccountRg = "$($Model.ResourceGroup)"
+    $AccountId = "$($Model.AccountId)"
+
+    $BestOfferRow = $null
+
+    foreach ($Row in @($MarketplaceRows))
+    {
+        if ($null -eq $Row) { continue }
+
+        $OfferText = @("$($Row.PublisherName)", "$($Row.OfferName)", "$($Row.PlanName)") -join ' '
+        $OfferTokens = @(Get-RdaFoundryModelMatchTokens -Value $OfferText)
+        if ($OfferTokens.Count -eq 0) { continue }
+
+        # Vendor alignment: any overlap between the model's vendor tokens and the offer's
+        # publisher/offer tokens (e.g. 'anthropic'/'claude'). Vendor-level here is CORRECT:
+        # Marketplace attribution is inherently offer-level (aggregated), unlike the
+        # per-model Retail Prices match.
+        $VendorAligned = @($VendorTokens | Where-Object { $OfferTokens -contains $_ }).Count -gt 0
+        if (-not $VendorAligned) { continue }
+
+        # Can we tie the CCU line to THIS specific deployment/account? Only if the row's
+        # InstanceId/ResourceGroup references the model's account/RG. The common case is
+        # NO (aggregation collapses per-model detail) -> AggregatedOffer.
+        $InstanceId = "$($Row.InstanceId)"
+        $RowRg = "$($Row.ResourceGroup)"
+        $TiedToDeployment = $false
+        if (-not [string]::IsNullOrEmpty($AccountId) -and -not [string]::IsNullOrEmpty($InstanceId) -and $InstanceId -like ("*" + $AccountId + "*"))
+        {
+            $TiedToDeployment = $true
+        }
+        elseif (-not [string]::IsNullOrEmpty($AccountRg) -and -not [string]::IsNullOrEmpty($RowRg) -and $RowRg -eq $AccountRg)
+        {
+            $TiedToDeployment = $true
+        }
+
+        if ($TiedToDeployment)
+        {
+            $Result.Matched = $true
+            $Result.Row = $Row
+            $Result.CcuAttribution = 'PerModel'
+            return $Result
+        }
+
+        if ($null -eq $BestOfferRow) { $BestOfferRow = $Row }
+    }
+
+    if ($null -ne $BestOfferRow)
+    {
+        $Result.Matched = $true
+        $Result.Row = $BestOfferRow
+        $Result.CcuAttribution = 'AggregatedOffer'
+    }
+
+    return $Result
+}
+
+function Global:Get-RdaFoundryCoverageStatus
+{
+    # The core branch/flag decision (report.md 3-5, 9, 10). Given the outcome of BOTH
+    # plane probes for one deployed model, returns the CoverageStatus + a human-readable
+    # CoverageFlag. This is the whole point of the collector - it is what fixes "dropped
+    # with no warning".
+    #
+    # KEY INVARIANT (no-overclaiming, report.md 10): UNPRICED is emitted ONLY when BOTH
+    # planes were SUCCESSFULLY probed and BOTH came back negative. If either probe
+    # failed/was denied/was unreachable, the status is Unknown-<reason>, NEVER UNPRICED -
+    # a probe failure must never masquerade as a confirmed coverage gap.
+    param(
+        [bool]$AzureMetered,          # confident Retail Prices match found
+        [bool]$MarketplaceCovered,    # Marketplace/CCU evidence found
+        [bool]$RetailProbed = $true,  # was the Retail Prices catalog readable this run?
+        [bool]$MarketplaceProbed = $true, # was the Marketplace plane successfully probed for this sub?
+        [string]$MarketplaceDeniedReason = $null # set when Marketplace was denied/failed
+    )
+
+    if ($AzureMetered)
+    {
+        $Status = if ($MarketplaceCovered) { 'AzureMetered+Marketplace' } else { 'AzureMetered' }
+        $Flag = if ($MarketplaceCovered)
+        {
+            'Billed on BOTH planes: an Azure meter exists (Retail Prices) AND Marketplace/CCU usage was found.'
+        }
+        else
+        {
+            'Azure-metered: a matching meter exists in the Retail Prices API. Priced by the server team via Retail Prices.'
+        }
+        return [pscustomobject]@{ CoverageStatus = $Status; CoverageFlag = $Flag }
+    }
+
+    if ($MarketplaceCovered)
+    {
+        return [pscustomobject]@{
+            CoverageStatus = 'MarketplaceOnly'
+            CoverageFlag   = 'Marketplace-billed, absent from Retail Prices - priced via CCU path.'
+        }
+    }
+
+    # Neither plane came back positive. Decide UNPRICED vs Unknown-<reason> based on
+    # whether BOTH planes were actually probed successfully.
+    if (-not $MarketplaceProbed)
+    {
+        $Reason = if (-not [string]::IsNullOrEmpty($MarketplaceDeniedReason)) { $MarketplaceDeniedReason } else { 'MarketplaceNotProbed' }
+        return [pscustomobject]@{
+            CoverageStatus = ('Unknown-' + $Reason)
+            CoverageFlag   = ('Coverage INDETERMINATE on the Marketplace axis ({0}); NOT declared UNPRICED because the Marketplace plane was not successfully probed. Grant Cost Management Reader (or Billing Reader on the billing scope) and re-run.' -f $Reason)
+        }
+    }
+
+    if (-not $RetailProbed)
+    {
+        return [pscustomobject]@{
+            CoverageStatus = 'Unknown-RetailCatalogUnavailable'
+            CoverageFlag   = 'Coverage INDETERMINATE on the Azure-metered axis (Retail Prices catalog could not be read this run); NOT declared UNPRICED. Retry when the price catalog is reachable.'
+        }
+    }
+
+    # BOTH planes probed, BOTH negative -> a genuine, confirmed coverage gap.
+    return [pscustomobject]@{
+        CoverageStatus = 'UNPRICED'
+        CoverageFlag   = 'UNPRICED MODEL / COVERAGE GAP - deployed model found in NEITHER billing plane (no Retail Prices meter, no Marketplace/CCU usage). Do NOT silently drop; the server team must investigate.'
+    }
+}
+
+function Global:ConvertTo-RdaFoundryCoverageRow
+{
+    # Maps ONE classified deployed-model record to the flat object emitted into
+    # FoundryModelCoverage_<ReportName>_<stamp>.csv, and applies obfuscation with the SAME
+    # discipline as ConvertTo-RdaMarketplaceRow (report.md 9.1):
+    #   - READABLE (product/plane identity, not customer secrets): AccountKind, ModelName,
+    #     ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region,
+    #     DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch,
+    #     MarketplacePublisher, MarketplaceOffer, CcuAttribution, all numeric usage/cost,
+    #     the probe presence flags, and the run window/timestamp.
+    #   - MASKED (identifying), via the SHARED run-wide dictionaries so tokens
+    #     cross-reference the rest of the bundle: SubscriptionGuid, SubscriptionName,
+    #     ResourceGroup, AccountName, DeploymentName. Reuses the exact
+    #     Resolve-ObfuscationToken + shared SubGuidTokenMap/RgTokenMap machinery the
+    #     Marketplace collector uses; a sub/RG absent from the shared maps mints a
+    #     deterministic local token so the row is still internally consistent.
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        [bool]$Obfuscate = $false,
+        $SubGuidTokenMap = $null,
+        $RgTokenMap = $null,
+        [hashtable]$SubCache = $null,
+        [hashtable]$RgCache = $null,
+        [hashtable]$NameCache = $null
+    )
+
+    $OutSubscriptionGuid = $Record.SubscriptionGuid
+    $OutSubscriptionName = $Record.SubscriptionName
+    $OutResourceGroup = $Record.ResourceGroup
+    $OutAccountName = $Record.AccountName
+    $OutDeploymentName = $Record.DeploymentName
+
+    if ($Obfuscate)
+    {
+        if ($null -eq $SubCache) { $SubCache = @{} }
+        if ($null -eq $RgCache) { $RgCache = @{} }
+        if ($null -eq $NameCache) { $NameCache = @{} }
+
+        $Prefix = if ("$($Record.AccountName) $($Record.DeploymentName) $($Record.ResourceGroup)" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$($Record.AccountName) $($Record.DeploymentName)" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+
+        $SharedSubToken = $null
+        if (-not [string]::IsNullOrEmpty($Record.SubscriptionGuid))
+        {
+            $SharedSubToken = Resolve-ObfuscationToken -RealValue $Record.SubscriptionGuid -LookupKey $Record.SubscriptionGuid -SharedDictionary $SubGuidTokenMap -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+            $OutSubscriptionGuid = $SharedSubToken
+        }
+
+        if (-not [string]::IsNullOrEmpty($Record.SubscriptionName))
+        {
+            if ($null -ne $SharedSubToken)
+            {
+                $OutSubscriptionName = $SharedSubToken
+            }
+            else
+            {
+                $OutSubscriptionName = Resolve-ObfuscationToken -RealValue $Record.SubscriptionName -LookupKey $Record.SubscriptionName -SharedDictionary $null -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+            }
+        }
+
+        if (-not [string]::IsNullOrEmpty($Record.ResourceGroup))
+        {
+            $RgTag = if ($Record.ResourceGroup -match '^mc_') { 'mc_' } else { '' }
+            $OutResourceGroup = Resolve-ObfuscationToken -RealValue $Record.ResourceGroup -LookupKey $Record.ResourceGroup -SharedDictionary $RgTokenMap -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
+        }
+
+        if (-not [string]::IsNullOrEmpty($Record.AccountName))
+        {
+            $OutAccountName = Resolve-ObfuscationToken -RealValue $Record.AccountName -LookupKey $Record.AccountName -SharedDictionary $null -LocalCache $NameCache -TokenPrefix $Prefix
+        }
+
+        if (-not [string]::IsNullOrEmpty($Record.DeploymentName))
+        {
+            $OutDeploymentName = Resolve-ObfuscationToken -RealValue $Record.DeploymentName -LookupKey $Record.DeploymentName -SharedDictionary $null -LocalCache $NameCache -TokenPrefix $Prefix
+        }
+    }
+
+    return [PSCustomObject]@{
+        SubscriptionGuid      = $OutSubscriptionGuid
+        SubscriptionName      = $OutSubscriptionName
+        ResourceGroup         = $OutResourceGroup
+        AccountName           = $OutAccountName
+        AccountKind           = $Record.AccountKind
+        DeploymentName        = $OutDeploymentName
+        ModelName             = $Record.ModelName
+        ModelFormat           = $Record.ModelFormat
+        ModelVersion          = $Record.ModelVersion
+        DeploymentSku         = $Record.DeploymentSku
+        DeploymentCapacity    = $Record.DeploymentCapacity
+        Region                = $Record.Region
+        DetectedPlanes        = $Record.DetectedPlanes
+        CoverageStatus        = $Record.CoverageStatus
+        CoverageFlag          = $Record.CoverageFlag
+        RetailPriceMatch      = $Record.RetailPriceMatch
+        MarketplacePublisher  = $Record.MarketplacePublisher
+        MarketplaceOffer      = $Record.MarketplaceOffer
+        CcuQuantity           = $Record.CcuQuantity
+        CcuUnitOfMeasure      = $Record.CcuUnitOfMeasure
+        MarketplacePretaxCost = $Record.MarketplacePretaxCost
+        MarketplaceCurrency   = $Record.MarketplaceCurrency
+        CcuAttribution        = $Record.CcuAttribution
+        TokenMetricsPresent   = $Record.TokenMetricsPresent
+        InputTokens           = $Record.InputTokens
+        OutputTokens          = $Record.OutputTokens
+        TotalTokens           = $Record.TotalTokens
+        AppInsightsLinked     = $Record.AppInsightsLinked
+        PerCallTokenSource    = $Record.PerCallTokenSource
+        PerCallInputTokens    = $Record.PerCallInputTokens
+        PerCallOutputTokens   = $Record.PerCallOutputTokens
+        PerCallCacheTokens    = $Record.PerCallCacheTokens
+        ProbeWindowStart      = $Record.ProbeWindowStart
+        ProbeWindowEnd        = $Record.ProbeWindowEnd
+        RunTimestampUtc       = $Record.RunTimestampUtc
+    }
+}
+
+function Global:Get-RdaFoundryRetailCatalog
+{
+    # Pulls the Azure Retail Prices catalog for serviceName 'Foundry Models' (report.md 4.1).
+    # The API is GLOBAL and UNAUTHENTICATED - no Azure permission, no per-tenant scoping - so
+    # this is a plain paged HTTP GET, called ONCE per run and cached by the caller. It answers
+    # only "does a first-party Azure meter exist for this model?" (plane membership), not usage.
+    #   https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices
+    param(
+        [string]$ServiceName = 'Foundry Models',
+        [int]$MaxPages = 200
+    )
+
+    $Base = 'https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview'
+    $Filter = [uri]::EscapeDataString("serviceName eq '$ServiceName'")
+    $Uri = $Base + '&$filter=' + $Filter
+    $Items = [System.Collections.ArrayList]::new()
+    $Page = 0
+
+    while (-not [string]::IsNullOrEmpty($Uri) -and $Page -lt $MaxPages)
+    {
+        $Resp = Invoke-RestMethod -Uri $Uri -Method GET -ErrorAction Stop
+        if ($null -ne $Resp.Items) { foreach ($It in $Resp.Items) { $null = $Items.Add($It) } }
+        $Uri = $Resp.NextPageLink
+        $Page++
+    }
+
+    return @($Items)
+}
+
+function Global:Get-RdaFoundryTokenMetrics
+{
+    # OPTIONAL richer usage tier (report.md 6): per-deployment token metrics from Azure
+    # Monitor, DISCOVERED at runtime via Get-AzMetricDefinition (never hardcoded) because the
+    # metric set differs by account kind and evolves. Returns presence + summed token counts,
+    # or a Present=$false record. A Marketplace/partner deployment that emits nothing here is
+    # EXPECTED, not an error - this NEVER throws for an absent/empty metric; it only surfaces
+    # genuine call failures to the caller (which records them as absent, not failed).
+    param(
+        [Parameter(Mandatory = $true)][string]$AccountId,
+        [Parameter(Mandatory = $true)][string]$DeploymentName,
+        [Parameter(Mandatory = $true)][datetime]$StartTime,
+        [Parameter(Mandatory = $true)][datetime]$EndTime
+    )
+
+    $Result = [pscustomobject]@{ Present = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = '' }
+
+    $Defs = @()
+    try { $Defs = @(Get-AzMetricDefinition -ResourceId $AccountId -ErrorAction Stop) }
+    catch { return $Result }  # metrics not authorized / not available -> absent, not failed
+
+    # Discover token metrics by NAME rather than assuming a fixed set. Azure OpenAI exposes
+    # ProcessedPromptTokens/GeneratedTokens; newer AIServices adds InputTokens/OutputTokens/
+    # TotalTokens - all dimensioned by ModelDeploymentName (report.md 6.1).
+    $NameOf = { param($d) if ($d.Name.Value) { $d.Name.Value } else { "$($d.Name)" } }
+    $HasMetric = { param($n) @($Defs | Where-Object { (& $NameOf $_) -eq $n }).Count -gt 0 }
+
+    $InputMetric = @('InputTokens', 'ProcessedPromptTokens') | Where-Object { & $HasMetric $_ } | Select-Object -First 1
+    $OutputMetric = @('OutputTokens', 'GeneratedTokens') | Where-Object { & $HasMetric $_ } | Select-Object -First 1
+    $TotalMetric = @('TotalTokens') | Where-Object { & $HasMetric $_ } | Select-Object -First 1
+
+    if (-not $InputMetric -and -not $OutputMetric -and -not $TotalMetric) { return $Result }
+
+    $DimFilter = ("ModelDeploymentName eq '{0}'" -f $DeploymentName)
+    $Sum = {
+        param($MetricName)
+        if ([string]::IsNullOrEmpty($MetricName)) { return $null }
+        try
+        {
+            $M = Get-AzMetric -ResourceId $AccountId -MetricName $MetricName -AggregationType Total -StartTime $StartTime -EndTime $EndTime -TimeGrain '1.00:00:00' -MetricFilter $DimFilter -WarningAction SilentlyContinue -ErrorAction Stop
+            $Total = 0.0
+            foreach ($Series in @($M.Data)) { foreach ($Pt in @($Series.Data)) { if ($null -ne $Pt.Total) { $Total += [double]$Pt.Total } } }
+            return $Total
+        }
+        catch { return $null }
+    }
+
+    $In = & $Sum $InputMetric
+    $Out = & $Sum $OutputMetric
+    $Tot = & $Sum $TotalMetric
+
+    if ($null -ne $In -or $null -ne $Out -or $null -ne $Tot)
+    {
+        $Result.Present = $true
+        if ($null -ne $In) { $Result.InputTokens = $In }
+        if ($null -ne $Out) { $Result.OutputTokens = $Out }
+        if ($null -ne $Tot) { $Result.TotalTokens = $Tot }
+    }
+
+    return $Result
+}
+
 function Global:Resolve-ObfuscationToken
 {
     param(

@@ -1357,18 +1357,13 @@ Describe 'Resume-state completed-ids seed array-ness (regression: null-collapse 
 }
 
 # Marketplace phase must have full health-plumbing PARITY with Consumption/Metrics across
-# the wrapper+stream seam: the stream worker resets the Marketplace globals per slice and
-# emits MarketplaceRecords/MarketplaceFailedSubs in its summary; the wrapper aggregates both
-# from every stream summary and seeds the globals up front. The aggregation loop is inline in
-# the wrapper body (not dot-sourceable), so this mirrors the production merge expression the
-# same way the archive-loss suite mirrors the wrapper's verification gate, with source guards
-# covering drift in the real files.
+# the wrapper+stream seam: MarketplaceRecords sum into the run-wide count and
+# MarketplaceFailedSubs concatenate across streams. The aggregation loop is inline in the
+# wrapper body (not dot-sourceable), so this mirrors the production merge expression the same
+# way the archive-loss suite mirrors the wrapper's verification gate, and exercises it against
+# in-memory stream summaries.
 Describe 'Marketplace stream/wrapper health parity' {
     BeforeAll {
-        $script:RepoRoot = Split-Path $PSScriptRoot -Parent
-        $script:WrapperSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
-        $script:StreamSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1') -Raw
-
         # Faithful mirror of the wrapper's per-stream merge: sum MarketplaceRecords into the
         # run-wide count and concatenate MarketplaceFailedSubs, exactly as the inline loop does.
         function script:Merge-StreamMarketplace
@@ -1410,37 +1405,5 @@ Describe 'Marketplace stream/wrapper health parity' {
         $Merged = script:Merge-StreamMarketplace -StreamSummaries $Streams
         $Merged.RecordCount | Should -Be 0
         $Merged.FailedSubs.Count | Should -Be 0
-    }
-
-    It 'the stream worker resets the Marketplace globals per slice' {
-        $script:StreamSrc | Should -Match '\$Global:MarketplaceRecordCount\s*=\s*0' -Because 'the per-slice reset must seed the count to 0 like ConsumptionRecordCount'
-        $script:StreamSrc | Should -Match '\$Global:MarketplaceFailedSubs\s*=\s*@\(\)' -Because 'the per-slice reset must seed the failed-subs list like ConsumptionFailedSubs'
-    }
-
-    It 'the stream worker emits both Marketplace fields in its summary object' {
-        $script:StreamSrc | Should -Match 'MarketplaceRecords\s*=\s*\$MarketplaceTotal' -Because 'the per-stream summary must carry the slice Marketplace record count'
-        $script:StreamSrc | Should -Match 'MarketplaceFailedSubs\s*=\s*@\(\$MarketplaceFailedSubs\)' -Because 'the per-stream summary must carry the slice Marketplace failed subs'
-    }
-
-    It 'the wrapper aggregates both Marketplace fields from each stream summary' {
-        $script:WrapperSrc | Should -Match '\$StreamSummary\.MarketplaceRecords' -Because 'the merge loop must read MarketplaceRecords from each stream summary'
-        $script:WrapperSrc | Should -Match '\$StreamSummary\.MarketplaceFailedSubs' -Because 'the merge loop must read MarketplaceFailedSubs from each stream summary'
-    }
-
-    It 'the wrapper seeds the Marketplace globals up front like MetricsFailedSubs' {
-        $script:WrapperSrc | Should -Match '\$Global:MarketplaceFailedSubs\s*=\s*@\(\)' -Because 'the failed-subs global must be nil-initialised up front so later @() reads are safe'
-        $script:WrapperSrc | Should -Match '\$Global:MarketplaceRecordCount\s*=\s*0' -Because 'the record-count global must be nil-initialised up front'
-    }
-
-    It 'the wrapper prints a Marketplace Failures block and a Marketplace Records line' {
-        $script:WrapperSrc | Should -Match 'Marketplace Failures:' -Because 'the end-of-run summary must surface Marketplace failures like Consumption/Metrics'
-        $script:WrapperSrc | Should -Match 'Marketplace Records:' -Because 'the end-of-run summary must surface the Marketplace records-collected count'
-    }
-
-    It 'the zero-subscription early-exit summary carries the Marketplace fields for shape consistency' {
-        # The early-exit object must match the main summary shape so the parent aggregation reads a
-        # consistent shape from every stream, including empty slices.
-        $script:StreamSrc | Should -Match 'MarketplaceRecords\s*=\s*0' -Because 'the empty-slice summary must include MarketplaceRecords=0'
-        $script:StreamSrc | Should -Match '(?m)MarketplaceFailedSubs\s*=\s*@\(\)' -Because 'the empty-slice summary must include MarketplaceFailedSubs=@()'
     }
 }

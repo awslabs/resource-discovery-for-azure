@@ -119,6 +119,8 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $script:Sub = @{}
         $script:Rg = @{}
         $script:Nm = @{}
+        # OrderNumber's own local cache, owned by the caller exactly as the collector owns it.
+        $script:Ord = @{}
         # Shared run-wide dictionary VIEWS the collector derives from $Global:ResourceSubscriptionDictionary
         # / $Global:ResourceResourceGroupDictionary. Keyed the way the function consumes them:
         # guid -> shared sub token, rgName -> shared rg token. A real bundle would have these already
@@ -221,6 +223,35 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $Out.ResourceGroup    | Should -Be $Row.ResourceGroup
         $Out.SubscriptionName | Should -Be $Row.SubscriptionName
         $Out.InstanceName     | Should -Be $Row.InstanceName
+        $Out.OrderNumber      | Should -Be $Row.OrderNumber
+    }
+
+    It 'masks OrderNumber under -Obfuscate (a customer PURCHASE identifier, unlike the product fields)' {
+        # Records the deliberate decision: PublisherName/OfferName/PlanName say WHICH PRODUCT was
+        # bought and stay readable; OrderNumber says WHO bought it under which order, so it is
+        # masked. Without this assertion the choice is unrecorded and either behaviour looks correct.
+        $Row = script:New-FakeMarketplaceRow
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+
+        $Out.OrderNumber | Should -Not -Be 'ORD-4242'
+        $Out.OrderNumber | Should -Not -Match 'ORD-4242'
+        $Out.OrderNumber | Should -Not -BeNullOrEmpty -Because 'masking must replace the value, not drop the column'
+        $Out.OrderNumber | Should -Match '^(non)?prod_order_' -Because 'it carries its own token namespace so it is recognisable in the CSV'
+    }
+
+    It 'masks OrderNumber deterministically, and never shares a token with an identically-spelled instance name' {
+        # Resolve-ObfuscationToken keys its LocalCache by the REAL VALUE (-LookupKey is consulted
+        # only for a SharedDictionary), so OrderNumber must get a cache SEPARATE from InstanceName's.
+        # Share one cache and an order number spelled like a resource name returns whichever token
+        # was minted first, implying a relationship that does not exist. Namespacing the lookup key
+        # does NOT fix it, because -LookupKey is never consulted for a local-cache hit.
+        $Collide = script:New-FakeMarketplaceRow -InstanceName 'ORD-4242'
+
+        $A = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+        $B = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+
+        $A.OrderNumber | Should -Be $B.OrderNumber -Because 'the same real value must map to the same token within a run'
+        $A.OrderNumber | Should -Not -Be $A.InstanceName -Because 'a cache of its own must keep the two dimensions distinct'
     }
 }
 

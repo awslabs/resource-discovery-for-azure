@@ -1712,9 +1712,12 @@ function ExecuteInventoryProcessing()
                         if (-not $script:MarketplaceSubCache) { $script:MarketplaceSubCache = @{} }
                         if (-not $script:MarketplaceRgCache) { $script:MarketplaceRgCache = @{} }
                         if (-not $script:MarketplaceNameCache) { $script:MarketplaceNameCache = @{} }
+                        # OrderNumber gets its own cache, kept separate from the name cache so an
+                        # order number and an identically-spelled resource name cannot share a token.
+                        if (-not $script:MarketplaceOrderCache) { $script:MarketplaceOrderCache = @{} }
                     }
 
-                    $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache))
+                    $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache -OrderCache $script:MarketplaceOrderCache))
                 }
 
                 if ($MarketplaceExport.Count -gt 0)

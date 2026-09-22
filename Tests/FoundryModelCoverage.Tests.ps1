@@ -17,7 +17,7 @@
     value[] entries, and Marketplace rows shaped like PSMarketplace - and assert the
     REAL classification/branch code path. This mirrors Tests/MarketplaceCollector.Tests.ps1.
 
-    DOC/IMPL VERIFICATION ANCHOR (see data/rda-billing-plane-scout/report.md, verified live):
+    DOC/IMPL VERIFICATION ANCHOR (see the design spec, verified live):
       - Retail Prices API: serviceName eq 'Foundry Models'; Claude/Anthropic return 0 rows
         (Marketplace-only), Cohere/Llama/Mistral are PARTIAL - proving per-model matching.
       - ARM deployments list: GET {accountId}/deployments?api-version=2024-10-01 is the
@@ -139,7 +139,7 @@ Describe 'Test-RdaRetailPriceMatch: per-model (not per-vendor) Azure-metered det
     }
 
     It 'does NOT mark a Marketplace-only SKU covered just because the vendor is partially present' {
-        # The partly-invisible trap (report.md 4.2): a Cohere meter EXISTS for embed v3, but
+        # The partly-invisible trap (the design spec section 4.2): a Cohere meter EXISTS for embed v3, but
         # a DIFFERENT Cohere SKU (a made-up rerank v9) is absent. A vendor-level check would
         # wrongly call it covered; the per-model matcher must not.
         $Present = script:New-FakeModel -ModelName 'embed-v3' -ModelFormat 'Cohere' -DeploymentName 'cohere-embed'

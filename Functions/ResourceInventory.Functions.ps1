@@ -207,7 +207,7 @@ function Global:Get-RdaFoundryModelMatchTokens
     # WHY. There is no clean join key between a deployment's properties.model.name
     # (e.g. 'gpt-4o', 'claude-opus-5') and a Retail Prices meterName/skuName/productName
     # (e.g. 'Azure OpenAI GPT5', '5.4 opt Dz 1M Tokens') - the catalog names are
-    # marketing-shaped and abbreviated (report.md 4.3). So we compare on normalized
+    # marketing-shaped and abbreviated (the design spec section 4.3). So we compare on normalized
     # token OVERLAP rather than an exact key. Purely mechanical, so it lives in a pure
     # helper and is unit-tested.
     param([string]$Value)
@@ -224,9 +224,9 @@ function Global:Test-RdaRetailPriceMatch
 {
     # Decides whether a single deployed model has a CONFIDENT match among the supplied
     # Azure Retail Prices catalog items (serviceName eq 'Foundry Models'), returning the
-    # matched productName/meterName so the server team can audit the match (report.md 4.3).
+    # matched productName/meterName so the server team can audit the match (the design spec section 4.3).
     #
-    # CONSERVATIVE + PER-MODEL (report.md 4.2/4.3): the match is decided at the individual
+    # CONSERVATIVE + PER-MODEL (the design spec section 4.2/4.3): the match is decided at the individual
     # catalog-item granularity, never at vendor granularity - a vendor like Cohere/Llama/
     # Mistral can be PARTIALLY present (some SKUs metered, others not), so "the vendor has
     # meters" is NOT proof this SKU is metered. A match requires BOTH:
@@ -235,7 +235,7 @@ function Global:Test-RdaRetailPriceMatch
     #   2. the distinctive tokens of the model's name/version (e.g. 'gpt','4o') to be
     #      covered by the catalog item's tokens.
     # A miss is NOT proof of absence (it may be a naming mismatch) - the caller combines
-    # this with the Marketplace probe before ever emitting UNPRICED (report.md 4.3/10).
+    # this with the Marketplace probe before ever emitting UNPRICED (the design spec section 4.3/10).
     param(
         [Parameter(Mandatory = $true)]$Model,
         $CatalogItems
@@ -296,8 +296,8 @@ function Global:Test-RdaMarketplaceModelMatch
 {
     # Decides whether a deployed model is covered by the Marketplace plane, by looking for
     # a Marketplace/CCU row (PSMarketplace-shaped) whose PublisherName/OfferName corresponds
-    # to the model's vendor (report.md 5.2). Because CCU is billed as a SINGLE AGGREGATED
-    # line per subscription/offer (report.md 2.1/5.2), we do NOT expect one row per model:
+    # to the model's vendor (the design spec section 5.2). Because CCU is billed as a SINGLE AGGREGATED
+    # line per subscription/offer (the design spec section 2.1/5.2), we do NOT expect one row per model:
     # any attributable Marketplace row for the model's vendor is Marketplace-plane evidence.
     #
     # Returns the matched row (for CCU quantity/cost) and whether the CCU could be tied to a
@@ -374,12 +374,12 @@ function Global:Test-RdaMarketplaceModelMatch
 
 function Global:Get-RdaFoundryCoverageStatus
 {
-    # The core branch/flag decision (report.md 3-5, 9, 10). Given the outcome of BOTH
+    # The core branch/flag decision (the design spec section 3-5, 9, 10). Given the outcome of BOTH
     # plane probes for one deployed model, returns the CoverageStatus + a human-readable
     # CoverageFlag. This is the whole point of the collector - it is what fixes "dropped
     # with no warning".
     #
-    # KEY INVARIANT (no-overclaiming, report.md 10): UNPRICED is emitted ONLY when BOTH
+    # KEY INVARIANT (no-overclaiming, the design spec section 10): UNPRICED is emitted ONLY when BOTH
     # planes were SUCCESSFULLY probed and BOTH came back negative. If either probe
     # failed/was denied/was unreachable, the status is Unknown-<reason>, NEVER UNPRICED -
     # a probe failure must never masquerade as a confirmed coverage gap.
@@ -443,7 +443,7 @@ function Global:ConvertTo-RdaFoundryCoverageRow
 {
     # Maps ONE classified deployed-model record to the flat object emitted into
     # FoundryModelCoverage_<ReportName>_<stamp>.csv, and applies obfuscation with the SAME
-    # discipline as ConvertTo-RdaMarketplaceRow (report.md 9.1):
+    # discipline as ConvertTo-RdaMarketplaceRow (the design spec section 9.1):
     #   - READABLE (product/plane identity, not customer secrets): AccountKind, ModelName,
     #     ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region,
     #     DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch,
@@ -556,7 +556,7 @@ function Global:ConvertTo-RdaFoundryCoverageRow
 
 function Global:Get-RdaFoundryRetailCatalog
 {
-    # Pulls the Azure Retail Prices catalog for serviceName 'Foundry Models' (report.md 4.1).
+    # Pulls the Azure Retail Prices catalog for serviceName 'Foundry Models' (the design spec section 4.1).
     # The API is GLOBAL and UNAUTHENTICATED - no Azure permission, no per-tenant scoping - so
     # this is a plain paged HTTP GET, called ONCE per run and cached by the caller. It answers
     # only "does a first-party Azure meter exist for this model?" (plane membership), not usage.
@@ -585,7 +585,7 @@ function Global:Get-RdaFoundryRetailCatalog
 
 function Global:Get-RdaFoundryTokenMetrics
 {
-    # OPTIONAL richer usage tier (report.md 6): per-deployment token metrics from Azure
+    # OPTIONAL richer usage tier (the design spec section 6): per-deployment token metrics from Azure
     # Monitor, DISCOVERED at runtime via Get-AzMetricDefinition (never hardcoded) because the
     # metric set differs by account kind and evolves. Returns presence + summed token counts,
     # or a Present=$false record. A Marketplace/partner deployment that emits nothing here is
@@ -606,7 +606,7 @@ function Global:Get-RdaFoundryTokenMetrics
 
     # Discover token metrics by NAME rather than assuming a fixed set. Azure OpenAI exposes
     # ProcessedPromptTokens/GeneratedTokens; newer AIServices adds InputTokens/OutputTokens/
-    # TotalTokens - all dimensioned by ModelDeploymentName (report.md 6.1).
+    # TotalTokens - all dimensioned by ModelDeploymentName (the design spec section 6.1).
     $NameOf = { param($d) if ($d.Name.Value) { $d.Name.Value } else { "$($d.Name)" } }
     $HasMetric = { param($n) @($Defs | Where-Object { (& $NameOf $_) -eq $n }).Count -gt 0 }
 

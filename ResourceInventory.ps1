@@ -1792,15 +1792,17 @@ function ExecuteInventoryProcessing()
         # RELATIONSHIP TO THE MARKETPLACE COLLECTOR. GetMarketplaceConsumption (above)
         # answers "what Marketplace/CCU dollars were billed"; this phase answers "what
         # models are deployed and which plane covers each", then JOINS the Marketplace rows
-        # back to deployed models where possible. It CONSUMES the same
-        # Get-AzConsumptionMarketplace result rather than calling it twice.
+        # back to deployed models where possible. It performs its OWN per-subscription
+        # Get-AzConsumptionMarketplace probe (scoped to the subscription context inside this
+        # phase's loop), independent of GetMarketplaceConsumption. Both reads are idempotent
+        # billing-plane reads, so the extra call is safe; the two phases are not coupled.
         #
-        # SOURCE OF TRUTH for "what is deployed" (report.md 3.2, verified live): the ARM
+        # SOURCE OF TRUTH for "what is deployed" (the design spec section 3.2, verified live): the ARM
         # per-account deployments list. Resource Graph indexes the deployment resource SHELL
         # but returns EMPTY name/properties.model, so Graph is used ONLY to enumerate the
         # CognitiveServices accounts; each account's deployments are then read via ARM.
         #
-        # GRACEFUL DEGRADATION (report.md 10). Every probe fails loud-and-local, never
+        # GRACEFUL DEGRADATION (the design spec section 10). Every probe fails loud-and-local, never
         # silently. UNPRICED is emitted ONLY when BOTH planes were successfully probed and
         # BOTH came back negative; any probe failure yields an Unknown-<reason> status, so a
         # probe gap never masquerades as a confirmed coverage gap (no-overclaiming).
@@ -1815,7 +1817,7 @@ function ExecuteInventoryProcessing()
         if ($null -eq $Global:FoundryCoverageUnpricedCount) { $Global:FoundryCoverageUnpricedCount = 0 }
         if ($null -eq $script:FoundryCoverageRecordsThisRun) { $script:FoundryCoverageRecordsThisRun = 0 }
 
-        $DeploymentsApiVersion = '2024-10-01'  # single named constant; a future bump is one edit (report.md 3.3)
+        $DeploymentsApiVersion = '2024-10-01'  # single named constant; a future bump is one edit (the design spec section 3.3)
         $ProbeWindowStart = (Get-Date).AddDays(-31).Date
         $ProbeWindowEnd = (Get-Date).AddDays(-1).Date
         $RunTimestampUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -1833,7 +1835,7 @@ function ExecuteInventoryProcessing()
             return
         }
 
-        # Retail Prices catalog is GLOBAL + unauthenticated (report.md 4.1): pull the
+        # Retail Prices catalog is GLOBAL + unauthenticated (the design spec section 4.1): pull the
         # 'Foundry Models' service catalog ONCE per run and cache it. A network failure
         # here is not fatal - it makes the Azure-metered axis INDETERMINATE (never UNPRICED).
         $RetailCatalog = $null
@@ -1921,7 +1923,7 @@ function ExecuteInventoryProcessing()
             {
                 # 1. Enumerate CognitiveServices accounts (Graph preferred; RDA already has
                 #    Search-AzGraph plumbing). Graph is only used to LIST accounts here - never
-                #    to read deployment model detail (report.md 3.2).
+                #    to read deployment model detail (the design spec section 3.2).
                 $Accounts = @()
                 try
                 {
@@ -1934,7 +1936,7 @@ resources
                 }
                 catch
                 {
-                    # ARM accounts-list fallback (report.md 3.3, verified HTTP 200).
+                    # ARM accounts-list fallback (the design spec section 3.3, verified HTTP 200).
                     Write-Log -Message ("FoundryModelCoverage: Resource Graph account enumeration failed for {0} ({1}); falling back to the ARM accounts-list." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
                     $ArmAcctResp = Invoke-AzRestMethod -Method GET -Path ("/subscriptions/{0}/providers/Microsoft.CognitiveServices/accounts?api-version={1}" -f $sub.id, $DeploymentsApiVersion) -ErrorAction Stop
                     if ($ArmAcctResp.StatusCode -ge 400) { throw ("ARM accounts-list returned HTTP {0}: {1}" -f $ArmAcctResp.StatusCode, $ArmAcctResp.Content) }
@@ -1943,7 +1945,7 @@ resources
                         })
                 }
 
-                # Probe the Marketplace plane ONCE for this subscription (report.md 5). A
+                # Probe the Marketplace plane ONCE for this subscription (the design spec section 5). A
                 # denial makes the Marketplace axis INDETERMINATE for every model in this sub
                 # (never UNPRICED) rather than falsely calling models UNPRICED.
                 $MarketplaceRows = @()
@@ -1973,7 +1975,7 @@ resources
 
                 foreach ($acct in $Accounts)
                 {
-                    # 2. List deployments per account via ARM (authoritative; report.md 3.3).
+                    # 2. List deployments per account via ARM (authoritative; the design spec section 3.3).
                     $Deployments = @()
                     try
                     {
@@ -2054,7 +2056,7 @@ resources
 
                         # 4. OPTIONAL richer usage tiers (probe-and-branch, never fail if absent):
                         #    Azure Monitor per-deployment token metrics, discovered at runtime via
-                        #    metric-definitions (report.md 6). A Marketplace/partner deployment
+                        #    metric-definitions (the design spec section 6). A Marketplace/partner deployment
                         #    that emits nothing here is EXPECTED, not an error.
                         try
                         {
@@ -2079,16 +2081,19 @@ resources
                 # 3c. Unattributed Marketplace/CCU rows: a Claude/partner CCU line that could
                 #     NOT be tied to any deployed model (deleted deployment, or a sub the
                 #     identity could not fully enumerate). Emit a synthetic row so the DOLLARS
-                #     are never dropped (report.md 9 anti-silent-drop guarantee). Only rows
-                #     whose offer looks like an AI/model vendor are surfaced (a generic
-                #     Marketplace SaaS charge is not a Foundry model coverage gap).
+                #     are never dropped (the design spec section 9 anti-silent-drop guarantee). Only rows
+                #     whose offer names a KNOWN Foundry model vendor are surfaced. The match
+                #     is on precise, multi-character vendor discriminators (the model-format
+                #     vendors from the design spec section 4.2 plus the 'foundry' service token) - NOT a
+                #     bare 'ai' token, which is far too common a substring and would sweep in
+                #     unrelated Marketplace SaaS charges as false model coverage gaps.
                 foreach ($MpRow in $MarketplaceRows)
                 {
                     if ($null -eq $MpRow) { continue }
                     $Key = "$($MpRow.InstanceId)|$($MpRow.MeterId)"
                     if ($MatchedMarketplaceRows.Contains($Key)) { continue }
                     $OfferTokens = @(Get-RdaFoundryModelMatchTokens -Value ("$($MpRow.PublisherName) $($MpRow.OfferName) $($MpRow.PlanName)"))
-                    $LooksLikeModelVendor = @($OfferTokens | Where-Object { $_ -in @('anthropic', 'claude', 'cohere', 'mistral', 'meta', 'llama', 'openai', 'foundry', 'ai') }).Count -gt 0
+                    $LooksLikeModelVendor = @($OfferTokens | Where-Object { $_ -in @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'meta', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry') }).Count -gt 0
                     if (-not $LooksLikeModelVendor) { continue }
 
                     $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record ([pscustomobject]@{
@@ -2126,7 +2131,7 @@ resources
             }
         }
 
-        # HONEST NEGATIVES (report.md 9). Zero deployed Foundry models is a CONFIRMED ZERO
+        # HONEST NEGATIVES (the design spec section 9). Zero deployed Foundry models is a CONFIRMED ZERO
         # (accounts were enumerated and none held deployments), NOT a silently-missing
         # section - log it explicitly so an empty file reads as "verified none".
         if ($Global:FoundryCoverageRecordCount -eq 0 -and ($Global:FoundryCoverageFailedSubs | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
@@ -2221,11 +2226,11 @@ resources
 
         # ADDITIVE Foundry model billing-plane coverage collector. Gated by the SAME
         # -SkipConsumption switch: it needs the same billing / Cost Management Reader
-        # access to probe the Marketplace plane per subscription, and it consumes the
-        # same Get-AzConsumptionMarketplace result the Marketplace collector uses. It is
-        # skipped independently with -SkipFoundryCoverage. It emits a SEPARATE
-        # FoundryModelCoverage_* output and never touches the first-party Consumption_*
-        # or Marketplace_* paths.
+        # access to probe the Marketplace plane per subscription, and it performs its own
+        # per-subscription Get-AzConsumptionMarketplace read (independent of, and idempotent
+        # with, the Marketplace collector's). It is skipped independently with
+        # -SkipFoundryCoverage. It emits a SEPARATE FoundryModelCoverage_* output and never
+        # touches the first-party Consumption_* or Marketplace_* paths.
         if (!$SkipFoundryCoverage.IsPresent)
         {
             $FoundryCoveragePhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()

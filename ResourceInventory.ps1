@@ -20,7 +20,6 @@ param ($TenantID,
     [switch]$RunAllSubs,
     [switch]$CapacityPlan,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
-    
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',

@@ -26,8 +26,7 @@ tables. Start at the index and drill into the group you care about.
   (`ParallelStreams`, `ShardCount`/`ShardIndex`, `Resume`, `ResumeFailedOnly`,
   `Plan`, `OutputDirectory`, `ReportName`, `Obfuscate`).
 - [variables/recipes.md](variables/recipes.md) — copy-paste parameter recipes
-  for common scenarios. *(Authored by a sibling doc task; may not be present
-  yet.)*
+  for common scenarios.
 
 ## Subsystem deep-dives
 

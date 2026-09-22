@@ -160,6 +160,21 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
             try { Invoke-AzGraphQuerySafe -Query 'this ||| is not valid' | Out-Null } catch { }
             Should -Invoke -CommandName Search-AzGraph -Exactly -Times 1
         }
+
+        It 'throws' {
+            { Invoke-AzGraphQuerySafe -Query 'this ||| is not valid' } | Should -Throw
+        }
+
+        It 'never sleeps (fails before any backoff)' {
+            try { Invoke-AzGraphQuerySafe -Query 'this ||| is not valid' | Out-Null } catch { }
+            Should -Invoke -CommandName Start-Sleep -Exactly -Times 0
+        }
+
+        It 'reports it failed on the first attempt' {
+            $Msg = $null
+            try { Invoke-AzGraphQuerySafe -Query 'this ||| is not valid' | Out-Null } catch { $Msg = $_.Exception.Message }
+            $Msg | Should -Match 'after 1 attempt\(s\)'
+        }
     }
 
     Context 'Throttling (429 / TooManyRequests) retries with a longer backoff' {

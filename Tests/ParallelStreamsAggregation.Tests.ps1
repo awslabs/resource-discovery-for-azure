@@ -144,8 +144,9 @@ BeforeAll {
     function Get-SignatureKey($a)
     {
         # Tuple of (resource-count, sorted populated-type names) is unique enough for
-        # the small fixture sizes we test against. Falls back to ResourceCount alone
-        # if both subs happen to have identical type sets.
+        # the small fixture sizes we test against. Both parts are always emitted;
+        # subs with an identical (ResourceCount, PopulatedTypes) pair collide on one
+        # key and are grouped into a list by the caller below.
         '{0}|{1}' -f $a.ResourceCount, ($a.PopulatedTypes -join ',')
     }
     # Group per-sub artifacts by signature into LISTS, not scalars: subs with an

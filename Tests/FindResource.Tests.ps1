@@ -214,6 +214,55 @@ Describe 'Write-RdaFindSummary - only a complete scan earns "confirmed zero"' {
         $Out | Should -Match 'read twice'
         $Out | Should -Match 'INFLATED'
     }
+
+    It 'NAMES the containing subscriptions, not just the count, when matches exist' {
+        # The tool's stated purpose is to say WHICH subscription holds the type.
+        # Two distinct subscriptions, so the summary must name BOTH - a plain
+        # count line alone would not tell the operator which sub to look in.
+        $Rows = @(
+            [pscustomobject]@{ Subscription = 'invented_sub_alpha'; RdaReportId = '202601010000000000101' }
+            [pscustomobject]@{ Subscription = 'invented_sub_alpha'; RdaReportId = '202601010000000000101' }
+            [pscustomobject]@{ Subscription = 'invented_sub_beta';  RdaReportId = '202601010000000000102' }
+        )
+        $R = New-RdaFindResult -Rows $Rows -UnitsRead 2 -ReadCount 2 -SourceCount 2 `
+            -TypePresence @{ 'VMWare' = 2 } -ResourceType @('VMWare')
+        $Out = Write-RdaFindSummary -Result $R 6>&1 | Out-String
+
+        $Out | Should -Match 'Subscriptions containing  : 2'
+        $Out | Should -Match 'invented_sub_alpha'
+        $Out | Should -Match 'invented_sub_beta'
+        # The per-subscription match count is surfaced next to each name.
+        $Out | Should -Match 'invented_sub_alpha.*2 matches'
+        $Out | Should -Match 'invented_sub_beta.*1 match'
+    }
+
+    It 'falls back to the report stamp for a row with no Subscription field, dropping nothing' {
+        # A row lacking a Subscription field must still appear in the list, keyed
+        # by its report stamp and clearly labelled as such.
+        $Rows = @(
+            [pscustomobject]@{ Subscription = 'invented_sub_gamma'; RdaReportId = '202601010000000000103' }
+            [pscustomobject]@{ RdaReportId = '202601010000000000104' }  # no Subscription field
+        )
+        $R = New-RdaFindResult -Rows $Rows -UnitsRead 2 -ReadCount 2 -SourceCount 2 `
+            -TypePresence @{ 'VMWare' = 2 } -ResourceType @('VMWare')
+        $Out = Write-RdaFindSummary -Result $R 6>&1 | Out-String
+
+        $Out | Should -Match 'Subscriptions containing  : 2'
+        $Out | Should -Match 'invented_sub_gamma'
+        $Out | Should -Match '202601010000000000104.*\(report stamp\)'
+    }
+
+    It 'flags that values may be obfuscated when a subscription looks like an -Obfuscate token' {
+        $Rows = @(
+            [pscustomobject]@{ Subscription = 'prod_invented-obfuscation-token'; RdaReportId = '202601010000000000105' }
+        )
+        $R = New-RdaFindResult -Rows $Rows -UnitsRead 1 -ReadCount 1 -SourceCount 1 `
+            -TypePresence @{ 'VMWare' = 1 } -ResourceType @('VMWare')
+        $Out = Write-RdaFindSummary -Result $R 6>&1 | Out-String
+
+        $Out | Should -Match 'prod_invented-obfuscation-token'
+        $Out | Should -Match 'obfuscated'
+    }
 }
 
 Describe 'Get-RdaInventorySource - nothing is dropped silently' {
@@ -409,6 +458,88 @@ Describe 'FindResource.ps1 entry point' {
 
         pwsh -NoProfile -File $Script:EntryPoint -Path $Partial -ResourceType 'VMWare' > $null 2>&1
         $LASTEXITCODE | Should -Be 3
+    }
+
+    It 'exits 3 when NO inventory read carried the key (CANNOT CONFIRM ABSENCE)' {
+        # A clean, complete scan of bundles that predate the collector prints
+        # CANNOT CONFIRM ABSENCE, and that verdict has to reach a caller reading
+        # only $LASTEXITCODE - it was exiting 0, indistinguishable from a
+        # confirmed zero.
+        $NoKey = Join-Path $Script:TestRoot 'entry-nokey'
+        New-Item -ItemType Directory -Path $NoKey -Force | Out-Null
+        New-PerSubZip -ZipPath (Join-Path $NoKey 'ResourcesReport_202601010000000000091.zip') -Stamp '202601010000000000091' -OmitVMWare
+
+        pwsh -NoProfile -File $Script:EntryPoint -Path $NoKey -ResourceType 'VMWare' > $null 2>&1
+        $LASTEXITCODE | Should -Be 3
+    }
+
+    It 'exits 3 when only SOME inventories carried the key (PARTIAL COVERAGE)' {
+        # One inventory carries the key with zero rows, one lacks the key. The
+        # zero is a lower bound, so this is exit 3 like any other partial result.
+        $SomeKey = Join-Path $Script:TestRoot 'entry-somekey'
+        New-Item -ItemType Directory -Path $SomeKey -Force | Out-Null
+        New-PerSubZip -ZipPath (Join-Path $SomeKey 'ResourcesReport_202601010000000000092.zip') -Stamp '202601010000000000092' -AvsCount 0
+        New-PerSubZip -ZipPath (Join-Path $SomeKey 'ResourcesReport_202601010000000000093.zip') -Stamp '202601010000000000093' -OmitVMWare
+
+        pwsh -NoProfile -File $Script:EntryPoint -Path $SomeKey -ResourceType 'VMWare' > $null 2>&1
+        $LASTEXITCODE | Should -Be 3
+    }
+
+    It 'exits 3 AND names the uncovered type when one requested type matched rows and another was in NO inventory' {
+        # Rows for VirtualMachines put the summary in its rows>0 branch, where it
+        # used to say nothing about VMWare being absent from every inventory - an
+        # exit 3 the operator could not explain from the printed text. Invoked via
+        # -Command (not -File) because this case binds an ARRAY to -ResourceType;
+        # the trailing 'exit $LASTEXITCODE' is load-bearing, because -Command on
+        # its own collapses a script's non-zero exit code to 1.
+        $MixNone = Join-Path $Script:TestRoot 'entry-mixnone'
+        New-Item -ItemType Directory -Path $MixNone -Force | Out-Null
+        New-PerSubZip -ZipPath (Join-Path $MixNone 'ResourcesReport_202601010000000000094.zip') -Stamp '202601010000000000094' -OmitVMWare
+
+        $Cmd = '& "{0}" -Path "{1}" -ResourceType VirtualMachines,VMWare; exit $LASTEXITCODE' -f $Script:EntryPoint, $MixNone
+        $Out = pwsh -NoProfile -Command $Cmd 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 3
+        $Out | Should -Match 'VMWare\] key was present in NO inventory read'
+    }
+
+    It 'exits 3 when a subscription was read more than once (INFLATED counts)' {
+        # The same per-sub zip packed into two consolidated bundles is one
+        # subscription read twice. The summary already flags the counts as
+        # INFLATED; a caller reading only $LASTEXITCODE must not see the 0 that
+        # says "confirmed total". Stamp-less outer names keep both bundles as
+        # distinct sources, so the duplicate is the inner read, not the outer.
+        $Dup = Join-Path $Script:TestRoot 'entry-dup'
+        New-Item -ItemType Directory -Path $Dup -Force | Out-Null
+        $Inner = Join-Path $Dup 'ResourcesReport_202601010000000000095.zip'
+        New-PerSubZip -ZipPath $Inner -Stamp '202601010000000000095' -AvsCount 1
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $Dup 'AllSubscriptions_ResourcesReport_a.zip') -Force
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $Dup 'AllSubscriptions_ResourcesReport_b.zip') -Force
+        Remove-Item -LiteralPath $Inner -Force
+
+        $Out = pwsh -NoProfile -File $Script:EntryPoint -Path $Dup -ResourceType 'VMWare' 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 3
+        $Out | Should -Match 'INFLATED'
+    }
+
+    It 'exits 0 when a subscription was read more than once but NO rows matched (nothing to inflate)' {
+        # Coverage is set-based, so a repeated read can add a row or a covered
+        # subscription but never remove one: with zero rows the zero is still
+        # proven, the summary keeps its confirmed-zero verdict, and the exit code
+        # must agree with it. The duplicate is still reported, but not as INFLATED.
+        $DupZero = Join-Path $Script:TestRoot 'entry-dupzero'
+        New-Item -ItemType Directory -Path $DupZero -Force | Out-Null
+        $Inner = Join-Path $DupZero 'ResourcesReport_202601010000000000096.zip'
+        New-PerSubZip -ZipPath $Inner -Stamp '202601010000000000096' -AvsCount 0
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $DupZero 'AllSubscriptions_ResourcesReport_a.zip') -Force
+        Compress-Archive -Path $Inner -DestinationPath (Join-Path $DupZero 'AllSubscriptions_ResourcesReport_b.zip') -Force
+        Remove-Item -LiteralPath $Inner -Force
+
+        $Out = pwsh -NoProfile -File $Script:EntryPoint -Path $DupZero -ResourceType 'VMWare' 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0
+        $Out | Should -Match 'This is a confirmed zero'
+        $Out | Should -Match 'read twice'
+        $Out | Should -Match 'nothing was INFLATED'
+        $Out | Should -Not -Match 'may be INFLATED'
     }
 
     It 'exits 2 when an inventory could not be read' {

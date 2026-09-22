@@ -33,6 +33,20 @@ BeforeAll {
         finally { $Archive.Dispose() }
     }
 
+    # Return the decoded text of a single named entry inside a zip.
+    function Get-ZipEntryText([string]$ZipPath, [string]$EntryName)
+    {
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        try
+        {
+            $Entry = $Archive.Entries | Where-Object { $_.FullName -eq $EntryName } | Select-Object -First 1
+            if ($null -eq $Entry) { return $null }
+            $Reader = [System.IO.StreamReader]::new($Entry.Open())
+            try { return $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+        }
+        finally { $Archive.Dispose() }
+    }
+
     # Build a representative InventoryRoot: wrapper logs at the top + one per-sub
     # ResourcesReport folder holding the four per-sub logs AND the two files that
     # must never be collected (dictionary + full inventory).
@@ -78,6 +92,21 @@ Describe 'New-RdaSupportLogBundle' {
         $Names | Should -Contain 'RunAllSubscriptions_failures_2026-07-24_10-00-00_ab12.log'
         $Names | Should -Contain 'RunAllSubscriptions_diagnostics_2026-07-24_10-00-00_cd34.log'
         $Names | Should -Contain 'RunSummary_2026-07-24_10-00-00.log'
+    }
+
+    It 'the MANIFEST documents what was collected and states the reveal key was withheld' {
+        $Root = New-FakeInventoryRoot $script:TestRoot
+        $Bundle = New-RdaSupportLogBundle -InventoryRoot $Root
+        $Manifest = Get-ZipEntryText $Bundle 'MANIFEST.txt'
+
+        $Manifest | Should -Not -BeNullOrEmpty -Because 'the MANIFEST must be readable, not just present by name'
+        # It must warn that the bundle carries real identifiers and is private...
+        $Manifest | Should -Match 'PRIVATE - contains real identifiers'
+        # ...and state that the de-obfuscation reveal key was deliberately withheld.
+        $Manifest | Should -Match 'obfuscation dictionary'
+        $Manifest | Should -Match 'NOT included'
+        # ...and still list what it DID collect, so the doc cannot be silently emptied.
+        $Manifest | Should -Match 'RunAllSubscriptions_transcript'
     }
 
     It 'NEVER collects the obfuscation dictionary or full inventory (reveal key)' {

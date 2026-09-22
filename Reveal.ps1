@@ -46,6 +46,11 @@
     If omitted, the newest ObfuscationDictionary_*.json in the current directory
     is used.
 
+.PARAMETER SearchDirectory
+    SINGLE-REPORT MODE. Directory searched for the newest
+    ObfuscationDictionary_*.json when -DictionaryPath is not supplied. Defaults
+    to the current directory ('.'). Ignored when -DictionaryPath is given.
+
 .PARAMETER InventoryRoot
     ALL-SUBSCRIPTIONS MODE. Folder that contains the per-subscription output
     folders. Defaults to C:\InventoryReports on Windows and

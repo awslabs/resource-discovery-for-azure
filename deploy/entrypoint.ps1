@@ -9,7 +9,19 @@ if ($ShardCount -gt 1 -and -not $IndexPresent)
 {
     throw "SHARD_COUNT is $ShardCount but JOB_COMPLETION_INDEX is not set, so every pod would run shard 0 and the other $($ShardCount - 1) slice(s) would be silently skipped. Use a Job with 'completionMode: Indexed' (see deploy/k8s/job.yaml), which injects JOB_COMPLETION_INDEX per pod."
 }
-$HeadRoom = if (-not [string]::IsNullOrWhiteSpace("$($env:HEAD_ROOM)")) { [int]$env:HEAD_ROOM } else { 0 }
+$HeadRoom = 0
+if (-not [string]::IsNullOrWhiteSpace("$($env:HEAD_ROOM)"))
+{
+    $ParsedHeadRoom = 0
+    if ([int]::TryParse("$($env:HEAD_ROOM)", [ref]$ParsedHeadRoom))
+    {
+        $HeadRoom = $ParsedHeadRoom
+    }
+    else
+    {
+        throw "HEAD_ROOM is '$($env:HEAD_ROOM)', which is not an integer. Set HEAD_ROOM to a whole number in [0,90] (leave it unset for the default 0)."
+    }
+}
 $RequestedHeadRoom = $HeadRoom
 if ($HeadRoom -lt 0) { $HeadRoom = 0 }
 if ($HeadRoom -gt 90) { $HeadRoom = 90 }

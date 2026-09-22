@@ -4,22 +4,22 @@ param ($TenantID,
     $Appid,
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', ErrorMessage = 'Invalid SubscriptionID; must be a GUID')]
     [string]$SubscriptionID,
+    [switch]$DeviceLogin,
     [securestring]$Secret,
     [ValidatePattern('^[A-Za-z0-9._()-]{1,90}$', ErrorMessage = 'Invalid resource group name; must match ^[A-Za-z0-9._()-]{1,90}$')]
     [string]$ResourceGroup,
     [string[]]$Service,
-    [string]$ObfuscationDictionary,
     [switch]$SkipMetrics,
-    [switch]$SkipConsumption,
-    [switch]$DeviceLogin,
-    [switch]$Obfuscate,
-    [switch]$RunAllSubs,
-    [switch]$UseMetricsBatch,
-    [switch]$IncludeStorageMetrics,
     [switch]$SkipDiskMetrics,
+    [switch]$MetricsDetailed,
+    [switch]$IncludeStorageMetrics,
+    [switch]$UseMetricsBatch,
+    [switch]$SkipConsumption,
+    [switch]$Obfuscate,
+    [string]$ObfuscationDictionary,
+    [switch]$RunAllSubs,
     [switch]$CapacityPlan,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
-    [switch]$MetricsDetailed,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
@@ -1106,7 +1106,7 @@ function ExecuteInventoryProcessing()
             {
                 if (![string]::IsNullOrEmpty($ResourceGroup))
                 {
-                    Write-Log -Message ("Cannot filter consumption by resource group." -f $sub.Name) -Severity 'Info'
+                    Write-Log -Message "Cannot filter consumption by resource group." -Severity 'Info'
                 }
 
                 if ($SubscriptionID -ne $sub.Id)
@@ -1173,6 +1173,21 @@ function ExecuteInventoryProcessing()
                     $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
                     $ConsumptionAuthRefreshedThisPage = $false
+                    # The retry loop can run long: up to $ConsumptionMaxRetries attempts, each
+                    # sleeping a server-directed Retry-After clamped to 300s (~26 min worst case),
+                    # which can outlive the token this page started with. The per-page guard below
+                    # ($ConsumptionAuthRefreshedThisPage) stops a PERMANENT 401 reconnecting on every
+                    # attempt, but on its own it also blocks a legitimate SECOND lapse: once a
+                    # reconnect has succeeded, a token that expires again LATER in the same loop could
+                    # not be refreshed, so the loop would burn its remaining budget against a dead
+                    # token and fail loud. To close that intra-page gap without reopening the reconnect
+                    # storm the guard prevents, a SUCCESSFUL reconnect re-arms the guard (its fresh
+                    # token can lapse again and deserves another refresh); a reconnect that yields no
+                    # usable token leaves the guard closed (a permanent 401 rides out the budget and
+                    # fails loud, unchanged). Total re-arms are capped so an every-attempt expiry that
+                    # keeps "succeeding" then immediately lapsing still terminates.
+                    $ConsumptionAuthRefreshMax = 3
+                    $ConsumptionAuthRefreshCount = 0
                     while ($true)
                     {
                         try
@@ -1191,13 +1206,55 @@ function ExecuteInventoryProcessing()
                             if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
                             {
                                 $ConsumptionAuthRefreshedThisPage = $true
-                                Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting one Azure re-authentication before retrying this page." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                                $ConsumptionAuthRefreshCount++
+                                Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting Azure re-authentication (refresh {2}/{3} for this page) before retrying this page." -f $sub.Name, $_.Exception.Message, $ConsumptionAuthRefreshCount, $ConsumptionAuthRefreshMax) -Severity 'Warning'
                                 if (Test-DataPlaneAuthReady -Phase 'Consumption')
                                 {
-                                    Write-Log -Message ("Consumption: Azure context re-established for {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                    # Test-DataPlaneAuthReady reconnects with Connect-AzAccount and no
+                                    # -Subscription, so a successful reconnect can leave the context on the
+                                    # identity's DEFAULT subscription rather than $sub. Get-UsageAggregates
+                                    # reads the context's subscription, so retrying now without re-pinning
+                                    # would attribute another subscription's usage rows to $sub. Re-pin and
+                                    # re-verify exactly as the per-sub loop does before its first page; if the
+                                    # scope cannot be restored, abandon this subscription rather than write
+                                    # cross-subscription billing data.
+                                    $RepinOk = $false
+                                    $RepinError = $null
+                                    try
+                                    {
+                                        $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                                        $RepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+                                    }
+                                    catch
+                                    {
+                                        $RepinError = $_.Exception.Message
+                                    }
+
+                                    if ($RepinOk)
+                                    {
+                                        Write-Log -Message ("Consumption: Azure context re-established and re-pinned to {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                        # The reconnect produced a usable, correctly-scoped token. That
+                                        # token can itself lapse later in a long retry loop, so re-arm the
+                                        # per-page guard to permit another refresh on a genuine SECOND
+                                        # expiry - bounded by $ConsumptionAuthRefreshMax so this cannot
+                                        # become an unbounded reconnect loop against an every-attempt expiry.
+                                        if ($ConsumptionAuthRefreshCount -lt $ConsumptionAuthRefreshMax)
+                                        {
+                                            $ConsumptionAuthRefreshedThisPage = $false
+                                        }
+                                    }
+                                    else
+                                    {
+                                        Write-Log -Message ("Consumption: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's consumption to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($RepinError) { " ($RepinError)" } else { ' (context did not match the target after Set-AzContext)' })) -Severity 'Error'
+                                        throw
+                                    }
                                 }
                                 else
                                 {
+                                    # No usable token after reconnect: a permanent 401 (revoked /
+                                    # interaction-required). Leave the guard CLOSED so we do not reconnect
+                                    # again this page - the remaining retries ride out the budget and fail
+                                    # loud, unchanged from the original behaviour.
                                     Write-Log -Message ("Consumption: re-authentication for {0} did not yield a usable token; the remaining retries will still be attempted but may not recover." -f $sub.Name) -Severity 'Warning'
                                 }
                             }

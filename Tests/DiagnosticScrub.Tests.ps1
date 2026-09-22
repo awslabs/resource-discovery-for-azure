@@ -105,10 +105,12 @@ Describe "Protect-DiagnosticText masks structured identifier classes" {
 
     It "masks IPv4 addresses" {
         $script:Scrubbed | Should -Not -Match '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+        $script:Scrubbed | Should -Match '<ip>' -Because 'the IPv4 must be replaced by the <ip> token, not merely dropped or over-masked'
     }
 
     It "masks Azure data-plane FQDNs" {
         $script:Scrubbed | Should -Not -Match ([regex]::Escape($script:Fqdn))
+        $script:Scrubbed | Should -Match '<host>' -Because 'the FQDN must be replaced by the <host> token, not merely dropped or over-masked'
     }
 
     It "masks Unix home paths and cannot trip the Obfuscation home-path scan" {

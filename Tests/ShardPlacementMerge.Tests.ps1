@@ -186,7 +186,7 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
     }
 
     It 'produces a summable capacity total across the whole tenant' {
-        # The number the file exists to produce: SUM(CPU * Instances) per zone.
+        # The number the file exists to produce: tenant-wide SUM(CPU * Instances).
         $Total = 0
         foreach ($Row in $script:MergedRows) { $Total += ([double]$Row.CPU * [double]$Row.Instances) }
         $Total | Should -Be 16 -Because '4 + 4 from shard0 and 8 from shard1'

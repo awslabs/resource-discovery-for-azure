@@ -375,7 +375,7 @@ header h1 { margin: 0 0 8px 0; font-size: 22px; }
 .bar-fill    { fill: var(--bar-fill); }
 .bar-label   { font-size: 12px; fill: var(--text); }
 .bar-value   { font-size: 12px; fill: var(--muted); }
-.svc-section, .service-section {
+.service-section {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;

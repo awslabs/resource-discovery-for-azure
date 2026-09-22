@@ -199,13 +199,16 @@ Describe "Inventory ID Obfuscation" {
 # ============================================================
 Describe "Inventory Name Obfuscation" {
     It "Should have all resource names matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($resource in $script:AllResources)
         {
             if ($null -ne $resource.Name)
             {
+                $Checked++
                 $resource.Name | Should -Match $script:ObfuscationPattern -Because "Resource Name '$($resource.Name)' should be obfuscated"
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no resource carried a non-null Name to assert against" }
     }
 }
 
@@ -214,13 +217,16 @@ Describe "Inventory Name Obfuscation" {
 # ============================================================
 Describe "Inventory Subscription Obfuscation" {
     It "Should have all subscription fields matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($resource in $script:AllResources)
         {
             if ($null -ne $resource.Subscription)
             {
+                $Checked++
                 $resource.Subscription | Should -Match $script:ObfuscationPattern -Because "Subscription '$($resource.Subscription)' should be obfuscated"
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no resource carried a non-null Subscription to assert against" }
     }
 }
 
@@ -229,13 +235,16 @@ Describe "Inventory Subscription Obfuscation" {
 # ============================================================
 Describe "Inventory ResourceGroup Obfuscation" {
     It "Should have all resource group fields matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($resource in $script:AllResources)
         {
             if ($null -ne $resource.ResourceGroup)
             {
+                $Checked++
                 $resource.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "ResourceGroup '$($resource.ResourceGroup)' should be obfuscated"
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no resource carried a non-null ResourceGroup to assert against" }
     }
 }
 
@@ -244,6 +253,7 @@ Describe "Inventory ResourceGroup Obfuscation" {
 # ============================================================
 Describe "Metrics Obfuscation" {
     It "Should have all metric IDs and names matching the obfuscation pattern" {
+        $Checked = 0
         foreach ($metricsFile in $script:MetricsFiles)
         {
             $MetricsData = Get-Content $metricsFile.FullName -Raw | ConvertFrom-Json
@@ -251,22 +261,27 @@ Describe "Metrics Obfuscation" {
             {
                 if ($null -ne $metric.ID)
                 {
+                    $Checked++
                     $metric.ID | Should -Match $script:ObfuscationPattern -Because "Metric ID should be obfuscated"
                 }
                 if ($null -ne $metric.Name)
                 {
+                    $Checked++
                     $metric.Name | Should -Match $script:ObfuscationPattern -Because "Metric Name should be obfuscated"
                 }
                 if ($null -ne $metric.Subscription)
                 {
+                    $Checked++
                     $metric.Subscription | Should -Match $script:ObfuscationPattern -Because "Metric Subscription should be obfuscated"
                 }
                 if ($null -ne $metric.ResourceGroup)
                 {
+                    $Checked++
                     $metric.ResourceGroup | Should -Match $script:ObfuscationPattern -Because "Metric ResourceGroup should be obfuscated"
                 }
             }
         }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no metric carried an obfuscatable field to assert against" }
     }
 }
 
@@ -1170,5 +1185,62 @@ Describe "AKS Multi-Node-Pool Tags — no cross-row aliasing (P1, P2)" {
         # token, and that token must actually be present as a dictionary value.
         $Rows[0].Tags[0].Value | Should -Be $Rows[1].Tags[0].Value -Because "the same real tag value on two rows of the same cluster must yield the same token (P1)"
         $Dict.Values | Should -Contain $Rows[0].Tags[0].Value -Because "the shared token must be the one real dictionary entry produced, not a spurious second entry"
+    }
+}
+
+# 21. AKS Autoscale field: the emitted 'Autoscale' column must reflect enableAutoScaling
+# faithfully. The collector compares against the string 'true' (AKS.ps1) rather than a bare
+# truth test, because enableAutoScaling can arrive as a real bool, as $null (pool omits it),
+# or as the stringified 'false'. A bare truth test would treat the non-empty string 'false'
+# as $true and report autoscale ON for a pool that has it OFF. This exercises the ACTUAL
+# collector against pools covering all three shapes.
+Describe "AKS Autoscale field reflects enableAutoScaling faithfully" {
+    BeforeAll {
+        $script:AksModule = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Containers', 'AKS.ps1'
+        $script:AutoSub = @([PSCustomObject]@{ id = 'sub-auto'; Name = 'sub-auto' })
+        $script:AutoCluster = [PSCustomObject]@{
+            id             = 'prod_' + [guid]::NewGuid().ToString()
+            RESOURCEGROUP  = 'rg-aks-auto'
+            NAME           = 'aks-auto'
+            LOCATION       = 'eastus'
+            TYPE           = 'microsoft.containerservice/managedclusters'
+            subscriptionId = 'sub-auto'
+            sku            = [PSCustomObject]@{ name = 'Base'; tier = 'Free' }
+            tags           = [PSCustomObject]@{ environment = 'prod' }
+            PROPERTIES     = [PSCustomObject]@{
+                kubernetesVersion = '1.29'
+                networkProfile    = [PSCustomObject]@{ loadBalancerSku = 'Standard' }
+                agentPoolProfiles = @(
+                    # Pool with autoscale genuinely ON, with bounds.
+                    [PSCustomObject]@{ name = 'poolon'; type = 'VirtualMachineScaleSets'; mode = 'System'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 3; maxPods = 30; orchestratorVersion = '1.29'; enableAutoScaling = $true; maxCount = 5; minCount = 1 }
+                    # Pool with autoscale explicitly OFF as the stringified 'false'.
+                    [PSCustomObject]@{ name = 'pooloff'; type = 'VirtualMachineScaleSets'; mode = 'User'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29'; enableAutoScaling = 'false' }
+                    # Pool that omits enableAutoScaling entirely (property is $null).
+                    [PSCustomObject]@{ name = 'poolabsent'; type = 'VirtualMachineScaleSets'; mode = 'User'; osType = 'Linux'; vmSize = 'Standard_B2s'; osDiskSizeGB = 30; count = 1; maxPods = 30; orchestratorVersion = '1.29' }
+                )
+            }
+        }
+        $script:AutoRows = & $script:AksModule -Sub $script:AutoSub -Resources @($script:AutoCluster) -Task 'Processing' -ResourceIdDictionary $null
+    }
+
+    It "reports Autoscale 'true' for a pool with enableAutoScaling `$true" {
+        $Row = @($script:AutoRows) | Where-Object { $_.NodePoolName -eq 'poolon' }
+        $Row.Autoscale | Should -Be 'true'
+        $Row.AutoscaleMax | Should -Be 5
+        $Row.AutoscaleMin | Should -Be 1
+    }
+
+    It "reports Autoscale 'false' for a pool whose enableAutoScaling is the string 'false' (not treated as truthy)" {
+        $Row = @($script:AutoRows) | Where-Object { $_.NodePoolName -eq 'pooloff' }
+        $Row.Autoscale | Should -Be 'false' -Because "the non-empty string 'false' must NOT be read as autoscale ON"
+        $Row.AutoscaleMax | Should -Be '0'
+        $Row.AutoscaleMin | Should -Be '0'
+    }
+
+    It "reports Autoscale 'false' with '0' bounds for a pool that omits enableAutoScaling" {
+        $Row = @($script:AutoRows) | Where-Object { $_.NodePoolName -eq 'poolabsent' }
+        $Row.Autoscale | Should -Be 'false'
+        $Row.AutoscaleMax | Should -Be '0'
+        $Row.AutoscaleMin | Should -Be '0'
     }
 }

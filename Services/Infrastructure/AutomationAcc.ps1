@@ -15,7 +15,7 @@ if ($Task -eq 'Processing')
             $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name -and $_.id.split('/')[4] -eq $0.RESOURCEGROUP }
 
             $Data0 = $0.properties
-            $Timecreated = try { if ($null -ne $Data0.creationTime) { [datetime]($Data0.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data0.creationTime) { ([datetime]$Data0.creationTime).ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($null -ne $Rbs)
             {

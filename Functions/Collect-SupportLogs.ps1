@@ -72,6 +72,17 @@ if ($Bundle)
 }
 else
 {
-    Write-Host "No support logs were found to collect under the inventory root." -ForegroundColor Yellow
+    # The delegate (New-RdaSupportLogBundle) already emitted a precise Write-Warning
+    # for the specific null cause (root absent / no matching files / empty -SinceTime
+    # window). Add a -SinceTime hint here too, since a too-narrow time window is the
+    # least obvious of the three causes from the generic summary alone.
+    if ($PSBoundParameters.ContainsKey('SinceTime'))
+    {
+        Write-Host ("No support logs were found to collect under the inventory root (note: -SinceTime {0} was supplied, so a too-narrow time window may be the cause; see the warning above)." -f $SinceTime) -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host "No support logs were found to collect under the inventory root." -ForegroundColor Yellow
+    }
 }
 

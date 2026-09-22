@@ -155,6 +155,29 @@ function Get-RdaInventorySource
         '{0} (de-obfuscated report, refused by the PII guard: it carries real identifiers)' -f $FullName
     }
 
+    # Count the per-subscription reports inside a consolidated bundle by reading
+    # only its central directory (no extraction). Used to tell the operator HOW
+    # MUCH coverage a skipped bundle represents, so a single skip line for a
+    # many-subscription bundle is not mistaken for a trivial loss. Returns -1 if
+    # the bundle cannot be inspected.
+    $CountBundleReports = {
+        param([string]$FullName)
+        $Zip = $null
+        try
+        {
+            $Zip = [System.IO.Compression.ZipFile]::OpenRead($FullName)
+            return @($Zip.Entries | Where-Object { $_.Name -like 'ResourcesReport*.zip' }).Count
+        }
+        catch
+        {
+            return -1
+        }
+        finally
+        {
+            if ($null -ne $Zip) { $Zip.Dispose() }
+        }
+    }
+
     foreach ($P in $Path)
     {
         $Item = $null
@@ -236,7 +259,20 @@ function Get-RdaInventorySource
         {
             foreach ($Found in $Bundles)
             {
-                $Skipped.Add(('{0} (skipped: extracted reports were found alongside it, so its contents were not opened to avoid double counting)' -f $Found.FullName))
+                $ReportCount = & $CountBundleReports $Found.FullName
+                $Magnitude = if ($ReportCount -gt 0)
+                {
+                    ' containing {0} per-subscription report(s)' -f $ReportCount
+                }
+                elseif ($ReportCount -eq 0)
+                {
+                    ' (no per-subscription reports found inside)'
+                }
+                else
+                {
+                    ' (contents not inspectable)'
+                }
+                $Skipped.Add(('{0}{1} (skipped: extracted reports were found alongside it, so its contents were not opened to avoid double counting)' -f $Found.FullName, $Magnitude))
             }
         }
 
@@ -248,7 +284,18 @@ function Get-RdaInventorySource
         }
     }
 
-    $Grouped = @($Sources | Group-Object { Get-RdaReportId -Name ([System.IO.Path]::GetFileName($_.File)) })
+    # De-duplication key. A stamped report keys on its stamp so the same report
+    # reached two ways (a loose json and the zip beside it) collapses to one unit.
+    # A stamp-LESS file keys on its FULL PATH, not its base name, so two distinct
+    # stamp-less inventories that happen to share a base name (a/ResourcesReport.zip
+    # and b/ResourcesReport.zip) stay DISTINCT instead of collapsing into one group
+    # where one would be dropped from Sources with nothing recorded - a silent false
+    # confirmed zero. This mirrors the reader-side fallback keys, which are already
+    # full-path-unique, so discovery and coverage cannot drift in opposite directions.
+    $Grouped = @($Sources | Group-Object {
+            $Stamp = [regex]::Match([System.IO.Path]::GetFileName($_.File), $Script:RdaReportStampPattern)
+            if ($Stamp.Success) { $Stamp.Groups[1].Value } else { $_.File }
+        })
     $Deduped = [System.Collections.Generic.List[object]]::new()
     foreach ($G in $Grouped)
     {
@@ -403,8 +450,23 @@ function Find-RdaResource
 
     if ($Sources.Count -eq 0)
     {
-        Write-Host 'No report bundles or inventory files found under the given path(s).' -ForegroundColor Red
-        Write-Host 'Expected one of: Inventory_*.json, ResourcesReport*.zip, AllSubscriptions_*.zip / shard-*.zip' -ForegroundColor Yellow
+        # Distinguish "nothing was there" from "candidates were found but every one
+        # was excluded". Saying "check the path" when the path was correct and the
+        # bundles were deliberately refused (e.g. every report was a de-obfuscated
+        # *_revealed copy the PII guard rejected) sends the operator to fix a
+        # non-problem. The specific per-entry warnings were already printed above.
+        $Excluded = (@($Discovered.Rejected).Count + @($Discovered.Unreadable).Count + @($Discovered.Skipped).Count)
+        if ($Excluded -gt 0)
+        {
+            Write-Host 'No usable report bundles remained: candidates were found but every one was' -ForegroundColor Red
+            Write-Host 'refused, unreadable, or skipped (see the warnings above for each). This is NOT' -ForegroundColor Red
+            Write-Host 'a statement that the path is wrong.' -ForegroundColor Red
+        }
+        else
+        {
+            Write-Host 'No report bundles or inventory files found under the given path(s).' -ForegroundColor Red
+            Write-Host 'Expected one of: Inventory_*.json, ResourcesReport*.zip, AllSubscriptions_*.zip / shard-*.zip' -ForegroundColor Yellow
+        }
         return New-RdaFindResult -SourceCount 0 -Missing $Discovered.Missing -Unreadable $Discovered.Unreadable `
             -Rejected $Discovered.Rejected -Skipped $Discovered.Skipped -ResourceType $Wanted `
             -SumBy $SumBy -GroupBy $GroupBy `
@@ -426,6 +488,13 @@ function Find-RdaResource
         $Excl = $using:RevealedExclusion
         $Stamp = $using:StampPattern
 
+        # Read-Inventory is defined INSIDE the -Parallel scriptblock on purpose: a
+        # runspace cannot see enclosing-scope functions, so it must be re-parsed
+        # once per source. That per-iteration re-definition cost is accepted and is
+        # immaterial beside the zip I/O each iteration does. Do NOT try to hoist it
+        # out and relay it via $using: - a scriptblock captured that way still
+        # cannot resolve against this runspace, which is the same cross-runspace
+        # trap the $using: pattern for the stamp/exclusion literals works around.
         function Read-Inventory
         {
             [CmdletBinding()]
@@ -448,13 +517,22 @@ function Find-RdaResource
                 $Prop = $Obj.PSObject.Properties[$T]
 
                 if (-not $Prop) { continue }
-                [void]$Present.Add($T)
+
+                # Stamp the inventory's ACTUAL key name, not the operator's -ResourceType
+                # casing. The lookup above is case-insensitive, so 'vmware' matches the
+                # 'VMWare' key; echoing the operator's input into RdaResourceType (and the
+                # coverage set) would let two runs of one estate emit 'vmware' and 'VMWare'
+                # and split under a case-sensitive downstream Group-Object. The inventory
+                # key is canonical-by-production (ResourceInventory.ps1 derives it from the
+                # Services/*.ps1 base name), so keying on it removes that variance.
+                $Canonical = $Prop.Name
+                [void]$Present.Add($Canonical)
 
                 foreach ($Row in @($Prop.Value | Where-Object { $null -ne $_ }))
                 {
                     $New = [ordered]@{}
                     foreach ($RP in $Row.PSObject.Properties) { $New[$RP.Name] = $RP.Value }
-                    $New['RdaResourceType'] = $T
+                    $New['RdaResourceType'] = $Canonical
                     $New['RdaReportId'] = $ReportId
                     $New['RdaSourceFile'] = $SourceFile
                     $Rows.Add([pscustomobject]$New)
@@ -672,7 +750,14 @@ function Find-RdaResource
         $DuplicateUnits = @($Named)
         Write-Host ('  WARNING: {0} inventory read(s) were duplicates ({1} attempts, {2} distinct subscriptions).' -f
             ($Attempts - $UnitIds.Count), $Attempts, $UnitIds.Count) -ForegroundColor Yellow
-        Write-Host '  Matched-row counts and any -SumBy total may therefore be INFLATED.' -ForegroundColor Yellow
+        if ($Rows.Count -gt 0)
+        {
+            Write-Host '  Matched-row counts and any -SumBy total may therefore be INFLATED.' -ForegroundColor Yellow
+        }
+        else
+        {
+            Write-Host '  No rows matched, so nothing was INFLATED; the duplicate source is still worth removing.' -ForegroundColor Yellow
+        }
     }
 
     return New-RdaFindResult -Rows $Rows -SourceCount $Sources.Count `
@@ -789,6 +874,14 @@ function Write-RdaFindSummary
     $TypesNone = @($Types | Where-Object { $Coverage[$_] -eq 'None' })
     $TypesPartial = @($Types | Where-Object { $Coverage[$_] -eq 'Partial' })
 
+    # DuplicateUnits is deliberately NOT part of Incomplete. A subscription read
+    # twice inflates counts and sums but can never cause a FALSE absence: the
+    # coverage arithmetic is set-based (UnitIds/TypeUnitIds are HashSets keyed on
+    # UnitId), so a repeated read collapses to the same id and cannot push a
+    # partial coverage up to Full. Folding DuplicateUnits into Incomplete would
+    # weaken the confirmed-zero test into "never confirmable when anything was
+    # read twice", which is strictly worse. Duplicate reads are surfaced on their
+    # own line below instead.
     $Incomplete = (
         (@($Result.Missing).Count -gt 0) -or
         (@($Result.Unreadable).Count -gt 0) -or
@@ -804,8 +897,18 @@ function Write-RdaFindSummary
 
         if ([int]$Result.SourceCount -eq 0)
         {
-            Write-Host '  NOTHING WAS SCANNED. No report bundles were found under the given path(s),' -ForegroundColor Red
-            Write-Host '  so this result says nothing about whether the type exists. Check the path.' -ForegroundColor Red
+            $Excluded = (@($Result.Rejected).Count + @($Result.Unreadable).Count + @($Result.Skipped).Count + @($Result.Missing).Count)
+            if ($Excluded -gt 0)
+            {
+                Write-Host '  NOTHING WAS SCANNED. Candidates were found but every one was refused,' -ForegroundColor Red
+                Write-Host '  unreadable, skipped, or missing (see the counts and warnings above), so no' -ForegroundColor Red
+                Write-Host '  inventory could be read. This does NOT mean the path is wrong.' -ForegroundColor Red
+            }
+            else
+            {
+                Write-Host '  NOTHING WAS SCANNED. No report bundles were found under the given path(s),' -ForegroundColor Red
+                Write-Host '  so this result says nothing about whether the type exists. Check the path.' -ForegroundColor Red
+            }
         }
         elseif ($UnitsRead -eq 0)
         {
@@ -845,9 +948,71 @@ function Write-RdaFindSummary
     }
     else
     {
-        $SubsWith = @($Rows | Group-Object RdaReportId).Count
+        # Group by the row's Subscription field - that is the identity that best
+        # answers "which subscription has this resource", which is this tool's
+        # whole stated purpose. A row with no (or empty) Subscription field falls
+        # back to its RdaReportId (the per-subscription report stamp) so nothing
+        # is silently dropped from the list. The printed count and the printed
+        # list MUST stay consistent, so the count line is the number of distinct
+        # groups produced here - NOT the old raw Group-Object RdaReportId count,
+        # which could differ when a report's rows carry a different Subscription
+        # value or when several reports share one subscription.
+        $Groups = $Rows | Group-Object -Property {
+            $Sub = $_.Subscription
+            if (($null -ne $Sub) -and ("$Sub".Trim() -ne '')) { "sub`0$Sub" }
+            else { "stamp`0{0}" -f $_.RdaReportId }
+        }
+        $Groups = @($Groups)
+
         Write-Host ('  Matching resources        : {0}' -f $Rows.Count) -ForegroundColor Green
-        Write-Host ('  Subscriptions containing  : {0}' -f $SubsWith) -ForegroundColor Green
+        Write-Host ('  Subscriptions containing  : {0}' -f $Groups.Count) -ForegroundColor Green
+
+        # List each containing subscription with its per-subscription match
+        # count, so the operator can see WHICH subscription holds the resource
+        # rather than only how many do. Bounded so a very large estate does not
+        # flood the console - the full list is always in -CsvPath output.
+        $ListCap = 50
+        $Shown = 0
+        $LooksObfuscated = $false
+        foreach ($G in ($Groups | Sort-Object -Property Count -Descending))
+        {
+            if ($Shown -ge $ListCap) { break }
+
+            # The grouping key is "<kind>`0<value>"; split it back into the kind
+            # and the human-facing identity.
+            $Parts = $G.Name -split "`0", 2
+            $Kind = $Parts[0]
+            $Identity = $Parts[1]
+
+            $Suffix = ''
+            if ($Kind -eq 'stamp')
+            {
+                # No Subscription field on these rows: make it clear the value is
+                # a report stamp, not a subscription name.
+                $Suffix = ' (report stamp)'
+            }
+            elseif ($Identity -match '^(prod|nonprod)_')
+            {
+                # An obfuscated report (-Obfuscate) tokenises the subscription.
+                # We do NOT de-obfuscate here (that is Reveal.ps1's job) - just
+                # note once that some values may be masked.
+                $LooksObfuscated = $true
+            }
+
+            $MatchWord = if ($G.Count -eq 1) { 'match' } else { 'matches' }
+            Write-Host ('    - {0,-40}{1} ({2} {3})' -f $Identity, $Suffix, $G.Count, $MatchWord) -ForegroundColor Green
+            $Shown++
+        }
+
+        if ($Groups.Count -gt $ListCap)
+        {
+            Write-Host ('    ... and {0} more (see -CsvPath for the full list)' -f ($Groups.Count - $ListCap)) -ForegroundColor Green
+        }
+
+        if ($LooksObfuscated)
+        {
+            Write-Host '    (some subscription values look obfuscated; use Reveal.ps1 to un-mask)' -ForegroundColor DarkGray
+        }
 
         foreach ($Field in @($Result.SumBy))
         {
@@ -932,6 +1097,15 @@ function Write-RdaFindSummary
             }
         }
 
+        if ($TypesNone.Count -gt 0)
+        {
+            Write-Host ''
+            foreach ($T in $TypesNone)
+            {
+                Write-Host ('  NOTE: the [{0}] key was present in NO inventory read, so nothing above speaks to' -f $T) -ForegroundColor Red
+                Write-Host ('  {0} at all - its absence is unproven, not confirmed.' -f $T) -ForegroundColor Red
+            }
+        }
         if ($TypesPartial.Count -gt 0)
         {
             Write-Host ''
@@ -969,8 +1143,19 @@ function Write-RdaFindSummary
     $Attempts = [int]$Result.UnitReadAttempts
     if ($Attempts -gt $UnitsRead)
     {
-        Write-Host ('  Subscriptions read twice  : {0} duplicate read(s) of {1} attempts (row counts and any sum may be INFLATED)' -f
-            ($Attempts - $UnitsRead), $Attempts) -ForegroundColor Red
+        # A repeated read can add a row or a covered subscription but never remove
+        # one, so with zero matched rows nothing was inflated and the confirmed-zero
+        # verdict above stands; the exit code makes the same distinction.
+        if ($Rows.Count -gt 0)
+        {
+            Write-Host ('  Subscriptions read twice  : {0} duplicate read(s) of {1} attempts (row counts and any sum may be INFLATED)' -f
+                ($Attempts - $UnitsRead), $Attempts) -ForegroundColor Red
+        }
+        else
+        {
+            Write-Host ('  Subscriptions read twice  : {0} duplicate read(s) of {1} attempts (no rows matched, so nothing was INFLATED)' -f
+                ($Attempts - $UnitsRead), $Attempts) -ForegroundColor Yellow
+        }
         foreach ($D in (@($Result.DuplicateUnits) | Select-Object -First 5))
         {
             Write-Host ('    {0}' -f $D) -ForegroundColor Red

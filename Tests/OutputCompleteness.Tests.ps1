@@ -109,7 +109,10 @@ Describe "Inventory JSON Structure" {
     }
 
     It "Should have at least one resource type with data" {
-        $Populated = $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' }
+        # $null -ne $_.Value is true even for an empty array (@() is not $null), so
+        # count only properties whose value holds at least one resource - otherwise
+        # this can pass with zero discovered resources while claiming it found some.
+        $Populated = $script:Inventory.PSObject.Properties | Where-Object { $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }
         $Populated.Count | Should -BeGreaterThan 0 -Because "At least one service should have discovered resources"
     }
 
@@ -117,11 +120,12 @@ Describe "Inventory JSON Structure" {
     # AutomationAcc.ps1 uses AutomationAccountName/RunbookName), so asserting Name would fail on real output.
     It "Every resource should have ID and Location fields" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
+            $ResourceType = $_.Name
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_)
                 {
-                    $_.PSObject.Properties.Name | Should -Contain 'ID' -Because "Resource in $($_.Name) should have ID"
-                    $_.PSObject.Properties.Name | Should -Contain 'Location' -Because "Resource should have Location"
+                    $_.PSObject.Properties.Name | Should -Contain 'ID' -Because "Resource in $ResourceType should have ID"
+                    $_.PSObject.Properties.Name | Should -Contain 'Location' -Because "Resource in $ResourceType should have Location"
                 }
             }
         }

@@ -96,15 +96,26 @@
 
 .NOTES
     Exit codes:
-      0  the scan completed and covered everything requested
+      0  the scan completed and proved what it reports: every path was
+         covered, every inventory read carried the requested key(s), and no
+         matched count was inflated by a repeated read
       1  nothing was scanned - no report bundles were found under -Path
       2  the scan completed but some inventories could not be read
-      3  the scan completed but did NOT cover everything requested (a path was
-         missing or refused, a subtree could not be enumerated, or a bundle was
-         skipped). The counts are a lower bound, so a zero is NOT a confirmed
-         absence. This code exists so a caller reading only $LASTEXITCODE reaches
-         the same conclusion the printed summary does.
+      3  the scan completed but did NOT prove what it reports: a path was
+         missing or refused, a subtree could not be enumerated, a bundle was
+         skipped, the requested key was absent from some or all of the
+         inventories read (the summary's CANNOT CONFIRM ABSENCE and PARTIAL
+         COVERAGE verdicts and its LOWER BOUND note), OR rows matched while a
+         subscription was read more than once (the summary's INFLATED warning),
+         so a zero is NOT a confirmed absence or a count is NOT a confirmed
+         total. This code exists so a caller reading only $LASTEXITCODE
+         reaches the same conclusion the printed summary does. A repeated read
+         that matched NO rows cannot hide or inflate anything, so that case
+         stays 0 alongside the summary's confirmed zero.
       4  the scan completed but -CsvPath or -JsonPath could not be written
+
+    When more than one condition applies, the lowest matching code is returned
+    (1 before 2 before 3 before 4), so a read failure outranks a coverage gap.
 
     A large match set is best piped or assigned rather than left to format to the
     console, since the rows are emitted to the pipeline after the summary.
@@ -241,6 +252,14 @@ if ((@($Result.Missing).Count -gt 0) -or
     (@($Result.Rejected).Count -gt 0) -or
     (@($Result.Unreadable).Count -gt 0) -or
     (@($Result.Skipped).Count -gt 0)) { exit 3 }
+$Coverage = Get-RdaTypeCoverage -Result $Result
+# The empty-map clause is a fail-closed guard for a shape the mandatory, validated
+# -ResourceType cannot produce. The duplicate-read clause applies only when rows
+# matched: coverage is set-based, so a repeated read can inflate a count but
+# cannot hide a row, and the summary calls a duplicated zero a confirmed zero.
+if ((@($Coverage.psbase.Keys).Count -eq 0) -or
+    (@($Coverage.psbase.Values | Where-Object { $_ -ne 'Full' }).Count -gt 0) -or
+    (($Rows.Count -gt 0) -and ([int]$Result.UnitReadAttempts -gt [int]$Result.UnitsRead))) { exit 3 }
 if ($Script:WriteFailed) { exit 4 }
 exit 0
 

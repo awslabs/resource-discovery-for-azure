@@ -96,7 +96,7 @@ Describe "Front Door WAF Field" {
         }
     }
 
-    It "WAF value should be a known marker or a non-Azure-path string" {
+    It "WAF value is never the misleading 'Enabled' marker" {
         if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors)
         {

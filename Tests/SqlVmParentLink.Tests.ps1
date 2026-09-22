@@ -88,6 +88,17 @@ Describe 'SQL VM parent-VM cross-reference (non-obfuscated)' {
         $Rec.ParentVirtualMachine | Should -BeExactly $script:VmRealId
     }
 
+    It 'passes the raw parent id through when the dictionary is non-null but EMPTY (Count -eq 0)' {
+        # The collector's guard is "$null -ne $Dict -and $Dict.Count -gt 0", so a
+        # non-null but empty dictionary falls to the raw-passthrough branch just
+        # like $null. Obfuscation-on normally implies a populated dictionary, but
+        # this pins the Count-0 edge so a guard rewrite that dropped the Count
+        # check (and started emitting 'obfuscated' against an empty dict) fails here.
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $Dict
+        $Rec.ParentVirtualMachine | Should -BeExactly $script:VmRealId -Because 'an empty dictionary is not an obfuscation pass, so the raw id is carried'
+    }
+
     It "emits 'None' when obfuscation is off and there is no parent id" {
         $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId '') -Dictionary $null
         $Rec.ParentVirtualMachine | Should -BeExactly 'None'

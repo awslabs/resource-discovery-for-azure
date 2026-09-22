@@ -151,8 +151,11 @@ Describe 'Extraction finds the body wherever the SDK put it' {
     }
 
     It 'falls back to raw text when the JSON is malformed, rather than losing it' {
+        # Assert the actual raw body is RETAINED, not merely that something non-empty came
+        # back: a regression returning a non-empty placeholder that dropped the body would
+        # pass a bare -Not -BeNullOrEmpty. Match a fragment of the original malformed input.
         Get-RdaMetricErrorBody -ErrorRecord (script:New-RecWithBody '{"error":{"code":') |
-            Should -Not -BeNullOrEmpty
+            Should -Match '\{"error":\{"code":'
     }
 }
 

@@ -386,16 +386,13 @@ Describe 'The Flexible-orchestration double-counting guard' {
         @($Global:PlacementLogLines | Where-Object { $_ -match 'Flexible' }).Count | Should -Be 0
     }
 
-    It 'the counter is initialised, not incremented from undeclared' {
-        # Source guard. '$null++' silently becomes 1 with no StrictMode, so the bug this
-        # replaces was invisible at runtime: the count was always 1 and never reported.
-        $Src = Get-Content -LiteralPath $script:Extension -Raw
-        $Src | Should -Match '\$FlexibleCount = 0' -Because 'an undeclared counter reads as 1 for any number of Flexible sets'
-        $InitIdx = $Src.IndexOf('$FlexibleCount = 0')
-        $IncIdx = $Src.IndexOf('$FlexibleCount++')
-        $InitIdx | Should -BeGreaterThan -1
-        $IncIdx | Should -BeGreaterThan $InitIdx -Because 'the initialiser must precede the increment'
-    }
+    # NOTE: the '$FlexibleCount initialised, not incremented from undeclared' source-guard
+    # that used to live here was removed as redundant and brittle. Its behaviour - the
+    # Flexible count reading 2 rather than 1 for two Flexible sets, which is exactly the
+    # failure an undeclared counter ($null++ -> always 1) would produce - is already proven
+    # behaviourally by the WARNING-count test above ("names the excluded count in a WARNING",
+    # which asserts the count reads 2). The UnknownOrchestrationCount source-guard is kept
+    # because no behavioural test pins that counter's magnitude.
 
     It 'leaves Instances EMPTY on an UNMATCHED scale set and names the excluded count in a WARNING' {
         # A join miss leaves orchestration UNKNOWN (possibly Flexible, whose members are

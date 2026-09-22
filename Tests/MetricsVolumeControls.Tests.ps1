@@ -1,5 +1,8 @@
 # Output-level proof of Metrics.ps1 volume controls (-IncludeStorageMetrics/-SkipDiskMetrics/
-# -MetricsIntervalMinutes), each env-gated so inert when unset; necessary-not-sufficient (no with/without baseline).
+# -MetricsIntervalMinutes), each env-gated so inert when unset. Storage now has a with/without
+# baseline: the absence test (opt-in off) is paired with an -IncludeStorageMetrics positive test
+# that proves the opt-in turns UsedCapacity back on; the disk and grain controls remain
+# necessary-not-sufficient (no with/without baseline).
 
 BeforeAll {
     # The sampled series the -MetricsIntervalMinutes knob overrides, kept in lockstep

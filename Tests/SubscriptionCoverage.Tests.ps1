@@ -136,6 +136,7 @@ Describe 'Get-TenantSubscriptionId (side-effecting fetch)' {
         }
         $Result = Get-TenantSubscriptionId -TenantId '12345678-1234-1234-1234-123456789012'
         @($Result.Ids).Count | Should -Be 1
+        $Result.Ids | Should -Contain 'dupe' -Because 'the surviving id must be the real one, not a truncated-to-one wrong id (membership over count)'
     }
 
     It 'returns Ids=$null with a Detail when the MG tree is empty (unverifiable)' {

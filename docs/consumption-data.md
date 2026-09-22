@@ -169,3 +169,7 @@ so you can confirm the replacement happened.
 > joins consumption tokens to inventory tokens.
 
 See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
+
+For the parameter that turns this phase off (`-SkipConsumption`) and the other
+data-collection switches, see
+[variables/metrics-and-consumption.md](variables/metrics-and-consumption.md).

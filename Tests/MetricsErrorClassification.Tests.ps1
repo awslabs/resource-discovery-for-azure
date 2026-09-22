@@ -143,7 +143,7 @@ Describe 'The anchored permanent pattern cannot be fooled by a resource id' {
     It 'is not fooled by a bare 404 substring inside a resource id' {
         # A resource group may legally contain digits and parentheses, so a looser
         # '404' or 'ResourceNotFound' substring test could match the id itself.
-        $Msg = "Error on /subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-404-test/providers/Microsoft.Compute/virtualMachines/vm1"
+        $Msg = "Error on /subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-404-test/providers/Microsoft.Compute/virtualMachines/vm1"
         $Msg -match $script:PermanentPattern | Should -BeFalse -Because 'anchoring on the quoted status phrase is what prevents an id from being read as a status'
     }
 }
@@ -153,7 +153,7 @@ Describe 'A resource id containing 429 is classified permanent, not throttled' {
     It 'is the exact case the ordering protects against' {
         # A REAL 404 whose echoed resource id happens to contain 429. With the
         # loose throttle test first, this is misread as throttling.
-        $Msg = "Operation returned an invalid status code 'NotFound'. Resource: /subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-429/providers/Microsoft.Compute/disks/disk429"
+        $Msg = "Operation returned an invalid status code 'NotFound'. Resource: /subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-429/providers/Microsoft.Compute/disks/disk429"
 
         # Both patterns match this message - that is precisely why order decides.
         ($Msg -match $script:PermanentPattern) | Should -BeTrue -Because 'it is genuinely a NotFound'

@@ -55,6 +55,11 @@ Describe 'Horizontal sharding partition helpers' {
         It 'ShardCount <= 1 returns the full list unchanged' {
             $out = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex 0 -ShardCount 1
             $out.Count | Should -Be $script:Subs.Count
+
+            # ShardCount 0 hits the same '$ShardCount -le 1' no-op branch and is the
+            # value the wrapper passes when not sharding, so pin it explicitly.
+            $zero = Select-ShardSubscriptions -Subscriptions $script:Subs -ShardIndex 0 -ShardCount 0
+            $zero.Count | Should -Be $script:Subs.Count
         }
 
         It 'partitions the tenant into DISJOINT and EXHAUSTIVE slices across all shards' {

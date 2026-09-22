@@ -89,8 +89,13 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         Test-Path -Path $Out | Should -BeTrue
         (Get-Card $Html 'Total resources') | Should -Be '5' -Because '2+1+2 across the two fixtures'
         (Get-Card $Html 'Subscriptions') | Should -Be '2'
-        # Self-contained: no external CDN/js/css references.
-        ($Html -match '(?i)src="https?://' -or $Html -match '(?i)href="https?://' -or $Html -match '(?i)cdn|googleapis|jsdelivr') | Should -BeFalse
+        # Self-contained: no external CDN/js/css references. Split into separate
+        # assertions so a failure names WHICH kind of external reference leaked
+        # (external script src, external href, or a known CDN host) rather than a
+        # single opaque BeFalse.
+        $Html | Should -Not -Match '(?i)src="https?://' -Because 'no external script/image src'
+        $Html | Should -Not -Match '(?i)href="https?://' -Because 'no external stylesheet/link href'
+        $Html | Should -Not -Match '(?i)cdn|googleapis|jsdelivr' -Because 'no known external CDN host'
         # No <script> at all (pure static HTML).
         ($Html -match '<script') | Should -BeFalse
     }
@@ -445,6 +450,7 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
         $Html = Get-Content -Path $Out -Raw
 
         $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
+        $Html | Should -Match '12345678-1234-1234-1234-123456789012' -Because 'an identifiable bundle renders the actual tenant value, not just the label (mirror of the -Obfuscated suppression check)'
         $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
     }
 }

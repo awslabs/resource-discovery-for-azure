@@ -546,7 +546,7 @@ A wrong "no" is the worst answer this tool could give, so it only calls a zero a
 | `PARTIAL SCAN` | A path was missing or refused, a subtree was unreadable, or a bundle was skipped. |
 | `NOTHING WAS SCANNED` | No bundles were found. Check the path. |
 
-Exit codes mirror this, so an automated caller reading only `$LASTEXITCODE` reaches the same conclusion: `0` complete, `1` nothing scanned, `2` read failures, `3` scope incomplete, `4` output file could not be written.
+Exit codes mirror this, so an automated caller reading only `$LASTEXITCODE` reaches the same conclusion: `0` complete (a confirmed result), `1` nothing scanned, `2` read failures, `3` scope or coverage incomplete (a path lost, the key absent from some or all inventories read - the `CANNOT CONFIRM ABSENCE` and `PARTIAL COVERAGE` verdicts - or a subscription read more than once, which can inflate the counts), `4` output file could not be written. When more than one applies the lowest code wins. Only `0` means the scan proved what it reports.
 
 De-obfuscated reports produced by `Reveal.ps1` are **refused and reported**, never read, so a revealed copy left on disk cannot leak real identifiers into the results.
 
@@ -556,6 +556,8 @@ The sections below cover both entry points, so each row is tagged where it matte
 **Inner script only** means the parameter exists on `ResourceInventory.ps1` and passing it to `Run-AllSubscriptions.ps1` fails parameter binding.
 **Wrapper only** means the reverse.
 Everything untagged is accepted by both, and the wrapper forwards it to the inner script unchanged.
+
+> For the **why behind each parameter** — the reasoning, invariants, and trade-offs behind every switch — see the parameter reference under [`docs/variables/`](docs/variables/README.md). The full documentation index is at [`docs/README.md`](docs/README.md).
 
 ### Core Parameters
 

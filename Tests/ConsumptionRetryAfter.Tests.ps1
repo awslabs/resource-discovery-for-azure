@@ -94,6 +94,12 @@ Describe 'Get-RdaRetryAfterSeconds' {
             $Record = [System.Management.Automation.ErrorRecord]::new($Ex, 'Throttled', [System.Management.Automation.ErrorCategory]::LimitsExceeded, $null)
             Get-RdaRetryAfterSeconds -ErrorRecord $Record | Should -Be 63
         }
+
+        It 'reads the header when the throttle CloudException is nested under an outer exception (InnerException, depth 1)' {
+            $Inner = New-ThrottleException @{ 'x-ms-ratelimit-microsoft.consumption-retry-after' = '63' }
+            $Outer = [System.InvalidOperationException]::new('wrapper with no Response of its own', $Inner)
+            Get-RdaRetryAfterSeconds -ErrorRecord $Outer | Should -Be 63
+        }
     }
 
     Context 'graceful fallback (no real types needed)' {

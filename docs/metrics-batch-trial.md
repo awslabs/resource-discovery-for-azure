@@ -164,3 +164,11 @@ Levers:
   not the call count.
 - `-SkipMetrics` skips the metrics phase entirely and issues zero metric-query
   calls.
+
+---
+
+## See also
+
+For the `-UseMetricsBatch` parameter and the other metrics switches referenced
+above, see
+[variables/metrics-and-consumption.md](variables/metrics-and-consumption.md).

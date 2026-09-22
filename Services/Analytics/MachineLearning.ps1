@@ -21,10 +21,10 @@ If ($Task -eq 'Processing')
 
             if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
             {
-                $StorageAcc = if (![string]::IsNullOrEmpty($Data.storageAccount) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.storageAccount)) { $ResourceIdDictionary[$Data.storageAccount] } else { 'obfuscated' }
-                $KeyVault = if (![string]::IsNullOrEmpty($Data.keyVault) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.keyVault)) { $ResourceIdDictionary[$Data.keyVault] } else { 'obfuscated' }
-                $Insight = if (![string]::IsNullOrEmpty($Data.applicationInsights) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.applicationInsights)) { $ResourceIdDictionary[$Data.applicationInsights] } else { 'obfuscated' }
-                $ContainerRegistry = if (![string]::IsNullOrEmpty($Data.containerRegistry) -and $ResourceIdDictionary.Count -gt 0 -and $ResourceIdDictionary.ContainsKey($Data.containerRegistry)) { $ResourceIdDictionary[$Data.containerRegistry] } else { 'obfuscated' }
+                $StorageAcc = if (![string]::IsNullOrEmpty($Data.storageAccount) -and $ResourceIdDictionary.ContainsKey($Data.storageAccount)) { $ResourceIdDictionary[$Data.storageAccount] } else { 'obfuscated' }
+                $KeyVault = if (![string]::IsNullOrEmpty($Data.keyVault) -and $ResourceIdDictionary.ContainsKey($Data.keyVault)) { $ResourceIdDictionary[$Data.keyVault] } else { 'obfuscated' }
+                $Insight = if (![string]::IsNullOrEmpty($Data.applicationInsights) -and $ResourceIdDictionary.ContainsKey($Data.applicationInsights)) { $ResourceIdDictionary[$Data.applicationInsights] } else { 'obfuscated' }
+                $ContainerRegistry = if (![string]::IsNullOrEmpty($Data.containerRegistry) -and $ResourceIdDictionary.ContainsKey($Data.containerRegistry)) { $ResourceIdDictionary[$Data.containerRegistry] } else { 'obfuscated' }
             }
 
             $Obj = @{

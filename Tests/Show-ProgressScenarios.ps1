@@ -109,10 +109,10 @@ try
     $Folders = 1..3 | ForEach-Object { 'RevealedStaging/Sub-Prod-{0:D2}' -f $_ }
     for ($i = 0; $i -lt $Folders.Count; $i++)
     {
-        Write-RdaProgress -Activity 'Revealing reports' -CurrentItem $Folders[$i] -Index ($i + 1) -Total $Folders.Count -NonInteractiveLine
+        Write-RdaProgress -Activity 'Revealing per-subscription reports' -CurrentItem $Folders[$i] -Index ($i + 1) -Total $Folders.Count -NonInteractiveLine
         if ($SleepMs) { Start-Sleep -Milliseconds $SleepMs }
     }
-    Write-RdaProgress -Activity 'Revealing reports' -Completed
+    Write-RdaProgress -Activity 'Revealing per-subscription reports' -Completed
 
     # -- Scenario 4: Reveal -Resume (enriched "already revealed" label) ----
     Write-ScenarioHeader -Number '4' -Title 'Reveal -Resume (skips already-revealed folders)' -Caller 'Reveal.ps1 -Resume'
@@ -124,10 +124,10 @@ try
     )
     for ($i = 0; $i -lt $ResumeSet.Count; $i++)
     {
-        Write-RdaProgress -Activity 'Revealing reports' -CurrentItem $ResumeSet[$i].Name -Index ($i + 1) -Total $ResumeSet.Count -NonInteractiveLine
+        Write-RdaProgress -Activity 'Revealing per-subscription reports' -CurrentItem $ResumeSet[$i].Name -Index ($i + 1) -Total $ResumeSet.Count -NonInteractiveLine
         if ($SleepMs) { Start-Sleep -Milliseconds $SleepMs }
     }
-    Write-RdaProgress -Activity 'Revealing reports' -Completed
+    Write-RdaProgress -Activity 'Revealing per-subscription reports' -Completed
 
     # -- Scenario 5: Heartbeat-forwarding read loop (durable heartbeat file) ----
     Write-ScenarioHeader -Number '5' -Title 'Heartbeat-forwarding read loop (durable heartbeat file)' -Caller 'FindResource.Functions.ps1 (-HeartbeatLogFile forwarded)'

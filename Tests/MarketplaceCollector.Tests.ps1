@@ -119,6 +119,15 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $script:Sub = @{}
         $script:Rg = @{}
         $script:Nm = @{}
+        # Shared run-wide dictionary VIEWS the collector derives from $Global:ResourceSubscriptionDictionary
+        # / $Global:ResourceResourceGroupDictionary. Keyed the way the function consumes them:
+        # guid -> shared sub token, rgName -> shared rg token. A real bundle would have these already
+        # populated from the inventory obfuscation pass; here we seed the sub + RG the fake row uses so
+        # the test can prove the Marketplace row masks to the SAME shared token.
+        $script:SharedSubToken = 'prod_sub_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $script:SharedRgToken = 'prod_rg_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        $script:SubGuidTokenMap = @{ '11111111-1111-1111-1111-111111111111' = $script:SharedSubToken }
+        $script:RgTokenMap = @{ 'rg-ai-prod' = $script:SharedRgToken }
     }
 
     It 'leaves third-party PRODUCT identifiers readable (PublisherName/OfferName/PlanName)' {
@@ -131,9 +140,46 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $Out.PlanName      | Should -Be 'pay-as-you-go'
     }
 
+    It 'masks SubscriptionGuid under -Obfuscate (P0: a real subscription GUID must NEVER reach the shareable CSV)' {
+        $Row = script:New-FakeMarketplaceRow
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+
+        # The raw subscription GUID must not survive anywhere in the SubscriptionGuid field.
+        $Out.SubscriptionGuid | Should -Not -Be '11111111-1111-1111-1111-111111111111'
+        $Out.SubscriptionGuid | Should -Not -Match '11111111-1111-1111-1111-111111111111'
+        # It must be the token from the SHARED subscription dictionary for that sub, so the
+        # Marketplace CSV cross-references every other sheet in the bundle for the same sub.
+        $Out.SubscriptionGuid | Should -Be $script:SharedSubToken -Because 'SubscriptionGuid must use the shared run-wide subscription token, not a fresh local one'
+    }
+
+    It 'masks SubscriptionName to the SAME shared token as SubscriptionGuid (both identify one sub)' {
+        $Row = script:New-FakeMarketplaceRow
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $Out.SubscriptionName | Should -Not -Be 'AI Production'
+        $Out.SubscriptionName | Should -Be $script:SharedSubToken -Because 'SubscriptionName and SubscriptionGuid describe the same subscription, so both must map to the shared sub token'
+    }
+
+    It 'masks ResourceGroup to the shared resource-group token (cross-references the rest of the bundle)' {
+        $Row = script:New-FakeMarketplaceRow
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $Out.ResourceGroup | Should -Not -Be 'rg-ai-prod'
+        $Out.ResourceGroup | Should -Be $script:SharedRgToken -Because 'a resource group that also appears in Inventory_*/Metrics_* must get the SAME token here'
+    }
+
+    It 'mints a deterministic LOCAL sub token when the GUID is absent from the shared map' {
+        # A Marketplace-only subscription with nothing in the first-party inventory: no shared token
+        # exists, so the function must still mask (never leak the raw GUID) using a deterministic
+        # local token, and reuse it for the name.
+        $Row = script:New-FakeMarketplaceRow -SubscriptionGuid '99999999-9999-9999-9999-999999999999' -SubscriptionName 'Orphan Sub'
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $Out.SubscriptionGuid | Should -Not -Match '99999999-9999-9999-9999-999999999999'
+        $Out.SubscriptionGuid | Should -Match '^prod_sub_[0-9a-f]{8}-'
+        $Out.SubscriptionName | Should -Be $Out.SubscriptionGuid -Because 'name reuses the sub token minted from the GUID within the row'
+    }
+
     It 'masks the sensitive identity fields (InstanceId/ResourceGroup/SubscriptionName/InstanceName)' {
         $Row = script:New-FakeMarketplaceRow
-        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
 
         # None of the real values may survive anywhere in the masked identity fields.
         $Out.InstanceId       | Should -Not -Match 'claude-saas-01'
@@ -151,9 +197,10 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
     It 'is deterministic within a run: the same real value maps to the same token' {
         $R1 = script:New-FakeMarketplaceRow -SubscriptionName 'AI Production' -ResourceGroup 'rg-ai-prod'
         $R2 = script:New-FakeMarketplaceRow -SubscriptionName 'AI Production' -ResourceGroup 'rg-ai-prod' -InstanceName 'claude-saas-02' -InstanceId '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/claude-saas-02'
-        $O1 = ConvertTo-RdaMarketplaceRow -Row $R1 -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
-        $O2 = ConvertTo-RdaMarketplaceRow -Row $R2 -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $O1 = ConvertTo-RdaMarketplaceRow -Row $R1 -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $O2 = ConvertTo-RdaMarketplaceRow -Row $R2 -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
 
+        $O1.SubscriptionGuid | Should -Be $O2.SubscriptionGuid -Because 'the same subscription GUID must map to a stable token'
         $O1.SubscriptionName | Should -Be $O2.SubscriptionName -Because 'the same subscription name must map to a stable token so grouping/pivots still work'
         $O1.ResourceGroup    | Should -Be $O2.ResourceGroup    -Because 'the same resource group must map to a stable token'
         $O1.InstanceName     | Should -Not -Be $O2.InstanceName -Because 'distinct instances must remain distinct after masking'
@@ -169,6 +216,7 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
     It 'does not mask anything when -Obfuscate is not set' {
         $Row = script:New-FakeMarketplaceRow
         $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$false
+        $Out.SubscriptionGuid | Should -Be $Row.SubscriptionGuid
         $Out.InstanceId       | Should -Be $Row.InstanceId
         $Out.ResourceGroup    | Should -Be $Row.ResourceGroup
         $Out.SubscriptionName | Should -Be $Row.SubscriptionName
@@ -197,7 +245,7 @@ Describe 'Marketplace collector reuses the shared auth/retry decision helpers' {
         $Denied = $false
         try
         {
-            $null = Get-AzConsumptionMarketplace -StartDate (Get-Date) -EndDate (Get-Date) -Top 1000 -ErrorAction Stop
+            $null = Get-AzConsumptionMarketplace -StartDate (Get-Date) -EndDate (Get-Date) -ErrorAction Stop
         }
         catch
         {
@@ -227,7 +275,7 @@ Describe 'Marketplace collector reuses the shared auth/retry decision helpers' {
         {
             try
             {
-                $Result = @(Get-AzConsumptionMarketplace -StartDate (Get-Date) -EndDate (Get-Date) -Top 1000 -ErrorAction Stop)
+                $Result = @(Get-AzConsumptionMarketplace -StartDate (Get-Date) -EndDate (Get-Date) -ErrorAction Stop)
                 break
             }
             catch
@@ -295,5 +343,12 @@ Describe 'Collector wiring invariants' {
 
     It 'the Marketplace phase is gated by -SkipConsumption and -SkipMarketplace' {
         $script:InvSrc | Should -Match '-not \$SkipMarketplace\.IsPresent|!\$SkipMarketplace\.IsPresent'
+    }
+
+    It 'does not cap the Marketplace query with -Top (which would silently truncate >1000-row subs)' {
+        # -Top on Get-AzConsumptionMarketplace is a HARD cap, not a page size, and the cmdlet
+        # exposes no ContinuationToken to page manually - so the query must omit -Top to return
+        # every row. Guards against reintroducing the truncation.
+        $script:InvSrc | Should -Not -Match 'Get-AzConsumptionMarketplace[^\r\n]*-Top'
     }
 }

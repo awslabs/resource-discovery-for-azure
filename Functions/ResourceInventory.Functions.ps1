@@ -52,18 +52,45 @@ function Global:ConvertTo-RdaMarketplaceRow
     #   https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
     #   https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list  (api-version 2023-05-01)
     #
-    # OBFUSCATION. When -Obfuscate is active the caller passes $Obfuscate = $true and the
-    # shared caches. PublisherName / OfferName / PlanName are THIRD-PARTY PRODUCT
-    # identifiers (the "which ISV / which offer" - e.g. Anthropic-vs-not - signal), not
-    # customer secrets, so they are left READABLE by design. InstanceId is an ARM resource
-    # id and is routed through Build-ObfuscatedResourceUri (which also masks the embedded
-    # subscription and resource-group segments); ResourceGroup / SubscriptionName /
-    # InstanceName are tokenised deterministically. This matches the first-party
-    # consumption obfuscation exactly.
+    # OBFUSCATION. When -Obfuscate is active the caller passes $Obfuscate = $true. PublisherName /
+    # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer" -
+    # e.g. Anthropic-vs-not - signal), not customer secrets, so they are left READABLE by design.
+    # Every identifying field is masked:
+    #   - InstanceId is an ARM resource id, routed through Build-ObfuscatedResourceUri (which
+    #     masks the embedded subscription and resource-group segments); its leaf resource-NAME
+    #     cross-references the shared run-wide ID dictionary passed as -NameDictionary (URI-keyed),
+    #     exactly as the first-party consumption path does.
+    #   - SubscriptionGuid and SubscriptionName both identify ONE subscription, so both resolve to
+    #     the SAME token via the shared run-wide subscription dictionary ($Global:ResourceSubscriptionDictionary,
+    #     passed as -SubGuidTokenMap: a guid->token view the caller derives from it once). This is
+    #     the P0 fix: without it SubscriptionGuid shipped RAW in the obfuscated, externally-shareable
+    #     Marketplace_*.csv (no-customer-data-in-public.md). Routing it through the SHARED dictionary
+    #     (not a fresh local token) is what makes the Marketplace row cross-reference every other
+    #     sheet in the bundle for the same sub.
+    #   - ResourceGroup cross-references the shared run-wide resource-group dictionary
+    #     ($Global:ResourceResourceGroupDictionary, passed as -RgTokenMap: an rgName->token view),
+    #     so a resource group that also appears in Inventory_*/Metrics_*/Consumption_* gets the SAME
+    #     token here. When a sub/RG is absent from the shared maps (e.g. a Marketplace-only sub with
+    #     no first-party resource inventoried), a deterministic local token is minted so the row is
+    #     still internally consistent.
+    #   - InstanceName is a leaf resource name with no shared-dictionary equivalent, tokenised
+    #     deterministically within the run via the local NameCache.
+    # NOTE: this deliberately DIVERGES from the first-party consumption path for the sub/RG dimensions
+    # (consumption passes $null shared sub/RG dictionaries and emits no bare subscription-GUID column
+    # at all). The divergence is intentional: the Marketplace CSV carries explicit SubscriptionGuid /
+    # SubscriptionName / ResourceGroup columns that MUST cross-reference the rest of the bundle.
     param(
         [Parameter(Mandatory = $true)]$Row,
         [bool]$Obfuscate = $false,
-        $NameDictionary = $null,
+        # URI-keyed shared resource-ID dictionary ($Global:ResourceIdDictionary). Passed as the
+        # -NameDictionary to Build-ObfuscatedResourceUri, which keys the InstanceId leaf on the FULL
+        # resource URI (NOT the resource name) - so this must be the ID dictionary, not
+        # $Global:ResourceNameDictionary, which is keyed differently and would break the cross-reference.
+        $UriKeyedNameDictionary = $null,
+        # guid -> shared-subscription-token view, derived by the caller from $Global:ResourceSubscriptionDictionary.
+        $SubGuidTokenMap = $null,
+        # rgName -> shared-resource-group-token view, derived by the caller from $Global:ResourceResourceGroupDictionary.
+        $RgTokenMap = $null,
         [hashtable]$SubCache = $null,
         [hashtable]$RgCache = $null,
         [hashtable]$NameCache = $null
@@ -73,6 +100,7 @@ function Global:ConvertTo-RdaMarketplaceRow
     $OutResourceGroup = $Row.ResourceGroup
     $OutSubscriptionName = $Row.SubscriptionName
     $OutInstanceName = $Row.InstanceName
+    $OutSubscriptionGuid = $Row.SubscriptionGuid
 
     if ($Obfuscate)
     {
@@ -84,18 +112,40 @@ function Global:ConvertTo-RdaMarketplaceRow
 
         if (-not [string]::IsNullOrEmpty($Row.InstanceId))
         {
-            $OutInstanceId = Build-ObfuscatedResourceUri -RawUri $Row.InstanceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $NameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+            $OutInstanceId = Build-ObfuscatedResourceUri -RawUri $Row.InstanceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $UriKeyedNameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+        }
+
+        # SubscriptionGuid + SubscriptionName both identify ONE subscription. Resolve the shared
+        # subscription token from the GUID (the unambiguous key) and reuse it for BOTH, so the whole
+        # Marketplace row's subscription identity matches the token used elsewhere in the bundle.
+        # The shared token is keyed on the raw GUID (via $SubGuidTokenMap) so it survives across rows
+        # and subscriptions; $SubCache is the deterministic local fallback when the GUID is not in the
+        # shared map (a Marketplace-only sub with nothing in the first-party inventory).
+        $SharedSubToken = $null
+        if (-not [string]::IsNullOrEmpty($Row.SubscriptionGuid))
+        {
+            $SharedSubToken = Resolve-ObfuscationToken -RealValue $Row.SubscriptionGuid -LookupKey $Row.SubscriptionGuid -SharedDictionary $SubGuidTokenMap -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+            $OutSubscriptionGuid = $SharedSubToken
+        }
+
+        if (-not [string]::IsNullOrEmpty($Row.SubscriptionName))
+        {
+            if ($null -ne $SharedSubToken)
+            {
+                $OutSubscriptionName = $SharedSubToken
+            }
+            else
+            {
+                # No GUID on the row to anchor the shared token; fall back to a deterministic local
+                # token keyed by the subscription name.
+                $OutSubscriptionName = Resolve-ObfuscationToken -RealValue $Row.SubscriptionName -LookupKey $Row.SubscriptionName -SharedDictionary $null -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+            }
         }
 
         if (-not [string]::IsNullOrEmpty($Row.ResourceGroup))
         {
             $RgTag = if ($Row.ResourceGroup -match '^mc_') { 'mc_' } else { '' }
-            $OutResourceGroup = Resolve-ObfuscationToken -RealValue $Row.ResourceGroup -LookupKey $Row.ResourceGroup -SharedDictionary $null -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
-        }
-
-        if (-not [string]::IsNullOrEmpty($Row.SubscriptionName))
-        {
-            $OutSubscriptionName = Resolve-ObfuscationToken -RealValue $Row.SubscriptionName -LookupKey $Row.SubscriptionName -SharedDictionary $null -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+            $OutResourceGroup = Resolve-ObfuscationToken -RealValue $Row.ResourceGroup -LookupKey $Row.ResourceGroup -SharedDictionary $RgTokenMap -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
         }
 
         if (-not [string]::IsNullOrEmpty($Row.InstanceName))
@@ -118,7 +168,7 @@ function Global:ConvertTo-RdaMarketplaceRow
         MeterId          = $Row.MeterId
         UsageStart       = $Row.UsageStart
         UsageEnd         = $Row.UsageEnd
-        SubscriptionGuid = $Row.SubscriptionGuid
+        SubscriptionGuid = $OutSubscriptionGuid
         SubscriptionName = $OutSubscriptionName
         ResourceGroup    = $OutResourceGroup
         InstanceId       = $OutInstanceId

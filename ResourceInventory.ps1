@@ -1477,12 +1477,63 @@ function ExecuteInventoryProcessing()
         if (-not (Test-DataPlaneAuthReady -Phase 'Marketplace'))
         {
             Write-Log -Message ('Marketplace: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Marketplace consumption was requested (no -SkipConsumption / -SkipMarketplace) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+            # Uniform failed-sub shape on EVERY path (mirror $Global:ConsumptionFailedSubs): the
+            # per-sub skip/failure paths below emit Complete/RecordsCollected too, so a downstream
+            # reader (the parallel wrapper aggregation) never hits a missing property on this row.
             $Global:MarketplaceFailedSubs += [pscustomobject]@{
-                Name    = '(all subscriptions)'
-                Id      = '(auth)'
-                Message = 'Marketplace phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Name             = '(all subscriptions)'
+                Id               = '(auth)'
+                Message          = 'Marketplace phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Complete         = $false
+                RecordsCollected = 0
             }
             return
+        }
+
+        # Build guid->token and rgName->token views of the SHARED run-wide obfuscation dictionaries
+        # ONCE, so every Marketplace row masks its SubscriptionGuid/SubscriptionName/ResourceGroup to
+        # the SAME token used elsewhere in the bundle (Inventory_*/Metrics_*/Consumption_*). The shared
+        # dictionaries are keyed by resource ID, so derive:
+        #   - guid  -> subscription token, by parsing /subscriptions/<guid>/ out of each key;
+        #   - rgName -> resource-group token, by parsing /resourcegroups/<rg>/ out of each key.
+        # Both source dictionaries are deterministic (one token per sub / per RG name), so these views
+        # are well-defined. They are $null when not obfuscating; ConvertTo-RdaMarketplaceRow then mints
+        # deterministic local tokens for any sub/RG absent from the shared maps.
+        $script:MarketplaceSubGuidTokenMap = $null
+        $script:MarketplaceRgTokenMap = $null
+        if ($Obfuscate.IsPresent)
+        {
+            $script:MarketplaceSubGuidTokenMap = @{}
+            if ($null -ne $Global:ResourceSubscriptionDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceSubscriptionDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/subscriptions/([^/]+)')
+                    {
+                        $ShGuid = $Matches[1]
+                        if (-not $script:MarketplaceSubGuidTokenMap.ContainsKey($ShGuid))
+                        {
+                            $script:MarketplaceSubGuidTokenMap[$ShGuid] = $Global:ResourceSubscriptionDictionary[$ShKey]
+                        }
+                    }
+                }
+            }
+
+            $script:MarketplaceRgTokenMap = @{}
+            if ($null -ne $Global:ResourceResourceGroupDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceResourceGroupDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/resourcegroups/([^/]+)')
+                    {
+                        $ShRg = $Matches[1]
+                        if (-not $script:MarketplaceRgTokenMap.ContainsKey($ShRg))
+                        {
+                            $script:MarketplaceRgTokenMap[$ShRg] = $Global:ResourceResourceGroupDictionary[$ShKey]
+                        }
+                    }
+                }
+            }
         }
 
         foreach ($sub in $Global:Subscriptions)
@@ -1540,11 +1591,18 @@ function ExecuteInventoryProcessing()
                 {
                     try
                     {
-                        # Get-AzConsumptionMarketplace returns the full result set for the
-                        # window in one call (the Az.Billing wrapper follows the service
-                        # nextLink internally); -Top caps it defensively. It is wrapped in
-                        # the same retry/auth-refresh envelope as the first-party loop.
-                        $MarketplaceData = @(Get-AzConsumptionMarketplace -StartDate $MarketplaceStartDate -EndDate $MarketplaceEndDate -Top 1000 -ErrorAction Stop)
+                        # Get-AzConsumptionMarketplace (Az.Billing 2.2.0) returns the FULL result
+                        # set for the window in one call: the cmdlet follows the service nextLink
+                        # internally to exhaustion, and there is NO ContinuationToken parameter to
+                        # page manually (unlike the first-party Get-UsageAggregates loop). Verified
+                        # against the installed cmdlet (Get-Command Get-AzConsumptionMarketplace ->
+                        # Az.Billing 2.2.0) and the docs: -Top is documented as "the maximum number
+                        # of records to return" (default None), i.e. a HARD CAP, not a page size -
+                        # so passing -Top 1000 would SILENTLY TRUNCATE a subscription with >1000
+                        # Marketplace rows. It is therefore OMITTED so all rows are returned.
+                        #   https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
+                        # It is wrapped in the same retry/auth-refresh envelope as the first-party loop.
+                        $MarketplaceData = @(Get-AzConsumptionMarketplace -StartDate $MarketplaceStartDate -EndDate $MarketplaceEndDate -ErrorAction Stop)
                         break
                     }
                     catch
@@ -1630,8 +1688,13 @@ function ExecuteInventoryProcessing()
                     # Field mapping + obfuscation live in ConvertTo-RdaMarketplaceRow
                     # (Functions/ResourceInventory.Functions.ps1) so the exact same code path
                     # is unit-tested. Product identifiers (PublisherName/OfferName/PlanName)
-                    # stay readable; InstanceId/ResourceGroup/SubscriptionName/InstanceName
-                    # flow through the shared obfuscation caches when -Obfuscate is set.
+                    # stay readable; SubscriptionGuid/SubscriptionName/ResourceGroup are masked
+                    # to the SAME tokens used elsewhere in the bundle via the shared run-wide
+                    # dictionaries (passed as the guid/rgName token maps built above and the
+                    # URI-keyed ID dictionary), while InstanceId/InstanceName tokenise through
+                    # the per-run local Marketplace caches. This deliberately DIFFERS from the
+                    # first-party consumption path, which emits no bare subscription-GUID column
+                    # and passes $null shared sub/RG dictionaries.
                     if ($Obfuscate.IsPresent)
                     {
                         if (-not $script:MarketplaceSubCache) { $script:MarketplaceSubCache = @{} }
@@ -1639,7 +1702,7 @@ function ExecuteInventoryProcessing()
                         if (-not $script:MarketplaceNameCache) { $script:MarketplaceNameCache = @{} }
                     }
 
-                    $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -NameDictionary $Global:ResourceIdDictionary -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache))
+                    $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache))
                 }
 
                 if ($MarketplaceExport.Count -gt 0)

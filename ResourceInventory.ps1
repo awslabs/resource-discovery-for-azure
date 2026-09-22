@@ -1473,6 +1473,13 @@ function ExecuteInventoryProcessing()
         if ($null -eq $Global:MarketplaceRecordCount) { $Global:MarketplaceRecordCount = 0 }
         if ($null -eq $Global:MarketplaceFailedSubs) { $Global:MarketplaceFailedSubs = @() }
         if ($null -eq $script:MarketplaceRecordsThisRun) { $script:MarketplaceRecordsThisRun = 0 }
+        # Per-INVOCATION failure count. The $Global: counterparts deliberately accumulate so the
+        # multi-subscription wrapper can aggregate them, but the wrapper invokes this script once
+        # per subscription with the CALL OPERATOR (&) in the same process. That is load-bearing
+        # here: `&` gives each invocation a fresh script scope, so $script: is per-invocation while
+        # $Global: carries over from the previous subscription. The confirmed-zero notice below must
+        # describe THIS invocation only, so it reads the $script:-scoped pair instead.
+        if ($null -eq $script:MarketplaceFailedSubsThisRun) { $script:MarketplaceFailedSubsThisRun = 0 }
 
         if (-not (Test-DataPlaneAuthReady -Phase 'Marketplace'))
         {
@@ -1570,6 +1577,11 @@ function ExecuteInventoryProcessing()
                     Complete         = $false
                     RecordsCollected = 0
                 }
+                # Count this toward the per-invocation failure total too. Without it the
+                # confirmed-zero notice below would fire for a run whose only subscription was
+                # skipped here, asserting the endpoint "was reached successfully and returned no
+                # rows" when no query was ever issued.
+                $script:MarketplaceFailedSubsThisRun++
                 continue
             }
 
@@ -1731,6 +1743,7 @@ function ExecuteInventoryProcessing()
                     Complete         = $false
                     RecordsCollected = $MarketplaceRecordsThisSub
                 }
+                $script:MarketplaceFailedSubsThisRun++
             }
         }
 
@@ -1832,6 +1845,14 @@ function ExecuteInventoryProcessing()
             $script:PhaseTimings['Marketplace consumption collection (billing)'] = $MarketplacePhaseTimer.Elapsed
         }
     }
+    elseif (!$SkipMarketplace.IsPresent)
+    {
+        # -SkipConsumption implies -SkipMarketplace because the Marketplace endpoint needs the
+        # same billing access and Azure context. Say so out loud: the operator asked to skip
+        # first-party consumption, NOT Marketplace, and the only other trace is a header-only
+        # Marketplace CSV, which is indistinguishable from a confirmed zero.
+        Write-Log -Message ('Marketplace: SKIPPED because -SkipConsumption was passed (the Marketplace endpoint needs the same billing access, so -SkipConsumption implies it). This is NOT a confirmed zero - no Marketplace query was issued. Pass -SkipMarketplace on its own to make this explicit, or drop -SkipConsumption to collect Marketplace charges.') -Severity 'Warning'
+    }
 }
 
 function FinalizeOutputs
@@ -1859,9 +1880,44 @@ function FinalizeOutputs
         }
         catch
         {
-            Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
-            Write-Log -Message ("The Inventory/Metrics/Consumption data files were still written to {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
-            throw
+            # Record the REAL cause and carry it to the single failure gate at the end of the
+            # script, which owns the "report this subscription as FAILED + exit 2" contract the
+            # wrapper reads. A bare `throw` here did NOT halt (the global $ErrorActionPreference
+            # is SilentlyContinue outside -Debug), so the run continued into packaging and failed
+            # again on a downstream symptom, reporting that instead of this. Halting here
+            # directly would be worse still: it would skip the obfuscation dictionary, which is
+            # the de-obfuscation key for whatever data files this run DID write.
+            $script:HtmlWriteError = $_.Exception.Message
+            Write-Log -Message ("HTML report generation FAILED: {0}" -f $script:HtmlWriteError) -Severity 'Error'
+
+            # Say only what is true. Do NOT assert the data files were written - when this failed
+            # because the output paths were never initialised, none of them exist.
+            # Metrics is checked by GLOB, not by $Global:MetricsJsonFile. Extension/Metrics.ps1
+            # writes SHARDED Metrics_<ReportName>_<stamp>_*.json files; the unsharded path is only
+            # created by the empty-metrics fallback in the packaging block, which runs AFTER this.
+            # Testing the single path here would report "not written" while real shards sit on disk.
+            $MetricsGlob = if ([string]::IsNullOrWhiteSpace($Global:MetricsJsonFile)) { $null }
+            else { [IO.Path]::Combine((Split-Path -LiteralPath $Global:MetricsJsonFile -Parent), ((Split-Path -LiteralPath $Global:MetricsJsonFile -Leaf) -replace '\.json$', '*.json')) }
+
+            $WrittenOutputs = @(
+                @{ Label = 'Inventory JSON'; Path = $Global:JsonFile }
+                @{ Label = 'Consumption CSV'; Path = $Global:ConsumptionFileCsv }
+                @{ Label = 'Marketplace CSV'; Path = $Global:MarketplaceFileCsv }
+            ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Path) -and (Test-Path -LiteralPath $_.Path -PathType Leaf) }
+
+            if ($MetricsGlob -and @(Get-ChildItem -Path $MetricsGlob -File -ErrorAction SilentlyContinue).Count -gt 0)
+            {
+                $WrittenOutputs = @($WrittenOutputs) + @{ Label = 'Metrics JSON' }
+            }
+
+            if ($WrittenOutputs.Count -gt 0)
+            {
+                Write-Log -Message ("No HTML report or zip was produced for this run. These data files WERE written to {0}: {1}." -f $Global:DefaultPath, (($WrittenOutputs | ForEach-Object { $_.Label }) -join ', ')) -Severity 'Error'
+            }
+            else
+            {
+                Write-Log -Message ("No HTML report or zip was produced for this run, and NO data files were written either - the run produced no report output at all. Re-run with -Debug to see the underlying error.") -Severity 'Error'
+            }
         }
     }
 
@@ -2236,6 +2292,25 @@ if ($null -eq $ZipWriteError)
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
+
+# A failed HTML report is a failed run, and it is the CAUSE of an archive failure rather than a
+# peer of it - the compression list always includes $Global:HtmlFile, so a report that was never
+# written necessarily fails the zip too. Name the real cause here, then route into the single
+# failure gate below rather than exiting directly: that gate owns removing an unusable archive so
+# the wrapper cannot consolidate a corrupt member, and duplicating that cleanup here would give
+# it two owners.
+if (-not [string]::IsNullOrWhiteSpace($script:HtmlWriteError))
+{
+    Write-Log -Message ('FAILED to produce the HTML report, so this run has no usable report bundle.') -Severity 'Error'
+    Write-Log -Message ("  Cause: {0}" -f $script:HtmlWriteError) -Severity 'Error'
+    # Append rather than replace: usually the compression error is just a derived symptom of the
+    # missing report, but it can be an INDEPENDENT packaging failure (disk full, destination locked,
+    # AV/DLP quarantine) and that text is the only record of it.
+    $HtmlReason = ("the HTML report it must contain was never produced ({0})" -f $script:HtmlWriteError)
+    $ZipWriteError = if ([string]::IsNullOrWhiteSpace($ZipWriteError)) { $HtmlReason }
+    else { ("{0}; the archive write also reported: {1}" -f $HtmlReason, $ZipWriteError) }
+    $ZipVerified = $false
+}
 
 if (-not $ZipVerified)
 {

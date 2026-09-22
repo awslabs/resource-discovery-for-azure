@@ -27,10 +27,13 @@ BeforeAll {
     $script:Repo = Split-Path $PSScriptRoot -Parent
     $script:FunctionsPath = Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1'
     $script:CommonPath = Join-Path $script:Repo 'Functions/Common.Functions.ps1'
-
+    $script:InvPath = Join-Path $script:Repo 'ResourceInventory.ps1'
     . $script:FunctionsPath
     . $script:CommonPath
-
+    # Read once here rather than per-It: the source-asserting guards below consume it, and
+    # leaving it unset makes them match against $null, which misreads as a failure of the
+    # code they guard rather than as missing setup.
+    $script:InvSrc = Get-Content -LiteralPath $script:InvPath -Raw
     # A representative Marketplace row shaped like PSMarketplace. Property names are the
     # documented ones (verified against the installed cmdlet's output type). Uses a
     # deliberately Anthropic-flavoured publisher/offer so the test proves those product

@@ -116,6 +116,8 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $script:Sub = @{}
         $script:Rg = @{}
         $script:Nm = @{}
+        # OrderNumber's own local cache, owned by the caller exactly as the collector owns it.
+        $script:Ord = @{}
         # Shared run-wide dictionary VIEWS the collector derives from $Global:ResourceSubscriptionDictionary
         # / $Global:ResourceResourceGroupDictionary. Keyed the way the function consumes them:
         # guid -> shared sub token, rgName -> shared rg token. A real bundle would have these already
@@ -218,6 +220,35 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $Out.ResourceGroup    | Should -Be $Row.ResourceGroup
         $Out.SubscriptionName | Should -Be $Row.SubscriptionName
         $Out.InstanceName     | Should -Be $Row.InstanceName
+        $Out.OrderNumber      | Should -Be $Row.OrderNumber
+    }
+
+    It 'masks OrderNumber under -Obfuscate (a customer PURCHASE identifier, unlike the product fields)' {
+        # Records the deliberate decision: PublisherName/OfferName/PlanName say WHICH PRODUCT was
+        # bought and stay readable; OrderNumber says WHO bought it under which order, so it is
+        # masked. Without this assertion the choice is unrecorded and either behaviour looks correct.
+        $Row = script:New-FakeMarketplaceRow
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+
+        $Out.OrderNumber | Should -Not -Be 'ORD-4242'
+        $Out.OrderNumber | Should -Not -Match 'ORD-4242'
+        $Out.OrderNumber | Should -Not -BeNullOrEmpty -Because 'masking must replace the value, not drop the column'
+        $Out.OrderNumber | Should -Match '^(non)?prod_order_' -Because 'it carries its own token namespace so it is recognisable in the CSV'
+    }
+
+    It 'masks OrderNumber deterministically, and never shares a token with an identically-spelled instance name' {
+        # Resolve-ObfuscationToken keys its LocalCache by the REAL VALUE (-LookupKey is consulted
+        # only for a SharedDictionary), so OrderNumber must get a cache SEPARATE from InstanceName's.
+        # Share one cache and an order number spelled like a resource name returns whichever token
+        # was minted first, implying a relationship that does not exist. Namespacing the lookup key
+        # does NOT fix it, because -LookupKey is never consulted for a local-cache hit.
+        $Collide = script:New-FakeMarketplaceRow -InstanceName 'ORD-4242'
+
+        $A = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+        $B = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+
+        $A.OrderNumber | Should -Be $B.OrderNumber -Because 'the same real value must map to the same token within a run'
+        $A.OrderNumber | Should -Not -Be $A.InstanceName -Because 'a cache of its own must keep the two dimensions distinct'
     }
 }
 
@@ -341,5 +372,51 @@ Describe 'Confirmed-zero honest negative' {
         {
             $Global:MarketplaceFailedSubs = $SavedMk
         }
+    }
+
+    It 'calls every function it defines inside ExecuteInventoryProcessing' {
+        # REGRESSION GUARD. Adding GetMarketplaceConsumption to ExecuteInventoryProcessing once
+        # overwrote the `InitializeInventoryProcessing` call that sat at that exact spot. The
+        # definition survived, the invocation did not, so no output-path global was ever set:
+        # $Global:JsonFile and $Global:ZipOutputFile were empty, Summary.ps1 threw on its guard,
+        # the archive write got a null -LiteralPath, and the run produced no report at all.
+        #
+        # Nothing caught it - it parses, it lints, and every offline suite passed against the
+        # broken tree, because a defined-but-never-called nested function is perfectly valid
+        # PowerShell. This asserts on the AST rather than on text, so it catches the whole class
+        # (any nested helper that loses its call site), not just the one occurrence.
+        # Capture the parse errors rather than discarding them: on a parse failure FindAll would
+        # return nothing and every assertion below would pass vacuously.
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$ParseErrors)
+        @($ParseErrors).Count | Should -Be 0 -Because 'a parse failure would make this guard pass vacuously'
+
+        $Outer = $Ast.FindAll(
+            { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'ExecuteInventoryProcessing' },
+            $true) | Select-Object -First 1
+        $Outer | Should -Not -BeNullOrEmpty -Because 'the orchestrator function must exist for this guard to mean anything'
+
+        $Defined = @($Outer.FindAll(
+                { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ne 'ExecuteInventoryProcessing' },
+                $true) | ForEach-Object { $_.Name })
+        $Defined.Count | Should -BeGreaterThan 0 -Because 'a positive control: this guard is vacuous if no nested functions are found'
+
+        # Every bare-word command invoked anywhere inside the outer function.
+        $Invoked = @($Outer.FindAll(
+                { param($n) $n -is [System.Management.Automation.Language.CommandAst] },
+                $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+
+        $NeverCalled = @($Defined | Where-Object { $Invoked -notcontains $_ })
+        $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'a nested function defined but never invoked is dead wiring - most likely a call site that was overwritten'
+    }
+
+    It 'passes a dedicated -OrderCache at the Marketplace row call site' {
+        # Without this, dropping -OrderCache from the collector would leave every test above green
+        # while every Marketplace row got a freshly minted order token - an obfuscation-determinism
+        # regression in the shareable CSV that no behavioural test here can see, because the unit
+        # tests supply their own cache.
+        $script:InvSrc | Should -Match 'ConvertTo-RdaMarketplaceRow[^\r\n]*-OrderCache'
+        # And the cache must be the run-scoped one, not a literal @{} minted per row.
+        $script:InvSrc | Should -Match '-OrderCache \$script:MarketplaceOrderCache'
     }
 }

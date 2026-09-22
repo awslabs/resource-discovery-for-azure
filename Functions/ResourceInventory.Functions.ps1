@@ -56,6 +56,9 @@ function Global:ConvertTo-RdaMarketplaceRow
     # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer" -
     # e.g. Anthropic-vs-not - signal), not customer secrets, so they are left READABLE by design.
     # Every identifying field is masked:
+    #   - OrderNumber is masked, unlike the three product fields above, because it identifies a
+    #     specific customer PURCHASE rather than a product. See the $OrderCache param and the
+    #     inline block below for why it needs a cache of its own.
     #   - InstanceId is an ARM resource id, routed through Build-ObfuscatedResourceUri (which
     #     masks the embedded subscription and resource-group segments); its leaf resource-NAME
     #     cross-references the shared run-wide ID dictionary passed as -NameDictionary (URI-keyed),
@@ -93,7 +96,11 @@ function Global:ConvertTo-RdaMarketplaceRow
         $RgTokenMap = $null,
         [hashtable]$SubCache = $null,
         [hashtable]$RgCache = $null,
-        [hashtable]$NameCache = $null
+        [hashtable]$NameCache = $null,
+        # OrderNumber needs its OWN cache, not $NameCache: Resolve-ObfuscationToken keys its local
+        # cache by the REAL VALUE, so sharing a cache with InstanceName would make an order number
+        # and an identically-spelled resource name collapse onto one token.
+        [hashtable]$OrderCache = $null
     )
 
     $OutInstanceId = $Row.InstanceId
@@ -101,12 +108,14 @@ function Global:ConvertTo-RdaMarketplaceRow
     $OutSubscriptionName = $Row.SubscriptionName
     $OutInstanceName = $Row.InstanceName
     $OutSubscriptionGuid = $Row.SubscriptionGuid
+    $OutOrderNumber = $Row.OrderNumber
 
     if ($Obfuscate)
     {
         if ($null -eq $SubCache) { $SubCache = @{} }
         if ($null -eq $RgCache) { $RgCache = @{} }
         if ($null -eq $NameCache) { $NameCache = @{} }
+        if ($null -eq $OrderCache) { $OrderCache = @{} }
 
         $Prefix = if ("$($Row.InstanceId) $($Row.InstanceName) $($Row.ResourceGroup)" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$($Row.InstanceId)" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
 
@@ -152,13 +161,26 @@ function Global:ConvertTo-RdaMarketplaceRow
         {
             $OutInstanceName = Resolve-ObfuscationToken -RealValue $Row.InstanceName -LookupKey $Row.InstanceName -SharedDictionary $null -LocalCache $NameCache -TokenPrefix $Prefix
         }
+
+        # OrderNumber identifies a specific customer PURCHASE, which is why it is masked while
+        # PublisherName / OfferName / PlanName stay readable - those say WHICH PRODUCT was bought
+        # (the signal the report exists to carry), this says WHO bought it and under which order.
+        # There is no shared dictionary for it, so it is tokenised deterministically within the run
+        # from its OWN $OrderCache. It must NOT share $NameCache: Resolve-ObfuscationToken keys the
+        # local cache by the REAL VALUE, so an order number and an identically-spelled instance name
+        # would otherwise return whichever token was minted first and imply a relationship between
+        # two unrelated dimensions.
+        if (-not [string]::IsNullOrEmpty($Row.OrderNumber))
+        {
+            $OutOrderNumber = Resolve-ObfuscationToken -RealValue $Row.OrderNumber -LookupKey $Row.OrderNumber -SharedDictionary $null -LocalCache $OrderCache -TokenPrefix ($Prefix + 'order_')
+        }
     }
 
     return [PSCustomObject]@{
         PublisherName    = $Row.PublisherName
         OfferName        = $Row.OfferName
         PlanName         = $Row.PlanName
-        OrderNumber      = $Row.OrderNumber
+        OrderNumber      = $OutOrderNumber
         ConsumedService  = $Row.ConsumedService
         ConsumedQuantity = $Row.ConsumedQuantity
         UnitOfMeasure    = $Row.UnitOfMeasure

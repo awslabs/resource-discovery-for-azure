@@ -454,7 +454,8 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | Cost and billing data (first-party Azure usage) |
+| `Marketplace_ResourcesReport_(date).csv` | Azure Marketplace / third-party SaaS usage (additive; see [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas)). Empty header-only file when there are no Marketplace charges (a confirmed zero) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
@@ -575,6 +576,7 @@ Everything untagged is accepted by both, and the wrapper forwards it to the inne
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipMarketplace` | Switch | Skip **only** the additive Azure Marketplace / third-party SaaS consumption collector (`Get-AzConsumptionMarketplace` → `Marketplace_*.csv`); first-party consumption is unaffected. Implied by `-SkipConsumption`. Reuses the same Cost Management Reader / Billing Reader access — no new role. See [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas). | False | `-SkipMarketplace` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
 | `IncludeStorageMetrics` | Switch | **Opt in** to the Storage Account `UsedCapacity` metric. It is **not collected by default**, because it costs one metric-query call per storage account and on a tenant with a very large storage estate that single capacity figure can dominate the metrics phase. Pass this when storage capacity is actually wanted. | False | `-IncludeStorageMetrics` |
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
@@ -654,7 +656,7 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 ### Run-AllSubscriptions Wrapper Parameters
 
 These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`,
-`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipMarketplace`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
 `-MetricsIntervalMinutes`, `-MetricsLookbackDays`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
 `ResourceInventory.ps1`, so they behave the same in both contexts (see
 [Performance Parameters](#performance-parameters) for the metric-volume controls).
@@ -673,6 +675,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
 | `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `SkipMarketplace` | Switch | Forwarded. Skip **only** the additive Marketplace consumption collector (`Marketplace_*.csv`); first-party consumption still runs. Implied by `-SkipConsumption`. | False | `-SkipMarketplace` |
 | `CapacityPlan` | Switch | Forwarded. **Opt in** to the tenant-wide `VMPlacement.csv` capacity-planning CSV. Off by default, so no `VMPlacement*.csv` is produced, aggregated, or folded into the bundle unless this is passed. See [Performance Parameters](#performance-parameters). | False | `-CapacityPlan` |
 | `Service` | String[] | Forwarded. Scope collection to ONLY these service collectors (by their `Services/*.ps1` base name, e.g. `VirtualMachines`, `Streamanalytics`), across every in-scope subscription — the rest are not collected. Useful for a migration that only cares about certain workloads. Accepts a comma list as one token or a PowerShell array; unknown names fail fast up front with the valid list. Omit to collect all services. | *(all)* | `-Service VirtualMachines,Streamanalytics` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
@@ -750,6 +753,8 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 | `5` | Both `3` and `4` occurred in the same run. |
 
 Codes `3`–`5` still mean the report was produced - they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result. Code `2` is stronger: a subscription's report is absent from the bundle entirely, so it is reported even when `3`, `4` or `5` also applies.
+
+**Marketplace is a soft, best-effort phase and does NOT affect the exit code.** A Marketplace-only failure or auth-skip does not flip the wrapper exit code to non-zero and does not trigger the automatic support-log bundle. This is a deliberate choice matching Marketplace's optional, additive nature (it is the third-party / Marketplace-SaaS slice of consumption, opt-out via `-SkipMarketplace` and implied-skipped by `-SkipConsumption`). Marketplace health is still surfaced loudly — a `Marketplace Failures:` block in the console summary, a `Marketplace failed subs` / `Marketplace records collected` line in the shareable `RunSummary.log` Health block, and a banner in `MainSummary.html` — so a truncated or empty Marketplace CSV is never silent; it simply does not, by itself, mark the whole run failed. First-party Consumption, by contrast, participates fully in the exit code (auth-skips map to code `3`).
 
 `ResourceInventory.ps1` (the per-subscription inner script) sets its own exit code, which the wrapper reads: `0` = success, `1` = a hard pre-flight/setup failure, `2` = collection finished but the report archive could not be written. The wrapper treats any non-zero as "this subscription failed" and maps an inner `2` to its own `2`.
 

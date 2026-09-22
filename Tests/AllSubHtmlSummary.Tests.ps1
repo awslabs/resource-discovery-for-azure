@@ -424,7 +424,8 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
             -TenantId $RealTenant `
             -FailedSubscriptions @('Contoso-Prod-Sub') `
             -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) `
-            -MetricsFailedSubs @([pscustomobject]@{ Name = 'Northwind-Metrics'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+            -MetricsFailedSubs @([pscustomobject]@{ Name = 'Northwind-Metrics'; Id = '12345678-1234-1234-1234-123456789012' }) `
+            -MarketplaceFailedSubs @([pscustomobject]@{ Name = 'Adventureworks-Marketplace'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
         $Html = Get-Content -Path $Out -Raw
 
         # No real identifiers reach the shareable summary.
@@ -433,10 +434,12 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
         $Html | Should -Not -Match 'Contoso-Prod-Sub'
         $Html | Should -Not -Match 'Fabrikam-Billing'
         $Html | Should -Not -Match 'Northwind-Metrics'
+        $Html | Should -Not -Match 'Adventureworks-Marketplace'
         # But the banners (and their counts) still render so the operator sees the health signal.
         $Html | Should -Match 'failed to process'
         $Html | Should -Match 'consumption \(billing\) issues'
         $Html | Should -Match 'metrics issues'
+        $Html | Should -Match 'Marketplace \(third-party SaaS billing\) issues'
     }
 
     It 'without -Obfuscated a non-obfuscated bundle still lists the affected subscription names' {
@@ -446,11 +449,13 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
 
         New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out `
             -TenantId '12345678-1234-1234-1234-123456789012' `
-            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) `
+            -MarketplaceFailedSubs @([pscustomobject]@{ Name = 'Adventureworks-Marketplace'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
         $Html = Get-Content -Path $Out -Raw
 
         $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
         $Html | Should -Match '12345678-1234-1234-1234-123456789012' -Because 'an identifiable bundle renders the actual tenant value, not just the label (mirror of the -Obfuscated suppression check)'
         $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
+        $Html | Should -Match 'Adventureworks-Marketplace' -Because 'an identifiable bundle names the affected Marketplace subs too'
     }
 }

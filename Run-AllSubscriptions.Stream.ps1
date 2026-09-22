@@ -22,6 +22,7 @@ param (
     [switch] $Obfuscate,
     [switch] $SkipMetrics,
     [switch] $SkipConsumption,
+    [switch] $SkipMarketplace,
     [switch] $UseMetricsBatch,
     [switch] $IncludeStorageMetrics,
     [switch] $SkipDiskMetrics,
@@ -78,6 +79,8 @@ if ($SubscriptionIds.Count -eq 0)
         ConsumptionRecords    = 0
         ConsumptionFailedSubs = @()
         MetricsFailedSubs     = @()
+        MarketplaceRecords    = 0
+        MarketplaceFailedSubs = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 0
 }
@@ -155,6 +158,7 @@ if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($SkipMarketplace) { $InventoryPassthrough['SkipMarketplace'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
@@ -177,6 +181,9 @@ $Global:ConsumptionFailedSubs = @()
 $Global:MetricsApiCallCount = 0
 
 $Global:MetricsFailedSubs = @()
+
+$Global:MarketplaceRecordCount = 0
+$Global:MarketplaceFailedSubs = @()
 
 $Global:CollectorFailures = @()
 
@@ -270,8 +277,10 @@ for ($i = 0; $i -lt $PairCount; $i++)
 
 $ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
 $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
+$MarketplaceTotal = if ($null -ne $Global:MarketplaceRecordCount) { [int]$Global:MarketplaceRecordCount } else { 0 }
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
 $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+$MarketplaceFailedSubs = if ($null -ne $Global:MarketplaceFailedSubs) { @($Global:MarketplaceFailedSubs) } else { @() }
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
 
 $Summary = [pscustomobject]@{
@@ -284,8 +293,10 @@ $Summary = [pscustomobject]@{
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
     MetricsApiCalls        = $MetricsApiCallTotal
+    MarketplaceRecords     = $MarketplaceTotal
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
     MetricsFailedSubs      = @($MetricsFailedSubs)
+    MarketplaceFailedSubs  = @($MarketplaceFailedSubs)
     CollectorFailures      = @($CollectorFailures)
     ArchiveWriteFailures   = @($ArchiveWriteFailures)
 }

@@ -15,6 +15,7 @@ param ($TenantID,
     [switch]$IncludeStorageMetrics,
     [switch]$UseMetricsBatch,
     [switch]$SkipConsumption,
+    [switch]$SkipMarketplace,
     [switch]$Obfuscate,
     [string]$ObfuscationDictionary,
     [switch]$RunAllSubs,
@@ -686,6 +687,7 @@ function ExecuteInventoryProcessing()
         $Global:JsonFile = ($DefaultPath + "Inventory_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+        $Global:MarketplaceFileCsv = ($DefaultPath + "Marketplace_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
 
         if ($RunAllSubs.IsPresent)
         {
@@ -1419,7 +1421,333 @@ function ExecuteInventoryProcessing()
 
     }
 
-    InitializeInventoryProcessing
+    function GetMarketplaceConsumption()
+    {
+        # ADDITIVE Marketplace consumption collector.
+        #
+        # WHY THIS EXISTS. The first-party consumption collector above uses
+        # Get-UsageAggregates (legacy Microsoft.Commerce/UsageAggregates), which
+        # returns ONLY first-party Azure metered usage and carries no PublisherType.
+        # Azure Marketplace / third-party SaaS charges (e.g. an ISV offer sold via
+        # Azure Marketplace, such as an Anthropic/Claude offer surfaced through Azure
+        # AI Foundry) live behind a DIFFERENT endpoint that RDA never called, so
+        # Marketplace usage was invisible regardless of whether any existed. This
+        # closes that endpoint-coverage gap.
+        #
+        # ENDPOINT (verified against Microsoft docs):
+        #   Get-AzConsumptionMarketplace (Az.Billing - already imported by RDA, so NO
+        #   new module dependency). Raw REST equivalent:
+        #     GET .../providers/Microsoft.Consumption/marketplaces?api-version=2023-05-01
+        #     (optionally billing-period-scoped)
+        #   Docs: https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list
+        #   Cmdlet: https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
+        #   Parameters used (-StartDate/-EndDate/-Top) confirmed via
+        #   `Get-Help Get-AzConsumptionMarketplace -Full` on the installed Az.Billing 2.2.0.
+        #
+        # DISCRIMINATOR. On the modern usageDetails / Cost Management dimension the
+        # discriminator is PublisherType ('Azure' = first-party, 'Marketplace' =
+        # third-party). The Marketplace endpoint returns ONLY Marketplace rows (its
+        # PSMarketplace output type has no PublisherType property at all), so NO
+        # client-side filtering is needed - every row it returns is a Marketplace row.
+        #
+        # ROLE. Reuses the SAME Cost Management Reader / Billing Reader requirement the
+        # first-party consumption phase already needs - NO new role. The auth gate,
+        # per-subscription context re-pin, denial short-circuit, auth-expiry refresh
+        # (with re-pin) and Retry-After/backoff below are the SAME pattern the
+        # Get-UsageAggregates loop uses, deliberately reused rather than reinvented.
+        #
+        # OUTPUT. Writes a SEPARATE Marketplace_<ReportName>_<stamp>.csv - the existing
+        # Consumption_* schema and first-party path are untouched. Column set is the
+        # documented PSMarketplace schema (property names verified from the installed
+        # cmdlet's output type).
+
+        $DebugPreference = "SilentlyContinue"
+
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
+
+        # Match the first-party consumption window: previous 31 days through yesterday.
+        $MarketplaceStartDate = (Get-Date).AddDays(-31).Date
+        $MarketplaceEndDate = (Get-Date).AddDays(-1).Date
+
+        if ($null -eq $Global:MarketplaceRecordCount) { $Global:MarketplaceRecordCount = 0 }
+        if ($null -eq $Global:MarketplaceFailedSubs) { $Global:MarketplaceFailedSubs = @() }
+        if ($null -eq $script:MarketplaceRecordsThisRun) { $script:MarketplaceRecordsThisRun = 0 }
+
+        if (-not (Test-DataPlaneAuthReady -Phase 'Marketplace'))
+        {
+            Write-Log -Message ('Marketplace: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Marketplace consumption was requested (no -SkipConsumption / -SkipMarketplace) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+            # Uniform failed-sub shape on EVERY path (mirror $Global:ConsumptionFailedSubs): the
+            # per-sub skip/failure paths below emit Complete/RecordsCollected too, so a downstream
+            # reader (the parallel wrapper aggregation) never hits a missing property on this row.
+            $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                Name             = '(all subscriptions)'
+                Id               = '(auth)'
+                Message          = 'Marketplace phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Complete         = $false
+                RecordsCollected = 0
+            }
+            return
+        }
+
+        # Build guid->token and rgName->token views of the SHARED run-wide obfuscation dictionaries
+        # ONCE, so every Marketplace row masks its SubscriptionGuid/SubscriptionName/ResourceGroup to
+        # the SAME token used elsewhere in the bundle (Inventory_*/Metrics_*/Consumption_*). The shared
+        # dictionaries are keyed by resource ID, so derive:
+        #   - guid  -> subscription token, by parsing /subscriptions/<guid>/ out of each key;
+        #   - rgName -> resource-group token, by parsing /resourcegroups/<rg>/ out of each key.
+        # Both source dictionaries are deterministic (one token per sub / per RG name), so these views
+        # are well-defined. They are $null when not obfuscating; ConvertTo-RdaMarketplaceRow then mints
+        # deterministic local tokens for any sub/RG absent from the shared maps.
+        $script:MarketplaceSubGuidTokenMap = $null
+        $script:MarketplaceRgTokenMap = $null
+        if ($Obfuscate.IsPresent)
+        {
+            $script:MarketplaceSubGuidTokenMap = @{}
+            if ($null -ne $Global:ResourceSubscriptionDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceSubscriptionDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/subscriptions/([^/]+)')
+                    {
+                        $ShGuid = $Matches[1]
+                        if (-not $script:MarketplaceSubGuidTokenMap.ContainsKey($ShGuid))
+                        {
+                            $script:MarketplaceSubGuidTokenMap[$ShGuid] = $Global:ResourceSubscriptionDictionary[$ShKey]
+                        }
+                    }
+                }
+            }
+
+            $script:MarketplaceRgTokenMap = @{}
+            if ($null -ne $Global:ResourceResourceGroupDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceResourceGroupDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/resourcegroups/([^/]+)')
+                    {
+                        $ShRg = $Matches[1]
+                        if (-not $script:MarketplaceRgTokenMap.ContainsKey($ShRg))
+                        {
+                            $script:MarketplaceRgTokenMap[$ShRg] = $Global:ResourceResourceGroupDictionary[$ShKey]
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach ($sub in $Global:Subscriptions)
+        {
+            if (![string]::IsNullOrEmpty($SubscriptionID))
+            {
+                if ($SubscriptionID -ne $sub.Id)
+                {
+                    Write-Log -Message ("Skipping (Marketplace): {0}" -f $sub.Name) -Severity 'Info'
+                    continue
+                }
+            }
+
+            $MpContextOk = $false
+            $MpContextSwitchError = $null
+            try
+            {
+                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $MpContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+            }
+            catch
+            {
+                $MpContextSwitchError = $_.Exception.Message
+            }
+
+            if (-not $MpContextOk)
+            {
+                $SkipMessage = ("Marketplace SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's Marketplace billing data to this one." -f $(if ($MpContextSwitchError) { " ($MpContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                Write-Log -Message ("Marketplace: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
+                $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $SkipMessage
+                    Complete         = $false
+                    RecordsCollected = 0
+                }
+                continue
+            }
+
+            Write-Log -Message ("Gathering Marketplace consumption for: {0}" -f $sub.Name) -Severity 'Info'
+
+            $MarketplaceRecordsThisSub = 0
+            $MarketplaceFailedThisSub = $false
+            $MarketplaceFailureMessage = $null
+            $MarketplaceData = $null
+
+            try
+            {
+                $MpMaxRetries = 30
+                $MpAttempt = 0
+                $MpAuthRefreshedThisCall = $false
+                $MpAuthRefreshMax = 3
+                $MpAuthRefreshCount = 0
+                while ($true)
+                {
+                    try
+                    {
+                        # Get-AzConsumptionMarketplace (Az.Billing 2.2.0) returns the FULL result
+                        # set for the window in one call: the cmdlet follows the service nextLink
+                        # internally to exhaustion, and there is NO ContinuationToken parameter to
+                        # page manually (unlike the first-party Get-UsageAggregates loop). Verified
+                        # against the installed cmdlet (Get-Command Get-AzConsumptionMarketplace ->
+                        # Az.Billing 2.2.0) and the docs: -Top is documented as "the maximum number
+                        # of records to return" (default None), i.e. a HARD CAP, not a page size -
+                        # so passing -Top 1000 would SILENTLY TRUNCATE a subscription with >1000
+                        # Marketplace rows. It is therefore OMITTED so all rows are returned.
+                        #   https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
+                        # It is wrapped in the same retry/auth-refresh envelope as the first-party loop.
+                        $MarketplaceData = @(Get-AzConsumptionMarketplace -StartDate $MarketplaceStartDate -EndDate $MarketplaceEndDate -ErrorAction Stop)
+                        break
+                    }
+                    catch
+                    {
+                        if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                        {
+                            Write-Log -Message ("Marketplace query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($MpAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                            throw
+                        }
+
+                        if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
+                        {
+                            $MpAuthRefreshedThisCall = $true
+                            $MpAuthRefreshCount++
+                            Write-Log -Message ("Marketplace query for {0} failed with an expired/invalid token: {1}. Attempting Azure re-authentication (refresh {2}/{3}) before retrying." -f $sub.Name, $_.Exception.Message, $MpAuthRefreshCount, $MpAuthRefreshMax) -Severity 'Warning'
+                            if (Test-DataPlaneAuthReady -Phase 'Marketplace')
+                            {
+                                # Test-DataPlaneAuthReady reconnects with no -Subscription, so it can
+                                # leave the context on the identity's DEFAULT subscription. Get-AzConsumptionMarketplace
+                                # reads the context's subscription, so re-pin and re-verify before retrying,
+                                # exactly as the first-party consumption loop does - otherwise another
+                                # subscription's Marketplace rows would be attributed to this one.
+                                $MpRepinOk = $false
+                                $MpRepinError = $null
+                                try
+                                {
+                                    $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                                    $MpRepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+                                }
+                                catch
+                                {
+                                    $MpRepinError = $_.Exception.Message
+                                }
+
+                                if ($MpRepinOk)
+                                {
+                                    Write-Log -Message ("Marketplace: Azure context re-established and re-pinned to {0}; retrying." -f $sub.Name) -Severity 'Info'
+                                    if ($MpAuthRefreshCount -lt $MpAuthRefreshMax)
+                                    {
+                                        $MpAuthRefreshedThisCall = $false
+                                    }
+                                }
+                                else
+                                {
+                                    Write-Log -Message ("Marketplace: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's Marketplace data to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($MpRepinError) { " ($MpRepinError)" } else { ' (context did not match the target after Set-AzContext)' })) -Severity 'Error'
+                                    throw
+                                }
+                            }
+                            else
+                            {
+                                Write-Log -Message ("Marketplace: re-authentication for {0} did not yield a usable token; the remaining retries will still be attempted but may not recover." -f $sub.Name) -Severity 'Warning'
+                            }
+                        }
+
+                        $MpAttempt++
+                        if ($MpAttempt -gt $MpMaxRetries) { throw }
+
+                        $MpThrottled = $_.Exception.Message -match 'TooManyRequests|\b429\b|throttl|rate limit'
+                        $MpRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_
+                        if ($MpRetryAfter -gt 0)
+                        {
+                            $MpThrottled = $true
+                            $MpBackoffSeconds = [math]::Min($MpRetryAfter, 300)
+                        }
+                        else
+                        {
+                            $MpBackoffSeconds = [math]::Min([math]::Pow(2, $MpAttempt), 60)
+                            if ($MpThrottled) { $MpBackoffSeconds = [math]::Min($MpBackoffSeconds * 2, 120) }
+                        }
+                        $MpBackoffSeconds = [math]::Round($MpBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
+
+                        $MpRetryMarker = if ($MpRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($MpThrottled) { ', throttled' } else { '' }
+                        Write-Log -Message ("Marketplace query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $MpAttempt, $MpMaxRetries, $MpRetryMarker, $_.Exception.Message, $MpBackoffSeconds) -Severity 'Warning'
+                        Start-Sleep -Seconds $MpBackoffSeconds
+                    }
+                }
+
+                $MarketplaceExport = [System.Collections.ArrayList]::new()
+                foreach ($Row in $MarketplaceData)
+                {
+                    if ($null -eq $Row) { continue }
+
+                    # Field mapping + obfuscation live in ConvertTo-RdaMarketplaceRow
+                    # (Functions/ResourceInventory.Functions.ps1) so the exact same code path
+                    # is unit-tested. Product identifiers (PublisherName/OfferName/PlanName)
+                    # stay readable; SubscriptionGuid/SubscriptionName/ResourceGroup are masked
+                    # to the SAME tokens used elsewhere in the bundle via the shared run-wide
+                    # dictionaries (passed as the guid/rgName token maps built above and the
+                    # URI-keyed ID dictionary), while InstanceId/InstanceName tokenise through
+                    # the per-run local Marketplace caches. This deliberately DIFFERS from the
+                    # first-party consumption path, which emits no bare subscription-GUID column
+                    # and passes $null shared sub/RG dictionaries.
+                    if ($Obfuscate.IsPresent)
+                    {
+                        if (-not $script:MarketplaceSubCache) { $script:MarketplaceSubCache = @{} }
+                        if (-not $script:MarketplaceRgCache) { $script:MarketplaceRgCache = @{} }
+                        if (-not $script:MarketplaceNameCache) { $script:MarketplaceNameCache = @{} }
+                    }
+
+                    $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache))
+                }
+
+                if ($MarketplaceExport.Count -gt 0)
+                {
+                    $MarketplaceExport | Select-Object PublisherName, OfferName, PlanName, OrderNumber, ConsumedService, ConsumedQuantity, UnitOfMeasure, PretaxCost, Currency, IsEstimated, MeterId, UsageStart, UsageEnd, SubscriptionGuid, SubscriptionName, ResourceGroup, InstanceId, InstanceName | Export-Csv -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8 -Append -NoTypeInformation
+                }
+
+                $MarketplaceRecordsThisSub = $MarketplaceExport.Count
+                Write-Log -Message ("Marketplace records found for {0}: {1}" -f $sub.Name, $MarketplaceRecordsThisSub) -Severity 'Info'
+            }
+            catch
+            {
+                $MarketplaceFailedThisSub = $true
+                $MarketplaceFailureMessage = ("{0} (this subscription's Marketplace data is INCOMPLETE)" -f $_.Exception.Message)
+                Write-Log -Message ("Marketplace query failed for {0}: {1}" -f $sub.Name, $MarketplaceFailureMessage) -Severity 'Warning'
+            }
+
+            $Global:MarketplaceRecordCount += $MarketplaceRecordsThisSub
+            $script:MarketplaceRecordsThisRun += $MarketplaceRecordsThisSub
+            if ($MarketplaceFailedThisSub)
+            {
+                $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $MarketplaceFailureMessage
+                    Complete         = $false
+                    RecordsCollected = $MarketplaceRecordsThisSub
+                }
+            }
+        }
+
+        # HONEST NEGATIVES. An empty Marketplace result is a CONFIRMED ZERO (the endpoint
+        # was reached and returned no rows), NOT a silently-missing section - mirror the
+        # first-party consumption zero-record warning so an empty file reads as "verified
+        # none", not "collector never ran". The Marketplace endpoint returns only
+        # Marketplace-publisher rows, so zero here means no third-party/Marketplace charges
+        # (e.g. no Anthropic-via-Marketplace usage) landed on the in-scope subscriptions in
+        # the window.
+        if ($Global:MarketplaceRecordCount -eq 0 -and ($Global:MarketplaceFailedSubs | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
+        {
+            Write-Log -Message ('Marketplace: 0 rows collected across all in-scope subscriptions. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to these subscriptions in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+        }
+    }
+
+
 
     $script:PhaseTimings = [ordered]@{}
 
@@ -1482,6 +1810,18 @@ function ExecuteInventoryProcessing()
         GetResourceConsumption
         $ConsumptionPhaseTimer.Stop()
         $script:PhaseTimings['Consumption / cost collection (billing)'] = $ConsumptionPhaseTimer.Elapsed
+
+        # ADDITIVE Marketplace collector. Gated by the SAME -SkipConsumption switch
+        # (it needs the same billing/Cost Management Reader access and Azure context)
+        # and can be skipped independently with -SkipMarketplace. It emits a SEPARATE
+        # Marketplace_* output and never touches the first-party Consumption_* path.
+        if (!$SkipMarketplace.IsPresent)
+        {
+            $MarketplacePhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetMarketplaceConsumption
+            $MarketplacePhaseTimer.Stop()
+            $script:PhaseTimings['Marketplace consumption collection (billing)'] = $MarketplacePhaseTimer.Elapsed
+        }
     }
 }
 
@@ -1798,15 +2138,38 @@ if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
     "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
 }
 
+# Marketplace CSV parallels the Consumption CSV: an empty-but-present file (header only)
+# is written when the phase was skipped or produced no rows, so a downstream consumer sees
+# a deliberate, schema-shaped "0 Marketplace rows" rather than a missing file. This mirrors
+# the confirmed-zero diagnostic the collector logs.
+$MarketplaceCreated = Test-Path -LiteralPath $Global:MarketplaceFileCsv
+$MarketplaceEmpty = $false
+if ($MarketplaceCreated)
+{
+    try
+    {
+        $MarketplaceEmpty = ((Get-Item -LiteralPath $Global:MarketplaceFileCsv -ErrorAction Stop).Length -eq 0)
+    }
+    catch
+    {
+        $MarketplaceEmpty = $true
+    }
+}
+
+if ($SkipConsumption.IsPresent -or $SkipMarketplace.IsPresent -or !$MarketplaceCreated -or $MarketplaceEmpty)
+{
+    "PublisherName,OfferName,PlanName,OrderNumber,ConsumedService,ConsumedQuantity,UnitOfMeasure,PretaxCost,Currency,IsEstimated,MeterId,UsageStart,UsageEnd,SubscriptionGuid,SubscriptionName,ResourceGroup,InstanceId,InstanceName" | Out-File -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8
+}
+
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
     $CompressionOutput = @{
-        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }
@@ -1814,7 +2177,7 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 
@@ -1828,7 +2191,7 @@ else
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
 
     $CompressionOutput = @{
-        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }

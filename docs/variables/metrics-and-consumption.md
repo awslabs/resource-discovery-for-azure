@@ -35,6 +35,7 @@ Related reading:
 |---|---|---|---|
 | `-SkipMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip) |
 | `-SkipConsumption` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip) |
+| `-SkipMarketplace` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip Marketplace collector only) |
 | `-SkipDiskMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip disk I/O metrics) |
 | `-IncludeStorageMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (opt-in) |
 | `-MetricsDetailed` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = native cadences) |
@@ -194,6 +195,51 @@ spend or reserved-instance coverage. Use `-SkipConsumption` when:
 
 Prefer leaving it **on** for any run whose purpose is cost or right-sizing
 analysis.
+
+---
+
+## `-SkipMarketplace`
+
+- **Type:** `[switch]`
+- **Declared on:** `ResourceInventory.ps1` (param block) and
+  `Run-AllSubscriptions.ps1` (param block).
+- **Default:** off. When absent, the **additive Marketplace consumption
+  collector** runs (as part of the consumption phase). When present, only the
+  Marketplace collector is skipped; the first-party consumption phase is
+  unaffected.
+
+### What it does
+
+The Marketplace collector calls `Get-AzConsumptionMarketplace` (Az.Billing) to
+capture **Azure Marketplace / third-party SaaS** charges — the offers the
+first-party `Get-UsageAggregates` path does not report — into a separate
+`Marketplace_<ReportName>_<timestamp>.csv`. Its full mechanics (endpoint,
+api-version, columns, obfuscation, confirmed-zero behaviour) are documented in
+[consumption-data.md](../consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas).
+
+- The Marketplace phase is gated on
+  `!$SkipConsumption.IsPresent -and !$SkipMarketplace.IsPresent` — it needs the
+  same billing access and Azure context as the first-party phase, so
+  `-SkipConsumption` implies it is skipped too, and `-SkipMarketplace` turns off
+  **only** the Marketplace collector while leaving first-party consumption on.
+- As with the other phases, finalization guarantees a well-formed output: when
+  the Marketplace phase is skipped (or produced no rows), RDA writes a
+  **header-only** `Marketplace_*.csv` so downstream tooling always finds a
+  schema-valid file.
+
+In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
+like `-SkipConsumption` (`$InventoryPassthrough['SkipMarketplace'] = $true`), on
+both the sequential and parallel-stream paths.
+
+### Why it exists / when to use it
+
+The Marketplace collector adds one billing API call per subscription. It reuses
+the existing Cost Management Reader / Billing Reader requirement, so it needs no
+extra role. Use `-SkipMarketplace` when you want the first-party consumption CSV
+but not the Marketplace one — for example when you already know the tenant has no
+Marketplace purchases and want to shave the extra call. Leave it **on** (the
+default) for any run where third-party/Marketplace spend could matter (e.g. an ISV
+offer purchased through Azure Marketplace / Azure AI Foundry).
 
 ---
 

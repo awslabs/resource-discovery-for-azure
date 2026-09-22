@@ -131,6 +131,7 @@ function New-RdaAllSubHtmlSummary
         $FailedSubscriptions = @(),
         $ConsumptionFailedSubs = @(),
         $MetricsFailedSubs = @(),
+        $MarketplaceFailedSubs = @(),
         $CollectorFailures = @(),
 
         $TenantId,
@@ -239,6 +240,7 @@ function New-RdaAllSubHtmlSummary
     $FailedList = @(@($FailedSubscriptions) | Where-Object { $_ })
     $ConsumpList = @(@($ConsumptionFailedSubs) | Where-Object { $_ -and $_.Id -ne '(auth)' })
     $MetricsList = @(@($MetricsFailedSubs) | Where-Object { $_ })
+    $MarketplaceList = @(@($MarketplaceFailedSubs) | Where-Object { $_ -and $_.Id -ne '(auth)' })
     $CollectorList = @(@($CollectorFailures) | Where-Object { $_ })
 
     $Banners = New-Object System.Text.StringBuilder
@@ -277,6 +279,17 @@ function New-RdaAllSubHtmlSummary
         else
         {
             [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had metrics issues.</b> Metric data may be incomplete for: {1}</div>', $MetricsList.Count, (ConvertTo-HtmlSafe (($MetricsList | ForEach-Object { [string]$_.Name }) -join ', ')))
+        }
+    }
+    if ($MarketplaceList.Count -gt 0)
+    {
+        if ($IsObfuscated)
+        {
+            [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had Marketplace (third-party SaaS billing) issues.</b> Marketplace data may be incomplete for those subscriptions.</div>', $MarketplaceList.Count)
+        }
+        else
+        {
+            [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had Marketplace (third-party SaaS billing) issues.</b> Marketplace data may be incomplete for: {1}</div>', $MarketplaceList.Count, (ConvertTo-HtmlSafe (($MarketplaceList | ForEach-Object { [string]$_.Name }) -join ', ')))
         }
     }
     if ($CollectorList.Count -gt 0)

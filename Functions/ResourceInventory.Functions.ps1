@@ -853,7 +853,7 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('Marketplace consumption records collected: n/a (-SkipMarketplace or -SkipConsumption was passed)')
         }
 
-        if ($MarketplaceRequested -and $MarketplaceRecordCount -eq 0)
+        if ($MarketplaceRequested -and $MarketplaceRecordCount -eq 0 -and $MarketplaceSkips.Count -eq 0)
         {
             # HONEST NEGATIVE (mirrors the consumption zero-records note above). The
             # Microsoft.Consumption/marketplaces endpoint returns ONLY Marketplace-publisher

@@ -335,6 +335,7 @@ Describe 'Confirmed-zero honest negative' {
             $Text | Should -Match 'Marketplace failed/incomplete subscriptions:\s*2'
             $Text | Should -Match 'Marketplace query failed for sub A'
             $Text | Should -Match 'Marketplace query failed for sub B'
+            $Text | Should -Not -Match 'CONFIRMED zero'
         }
         finally
         {

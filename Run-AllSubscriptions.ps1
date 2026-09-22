@@ -261,6 +261,10 @@ $ArchiveWriteFailures = @()
 
 $Global:MetricsFailedSubs = @()
 
+$Global:MarketplaceFailedSubs = @()
+
+$Global:MarketplaceRecordCount = 0
+
 $Global:CollectorFailures = @()
 
 $RootResult = Get-RdaInventoryRoot -NoInherit
@@ -1458,6 +1462,7 @@ else
                 if ($Obfuscate) { $WorkerArgs.Obfuscate = $true }
                 if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
+                if ($SkipMarketplace) { $WorkerArgs.SkipMarketplace = $true }
                 if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
                 if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
@@ -1560,6 +1565,12 @@ else
                     if ($null -eq $Global:MetricsApiCallCount) { $Global:MetricsApiCallCount = 0 }
                     $Global:MetricsApiCallCount = [int]$Global:MetricsApiCallCount + [int]$StreamSummary.MetricsApiCalls
                 }
+
+                if ($null -ne $StreamSummary.MarketplaceRecords)
+                {
+                    if ($null -eq $Global:MarketplaceRecordCount) { $Global:MarketplaceRecordCount = 0 }
+                    $Global:MarketplaceRecordCount = [int]$Global:MarketplaceRecordCount + [int]$StreamSummary.MarketplaceRecords
+                }
                 if ($StreamSummary.ConsumptionFailedSubs -and $StreamSummary.ConsumptionFailedSubs.Count -gt 0)
                 {
                     if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
@@ -1570,6 +1581,12 @@ else
                 {
                     if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                     $Global:MetricsFailedSubs += @($StreamSummary.MetricsFailedSubs)
+                }
+
+                if ($StreamSummary.MarketplaceFailedSubs -and $StreamSummary.MarketplaceFailedSubs.Count -gt 0)
+                {
+                    if ($null -eq $Global:MarketplaceFailedSubs) { $Global:MarketplaceFailedSubs = @() }
+                    $Global:MarketplaceFailedSubs += @($StreamSummary.MarketplaceFailedSubs)
                 }
 
                 if ($StreamSummary.CollectorFailures -and $StreamSummary.CollectorFailures.Count -gt 0)
@@ -1889,6 +1906,7 @@ if ($null -ne $OuterZipFile)
             -FailedSubscriptions $FailedSubscriptions `
             -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
             -MetricsFailedSubs $Global:MetricsFailedSubs `
+            -MarketplaceFailedSubs $Global:MarketplaceFailedSubs `
             -CollectorFailures $Global:CollectorFailures `
             -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
             -Detailed:$Detailed -Obfuscated:$Obfuscate
@@ -2063,6 +2081,19 @@ elseif ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
     Write-Host ("Consumption Records:     {0:N0} record(s) collected" -f $ConsumptionRecords) -ForegroundColor Green
 }
 
+$MarketplaceRecords = if ($null -ne $Global:MarketplaceRecordCount) { [int]$Global:MarketplaceRecordCount } else { 0 }
+$MarketplaceFailures = if ($null -ne $Global:MarketplaceFailedSubs) { @($Global:MarketplaceFailedSubs) } else { @() }
+$MarketplaceRequested = (-not $SkipConsumption) -and (-not $SkipMarketplace)
+if ($MarketplaceRequested)
+{
+    $MarketplaceRecordColor = if ($MarketplaceRecords -gt 0) { 'Green' } else { 'Yellow' }
+    Write-Host ("Marketplace Records:     {0:N0} record(s) collected" -f $MarketplaceRecords) -ForegroundColor $MarketplaceRecordColor
+}
+elseif ($MarketplaceRecords -gt 0 -or $MarketplaceFailures.Count -gt 0)
+{
+    Write-Host ("Marketplace Records:     {0:N0} record(s) collected" -f $MarketplaceRecords) -ForegroundColor Green
+}
+
 if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
 {
     Write-Host ""
@@ -2101,6 +2132,32 @@ if ($ConsumptionFailures.Count -gt 0)
         Write-Host "    Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
     }
     Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+if ($MarketplaceFailures.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host ("Marketplace Failures:    {0} subscription(s)" -f $MarketplaceFailures.Count) -ForegroundColor Yellow
+    foreach ($mf in (@($MarketplaceFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object Name -Unique))
+    {
+        Write-Host ("  - {0} ({1})" -f $mf.Name, $mf.Id) -ForegroundColor Yellow
+    }
+    $UniqueMarketplaceMessages = @($MarketplaceFailures | Select-Object -ExpandProperty Message -Unique)
+    foreach ($m in $UniqueMarketplaceMessages)
+    {
+        Write-Host ("  - {0}" -f $m) -ForegroundColor Yellow
+    }
+    Write-Host "  Note: the Marketplace CSV in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+elseif ($MarketplaceRequested -and $MarketplaceRecords -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
+{
+    Write-Host ""
+    Write-Host "Marketplace Records:     0 collected. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces" -ForegroundColor Yellow
+    Write-Host "         endpoint was reached successfully and returned no rows, meaning no Azure Marketplace /" -ForegroundColor Yellow
+    Write-Host "         third-party SaaS charges were billed to the in-scope subscriptions in the queried window." -ForegroundColor Yellow
+    Write-Host "         It is NOT a missing/failed section. The Marketplace CSV will contain only its header row." -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -2184,6 +2241,7 @@ $RunSummaryLocalFile = $null
 try
 {
     $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
+    $MarketplaceRecordTotal = if ($null -ne $Global:MarketplaceRecordCount) { [int]$Global:MarketplaceRecordCount } else { 0 }
     $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
     $RunSummaryLines = Get-RunSummaryLogContent `
         -InvocationParameters $PSBoundParameters `
@@ -2196,9 +2254,12 @@ try
         -CollectorFailures $Global:CollectorFailures `
         -MetricsFailedSubs $Global:MetricsFailedSubs `
         -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
+        -MarketplaceFailedSubs $Global:MarketplaceFailedSubs `
         -ConsumptionRecordCount $ConsumptionRecordTotal `
+        -MarketplaceRecordCount $MarketplaceRecordTotal `
         -MetricsApiCallCount $MetricsApiCallTotal `
         -ConsumptionRequested:(-not $SkipConsumption.IsPresent) `
+        -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) `
         -MetricsRequested:(-not $SkipMetrics.IsPresent) `
         -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
         -Streams $ParallelStreams -StreamsSource $StreamsSrc `
@@ -2447,6 +2508,16 @@ if ($WrapperTranscriptStarted)
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
 
+# Marketplace is a deliberately SOFT best-effort phase: a Marketplace-only failure or
+# auth-skip does NOT flip the wrapper exit code and does NOT trigger the automatic
+# Collect-SupportLogs bundle. This matches its optional, additive nature (it is the
+# third-party/Marketplace SaaS slice of consumption, opt-out via -SkipMarketplace and
+# implied-skipped by -SkipConsumption) and mirrors how the metric-query call count is
+# telemetry-only. Marketplace health is still surfaced (the console 'Marketplace
+# Failures:' block, the RunSummary.log Health block, and the MainSummary banner), so a
+# truncated Marketplace CSV is never silent - it just does not, by itself, mark the
+# whole run failed. First-party Consumption remains a hard-participating phase below.
+# See the exit-code table in README.md.
 $RunHadFailures = ($FailedSubscriptions.Count -gt 0) -or (@($Global:CollectorFailures).Count -gt 0) -or (@($Global:MetricsFailedSubs).Count -gt 0) -or (@($Global:ConsumptionFailedSubs).Count -gt 0)
 if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
 {

@@ -380,6 +380,7 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $script:NoAccess = @([pscustomobject]@{ Name = 'Fabrikam-Locked'; Id = '22222222-2222-2222-2222-222222222222' })
         $script:CollectorFails = @([pscustomobject]@{ Id = '33333333-3333-3333-3333-333333333333'; Module = 'StreamAnalytics'; Message = 'threw on Contoso-Prod-Sub resource' })
         $script:MetricsSkips = @([pscustomobject]@{ Name = 'Fabrikam-Locked'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'no usable token' })
+        $script:MarketplaceSkips = @([pscustomobject]@{ Name = 'Northwind-Marketplace'; Id = '55555555-5555-5555-5555-555555555555'; Message = 'marketplace pull incomplete for Northwind' })
     }
 
     It 'obfuscated run emits counts only - no names, ids, or raw messages' {
@@ -414,6 +415,53 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Match 'Fabrikam-Locked'
         $Text | Should -Match 'StreamAnalytics'
         $Text | Should -Match 'no usable token'
+    }
+
+    It 'renders the Marketplace records-collected line and failed-subs count in the Health block' {
+        # Marketplace must have full parity with Consumption/Metrics in the shareable
+        # RunSummary.log: a records-collected line and a failed-subs count.
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -MarketplaceRecordCount 42 -MarketplaceFailedSubs $script:MarketplaceSkips `
+            -ConsumptionRecordCount 100
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Match 'Marketplace records collected\s+:\s+42'
+        $Text | Should -Match 'Marketplace failed subs\s+:\s+1'
+    }
+
+    It 'renders n/a for Marketplace records when Marketplace was not requested' {
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -MarketplaceRequested:$false -MarketplaceRecordCount 0
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Match 'Marketplace records collected\s+:\s+n/a'
+    }
+
+    It 'non-obfuscated run includes the Marketplace failed-subscription detail line' {
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -MarketplaceFailedSubs $script:MarketplaceSkips
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Match 'Marketplace failed subscriptions \(detail\):'
+        $Text | Should -Match 'Northwind-Marketplace'
+        $Text | Should -Match 'marketplace pull incomplete for Northwind'
+    }
+
+    It 'obfuscated run emits Marketplace counts only - no names, ids, or raw messages' {
+        $Lines = Get-RunSummaryLogContent -Obfuscated `
+            -Visible 5 -Excluded 1 -Eligible 4 -Processed 3 -Skipped 0 `
+            -MarketplaceRecordCount 42 -MarketplaceFailedSubs $script:MarketplaceSkips
+        $Text = ($Lines -join "`n")
+
+        $Text | Should -Not -Match 'Northwind-Marketplace'
+        $Text | Should -Not -Match '55555555-5555-5555-5555-555555555555'
+        $Text | Should -Not -Match 'marketplace pull incomplete'
+        $Text | Should -Not -Match 'Marketplace failed subscriptions \(detail\):'
+        $Text | Should -Match 'Marketplace failed subs\s+:\s+1'
+        $Text | Should -Match 'Marketplace records collected\s+:\s+42'
     }
 
     It 'renders STRING-shaped failed subscriptions, the shape production actually passes' {
@@ -1305,5 +1353,94 @@ Describe 'Resume-state completed-ids seed array-ness (regression: null-collapse 
         $CodeText = ((Get-Content -LiteralPath $WrapperPath) | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
         ($CodeText -match '\$CompletedIds\s*=\s*@\(\s*Get-CompletedSubscriptionIds') | Should -BeTrue -Because 'the completed-ids seed must be @()-wrapped so an empty result stays an array'
         ($CodeText -match '\$CompletedIds\s*=\s*Get-CompletedSubscriptionIds') | Should -BeFalse -Because 'an unwrapped seed collapses @() to $null on a fresh run and breaks -Resume'
+    }
+}
+
+# Marketplace phase must have full health-plumbing PARITY with Consumption/Metrics across
+# the wrapper+stream seam: the stream worker resets the Marketplace globals per slice and
+# emits MarketplaceRecords/MarketplaceFailedSubs in its summary; the wrapper aggregates both
+# from every stream summary and seeds the globals up front. The aggregation loop is inline in
+# the wrapper body (not dot-sourceable), so this mirrors the production merge expression the
+# same way the archive-loss suite mirrors the wrapper's verification gate, with source guards
+# covering drift in the real files.
+Describe 'Marketplace stream/wrapper health parity' {
+    BeforeAll {
+        $script:RepoRoot = Split-Path $PSScriptRoot -Parent
+        $script:WrapperSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
+        $script:StreamSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1') -Raw
+
+        # Faithful mirror of the wrapper's per-stream merge: sum MarketplaceRecords into the
+        # run-wide count and concatenate MarketplaceFailedSubs, exactly as the inline loop does.
+        function script:Merge-StreamMarketplace
+        {
+            param($StreamSummaries)
+            $RecordCount = 0
+            $FailedSubs = @()
+            foreach ($S in $StreamSummaries)
+            {
+                if ($null -ne $S.MarketplaceRecords)
+                {
+                    $RecordCount = [int]$RecordCount + [int]$S.MarketplaceRecords
+                }
+                if ($S.MarketplaceFailedSubs -and $S.MarketplaceFailedSubs.Count -gt 0)
+                {
+                    $FailedSubs += @($S.MarketplaceFailedSubs)
+                }
+            }
+            return @{ RecordCount = $RecordCount; FailedSubs = @($FailedSubs) }
+        }
+    }
+
+    It 'sums MarketplaceRecords and concatenates MarketplaceFailedSubs across streams' {
+        $Streams = @(
+            [pscustomobject]@{ MarketplaceRecords = 10; MarketplaceFailedSubs = @([pscustomobject]@{ Name = 'Sub A'; Id = 'a1'; Message = 'incomplete' }) }
+            [pscustomobject]@{ MarketplaceRecords = 7; MarketplaceFailedSubs = @() }
+            [pscustomobject]@{ MarketplaceRecords = 0; MarketplaceFailedSubs = @([pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped' }) }
+        )
+        $Merged = script:Merge-StreamMarketplace -StreamSummaries $Streams
+        $Merged.RecordCount | Should -Be 17 -Because 'Marketplace records must sum across streams like Consumption records'
+        $Merged.FailedSubs.Count | Should -Be 2 -Because 'per-sub Marketplace failures from every stream must be retained, including the auth-skip sentinel'
+    }
+
+    It 'yields zero records and no failures when no stream reported Marketplace data' {
+        $Streams = @(
+            [pscustomobject]@{ MarketplaceRecords = 0; MarketplaceFailedSubs = @() }
+            [pscustomobject]@{ MarketplaceRecords = 0; MarketplaceFailedSubs = @() }
+        )
+        $Merged = script:Merge-StreamMarketplace -StreamSummaries $Streams
+        $Merged.RecordCount | Should -Be 0
+        $Merged.FailedSubs.Count | Should -Be 0
+    }
+
+    It 'the stream worker resets the Marketplace globals per slice' {
+        $script:StreamSrc | Should -Match '\$Global:MarketplaceRecordCount\s*=\s*0' -Because 'the per-slice reset must seed the count to 0 like ConsumptionRecordCount'
+        $script:StreamSrc | Should -Match '\$Global:MarketplaceFailedSubs\s*=\s*@\(\)' -Because 'the per-slice reset must seed the failed-subs list like ConsumptionFailedSubs'
+    }
+
+    It 'the stream worker emits both Marketplace fields in its summary object' {
+        $script:StreamSrc | Should -Match 'MarketplaceRecords\s*=\s*\$MarketplaceTotal' -Because 'the per-stream summary must carry the slice Marketplace record count'
+        $script:StreamSrc | Should -Match 'MarketplaceFailedSubs\s*=\s*@\(\$MarketplaceFailedSubs\)' -Because 'the per-stream summary must carry the slice Marketplace failed subs'
+    }
+
+    It 'the wrapper aggregates both Marketplace fields from each stream summary' {
+        $script:WrapperSrc | Should -Match '\$StreamSummary\.MarketplaceRecords' -Because 'the merge loop must read MarketplaceRecords from each stream summary'
+        $script:WrapperSrc | Should -Match '\$StreamSummary\.MarketplaceFailedSubs' -Because 'the merge loop must read MarketplaceFailedSubs from each stream summary'
+    }
+
+    It 'the wrapper seeds the Marketplace globals up front like MetricsFailedSubs' {
+        $script:WrapperSrc | Should -Match '\$Global:MarketplaceFailedSubs\s*=\s*@\(\)' -Because 'the failed-subs global must be nil-initialised up front so later @() reads are safe'
+        $script:WrapperSrc | Should -Match '\$Global:MarketplaceRecordCount\s*=\s*0' -Because 'the record-count global must be nil-initialised up front'
+    }
+
+    It 'the wrapper prints a Marketplace Failures block and a Marketplace Records line' {
+        $script:WrapperSrc | Should -Match 'Marketplace Failures:' -Because 'the end-of-run summary must surface Marketplace failures like Consumption/Metrics'
+        $script:WrapperSrc | Should -Match 'Marketplace Records:' -Because 'the end-of-run summary must surface the Marketplace records-collected count'
+    }
+
+    It 'the zero-subscription early-exit summary carries the Marketplace fields for shape consistency' {
+        # The early-exit object must match the main summary shape so the parent aggregation reads a
+        # consistent shape from every stream, including empty slices.
+        $script:StreamSrc | Should -Match 'MarketplaceRecords\s*=\s*0' -Because 'the empty-slice summary must include MarketplaceRecords=0'
+        $script:StreamSrc | Should -Match '(?m)MarketplaceFailedSubs\s*=\s*@\(\)' -Because 'the empty-slice summary must include MarketplaceFailedSubs=@()'
     }
 }

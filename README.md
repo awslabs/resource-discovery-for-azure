@@ -754,6 +754,8 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 
 Codes `3`–`5` still mean the report was produced - they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result. Code `2` is stronger: a subscription's report is absent from the bundle entirely, so it is reported even when `3`, `4` or `5` also applies.
 
+**Marketplace is a soft, best-effort phase and does NOT affect the exit code.** A Marketplace-only failure or auth-skip does not flip the wrapper exit code to non-zero and does not trigger the automatic support-log bundle. This is a deliberate choice matching Marketplace's optional, additive nature (it is the third-party / Marketplace-SaaS slice of consumption, opt-out via `-SkipMarketplace` and implied-skipped by `-SkipConsumption`). Marketplace health is still surfaced loudly — a `Marketplace Failures:` block in the console summary, a `Marketplace failed subs` / `Marketplace records collected` line in the shareable `RunSummary.log` Health block, and a banner in `MainSummary.html` — so a truncated or empty Marketplace CSV is never silent; it simply does not, by itself, mark the whole run failed. First-party Consumption, by contrast, participates fully in the exit code (auth-skips map to code `3`).
+
 `ResourceInventory.ps1` (the per-subscription inner script) sets its own exit code, which the wrapper reads: `0` = success, `1` = a hard pre-flight/setup failure, `2` = collection finished but the report archive could not be written. The wrapper treats any non-zero as "this subscription failed" and maps an inner `2` to its own `2`.
 
 ### Important Notes

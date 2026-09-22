@@ -1196,9 +1196,12 @@ function Get-RunSummaryLogContent
         $CollectorFailures = @(),
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
+        $MarketplaceFailedSubs = @(),
         [int]$ConsumptionRecordCount = 0,
+        [int]$MarketplaceRecordCount = 0,
         [int]$MetricsApiCallCount = 0,
         [bool]$ConsumptionRequested = $true,
+        [bool]$MarketplaceRequested = $true,
         [bool]$MetricsRequested = $true,
         [int]$HostVCpu = 0,
         [double]$HostRamGB = 0,
@@ -1220,6 +1223,7 @@ function Get-RunSummaryLogContent
     $Collector = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
     $Metrics = @(@($MetricsFailedSubs) | Where-Object { $null -ne $_ })
     $Consumption = @(@($ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
+    $Marketplace = @(@($MarketplaceFailedSubs) | Where-Object { $null -ne $_ })
 
     $Lines = [System.Collections.Generic.List[string]]::new()
     $Lines.Add('Resource Discovery for Azure - run summary')
@@ -1329,6 +1333,14 @@ function Get-RunSummaryLogContent
     {
         $Lines.Add(('  Consumption records collected : {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
     }
+    if ((-not $MarketplaceRequested) -and ($MarketplaceRecordCount -eq 0))
+    {
+        $Lines.Add('  Marketplace records collected : n/a (-SkipConsumption/-SkipMarketplace was passed)')
+    }
+    else
+    {
+        $Lines.Add(('  Marketplace records collected : {0}' -f $MarketplaceRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+    }
     if ((-not $MetricsRequested) -and ($MetricsApiCallCount -eq 0))
     {
         $Lines.Add('  Metric-query API calls issued : n/a (-SkipMetrics was passed)')
@@ -1341,6 +1353,7 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
     $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))
+    $Lines.Add(('  Marketplace failed subs       : {0}' -f $Marketplace.Count))
 
     if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0))
     {
@@ -1405,6 +1418,12 @@ function Get-RunSummaryLogContent
             $Lines.Add('')
             $Lines.Add('Consumption failed subscriptions (detail):')
             foreach ($ConsumpSub in $Consumption) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$ConsumpSub.Name, [string]$ConsumpSub.Id, [string]$ConsumpSub.Message)) }
+        }
+        if ($Marketplace.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Marketplace failed subscriptions (detail):')
+            foreach ($MarketSub in $Marketplace) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$MarketSub.Name, [string]$MarketSub.Id, [string]$MarketSub.Message)) }
         }
     }
 

@@ -80,6 +80,16 @@ Describe 'Sequential and parallel paths reach ResourceInventory.ps1 with the sam
         'Debug' | Should -BeIn $script:WorkerArgKeys -Because 'the wrapper must forward -Debug to the worker, since jobs do not inherit $DebugPreference'
     }
 
+    It 'forwards -SkipMarketplace on both paths and into the parallel worker' {
+        # The parallel $WorkerArgs hashtable originally dropped -SkipMarketplace while the
+        # sequential $InventoryPassthrough and the stream's own re-forward both carried it,
+        # so a -SkipMarketplace -ParallelStreams N run silently ran the Marketplace phase
+        # anyway. Assert parity with the Consumption forward it mirrors.
+        'SkipMarketplace' | Should -BeIn $script:WrapperPassKeys -Because 'the sequential path must forward -SkipMarketplace'
+        'SkipMarketplace' | Should -BeIn $script:StreamPassKeys -Because 'the parallel worker must forward -SkipMarketplace to the inner script'
+        'SkipMarketplace' | Should -BeIn $script:WorkerArgKeys -Because 'the wrapper must forward -SkipMarketplace into the parallel worker args, exactly like -SkipConsumption'
+    }
+
     It 'honours an explicit -Debug:$false rather than inverting it' {
         # ContainsKey('Debug') is also true for -Debug:$false, so a literal $true
         # would invert the operator's intent at every forwarding site.

@@ -1741,13 +1741,22 @@ function ExecuteInventoryProcessing()
         # Marketplace-publisher rows, so zero here means no third-party/Marketplace charges
         # (e.g. no Anthropic-via-Marketplace usage) landed on the in-scope subscriptions in
         # the window.
-        if ($Global:MarketplaceRecordCount -eq 0 -and ($Global:MarketplaceFailedSubs | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
+        #
+        # Keyed on the $script:-scoped per-invocation values, NOT the $Global: ones: the
+        # multi-subscription wrapper invokes this script once per subscription in the same
+        # process, so the accumulating $Global: pair would still hold the previous
+        # subscription's rows and suppress this notice for every later zero-row subscription.
+        if ($script:MarketplaceRecordsThisRun -eq 0 -and $script:MarketplaceFailedSubsThisRun -eq 0)
         {
-            Write-Log -Message ('Marketplace: 0 rows collected across all in-scope subscriptions. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to these subscriptions in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+            Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
         }
     }
 
+    InitializeInventoryProcessing
 
+    # Explicitly nil for this invocation. Read unguarded by the failure gate near the end of the
+    # script, which is safe today only because no Set-StrictMode is in effect.
+    $script:HtmlWriteError = $null
 
     $script:PhaseTimings = [ordered]@{}
 

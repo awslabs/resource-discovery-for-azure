@@ -351,4 +351,50 @@ Describe 'Collector wiring invariants' {
         # every row. Guards against reintroducing the truncation.
         $script:InvSrc | Should -Not -Match 'Get-AzConsumptionMarketplace[^\r\n]*-Top'
     }
+
+    It 'calls every function it defines inside ExecuteInventoryProcessing' {
+        # REGRESSION GUARD. Adding GetMarketplaceConsumption to ExecuteInventoryProcessing once
+        # overwrote the `InitializeInventoryProcessing` call that sat at that exact spot. The
+        # definition survived, the invocation did not, so no output-path global was ever set:
+        # $Global:JsonFile and $Global:ZipOutputFile were empty, Summary.ps1 threw on its guard,
+        # the archive write got a null -LiteralPath, and the run produced no report at all.
+        #
+        # Nothing caught it - it parses, it lints, and every offline suite passed against the
+        # broken tree, because a defined-but-never-called nested function is perfectly valid
+        # PowerShell. This asserts on the AST rather than on text, so it catches the whole class
+        # (any nested helper that loses its call site), not just the one occurrence.
+        # Capture the parse errors rather than discarding them: on a parse failure FindAll would
+        # return nothing and every assertion below would pass vacuously.
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$ParseErrors)
+        @($ParseErrors).Count | Should -Be 0 -Because 'a parse failure would make this guard pass vacuously'
+
+        $Outer = $Ast.FindAll(
+            { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'ExecuteInventoryProcessing' },
+            $true) | Select-Object -First 1
+        $Outer | Should -Not -BeNullOrEmpty -Because 'the orchestrator function must exist for this guard to mean anything'
+
+        $Defined = @($Outer.FindAll(
+                { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ne 'ExecuteInventoryProcessing' },
+                $true) | ForEach-Object { $_.Name })
+        $Defined.Count | Should -BeGreaterThan 0 -Because 'a positive control: this guard is vacuous if no nested functions are found'
+
+        # Every bare-word command invoked anywhere inside the outer function.
+        $Invoked = @($Outer.FindAll(
+                { param($n) $n -is [System.Management.Automation.Language.CommandAst] },
+                $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+
+        $NeverCalled = @($Defined | Where-Object { $Invoked -notcontains $_ })
+        $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'a nested function defined but never invoked is dead wiring - most likely a call site that was overwritten'
+    }
+
+    It 'passes a dedicated -OrderCache at the Marketplace row call site' {
+        # Without this, dropping -OrderCache from the collector would leave every test above green
+        # while every Marketplace row got a freshly minted order token - an obfuscation-determinism
+        # regression in the shareable CSV that no behavioural test here can see, because the unit
+        # tests supply their own cache.
+        $script:InvSrc | Should -Match 'ConvertTo-RdaMarketplaceRow[^\r\n]*-OrderCache'
+        # And the cache must be the run-scoped one, not a literal @{} minted per row.
+        $script:InvSrc | Should -Match '-OrderCache \$script:MarketplaceOrderCache'
+    }
 }

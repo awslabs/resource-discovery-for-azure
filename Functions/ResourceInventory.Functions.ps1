@@ -41,6 +41,91 @@ function Global:Protect-FreeTextValue([string]$Value)
     return $Global:FreeTextDictionary[$Value]
 }
 
+function Global:ConvertTo-RdaMarketplaceRow
+{
+    # Maps ONE PSMarketplace-shaped row (as returned by Get-AzConsumptionMarketplace,
+    # Az.Billing) to the flat object emitted into Marketplace_<ReportName>_<stamp>.csv.
+    #
+    # Field names are the documented PSMarketplace property names, verified from the
+    # installed cmdlet's output type
+    # ([Microsoft.Azure.Commands.Consumption.Models.PSMarketplace]) and the docs:
+    #   https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
+    #   https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list  (api-version 2023-05-01)
+    #
+    # OBFUSCATION. When -Obfuscate is active the caller passes $Obfuscate = $true and the
+    # shared caches. PublisherName / OfferName / PlanName are THIRD-PARTY PRODUCT
+    # identifiers (the "which ISV / which offer" - e.g. Anthropic-vs-not - signal), not
+    # customer secrets, so they are left READABLE by design. InstanceId is an ARM resource
+    # id and is routed through Build-ObfuscatedResourceUri (which also masks the embedded
+    # subscription and resource-group segments); ResourceGroup / SubscriptionName /
+    # InstanceName are tokenised deterministically. This matches the first-party
+    # consumption obfuscation exactly.
+    param(
+        [Parameter(Mandatory = $true)]$Row,
+        [bool]$Obfuscate = $false,
+        $NameDictionary = $null,
+        [hashtable]$SubCache = $null,
+        [hashtable]$RgCache = $null,
+        [hashtable]$NameCache = $null
+    )
+
+    $OutInstanceId = $Row.InstanceId
+    $OutResourceGroup = $Row.ResourceGroup
+    $OutSubscriptionName = $Row.SubscriptionName
+    $OutInstanceName = $Row.InstanceName
+
+    if ($Obfuscate)
+    {
+        if ($null -eq $SubCache) { $SubCache = @{} }
+        if ($null -eq $RgCache) { $RgCache = @{} }
+        if ($null -eq $NameCache) { $NameCache = @{} }
+
+        $Prefix = if ("$($Row.InstanceId) $($Row.InstanceName) $($Row.ResourceGroup)" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$($Row.InstanceId)" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+
+        if (-not [string]::IsNullOrEmpty($Row.InstanceId))
+        {
+            $OutInstanceId = Build-ObfuscatedResourceUri -RawUri $Row.InstanceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $NameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+        }
+
+        if (-not [string]::IsNullOrEmpty($Row.ResourceGroup))
+        {
+            $RgTag = if ($Row.ResourceGroup -match '^mc_') { 'mc_' } else { '' }
+            $OutResourceGroup = Resolve-ObfuscationToken -RealValue $Row.ResourceGroup -LookupKey $Row.ResourceGroup -SharedDictionary $null -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
+        }
+
+        if (-not [string]::IsNullOrEmpty($Row.SubscriptionName))
+        {
+            $OutSubscriptionName = Resolve-ObfuscationToken -RealValue $Row.SubscriptionName -LookupKey $Row.SubscriptionName -SharedDictionary $null -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+        }
+
+        if (-not [string]::IsNullOrEmpty($Row.InstanceName))
+        {
+            $OutInstanceName = Resolve-ObfuscationToken -RealValue $Row.InstanceName -LookupKey $Row.InstanceName -SharedDictionary $null -LocalCache $NameCache -TokenPrefix $Prefix
+        }
+    }
+
+    return [PSCustomObject]@{
+        PublisherName    = $Row.PublisherName
+        OfferName        = $Row.OfferName
+        PlanName         = $Row.PlanName
+        OrderNumber      = $Row.OrderNumber
+        ConsumedService  = $Row.ConsumedService
+        ConsumedQuantity = $Row.ConsumedQuantity
+        UnitOfMeasure    = $Row.UnitOfMeasure
+        PretaxCost       = $Row.PretaxCost
+        Currency         = $Row.Currency
+        IsEstimated      = $Row.IsEstimated
+        MeterId          = $Row.MeterId
+        UsageStart       = $Row.UsageStart
+        UsageEnd         = $Row.UsageEnd
+        SubscriptionGuid = $Row.SubscriptionGuid
+        SubscriptionName = $OutSubscriptionName
+        ResourceGroup    = $OutResourceGroup
+        InstanceId       = $OutInstanceId
+        InstanceName     = $OutInstanceName
+    }
+}
+
 function Global:Resolve-ObfuscationToken
 {
     param(
@@ -554,6 +639,8 @@ function Write-RdaShareableDiagnosticsLog
         $PhaseTimings,
         [int]$ConsumptionRecordCount = 0,
         [bool]$ConsumptionRequested = $true,
+        [int]$MarketplaceRecordCount = 0,
+        [bool]$MarketplaceRequested = $true,
         [int]$MetricsApiCallCount = 0,
         [bool]$MetricsRequested = $true,
         [switch]$Obfuscated
@@ -697,6 +784,27 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('      help - the partner must enable it in Partner Center.')
             $DiagLines.Add('    - Subscription not transitioned to the Azure plan.')
             $DiagLines.Add('    - A subscription offer the legacy usage API does not serve.')
+        }
+
+        $DiagLines.Add('')
+        if ($MarketplaceRequested -or ($MarketplaceRecordCount -ne 0))
+        {
+            $DiagLines.Add(('Marketplace consumption records collected: {0}' -f $MarketplaceRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
+        }
+        else
+        {
+            $DiagLines.Add('Marketplace consumption records collected: n/a (-SkipMarketplace or -SkipConsumption was passed)')
+        }
+
+        if ($MarketplaceRequested -and $MarketplaceRecordCount -eq 0)
+        {
+            # HONEST NEGATIVE (mirrors the consumption zero-records note above). The
+            # Microsoft.Consumption/marketplaces endpoint returns ONLY Marketplace-publisher
+            # rows, so a successful call with zero rows is a CONFIRMED absence of Azure
+            # Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace
+            # offer) in the window - not a missing or failed section. The Marketplace CSV
+            # holds only its header in that case.
+            $DiagLines.Add('  Note: ZERO Marketplace rows is a CONFIRMED zero (endpoint reached, no third-party/Marketplace charges billed), not a skipped section.')
         }
 
         $DiagLines.Add('')

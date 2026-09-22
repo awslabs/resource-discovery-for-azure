@@ -6,6 +6,7 @@ param (
     [switch]$Obfuscate,
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
+    [switch]$SkipMarketplace,
 
     [switch]$UseMetricsBatch,
 
@@ -523,6 +524,7 @@ if ($Plan)
     if ($Service) { $ExtraFlags += ('-Service {0}' -f (& $QuoteArg ($Service -join ','))) }
     if ($SkipMetrics) { $ExtraFlags += '-SkipMetrics' }
     if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
+    if ($SkipMarketplace) { $ExtraFlags += '-SkipMarketplace' }
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
     if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
@@ -1132,6 +1134,7 @@ if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
+if ($SkipMarketplace) { $InventoryPassthrough['SkipMarketplace'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }

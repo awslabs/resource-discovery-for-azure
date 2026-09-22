@@ -170,6 +170,86 @@ so you can confirm the replacement happened.
 
 See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
 
-For the parameter that turns this phase off (`-SkipConsumption`) and the other
-data-collection switches, see
+## Marketplace consumption (Azure Marketplace / third-party SaaS)
+
+`Get-UsageAggregates` above returns **first-party Azure** metered usage only — it
+carries no `PublisherType` and never reports Azure Marketplace / third-party SaaS
+charges (for example an ISV offer sold through Azure Marketplace, such as an
+Anthropic/Claude offer surfaced via Azure AI Foundry). Those charges live behind a
+**different** endpoint. To close that coverage gap, RDA runs a second, **additive**
+collector that emits a separate `Marketplace_<ReportName>_<timestamp>.csv`. The
+first-party `Consumption_*` schema and code path are untouched.
+
+The Marketplace phase runs whenever consumption runs (it needs the same billing
+access and Azure context), and can be turned off on its own with `-SkipMarketplace`
+(or implicitly with `-SkipConsumption`).
+
+### Where the data comes from
+
+RDA calls **`Get-AzConsumptionMarketplace`** (also in `Az.Billing`, already
+imported — **no new module dependency**). Its raw REST equivalent is
+`GET .../providers/Microsoft.Consumption/marketplaces?api-version=2023-05-01`
+([docs](https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list);
+[cmdlet docs](https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace)).
+It uses the **same** window as the first-party phase (last 31 days ending at the
+start of yesterday) and reuses the **same** Cost Management Reader / Billing Reader
+requirement — **no new role**. It is wrapped in the same auth pre-check, denial
+short-circuit, mid-run token-refresh + subscription re-pin, and Retry-After/backoff
+envelope as the first-party consumption loop.
+
+**Discriminator.** On the modern usageDetails / Cost Management dimension the
+`PublisherType` value distinguishes `Azure` (first-party) from `Marketplace`
+(third-party). The Marketplace endpoint returns **only** Marketplace rows (its
+`PSMarketplace` output type has no `PublisherType` property at all), so **no
+client-side filtering is needed** — every row it returns is a Marketplace row.
+The "is this Anthropic?" question is answered by `PublisherName` / `OfferName`;
+RDA does **not** hardcode any publisher/offer literal — the field is the contract.
+
+### The columns
+
+The CSV columns are the documented `PSMarketplace` fields (verified against the
+installed `Az.Billing` cmdlet's output type):
+
+| Column | Meaning |
+|--------|---------|
+| `PublisherName` | ISV / publisher of the Marketplace offer (readable). |
+| `OfferName` | The Marketplace offer (readable). |
+| `PlanName` | Purchased plan/SKU within the offer (readable). |
+| `OrderNumber` | Marketplace order number. |
+| `ConsumedService` | The service the usage was consumed through. |
+| `ConsumedQuantity` | Amount of usage in `UnitOfMeasure`. |
+| `UnitOfMeasure` | Unit for `ConsumedQuantity`. |
+| `PretaxCost` | Pre-tax charge for the row. |
+| `Currency` | Currency of `PretaxCost`. |
+| `IsEstimated` | Whether the charge is an estimate. |
+| `MeterId` | Azure meter GUID (not customer-specific). |
+| `UsageStart` / `UsageEnd` | Aggregation interval. |
+| `SubscriptionGuid` | Subscription the usage is billed to. |
+| `SubscriptionName` | Subscription display name (masked under `-Obfuscate`). |
+| `ResourceGroup` | Resource group (masked under `-Obfuscate`). |
+| `InstanceId` | ARM resource id of the consuming resource (masked under `-Obfuscate`, ARM path structure preserved). |
+| `InstanceName` | Resource name (masked under `-Obfuscate`). |
+
+### Obfuscation
+
+`PublisherName` / `OfferName` / `PlanName` are **third-party product identifiers**,
+not customer secrets, so they are left **readable** (the "which ISV / which offer"
+signal must survive). `InstanceId`, `ResourceGroup`, `SubscriptionName`, and
+`InstanceName` flow through RDA's existing consumption obfuscation exactly like the
+first-party fields — deterministic per-run tokens, ARM path structure preserved on
+`InstanceId`.
+
+### Honest negatives (confirmed zero)
+
+The Marketplace endpoint returns only Marketplace rows, so a successful call with
+**zero** rows is a *confirmed absence* of Marketplace/third-party SaaS charges, not
+a silently-missing section. When that happens, RDA logs an explicit
+`0 rows … CONFIRMED ZERO` line, writes a header-only `Marketplace_*.csv`, and (on
+obfuscated runs) records the confirmed-zero note in the shareable diagnostics log —
+mirroring the first-party consumption zero-record warning.
+
+See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
+
+For the parameters that turn these phases off (`-SkipConsumption`,
+`-SkipMarketplace`) and the other data-collection switches, see
 [variables/metrics-and-consumption.md](variables/metrics-and-consumption.md).

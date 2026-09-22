@@ -319,7 +319,7 @@ function Global:Test-RdaMarketplaceModelMatch
     $AccountRg = "$($Model.ResourceGroup)"
     $AccountId = "$($Model.AccountId)"
 
-    $KnownVendorTokens = @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'meta', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry')
+    $KnownVendorTokens = @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry')
     $ModelVendorDiscriminators = @($VendorTokens | Where-Object { $_ -in $KnownVendorTokens })
     if ($ModelVendorDiscriminators.Count -eq 0) { return $Result }
 

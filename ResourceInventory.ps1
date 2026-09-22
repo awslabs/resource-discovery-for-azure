@@ -2099,7 +2099,7 @@ resources
                     $Key = "$($MpRow.InstanceId)|$($MpRow.MeterId)"
                     if ($MatchedMarketplaceRows.Contains($Key)) { continue }
                     $OfferTokens = @(Get-RdaFoundryModelMatchTokens -Value ("$($MpRow.PublisherName) $($MpRow.OfferName) $($MpRow.PlanName)"))
-                    $LooksLikeModelVendor = @($OfferTokens | Where-Object { $_ -in @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'meta', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry') }).Count -gt 0
+                    $LooksLikeModelVendor = @($OfferTokens | Where-Object { $_ -in @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry') }).Count -gt 0
                     if (-not $LooksLikeModelVendor) { continue }
 
                     $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record ([pscustomobject]@{

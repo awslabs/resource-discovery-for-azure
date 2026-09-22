@@ -1843,8 +1843,15 @@ function ExecuteInventoryProcessing()
         try
         {
             $RetailCatalog = @(Get-RdaFoundryRetailCatalog)
-            $RetailProbed = $true
-            Write-Log -Message ("FoundryModelCoverage: pulled {0} Retail Prices catalog item(s) for serviceName 'Foundry Models'." -f $RetailCatalog.Count) -Severity 'Info'
+            $RetailProbed = $RetailCatalog.Count -gt 0
+            if ($RetailProbed)
+            {
+                Write-Log -Message ("FoundryModelCoverage: pulled {0} Retail Prices catalog item(s) for serviceName 'Foundry Models'." -f $RetailCatalog.Count) -Severity 'Info'
+            }
+            else
+            {
+                Write-Log -Message ("FoundryModelCoverage: the Retail Prices catalog for serviceName 'Foundry Models' returned zero items on a successful call. The Azure-metered axis will be marked INDETERMINATE (never UNPRICED) for this run.") -Severity 'Warning'
+            }
         }
         catch
         {
@@ -1993,7 +2000,7 @@ resources
                                         DeploymentSku = ''; DeploymentCapacity = ''; Region = "$($acct.location)"; DetectedPlanes = 'None'
                                         CoverageStatus = 'Unknown-DeploymentsNotEnumerated'; CoverageFlag = ('Coverage INDETERMINATE: the account''s deployments could not be listed ({0}). NOT declared UNPRICED.' -f $_.Exception.Message)
                                         RetailPriceMatch = '(not probed)'; MarketplacePublisher = ''; MarketplaceOffer = ''; CcuQuantity = ''; CcuUnitOfMeasure = ''; MarketplacePretaxCost = ''; MarketplaceCurrency = ''; CcuAttribution = ''
-                                        TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''; AppInsightsLinked = $false; PerCallTokenSource = '(not probed)'; PerCallInputTokens = ''; PerCallOutputTokens = ''; PerCallCacheTokens = ''
+                                        TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
                                         ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
                                     }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
                         continue
@@ -2050,7 +2057,6 @@ resources
                             MarketplaceCurrency = $(if ($MarketplaceCovered) { "$($MpRow.Currency)" } else { '' })
                             CcuAttribution = $(if ($MarketplaceCovered) { $MpMatch.CcuAttribution } else { '' })
                             TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
-                            AppInsightsLinked = $false; PerCallTokenSource = '(not probed)'; PerCallInputTokens = ''; PerCallOutputTokens = ''; PerCallCacheTokens = ''
                             ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
                         }
 
@@ -2103,14 +2109,14 @@ resources
                                     CoverageStatus = 'MarketplaceOnly'; CoverageFlag = 'Marketplace/CCU charge that could NOT be tied to a deployed model in this subscription; carried so the billed dollars are not dropped.'
                                     RetailPriceMatch = '(n/a - unattributed Marketplace charge)'
                                     MarketplacePublisher = "$($MpRow.PublisherName)"; MarketplaceOffer = "$($MpRow.OfferName)"; CcuQuantity = $MpRow.ConsumedQuantity; CcuUnitOfMeasure = "$($MpRow.UnitOfMeasure)"; MarketplacePretaxCost = $MpRow.PretaxCost; MarketplaceCurrency = "$($MpRow.Currency)"; CcuAttribution = 'AggregatedOffer'
-                                    TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''; AppInsightsLinked = $false; PerCallTokenSource = '(not applicable)'; PerCallInputTokens = ''; PerCallOutputTokens = ''; PerCallCacheTokens = ''
+                                    TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
                                     ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
                                 }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
                 }
 
                 if ($ExportRows.Count -gt 0)
                 {
-                    $ExportRows | Select-Object SubscriptionGuid, SubscriptionName, ResourceGroup, AccountName, AccountKind, DeploymentName, ModelName, ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region, DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch, MarketplacePublisher, MarketplaceOffer, CcuQuantity, CcuUnitOfMeasure, MarketplacePretaxCost, MarketplaceCurrency, CcuAttribution, TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens, AppInsightsLinked, PerCallTokenSource, PerCallInputTokens, PerCallOutputTokens, PerCallCacheTokens, ProbeWindowStart, ProbeWindowEnd, RunTimestampUtc | Export-Csv -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $ExportRows | Select-Object SubscriptionGuid, SubscriptionName, ResourceGroup, AccountName, AccountKind, DeploymentName, ModelName, ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region, DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch, MarketplacePublisher, MarketplaceOffer, CcuQuantity, CcuUnitOfMeasure, MarketplacePretaxCost, MarketplaceCurrency, CcuAttribution, TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens, ProbeWindowStart, ProbeWindowEnd, RunTimestampUtc | Export-Csv -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8 -Append -NoTypeInformation
                 }
 
                 $FcRecordsThisSub = $ExportRows.Count
@@ -2640,7 +2646,7 @@ if ($FoundryCoverageCreated)
 
 if ($SkipConsumption.IsPresent -or $SkipFoundryCoverage.IsPresent -or !$FoundryCoverageCreated -or $FoundryCoverageEmpty)
 {
-    "SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,DeploymentName,ModelName,ModelFormat,ModelVersion,DeploymentSku,DeploymentCapacity,Region,DetectedPlanes,CoverageStatus,CoverageFlag,RetailPriceMatch,MarketplacePublisher,MarketplaceOffer,CcuQuantity,CcuUnitOfMeasure,MarketplacePretaxCost,MarketplaceCurrency,CcuAttribution,TokenMetricsPresent,InputTokens,OutputTokens,TotalTokens,AppInsightsLinked,PerCallTokenSource,PerCallInputTokens,PerCallOutputTokens,PerCallCacheTokens,ProbeWindowStart,ProbeWindowEnd,RunTimestampUtc" | Out-File -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8
+    "SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,DeploymentName,ModelName,ModelFormat,ModelVersion,DeploymentSku,DeploymentCapacity,Region,DetectedPlanes,CoverageStatus,CoverageFlag,RetailPriceMatch,MarketplacePublisher,MarketplaceOffer,CcuQuantity,CcuUnitOfMeasure,MarketplacePretaxCost,MarketplaceCurrency,CcuAttribution,TokenMetricsPresent,InputTokens,OutputTokens,TotalTokens,ProbeWindowStart,ProbeWindowEnd,RunTimestampUtc" | Out-File -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8
 }
 
 if ($Obfuscate.IsPresent)

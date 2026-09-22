@@ -242,7 +242,7 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
         $Record | Add-Member -NotePropertyName CoverageStatus -NotePropertyValue 'AzureMetered' -Force
         $Record | Add-Member -NotePropertyName CoverageFlag -NotePropertyValue 'x' -Force
         $Record | Add-Member -NotePropertyName RetailPriceMatch -NotePropertyValue 'y' -Force
-        foreach ($p in 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'AppInsightsLinked', 'PerCallTokenSource', 'PerCallInputTokens', 'PerCallOutputTokens', 'PerCallCacheTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        foreach ($p in 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
         {
             $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
         }
@@ -253,8 +253,7 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
             'DeploymentCapacity', 'Region', 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag',
             'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity',
             'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution',
-            'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'AppInsightsLinked',
-            'PerCallTokenSource', 'PerCallInputTokens', 'PerCallOutputTokens', 'PerCallCacheTokens',
+            'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens',
             'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc'
         ) | Sort-Object
         $Actual = @($Out.PSObject.Properties.Name) | Sort-Object
@@ -268,7 +267,7 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
         $Record | Add-Member -NotePropertyName CoverageFlag -NotePropertyValue 'flag' -Force
         $Record | Add-Member -NotePropertyName RetailPriceMatch -NotePropertyValue 'none' -Force
         $Record | Add-Member -NotePropertyName MarketplacePublisher -NotePropertyValue 'anthropic' -Force
-        foreach ($p in 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'AppInsightsLinked', 'PerCallTokenSource', 'PerCallInputTokens', 'PerCallOutputTokens', 'PerCallCacheTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        foreach ($p in 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
         {
             $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
         }
@@ -288,7 +287,7 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
         $RgTokenMap = @{ 'rg-ai-prod' = $SharedRgToken }
 
         $Record = script:New-FakeModel
-        foreach ($p in 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag', 'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'AppInsightsLinked', 'PerCallTokenSource', 'PerCallInputTokens', 'PerCallOutputTokens', 'PerCallCacheTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        foreach ($p in 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag', 'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
         {
             $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
         }
@@ -307,7 +306,7 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
 
     It 'mints deterministic local tokens when a sub/RG is absent from the shared maps' {
         $Record = script:New-FakeModel
-        foreach ($p in 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag', 'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'AppInsightsLinked', 'PerCallTokenSource', 'PerCallInputTokens', 'PerCallOutputTokens', 'PerCallCacheTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        foreach ($p in 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag', 'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
         {
             $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
         }

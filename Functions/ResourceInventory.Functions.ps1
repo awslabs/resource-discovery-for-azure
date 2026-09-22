@@ -319,6 +319,10 @@ function Global:Test-RdaMarketplaceModelMatch
     $AccountRg = "$($Model.ResourceGroup)"
     $AccountId = "$($Model.AccountId)"
 
+    $KnownVendorTokens = @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'meta', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry')
+    $ModelVendorDiscriminators = @($VendorTokens | Where-Object { $_ -in $KnownVendorTokens })
+    if ($ModelVendorDiscriminators.Count -eq 0) { return $Result }
+
     $BestOfferRow = $null
 
     foreach ($Row in @($MarketplaceRows))
@@ -329,11 +333,12 @@ function Global:Test-RdaMarketplaceModelMatch
         $OfferTokens = @(Get-RdaFoundryModelMatchTokens -Value $OfferText)
         if ($OfferTokens.Count -eq 0) { continue }
 
-        # Vendor alignment: any overlap between the model's vendor tokens and the offer's
-        # publisher/offer tokens (e.g. 'anthropic'/'claude'). Vendor-level here is CORRECT:
-        # Marketplace attribution is inherently offer-level (aggregated), unlike the
-        # per-model Retail Prices match.
-        $VendorAligned = @($VendorTokens | Where-Object { $OfferTokens -contains $_ }).Count -gt 0
+        # Vendor alignment: overlap on a KNOWN Foundry-vendor discriminator (e.g.
+        # 'anthropic'/'claude'), not any incidental shared name token. A bare common
+        # word like 'meta' in an unrelated publisher must not align the model to that
+        # offer. Vendor-level here is CORRECT: Marketplace attribution is inherently
+        # offer-level (aggregated), unlike the per-model Retail Prices match.
+        $VendorAligned = @($ModelVendorDiscriminators | Where-Object { $OfferTokens -contains $_ }).Count -gt 0
         if (-not $VendorAligned) { continue }
 
         # Can we tie the CCU line to THIS specific deployment/account? Only if the row's
@@ -543,11 +548,6 @@ function Global:ConvertTo-RdaFoundryCoverageRow
         InputTokens           = $Record.InputTokens
         OutputTokens          = $Record.OutputTokens
         TotalTokens           = $Record.TotalTokens
-        AppInsightsLinked     = $Record.AppInsightsLinked
-        PerCallTokenSource    = $Record.PerCallTokenSource
-        PerCallInputTokens    = $Record.PerCallInputTokens
-        PerCallOutputTokens   = $Record.PerCallOutputTokens
-        PerCallCacheTokens    = $Record.PerCallCacheTokens
         ProbeWindowStart      = $Record.ProbeWindowStart
         ProbeWindowEnd        = $Record.ProbeWindowEnd
         RunTimestampUtc       = $Record.RunTimestampUtc

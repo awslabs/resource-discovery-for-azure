@@ -84,10 +84,29 @@ Describe 'Sequential and parallel paths reach ResourceInventory.ps1 with the sam
         # The parallel $WorkerArgs hashtable originally dropped -SkipMarketplace while the
         # sequential $InventoryPassthrough and the stream's own re-forward both carried it,
         # so a -SkipMarketplace -ParallelStreams N run silently ran the Marketplace phase
-        # anyway. Assert parity with the Consumption forward it mirrors.
-        'SkipMarketplace' | Should -BeIn $script:WrapperPassKeys -Because 'the sequential path must forward -SkipMarketplace'
-        'SkipMarketplace' | Should -BeIn $script:StreamPassKeys -Because 'the parallel worker must forward -SkipMarketplace to the inner script'
-        'SkipMarketplace' | Should -BeIn $script:WorkerArgKeys -Because 'the wrapper must forward -SkipMarketplace into the parallel worker args, exactly like -SkipConsumption'
+        # anyway. Behavioural, not textual: extract each real forwarding statement from the
+        # wrapper/stream source and EXECUTE it with -SkipMarketplace present, then assert the
+        # resulting hashtable actually carries the key. A commented-out or dead source line
+        # does not execute, so it cannot satisfy this.
+        function script:Test-ForwardsSkipMarketplace
+        {
+            param([string]$Src, [string]$HashVar)
+            $Line = @($Src -split "`r?`n" | Where-Object {
+                    $_ -match [regex]::Escape($HashVar) -and $_ -match "SkipMarketplace"
+                }) | Select-Object -First 1
+            if (-not $Line) { return $false }
+            $Block = [scriptblock]::Create(
+                "param(`$SkipMarketplace) `$$HashVar = @{}; $($Line.Trim()); `$$HashVar")
+            $Result = & $Block ([switch]$true)
+            return [bool]$Result.ContainsKey('SkipMarketplace')
+        }
+
+        (script:Test-ForwardsSkipMarketplace -Src $script:WrapperSrc -HashVar 'InventoryPassthrough') |
+            Should -BeTrue -Because 'the sequential path must forward -SkipMarketplace'
+        (script:Test-ForwardsSkipMarketplace -Src $script:StreamSrc -HashVar 'InventoryPassthrough') |
+            Should -BeTrue -Because 'the parallel worker must forward -SkipMarketplace to the inner script'
+        (script:Test-ForwardsSkipMarketplace -Src $script:WrapperSrc -HashVar 'WorkerArgs') |
+            Should -BeTrue -Because 'the wrapper must forward -SkipMarketplace into the parallel worker args, exactly like -SkipConsumption'
     }
 
     It 'honours an explicit -Debug:$false rather than inverting it' {

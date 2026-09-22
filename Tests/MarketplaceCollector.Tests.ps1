@@ -321,4 +321,24 @@ Describe 'Confirmed-zero honest negative' {
         $Text = Get-Content -LiteralPath $File -Raw
         $Text | Should -Match 'Marketplace consumption records collected:\s*n/a'
     }
+
+    It 'names each Marketplace failed subscription in the shareable diagnostics log' {
+        $SavedMk = $Global:MarketplaceFailedSubs
+        try
+        {
+            $Global:MarketplaceFailedSubs = @(
+                [pscustomobject]@{ Name = 's1'; Id = 'sub-A-id'; Message = 'Marketplace query failed for sub A'; Complete = $false; RecordsCollected = 0 }
+                [pscustomobject]@{ Name = 's2'; Id = 'sub-B-id'; Message = 'Marketplace query failed for sub B'; Complete = $false; RecordsCollected = 0 }
+            )
+            $File = Write-RdaShareableDiagnosticsLog -DefaultPath $script:DiagPrefix -ReportName 'R' -RunDateTime 'mpfail' -Version '0.0.0-test' -PhaseTimings $null -MarketplaceRecordCount 0 -MarketplaceRequested $true -Obfuscated
+            $Text = Get-Content -LiteralPath $File -Raw
+            $Text | Should -Match 'Marketplace failed/incomplete subscriptions:\s*2'
+            $Text | Should -Match 'Marketplace query failed for sub A'
+            $Text | Should -Match 'Marketplace query failed for sub B'
+        }
+        finally
+        {
+            $Global:MarketplaceFailedSubs = $SavedMk
+        }
+    }
 }

@@ -751,6 +751,7 @@ function Write-RdaShareableDiagnosticsLog
         $CollectorFails = @(@($Global:CollectorFailures) | Where-Object { $null -ne $_ })
         $MetricsSkips = @(@($Global:MetricsFailedSubs) | Where-Object { $null -ne $_ })
         $ConsumpSkips = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
+        $MarketplaceSkips = @(@($Global:MarketplaceFailedSubs) | Where-Object { $null -ne $_ })
 
         $DiagLines = [System.Collections.Generic.List[string]]::new()
         if ($Obfuscated)
@@ -836,6 +837,12 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('    - A subscription offer the legacy usage API does not serve.')
         }
 
+        $DiagLines.Add('')
+        $DiagLines.Add(('Marketplace failed/incomplete subscriptions: {0}' -f $MarketplaceSkips.Count))
+        foreach ($mkItem in $MarketplaceSkips)
+        {
+            $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$mkItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$mkItem.Message) $DiagScrubMap)))
+        }
         $DiagLines.Add('')
         if ($MarketplaceRequested -or ($MarketplaceRecordCount -ne 0))
         {

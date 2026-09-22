@@ -224,7 +224,7 @@ installed `Az.Billing` cmdlet's output type):
 | `IsEstimated` | Whether the charge is an estimate. |
 | `MeterId` | Azure meter GUID (not customer-specific). |
 | `UsageStart` / `UsageEnd` | Aggregation interval. |
-| `SubscriptionGuid` | Subscription the usage is billed to. |
+| `SubscriptionGuid` | Subscription the usage is billed to (masked under `-Obfuscate`). |
 | `SubscriptionName` | Subscription display name (masked under `-Obfuscate`). |
 | `ResourceGroup` | Resource group (masked under `-Obfuscate`). |
 | `InstanceId` | ARM resource id of the consuming resource (masked under `-Obfuscate`, ARM path structure preserved). |
@@ -234,10 +234,12 @@ installed `Az.Billing` cmdlet's output type):
 
 `PublisherName` / `OfferName` / `PlanName` are **third-party product identifiers**,
 not customer secrets, so they are left **readable** (the "which ISV / which offer"
-signal must survive). `InstanceId`, `ResourceGroup`, `SubscriptionName`, and
-`InstanceName` flow through RDA's existing consumption obfuscation exactly like the
-first-party fields — deterministic per-run tokens, ARM path structure preserved on
-`InstanceId`.
+signal must survive). `SubscriptionGuid`, `SubscriptionName`, `ResourceGroup`,
+`InstanceId`, and `InstanceName` flow through RDA's existing consumption obfuscation
+exactly like the first-party fields — deterministic per-run tokens, ARM path
+structure preserved on `InstanceId`. `SubscriptionGuid` and `SubscriptionName`
+resolve to the same shared subscription token, so the Marketplace CSV cross-references
+every other sheet in the bundle for the same subscription.
 
 ### Honest negatives (confirmed zero)
 

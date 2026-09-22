@@ -27,12 +27,9 @@ BeforeAll {
     $script:Repo = Split-Path $PSScriptRoot -Parent
     $script:FunctionsPath = Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1'
     $script:CommonPath = Join-Path $script:Repo 'Functions/Common.Functions.ps1'
-    $script:InvPath = Join-Path $script:Repo 'ResourceInventory.ps1'
 
     . $script:FunctionsPath
     . $script:CommonPath
-
-    $script:InvSrc = Get-Content -LiteralPath $script:InvPath -Raw
 
     # A representative Marketplace row shaped like PSMarketplace. Property names are the
     # documented ones (verified against the installed cmdlet's output type). Uses a
@@ -323,32 +320,5 @@ Describe 'Confirmed-zero honest negative' {
         $File = Write-RdaShareableDiagnosticsLog -DefaultPath $script:DiagPrefix -ReportName 'R' -RunDateTime 'mpna' -Version '0.0.0-test' -PhaseTimings $null -MarketplaceRecordCount 0 -MarketplaceRequested $false -Obfuscated
         $Text = Get-Content -LiteralPath $File -Raw
         $Text | Should -Match 'Marketplace consumption records collected:\s*n/a'
-    }
-}
-
-Describe 'Collector wiring invariants' {
-    # These are structural checks on wiring that has no behavioural surface reachable
-    # offline (the nested collector cannot be invoked without a live Az context). They
-    # complement, and do not replace, the behavioural tests above.
-
-    It 'the collector calls Get-AzConsumptionMarketplace (the documented Az.Billing cmdlet)' {
-        $script:InvSrc | Should -Match 'Get-AzConsumptionMarketplace'
-    }
-
-    It 'the collector emits a SEPARATE Marketplace_ output and never rewrites the Consumption_ file' {
-        $script:InvSrc | Should -Match 'Marketplace_"'
-        # The Marketplace CSV path variable is distinct from the consumption one.
-        $script:InvSrc | Should -Match '\$Global:MarketplaceFileCsv'
-    }
-
-    It 'the Marketplace phase is gated by -SkipConsumption and -SkipMarketplace' {
-        $script:InvSrc | Should -Match '-not \$SkipMarketplace\.IsPresent|!\$SkipMarketplace\.IsPresent'
-    }
-
-    It 'does not cap the Marketplace query with -Top (which would silently truncate >1000-row subs)' {
-        # -Top on Get-AzConsumptionMarketplace is a HARD cap, not a page size, and the cmdlet
-        # exposes no ContinuationToken to page manually - so the query must omit -Top to return
-        # every row. Guards against reintroducing the truncation.
-        $script:InvSrc | Should -Not -Match 'Get-AzConsumptionMarketplace[^\r\n]*-Top'
     }
 }

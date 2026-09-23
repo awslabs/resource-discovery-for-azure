@@ -119,8 +119,12 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $script:Sub = @{}
         $script:Rg = @{}
         $script:Nm = @{}
-        # OrderNumber's own local cache, owned by the caller exactly as the collector owns it.
-        $script:Ord = @{}
+        # Protect-FreeTextValue returns its input unchanged when $Global:FreeTextDictionary is null,
+        # which is how the shared helper expresses "obfuscation is off". ResourceInventory.ps1 creates
+        # this dictionary inside its Obfuscate.IsPresent block, so an -Obfuscate run always has one.
+        # Establish it here for the same reason: without it these tests would exercise the
+        # obfuscation-off path while asking for -Obfuscate, and OrderNumber would read as unmasked.
+        $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         # Shared run-wide dictionary VIEWS the collector derives from $Global:ResourceSubscriptionDictionary
         # / $Global:ResourceResourceGroupDictionary. Keyed the way the function consumes them:
         # guid -> shared sub token, rgName -> shared rg token. A real bundle would have these already
@@ -231,27 +235,49 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         # bought and stay readable; OrderNumber says WHO bought it under which order, so it is
         # masked. Without this assertion the choice is unrecorded and either behaviour looks correct.
         $Row = script:New-FakeMarketplaceRow
-        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+        $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
 
         $Out.OrderNumber | Should -Not -Be 'ORD-4242'
         $Out.OrderNumber | Should -Not -Match 'ORD-4242'
         $Out.OrderNumber | Should -Not -BeNullOrEmpty -Because 'masking must replace the value, not drop the column'
-        $Out.OrderNumber | Should -Match '^(non)?prod_order_' -Because 'it carries its own token namespace so it is recognisable in the CSV'
+        $Out.OrderNumber | Should -Match '^(non)?prod_' -Because 'it carries the shared free-text token shape'
+    }
+
+    It 'records the OrderNumber token in the dictionary that gets exported, so the owner can reverse it' {
+        # THE point of the change this guards. A token the owner cannot map back is useless to them:
+        # the dictionary is the only route from a shared CSV back to a real order number.
+        # $Global:FreeTextDictionary is what ResourceInventory.ps1 serialises into FreeTextMap, so
+        # presence here is what reversibility actually means. Tokenising from a cache private to the
+        # row helper satisfied every other assertion in this file while leaving the value
+        # permanently unrecoverable.
+        $Saved = $Global:FreeTextDictionary
+        try
+        {
+            $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+            $Row = script:New-FakeMarketplaceRow
+            $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+
+            $Global:FreeTextDictionary.ContainsKey('ORD-4242') | Should -BeTrue -Because 'the real order number must be a key so the export can invert it'
+            $Global:FreeTextDictionary['ORD-4242'] | Should -Be $Out.OrderNumber -Because 'the recorded token must be the one that shipped in the row'
+        }
+        finally
+        {
+            $Global:FreeTextDictionary = $Saved
+        }
     }
 
     It 'masks OrderNumber deterministically, and never shares a token with an identically-spelled instance name' {
-        # Resolve-ObfuscationToken keys its LocalCache by the REAL VALUE (-LookupKey is consulted
-        # only for a SharedDictionary), so OrderNumber must get a cache SEPARATE from InstanceName's.
-        # Share one cache and an order number spelled like a resource name returns whichever token
-        # was minted first, implying a relationship that does not exist. Namespacing the lookup key
-        # does NOT fix it, because -LookupKey is never consulted for a local-cache hit.
+        # OrderNumber is tokenised from the run-wide free-text dictionary while InstanceName uses the
+        # resource-name cache, so the two stay distinct dimensions even when spelled identically.
+        # Collapsing them onto one token would imply a relationship that does not exist - an order
+        # number is not a resource - and would make the name token useless as a cross-reference.
         $Collide = script:New-FakeMarketplaceRow -InstanceName 'ORD-4242'
 
-        $A = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
-        $B = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm -OrderCache $script:Ord
+        $A = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
+        $B = ConvertTo-RdaMarketplaceRow -Row $Collide -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
 
         $A.OrderNumber | Should -Be $B.OrderNumber -Because 'the same real value must map to the same token within a run'
-        $A.OrderNumber | Should -Not -Be $A.InstanceName -Because 'a cache of its own must keep the two dimensions distinct'
+        $A.OrderNumber | Should -Not -Be $A.InstanceName -Because 'separate dictionaries must keep the two dimensions distinct'
     }
 }
 
@@ -413,13 +439,14 @@ Describe 'Confirmed-zero honest negative' {
         $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'a nested function defined but never invoked is dead wiring - most likely a call site that was overwritten'
     }
 
-    It 'passes a dedicated -OrderCache at the Marketplace row call site' {
-        # Without this, dropping -OrderCache from the collector would leave every test above green
-        # while every Marketplace row got a freshly minted order token - an obfuscation-determinism
-        # regression in the shareable CSV that no behavioural test here can see, because the unit
-        # tests supply their own cache.
-        $script:InvSrc | Should -Match 'ConvertTo-RdaMarketplaceRow[^\r\n]*-OrderCache'
-        # And the cache must be the run-scoped one, not a literal @{} minted per row.
-        $script:InvSrc | Should -Match '-OrderCache \$script:MarketplaceOrderCache'
+    It 'tokenises OrderNumber through the exported free-text dictionary, not a private cache' {
+        # Guards the reversibility fix at the source level. The behavioural test above proves the
+        # token reaches $Global:FreeTextDictionary; this proves the row helper has not quietly gone
+        # back to minting tokens into a cache of its own, which reads as correct in every functional
+        # assertion while leaving the owner unable to map the value back.
+        $FnSrc = Get-Content -LiteralPath (Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1') -Raw
+
+        $FnSrc | Should -Match 'OutOrderNumber\s*=\s*Protect-FreeTextValue'
+        $FnSrc | Should -Not -Match '\$OrderCache' -Because 'the parameter was removed; a stray reference would bind to $null and mint an unexportable per-row token'
     }
 }

@@ -45,6 +45,7 @@ BeforeAll {
     $script:InventoryFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
     $script:MetricsFiles = @(Get-ChildItem -Path $script:ExtractPath -Filter "Metrics_*.json")
     $script:ConsumptionFile = Get-ChildItem -Path $script:ExtractPath -Filter "Consumption_*.csv" | Select-Object -First 1
+    $script:MarketplaceFile = Get-ChildItem -Path $script:ExtractPath -Filter "Marketplace_*.csv" | Select-Object -First 1
     $script:AllFiles = Get-ChildItem -Path $script:ExtractPath -File
 
     # Parse inventory JSON
@@ -334,6 +335,70 @@ Describe "Consumption Obfuscation" {
 # ============================================================
 # 11. Obfuscation prefix consistency (no plain GUIDs)
 # ============================================================
+Describe "Marketplace Obfuscation" {
+    # Marketplace_*.csv is covered by the whole-bundle PII sweep above, but that sweep only proves no
+    # KNOWN-BAD pattern appears. It cannot prove the right fields were masked, nor - just as important
+    # here - that the deliberately READABLE ones were left alone. Inventory, Metrics and Consumption
+    # each get that per-field treatment; this gives Marketplace the same.
+    # Derived in BeforeAll, not the Describe body: it depends on $script:ObfuscationPattern from the
+    # top-level BeforeAll, which is still $null at discovery time.
+    BeforeAll {
+        $script:MarketplaceSafePattern = '^(' + $script:ObfuscationPattern.TrimStart('^').TrimEnd('$') + '|/subscriptions/(prod|nonprod)_sub_)'
+        $script:MarketplaceRows = if ($null -ne $script:MarketplaceFile) { @(Import-Csv $script:MarketplaceFile.FullName) } else { @() }
+    }
+
+    It "Should mask every identifying Marketplace field" {
+        if ($null -eq $script:MarketplaceFile) { Set-ItResult -Skipped -Because "no Marketplace file in fixture"; return }
+        if ($script:MarketplaceRows.Count -eq 0) { Set-ItResult -Skipped -Because "Marketplace csv has no data rows - a confirmed zero, nothing to assert on"; return }
+        foreach ($Row in $script:MarketplaceRows)
+        {
+            # These are flat tokens; InstanceId keeps the ARM shape so a consumer can still
+            # categorise by provider and type, exactly as Consumption ResourceId does.
+            foreach ($Field in 'SubscriptionGuid', 'SubscriptionName', 'ResourceGroup', 'InstanceName', 'OrderNumber', 'InstanceId')
+            {
+                $Value = [string]$Row.$Field
+                if (![string]::IsNullOrEmpty($Value) -and $Value -ne 'obfuscated')
+                {
+                    $Value | Should -Match $script:MarketplaceSafePattern -Because "Marketplace $Field must be an obfuscation token"
+                }
+            }
+        }
+    }
+
+    It "Should never expose a real subscription GUID in any Marketplace column" {
+        if ($null -eq $script:MarketplaceFile) { Set-ItResult -Skipped -Because "no Marketplace file in fixture"; return }
+        if ($script:MarketplaceRows.Count -eq 0) { Set-ItResult -Skipped -Because "Marketplace csv has no data rows - a confirmed zero, nothing to assert on"; return }
+        foreach ($Row in $script:MarketplaceRows)
+        {
+            foreach ($Prop in $Row.PSObject.Properties)
+            {
+                $Value = [string]$Prop.Value
+                if ([string]::IsNullOrEmpty($Value)) { continue }
+                $Value | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "Marketplace $($Prop.Name) must not carry a raw ARM path"
+            }
+        }
+    }
+
+    It "Should leave the third-party PRODUCT identifiers readable" {
+        # This collector exists to say WHICH ISV offer was bought. Masking these would leave the file
+        # structurally valid and useless, and nothing else in this suite would notice, because a leak
+        # test only ever complains about too MUCH information.
+        if ($null -eq $script:MarketplaceFile) { Set-ItResult -Skipped -Because "no Marketplace file in fixture"; return }
+        if ($script:MarketplaceRows.Count -eq 0) { Set-ItResult -Skipped -Because "Marketplace csv has no data rows - a confirmed zero, nothing to assert on"; return }
+        foreach ($Row in $script:MarketplaceRows)
+        {
+            foreach ($Field in 'PublisherName', 'OfferName', 'PlanName')
+            {
+                $Value = [string]$Row.$Field
+                if (![string]::IsNullOrEmpty($Value))
+                {
+                    $Value | Should -Not -Match $script:ObfuscationPattern -Because "Marketplace $Field is a product identifier and is deliberately NOT masked"
+                }
+            }
+        }
+    }
+}
+
 Describe "Obfuscation Prefix Consistency" {
     It "Should use prod_ or nonprod_ prefix on all IDs (not plain GUIDs)" {
         $PlainGuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'

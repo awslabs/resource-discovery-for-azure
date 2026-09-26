@@ -140,7 +140,7 @@ function RunInventorySetup()
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph', 'Az.CognitiveServices')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
@@ -2121,11 +2121,24 @@ function ExecuteInventoryProcessing()
                     $Fidelity = $Bucket.Fidelity
 
                     $RowsForModel = 0
+                    $RoleAgg = [ordered]@{}
                     foreach ($MetricName in $Bucket.Priced.Keys)
                     {
                         $RoleInfo = Get-RdaFoundryTokenRole -MetricName $MetricName
                         if ($null -eq $RoleInfo) { continue }
                         $TokenQty = [double]$Bucket.Priced[$MetricName]
+                        if (-not $RoleAgg.Contains($RoleInfo.Role))
+                        {
+                            $RoleAgg[$RoleInfo.Role] = @{ MeterWord = $RoleInfo.MeterWord; Quantity = 0.0; Sources = @() }
+                        }
+                        $RoleAgg[$RoleInfo.Role].Quantity += $TokenQty
+                        $RoleAgg[$RoleInfo.Role].Sources += $MetricName
+                    }
+
+                    foreach ($RoleKey in $RoleAgg.Keys)
+                    {
+                        $RoleEntry = $RoleAgg[$RoleKey]
+                        $TokenQty = [double]$RoleEntry.Quantity
                         # Skip a zero-token role: it is not usage, and emitting it would clutter the
                         # CSV with priceless rows. A model with NO non-zero role is logged below.
                         if ($TokenQty -le 0) { continue }
@@ -2133,10 +2146,10 @@ function ExecuteInventoryProcessing()
                         $Folded = ConvertTo-RdaFoldedFoundryTokenRow `
                             -AccountResourceId $AccountId `
                             -ModelName $ModelName `
-                            -RoleMeterWord $RoleInfo.MeterWord `
-                            -Role $RoleInfo.Role `
+                            -RoleMeterWord $RoleEntry.MeterWord `
+                            -Role $RoleKey `
                             -TokenQuantity $TokenQty `
-                            -SourceMetricName $MetricName `
+                            -SourceMetricName ($RoleEntry.Sources -join '+') `
                             -AccountLocation $AccountLocation `
                             -UsageStartTime $FtStartTime `
                             -UsageEndTime $FtEndTime `

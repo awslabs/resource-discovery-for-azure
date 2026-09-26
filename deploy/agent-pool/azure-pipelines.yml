@@ -27,7 +27,7 @@ steps:
 # already be present (unlike Microsoft-hosted agents, it does NOT install it).
 # cloud-init.yaml bakes PS7 + Az + az CLI into each node; this step proves it.
 - script: |
-    pwsh -NoProfile -Command '$PSVersionTable.PSVersion; Get-Module -ListAvailable Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph | Select-Object Name,Version'
+    pwsh -NoProfile -Command '$PSVersionTable.PSVersion; Get-Module -ListAvailable Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices | Select-Object Name,Version'
     az version
   displayName: 'Show agent PowerShell 7 / Az / az versions'
 

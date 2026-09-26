@@ -15,5 +15,5 @@ runcmd:
   - rpm --import https://packages.microsoft.com/keys/microsoft.asc
   - curl -sSL -o /etc/yum.repos.d/microsoft-prod.repo https://packages.microsoft.com/config/rhel/9/prod.repo
   - dnf install -y powershell azure-cli libicu git
-  - pwsh -NoProfile -Command "Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Scope AllUsers -Force -AllowClobber"
+  - pwsh -NoProfile -Command "Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Scope AllUsers -Force -AllowClobber"
   - pwsh -NoProfile -Command "$PSVersionTable.PSVersion | Out-File -FilePath /var/log/rda-agent-bootstrap.log; Get-Module -ListAvailable Az.Accounts | Select-Object Name,Version | Out-File -Append /var/log/rda-agent-bootstrap.log"

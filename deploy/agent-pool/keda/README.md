@@ -87,7 +87,7 @@ scope if you run consumption/metrics.
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | RHEL UBI 9 agent image + PowerShell 7 + `az` CLI + the Az submodules RDA needs: **Az.Accounts, Az.Compute, Az.Monitor, Az.Billing, Az.ResourceGraph, Az.Storage**. `Az.Storage` is required for blob upload; all are baked in because `AzurePowerShell@5` does not install modules on a self-hosted agent. |
+| `Dockerfile` | RHEL UBI 9 agent image + PowerShell 7 + `az` CLI + the Az submodules RDA needs: **Az.Accounts, Az.Compute, Az.Monitor, Az.Billing, Az.ResourceGraph, Az.CognitiveServices, Az.Storage**. `Az.CognitiveServices` is required for the Foundry per-model token collector; `Az.Storage` is required for blob upload; all are baked in because `AzurePowerShell@5` does not install modules on a self-hosted agent. |
 | `start.sh` | Registers the agent and runs one job (`--once`), then de-registers. |
 | `agent-scaledjob.yaml` | KEDA `ScaledJob` — one agent pod per queued job. |
 | `trigger-auth.yaml` | Secret (AZP_URL/PAT) + `TriggerAuthentication` for the scaler. |

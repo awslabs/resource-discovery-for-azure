@@ -612,7 +612,7 @@ A version check must never gate the inventory.
         #  validates exactly those and does NOT require the ~80-submodule Az rollup.
         #  Checking the submodules rather than the Az umbrella is what lets a slim
         #  install pass - a slim install has no Az meta-module at all.]
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph', 'Az.CognitiveServices')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 

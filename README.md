@@ -118,19 +118,19 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the five Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`, `Az.ResourceGraph`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those five submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the five it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
+**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the six Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`, `Az.ResourceGraph`, `Az.CognitiveServices`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those six submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the ones it needs). `Az.CognitiveServices` is what lets the Azure AI Foundry per-model token collector discover Cognitive Services accounts and deployments; without it that collector would find nothing on a hand-picked local install. The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
 
 **Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
 ```powershell
 Get-Module Az* -ListAvailable | Uninstall-Module -Force
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
   
 
@@ -715,7 +715,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
 - The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
-- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
 
 **Cloud Shell session ended mid-run:**
 - Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.

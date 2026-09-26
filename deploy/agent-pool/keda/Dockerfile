@@ -19,7 +19,7 @@ RUN rpm --import https://packages.microsoft.com/keys/microsoft.asc \
 
 # Az PowerShell submodules RDA depends on (installed once, machine-wide).
 # Az.Storage is required by -UploadToBlobContainerUri (report/support-log upload).
-RUN pwsh -NoProfile -Command "Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.Storage -Repository PSGallery -Scope AllUsers -Force -AllowClobber"
+RUN pwsh -NoProfile -Command "Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices,Az.Storage -Repository PSGallery -Scope AllUsers -Force -AllowClobber"
 
 # The Azure DevOps agent's config.sh/run.sh refuse to run as root ("Must not
 # run with sudo") unless this is set. The container runs as root, so allow it.

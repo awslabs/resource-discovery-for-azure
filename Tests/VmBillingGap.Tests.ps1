@@ -198,4 +198,26 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Not -Match '<div class="coverage-banner">'
         $Html | Should -Not -Match 'VM billing-coverage check'
     }
+
+    # The billed-VM count ignores letter case, so a VM whose ResourceId repeats in another case is one VM.
+    # Counting by exact case here would give 6 billed VMs against 5 running, and no banner at all.
+    It 'counts a VM once when its ResourceId repeats in a different letter case' {
+        $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_case.csv'
+        $Rows = @()
+        for ($i = 0; $i -lt 3; $i++)
+        {
+            $Rid = ('prod_{0}' -f [guid]::NewGuid())
+            $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $Rid }
+            $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $Rid.ToUpperInvariant() }
+        }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Storage'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) }
+        $Rows | Select-Object MeterCategory, ResourceId | Export-Csv -Path $Csv -Encoding utf8 -NoTypeInformation
+
+        # 5 running, 3 distinct billed -> gap 2 of 5 = 40%
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'only 3 VMs'
+        $Html | Should -Match '2 running VMs \(40%\)'
+    }
 }

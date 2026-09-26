@@ -8,6 +8,7 @@ param (
     [switch]$SkipConsumption,
     [switch]$SkipMarketplace,
     [switch]$SkipFoundryCoverage,
+    [switch]$SkipFoundryTokens,
 
     [switch]$UseMetricsBatch,
 
@@ -531,6 +532,7 @@ if ($Plan)
     if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
     if ($SkipMarketplace) { $ExtraFlags += '-SkipMarketplace' }
     if ($SkipFoundryCoverage) { $ExtraFlags += '-SkipFoundryCoverage' }
+    if ($SkipFoundryTokens) { $ExtraFlags += '-SkipFoundryTokens' }
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
     if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
@@ -1142,6 +1144,7 @@ if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($SkipMarketplace) { $InventoryPassthrough['SkipMarketplace'] = $true }
 if ($SkipFoundryCoverage) { $InventoryPassthrough['SkipFoundryCoverage'] = $true }
+if ($SkipFoundryTokens) { $InventoryPassthrough['SkipFoundryTokens'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
@@ -1467,6 +1470,7 @@ else
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
                 if ($SkipMarketplace) { $WorkerArgs.SkipMarketplace = $true }
                 if ($SkipFoundryCoverage) { $WorkerArgs.SkipFoundryCoverage = $true }
+                if ($SkipFoundryTokens) { $WorkerArgs.SkipFoundryTokens = $true }
                 if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
                 if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }

@@ -432,6 +432,309 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     }
 }
 
+function Global:Get-RdaFoundryTokenRole
+{
+    # TIER 2 (per-model TOKEN counts). Maps ONE Azure AI Foundry / Cognitive Services token
+    # METRIC NAME to the server-recognizable token ROLE and the MeterName word that encodes it,
+    # or $null when the metric is NOT a per-role billable token count and must not be emitted as
+    # its own priced row.
+    #
+    # WHY. The ingestion server's Foundry->Bedrock path resolves a token role by scanning MeterName
+    # for a role substring (verified in the server's role parser):
+    #     input        <- "inp" / "input"
+    #     output       <- "outp" / "out" / "output"
+    #     cached-input <- "cd inp" / "cached inp" / "cache read"
+    #     cache-write  <- "cd wr" / "cache write"
+    # So each emitted token row must carry BOTH the model identity AND one of those role substrings
+    # in MeterName. This helper is the single owner of the metric-name -> role mapping so the
+    # collector wiring and the tests agree on it, and it is a pure function so it is unit-tested.
+    #
+    # LIVE-VERIFIED METRIC NAMES (confirmed 2026-09-26 against a real Phi-4 + Phi-4-mini deployment;
+    # Unit=Count on all of them):
+    #     InputTokens, OutputTokens, TotalTokens,
+    #     cacheReadInputTokens, ephemeral5mInputTokens, ephemeral1hInputTokens,
+    #     ModelRequests, TotalCalls
+    #
+    # WHAT MAPS TO A PRICED ROLE (returns a role) vs WHAT DOES NOT (returns $null):
+    #   - InputTokens              -> input        ("Inp")
+    #   - OutputTokens             -> output       ("Outp")
+    #   - cacheReadInputTokens     -> cached-input ("Cd Inp") - a cache-READ hit (discounted input)
+    #   - ephemeral5mInputTokens   -> cache-write  ("Cd Wr")  - a cache-WRITE (ephemeral cache entry)
+    #   - ephemeral1hInputTokens   -> cache-write  ("Cd Wr")
+    #   - TotalTokens              -> $null: it is Input+Output SUMMED. Emitting it as its own token
+    #                                 row alongside the input/output rows would DOUBLE-COUNT tokens
+    #                                 (test (d)). It is preserved for fidelity in AdditionalInfo, not
+    #                                 emitted as a priced row.
+    #   - ModelRequests, TotalCalls-> $null: request/call COUNTS, not token counts. A token Unit on
+    #                                 these would misprice a call count as tokens. Preserved for
+    #                                 fidelity, not emitted as a priced token row.
+    #
+    # Returns a PSCustomObject { Role; MeterWord; IsCacheWrite } or $null. Match is case-insensitive
+    # on the exact live-verified metric names above.
+    param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$MetricName)
+
+    if ([string]::IsNullOrWhiteSpace($MetricName)) { return $null }
+
+    switch -Regex ($MetricName.Trim())
+    {
+        # cache-READ hit (discounted input token) - matched BEFORE the plain InputTokens branch so
+        # 'cacheReadInputTokens' does not fall through to the input role.
+        '^(?i)cacheReadInputTokens$' { return [pscustomobject]@{ Role = 'cached-input'; MeterWord = 'Cd Inp'; IsCacheWrite = $false } }
+        # cache-WRITE (ephemeral cache entry, 5-minute or 1-hour TTL) - also matched before the plain
+        # InputTokens branch. Both ephemeral variants are cache writes.
+        '^(?i)ephemeral(5m|1h)InputTokens$' { return [pscustomobject]@{ Role = 'cache-write'; MeterWord = 'Cd Wr'; IsCacheWrite = $true } }
+        '^(?i)InputTokens$' { return [pscustomobject]@{ Role = 'input'; MeterWord = 'Inp'; IsCacheWrite = $false } }
+        '^(?i)OutputTokens$' { return [pscustomobject]@{ Role = 'output'; MeterWord = 'Outp'; IsCacheWrite = $false } }
+        # TotalTokens / ModelRequests / TotalCalls are intentionally not priced rows (see header).
+        default { return $null }
+    }
+}
+
+function Global:ConvertTo-RdaFoldedFoundryTokenRow
+{
+    # TIER 2 FOLD (per-model TOKEN counts). Maps ONE (Cognitive Services account, deployed model,
+    # token role, token count) tuple to a row shaped like the FIRST-PARTY Consumption CSV, so the
+    # deployed ingestion server - which reads ONLY Consumption_*.csv - can price the Azure-hosted
+    # model's token usage against AWS Bedrock. Sibling of the Tier 1 ConvertTo-RdaFoldedFoundryRow
+    # (which folds Claude/CCU cost rows); this one folds the per-role TOKEN rows.
+    #
+    # WHY. Azure AI Foundry models that DO expose token telemetry (Phi / OpenAI / DeepSeek / etc.)
+    # publish per-model token metrics on the Cognitive Services account, split by the
+    # ModelDeploymentName dimension. Those token counts never reach the first-party consumption
+    # endpoint, so without this fold the server sees the account but no token quantities to price.
+    # This emits one "Foundry Models" consumption row per (account, model, role) carrying the token
+    # count as Quantity and a token Unit, exactly the shape the server's token-pricing path expects.
+    #
+    # OUTPUT SHAPE. Returns an object carrying EXACTLY the first-party Consumption CSV columns
+    # (AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity,
+    # Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter,
+    # ReservationId, ReservationOrderId) so the collector can Select-Object + Export-Csv -Append it
+    # straight onto the existing Consumption_*.csv with no schema change.
+    #   - MeterCategory = "Foundry Models" (exact, server contract - the Foundry->Bedrock gate).
+    #   - MeterName     = "<ModelName> <RoleWord> Tkns" (e.g. "Phi-4 Inp Tkns", "Phi-4 Outp Tkns",
+    #                     "Phi-4 Cd Inp Tkns", "Phi-4 Cd Wr Tkns"). Carries BOTH the model identity
+    #                     (so BedrockModelFamilies aliases resolve it) AND the role substring the
+    #                     server parser keys on. The role word comes from Get-RdaFoundryTokenRole.
+    #   - Quantity      = the raw token count for that (model, role) over the window.
+    #   - Unit          = "Tokens" - a UNIT-1 token unit so the server's token multiplier is 1 and
+    #                     Quantity x multiplier = the raw token count. A "1M Tokens"-style unit would
+    #                     make the server divide by 1e6 and misprice; this row emits RAW token counts,
+    #                     so the unit MUST be the unit-1 "Tokens" (never "1M Tokens").
+    #   - ResourceId    = the Cognitive Services account resourceId (non-empty; obfuscated via the
+    #                     shared dictionary like every other row).
+    #   - MeterId       = a STABLE synthesized id per (account, model, role) - SHA256 over the
+    #                     account id + model + role - so the same tuple maps to the same id across runs.
+    #   - MeterSubCategory = the model name (a second place the server can read the model from).
+    #   - ResourceLocation = the account location.
+    #   - AdditionalInfo   = JSON {"Microsoft.Resources":{resourceUri,location,additionalInfo:{...}}}
+    #                        carrying the fold markers (IsFoundryFold, FoldTier=2, IsTokenMeter=$true),
+    #                        the model identity, the role, the source metric name, and - for fidelity -
+    #                        the raw non-priced counts (TotalTokens / ModelRequests / TotalCalls) when
+    #                        the caller passes them.
+    #
+    # OBFUSCATION PARITY. Same surface as ConvertTo-RdaFoldedFoundryRow: the caller passes the shared
+    # URI-keyed name dictionary and the per-run caches. The model identity (the "which model" signal)
+    # stays READABLE in MeterName / MeterSubCategory by design, exactly as Marketplace/Tier 1 keep the
+    # product identity readable; only the ResourceId is masked.
+    param(
+        [Parameter(Mandatory = $true)][string]$AccountResourceId,
+        [Parameter(Mandatory = $true)][string]$ModelName,
+        # The per-role MeterName word from Get-RdaFoundryTokenRole (e.g. 'Inp', 'Outp', 'Cd Inp', 'Cd Wr').
+        [Parameter(Mandatory = $true)][string]$RoleMeterWord,
+        # The token ROLE key ('input'/'output'/'cached-input'/'cache-write'), preserved in AdditionalInfo.
+        [Parameter(Mandatory = $true)][string]$Role,
+        # The raw token count for this (model, role) over the window.
+        [Parameter(Mandatory = $true)][double]$TokenQuantity,
+        # The source metric name (e.g. 'InputTokens'), preserved in AdditionalInfo for auditability.
+        [string]$SourceMetricName = '',
+        [string]$AccountLocation = 'global',
+        $UsageStartTime = $null,
+        $UsageEndTime = $null,
+        # Optional raw non-priced counts for fidelity (NOT emitted as priced rows - see Get-RdaFoundryTokenRole).
+        $TotalTokens = $null,
+        $ModelRequests = $null,
+        $TotalCalls = $null,
+        [bool]$Obfuscate = $false,
+        $UriKeyedNameDictionary = $null,
+        [hashtable]$SubCache = $null,
+        [hashtable]$RgCache = $null,
+        [hashtable]$NameCache = $null
+    )
+
+    # --- MeterName: model identity + role word + "Tkns" (server reads model AND role from it) ---
+    $MeterName = ("{0} {1} Tkns" -f $ModelName, $RoleMeterWord)
+
+    # --- Stable synthetic MeterId per (account, model, role) ---
+    $IdentitySeed = ("{0}|{1}|{2}" -f $AccountResourceId, $ModelName, $Role)
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try
+    {
+        $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($IdentitySeed))
+    }
+    finally
+    {
+        $Sha.Dispose()
+    }
+    $HashHex = -join ($HashBytes | ForEach-Object { $_.ToString('x2') })
+    $SynthGuid = ("{0}-{1}-{2}-{3}-{4}" -f $HashHex.Substring(0, 8), $HashHex.Substring(8, 4), $HashHex.Substring(12, 4), $HashHex.Substring(16, 4), $HashHex.Substring(20, 12))
+    $MeterId = ("foundrytoken-{0}" -f $SynthGuid)
+
+    $ResourceLocation = if (-not [string]::IsNullOrEmpty($AccountLocation)) { $AccountLocation } else { 'global' }
+
+    # --- Obfuscation of the account ResourceId (parity with the Marketplace/consumption/Tier1 paths) ---
+    $OutResourceId = $AccountResourceId
+    if ($Obfuscate)
+    {
+        if ($null -eq $SubCache) { $SubCache = @{} }
+        if ($null -eq $RgCache) { $RgCache = @{} }
+        if ($null -eq $NameCache) { $NameCache = @{} }
+
+        $Prefix = if ("$AccountResourceId $ModelName" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$AccountResourceId" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+        if (-not [string]::IsNullOrEmpty($AccountResourceId))
+        {
+            $OutResourceId = Build-ObfuscatedResourceUri -RawUri $AccountResourceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $UriKeyedNameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+        }
+    }
+
+    # --- AdditionalInfo JSON (mirror the first-party {"Microsoft.Resources":{...}} shape) ---
+    $ExtraInfo = [ordered]@{
+        IsFoundryFold   = $true
+        FoldTier        = 2
+        IsTokenMeter    = $true
+        ModelIdentity   = $ModelName
+        TokenRole       = $Role
+        SourceMetric    = $SourceMetricName
+    }
+    # Raw non-priced counts for fidelity, only when supplied (never emitted as their own priced rows).
+    if ($null -ne $TotalTokens) { $ExtraInfo['TotalTokens'] = $TotalTokens }
+    if ($null -ne $ModelRequests) { $ExtraInfo['ModelRequests'] = $ModelRequests }
+    if ($null -ne $TotalCalls) { $ExtraInfo['TotalCalls'] = $TotalCalls }
+
+    $AdditionalInfoObject = [PSCustomObject]@{
+        'Microsoft.Resources' = [PSCustomObject]@{
+            resourceUri    = $OutResourceId
+            location       = $ResourceLocation
+            additionalInfo = [PSCustomObject]$ExtraInfo
+        }
+    }
+
+    return [PSCustomObject]@{
+        AdditionalInfo     = ($AdditionalInfoObject | ConvertTo-Json -Compress -Depth 6)
+        MeterCategory      = 'Foundry Models'
+        MeterId            = $MeterId
+        MeterName          = $MeterName
+        MeterRegion        = $ResourceLocation
+        MeterSubCategory   = $ModelName
+        # RAW token count. Unit is the unit-1 'Tokens' so Quantity x server-multiplier = raw tokens.
+        Quantity           = $TokenQuantity
+        Unit               = 'Tokens'
+        UsageStartTime     = $UsageStartTime
+        UsageEndTime       = $UsageEndTime
+        ResourceId         = $OutResourceId
+        ResourceLocation   = $ResourceLocation
+        ConsumptionMeter   = $ModelName
+        ReservationId      = ''
+        ReservationOrderId = ''
+    }
+}
+
+function Global:Get-RdaFoundryTokenSeriesTotals
+{
+    # TIER 2 (per-model TOKEN counts) - pure parser. Given ONE Get-AzMetric result object for a
+    # single token metric collected WITH the ModelDeploymentName dimension split
+    # (-MetricFilter "ModelDeploymentName eq '*'"), returns the summed Total per model deployment
+    # as an array of { ModelDeploymentName; Total }.
+    #
+    # WHY A PURE HELPER. The dimension-parsing is the fiddly part of Tier 2 and must be unit-tested
+    # offline against a faithful fake of the Az.Monitor result shape, so it lives here rather than
+    # inline in the collector. The collector calls this once per (account, metric).
+    #
+    # AZ.MONITOR RESULT SHAPE (PSMetric, Az.Monitor). A metric collected with a dimension filter
+    # returns its per-dimension breakdown under .Timeseries: a list of PSTimeSeriesElement, each with
+    #   .Metadatavalues -> list of { Name.Value = '<dimension name>'; Value = '<dimension value>' }
+    #   .Data           -> list of PSMetricValue, each with .Total (AggregationType Total was requested)
+    # So for the ModelDeploymentName dimension, each timeseries element is ONE model, and its per-point
+    # .Total values are summed to the model's token total for the window. A metric with NO dimension
+    # split (some accounts / older shapes) exposes only .Data; that whole-account fallback is handled
+    # by the collector, not here (this helper reports only what the dimension split gives).
+    #
+    # ROBUSTNESS. Null/absent .Timeseries -> empty array (the collector then treats it as "no per-model
+    # split"); a null .Total data point contributes 0; a model with no non-null points still returns a
+    # row with Total 0 so the caller can log a confirmed-zero for it. The dimension name match is
+    # case-insensitive and tolerant of the Name being either a plain string or a { Value = ... } object.
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$MetricResult,
+        [string]$DimensionName = 'ModelDeploymentName'
+    )
+
+    $Out = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $MetricResult) { return @($Out) }
+
+    $SeriesProp = $MetricResult.PSObject.Properties['Timeseries']
+    if (-not $SeriesProp) { $SeriesProp = $MetricResult.PSObject.Properties['TimeSeries'] }
+    if (-not $SeriesProp -or $null -eq $SeriesProp.Value) { return @($Out) }
+
+    foreach ($Series in @($SeriesProp.Value))
+    {
+        if ($null -eq $Series) { continue }
+
+        # Resolve this series' model deployment name from its Metadatavalues (the dimension pairs).
+        $ModelValue = $null
+        $MetaProp = $Series.PSObject.Properties['Metadatavalues']
+        if (-not $MetaProp) { $MetaProp = $Series.PSObject.Properties['MetadataValues'] }
+        if ($MetaProp -and $null -ne $MetaProp.Value)
+        {
+            foreach ($Meta in @($MetaProp.Value))
+            {
+                if ($null -eq $Meta) { continue }
+                # .Name is a LocalizableString ({ Value = 'ModelDeploymentName' }) on the real type,
+                # but tolerate a plain string too so the fake in tests can be simple.
+                $RawName = $null
+                $NameProp = $Meta.PSObject.Properties['Name']
+                if ($NameProp -and $null -ne $NameProp.Value)
+                {
+                    $NameVal = $NameProp.Value
+                    if ($NameVal -is [string]) { $RawName = $NameVal }
+                    else
+                    {
+                        $InnerVal = $NameVal.PSObject.Properties['Value']
+                        $RawName = if ($InnerVal) { [string]$InnerVal.Value } else { [string]$NameVal }
+                    }
+                }
+                if ($RawName -and $RawName.Equals($DimensionName, [System.StringComparison]::OrdinalIgnoreCase))
+                {
+                    $ValProp = $Meta.PSObject.Properties['Value']
+                    if ($ValProp) { $ModelValue = [string]$ValProp.Value }
+                    break
+                }
+            }
+        }
+
+        # Sum the per-point Total for this series.
+        $Total = 0.0
+        $DataProp = $Series.PSObject.Properties['Data']
+        if ($DataProp -and $null -ne $DataProp.Value)
+        {
+            foreach ($Point in @($DataProp.Value))
+            {
+                if ($null -eq $Point) { continue }
+                $TotalProp = $Point.PSObject.Properties['Total']
+                if ($TotalProp -and $null -ne $TotalProp.Value)
+                {
+                    $Total += [double]$TotalProp.Value
+                }
+            }
+        }
+
+        $Out.Add([pscustomobject]@{
+                ModelDeploymentName = $ModelValue
+                Total               = $Total
+            })
+    }
+
+    return @($Out)
+}
+
 function Global:Get-RdaFoundryModelMatchTokens
 {
     # Normalizes a free-form model/meter string into a lower-cased set of alphanumeric

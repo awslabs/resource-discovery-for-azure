@@ -292,10 +292,45 @@ row, marked **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Market
 unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The server attributes
 the Azure cost but does **not** compute a token price from it.
 
-> **Tier 2 per-model token-role fold deferred** — a per-(model, role) token-row tier
-> needs live-tenant Foundry token metric-name verification and an account→Claude
-> correlation before it can be trusted, neither of which is available yet; see the
-> findings ledger.
+### Tier 2 — per-model token counts folded into the Consumption CSV
+
+Tier 1 above covers the Claude/CCU path, which has no token telemetry. **Tier 2** is
+the complementary fold for the Azure-hosted Foundry models that DO expose token
+metrics (Phi / OpenAI / DeepSeek / …). It runs as a separate phase (`GetFoundryTokenConsumption`),
+gated on `!$SkipConsumption -and !$SkipMetrics -and !$SkipFoundryTokens` — it writes into
+the Consumption CSV **and** reads the Azure Monitor metrics data plane, so both
+`-SkipConsumption` and `-SkipMetrics` imply it is skipped, and `-SkipFoundryTokens`
+turns off only this phase (see [`-SkipFoundryTokens`](variables/metrics-and-consumption.md#-skipfoundrytokens)).
+
+What it does, per subscription (context re-pinned + verified exactly like the
+consumption/Marketplace loops, so token usage is never cross-attributed):
+
+- **Discovers** Azure AI / Cognitive Services accounts and their model deployments via
+  **ARM** (`Get-AzCognitiveServicesAccount`, then `Get-AzCognitiveServicesAccountDeployment`).
+  Resource Graph does **not** index Cognitive Services model deployments, so ARM is the
+  only source.
+- **Reads** the per-model token metrics with `Get-AzMetric` on the account, split by the
+  `ModelDeploymentName` dimension (`-MetricFilter "ModelDeploymentName eq '*'"`,
+  `AggregationType Total` over the 31-day window), reusing the same
+  retry / Retry-After / denial / auth-expiry envelope the billing loops use.
+- **Folds** one `Foundry Models` row per `(account, model, token-role)` into the same
+  `Consumption_*.csv`, with:
+  - `MeterName` = model identity + a role word + `Tkns` — `Phi-4 Inp Tkns` (input),
+    `Phi-4 Outp Tkns` (output), `Phi-4 Cd Inp Tkns` (cached input / cache read),
+    `Phi-4 Cd Wr Tkns` (cache write) — so the server resolves both the model and the role.
+  - `Quantity` = the raw token count; `Unit` = **`Tokens`** (a unit-1 token unit, so
+    `Quantity × server-multiplier` = the raw token count — never a `1M Tokens`-style unit
+    that would misprice by 10⁶).
+  - `ResourceId` = the Cognitive Services account id (obfuscated like every other row);
+    `MeterId` = a stable synthesized id per `(account, model, role)`;
+    `MeterSubCategory` = the model name; `AdditionalInfo` carries `FoldTier=2`,
+    `IsTokenMeter=true`, the role, and the raw fidelity counts.
+
+Only the per-role token metrics become rows. `TotalTokens` (input+output summed),
+`ModelRequests`, and `TotalCalls` are **not** emitted as their own rows — that would
+double-count — but are preserved inside the priced rows' `AdditionalInfo` for fidelity.
+A run with no Foundry accounts, or accounts with no token usage in the window (e.g.
+metrics lag), logs a **confirmed zero** distinct from a failure.
 
 If the Marketplace phase collected no Claude/Anthropic rows, the fold logs a
 **confirmed zero** (the phase ran; there was simply nothing to fold), not a silent

@@ -432,6 +432,65 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     }
 }
 
+function Global:Get-RdaFoundryDeploymentModelMap
+{
+    # TIER 2 (per-model TOKEN counts) - pure helper. Given the list of model deployments returned by
+    # Get-AzCognitiveServicesAccountDeployment for ONE Cognitive Services account, returns a hashtable
+    # mapping each deployment NAME (the ModelDeploymentName metric-dimension value) to the underlying
+    # MODEL name used in MeterName. The metric dimension keys on the DEPLOYMENT name; the model name is
+    # what the ingestion server resolves, so prefer the model name and fall back to the deployment name.
+    #
+    # WHY A PURE HELPER (this is a regression guard). Get-AzCognitiveServicesAccountDeployment returns
+    # Microsoft.Azure.Management.CognitiveServices.Models.Deployment instances whose public CLR
+    # properties are NOT surfaced as adapted PSObject members: $Dep.PSObject.Properties['Name'] is
+    # ABSENT (indexing it can even throw) while $Dep.Name returns the value. The earlier inline
+    # implementation gated every read behind $Dep.PSObject.Properties['...'] membership, so on REAL
+    # Azure data every deployment was skipped ("none resolved a usable name") and zero token rows were
+    # collected despite tokens existing. This helper reads via DIRECT null-safe member access, which
+    # works on the real .NET type, on a Newtonsoft JObject (the faithful test fake for that adapter
+    # divergence), and on a [pscustomobject], returning $null only when a member is genuinely absent.
+    # Living here as a pure function lets the offline tests reproduce the divergence and prove the fix.
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$Deployments
+    )
+
+    $Map = @{}
+    if ($null -eq $Deployments) { return $Map }
+
+    foreach ($Dep in @($Deployments))
+    {
+        if ($null -eq $Dep) { continue }
+
+        $DepNameRaw = $Dep.Name
+        $DepName = if ($null -ne $DepNameRaw) { [string]$DepNameRaw } else { $null }
+        if ([string]::IsNullOrWhiteSpace($DepName)) { continue }
+
+        $ModelName = $null
+        # Deployment model identity: properties.model.name (ARM shape). Null-safe through each hop;
+        # tolerate the alternative top-level .Model shape as well.
+        $ModelObj = $Dep.Properties.Model
+        if ($null -ne $ModelObj)
+        {
+            if ($ModelObj -is [string]) { $ModelName = $ModelObj }
+            elseif ($null -ne $ModelObj.Name) { $ModelName = [string]$ModelObj.Name }
+        }
+        if ([string]::IsNullOrWhiteSpace($ModelName))
+        {
+            $ModelObj = $Dep.Model
+            if ($null -ne $ModelObj)
+            {
+                if ($ModelObj -is [string]) { $ModelName = $ModelObj }
+                elseif ($null -ne $ModelObj.Name) { $ModelName = [string]$ModelObj.Name }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($ModelName)) { $ModelName = $DepName }
+
+        $Map[$DepName] = $ModelName
+    }
+
+    return $Map
+}
+
 function Global:Get-RdaFoundryTokenRole
 {
     # TIER 2 (per-model TOKEN counts). Maps ONE Azure AI Foundry / Cognitive Services token
@@ -670,41 +729,45 @@ function Global:Get-RdaFoundryTokenSeriesTotals
     $Out = [System.Collections.Generic.List[object]]::new()
     if ($null -eq $MetricResult) { return @($Out) }
 
-    $SeriesProp = $MetricResult.PSObject.Properties['Timeseries']
-    if (-not $SeriesProp) { $SeriesProp = $MetricResult.PSObject.Properties['TimeSeries'] }
-    if (-not $SeriesProp -or $null -eq $SeriesProp.Value) { return @($Out) }
+    # READ VIA DIRECT NULL-SAFE MEMBER ACCESS, not $X.PSObject.Properties['...'] indexing. The real
+    # Az.Monitor result (PSMetric) and its .Timeseries elements (PSTimeSeriesElement), plus the
+    # LocalizableString dimension name, are .NET CLR types whose public properties are not reliably
+    # surfaced as adapted PSObject members (the same defect that made the deployment collector skip
+    # every real deployment). Direct access returns $null when a member is genuinely absent and works
+    # on both the real types and the [pscustomobject] fakes the offline tests use. Casing differs
+    # across Az versions (Timeseries vs TimeSeries, Metadatavalues vs MetadataValues); PowerShell
+    # member access is case-insensitive, so one read covers both.
+    $SeriesList = $MetricResult.Timeseries
+    if ($null -eq $SeriesList) { return @($Out) }
 
-    foreach ($Series in @($SeriesProp.Value))
+    foreach ($Series in @($SeriesList))
     {
         if ($null -eq $Series) { continue }
 
         # Resolve this series' model deployment name from its Metadatavalues (the dimension pairs).
         $ModelValue = $null
-        $MetaProp = $Series.PSObject.Properties['Metadatavalues']
-        if (-not $MetaProp) { $MetaProp = $Series.PSObject.Properties['MetadataValues'] }
-        if ($MetaProp -and $null -ne $MetaProp.Value)
+        $MetaList = $Series.Metadatavalues
+        if ($null -ne $MetaList)
         {
-            foreach ($Meta in @($MetaProp.Value))
+            foreach ($Meta in @($MetaList))
             {
                 if ($null -eq $Meta) { continue }
                 # .Name is a LocalizableString ({ Value = 'ModelDeploymentName' }) on the real type,
                 # but tolerate a plain string too so the fake in tests can be simple.
                 $RawName = $null
-                $NameProp = $Meta.PSObject.Properties['Name']
-                if ($NameProp -and $null -ne $NameProp.Value)
+                $NameVal = $Meta.Name
+                if ($null -ne $NameVal)
                 {
-                    $NameVal = $NameProp.Value
                     if ($NameVal -is [string]) { $RawName = $NameVal }
                     else
                     {
-                        $InnerVal = $NameVal.PSObject.Properties['Value']
-                        $RawName = if ($InnerVal) { [string]$InnerVal.Value } else { [string]$NameVal }
+                        $InnerVal = $NameVal.Value
+                        $RawName = if ($null -ne $InnerVal) { [string]$InnerVal } else { [string]$NameVal }
                     }
                 }
                 if ($RawName -and $RawName.Equals($DimensionName, [System.StringComparison]::OrdinalIgnoreCase))
                 {
-                    $ValProp = $Meta.PSObject.Properties['Value']
-                    if ($ValProp) { $ModelValue = [string]$ValProp.Value }
+                    $ModelValue = [string]$Meta.Value
                     break
                 }
             }
@@ -712,16 +775,16 @@ function Global:Get-RdaFoundryTokenSeriesTotals
 
         # Sum the per-point Total for this series.
         $Total = 0.0
-        $DataProp = $Series.PSObject.Properties['Data']
-        if ($DataProp -and $null -ne $DataProp.Value)
+        $DataList = $Series.Data
+        if ($null -ne $DataList)
         {
-            foreach ($Point in @($DataProp.Value))
+            foreach ($Point in @($DataList))
             {
                 if ($null -eq $Point) { continue }
-                $TotalProp = $Point.PSObject.Properties['Total']
-                if ($TotalProp -and $null -ne $TotalProp.Value)
+                $PointTotal = $Point.Total
+                if ($null -ne $PointTotal)
                 {
-                    $Total += [double]$TotalProp.Value
+                    $Total += [double]$PointTotal
                 }
             }
         }

@@ -2032,7 +2032,7 @@ function ExecuteInventoryProcessing()
                 if ($null -eq $Account) { continue }
                 $script:FoundryTokenAccountsSeenThisRun++
                 $AccountId = $Account.Id
-                $AccountLocation = if ($Account.PSObject.Properties['Location'] -and $Account.Location) { [string]$Account.Location } else { 'global' }
+                $AccountLocation = if ($null -ne $Account.Location -and -not [string]::IsNullOrWhiteSpace([string]$Account.Location)) { [string]$Account.Location } else { 'global' }
 
                 # --- DISCOVERY: model deployments on this account (ARM) ---
                 $FtDeployments = $null
@@ -2053,31 +2053,13 @@ function ExecuteInventoryProcessing()
                 }
 
                 # Map the deployment NAME (the ModelDeploymentName metric dimension value) to the
-                # underlying model identity used in MeterName. The metric dimension keys on the
-                # DEPLOYMENT name; the model name is what the server resolves, so prefer the model
-                # name and fall back to the deployment name when the model name is unavailable.
-                $FtDeployModelMap = @{}
-                foreach ($Dep in $FtDeployments)
-                {
-                    if ($null -eq $Dep) { continue }
-                    $DepName = if ($Dep.PSObject.Properties['Name'] -and $Dep.Name) { [string]$Dep.Name } else { $null }
-                    if ([string]::IsNullOrWhiteSpace($DepName)) { continue }
-                    $ModelName = $null
-                    # Deployment model identity: properties.model.name (ARM shape). Tolerate a few shapes.
-                    if ($Dep.PSObject.Properties['Properties'] -and $Dep.Properties -and $Dep.Properties.PSObject.Properties['Model'] -and $Dep.Properties.Model)
-                    {
-                        $ModelObj = $Dep.Properties.Model
-                        if ($ModelObj.PSObject.Properties['Name'] -and $ModelObj.Name) { $ModelName = [string]$ModelObj.Name }
-                    }
-                    if ([string]::IsNullOrWhiteSpace($ModelName) -and $Dep.PSObject.Properties['Model'] -and $Dep.Model)
-                    {
-                        $ModelObj = $Dep.Model
-                        if ($ModelObj -is [string]) { $ModelName = $ModelObj }
-                        elseif ($ModelObj.PSObject.Properties['Name'] -and $ModelObj.Name) { $ModelName = [string]$ModelObj.Name }
-                    }
-                    if ([string]::IsNullOrWhiteSpace($ModelName)) { $ModelName = $DepName }
-                    $FtDeployModelMap[$DepName] = $ModelName
-                }
+                # underlying model identity used in MeterName. Resolution is a pure, unit-tested helper
+                # (Get-RdaFoundryDeploymentModelMap in Functions/ResourceInventory.Functions.ps1) that
+                # reads via DIRECT null-safe member access - the real Az SDK Deployment type does not
+                # surface its CLR properties as adapted PSObject members, so PSObject.Properties['Name']
+                # is absent while $Dep.Name works, and the earlier membership-gated read skipped every
+                # real deployment ("none resolved a usable name" -> zero token rows on live data).
+                $FtDeployModelMap = Get-RdaFoundryDeploymentModelMap -Deployments $FtDeployments
 
                 if ($FtDeployModelMap.Count -eq 0)
                 {

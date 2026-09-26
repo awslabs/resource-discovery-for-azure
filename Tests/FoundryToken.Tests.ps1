@@ -359,6 +359,67 @@ Describe 'Right-subscription attribution: distinct accounts do not cross-attribu
     }
 }
 
+Describe 'Get-RdaFoundryDeploymentModelMap: resolves deployment + model names via DIRECT access' {
+    # REGRESSION for the live-data bug: on REAL Azure data the collector discovered the Foundry
+    # account + deployments but collected ZERO token rows, logging "none resolved a usable name".
+    # ROOT CAUSE (firstmate live-verified, 2026-09-26): Get-AzCognitiveServicesAccountDeployment
+    # returns Microsoft.Azure.Management.CognitiveServices.Models.Deployment instances whose public
+    # CLR properties are NOT surfaced as adapted PSObject members - $Dep.PSObject.Properties['Name']
+    # is ABSENT even though $Dep.Name returns the value - so the earlier membership-gated read
+    #     if ($Dep.PSObject.Properties['Name'] -and $Dep.Name) { ... }
+    # was false for every real deployment and each was skipped. The fix (this pure helper) reads via
+    # DIRECT null-safe member access ($Dep.Name, $Dep.Properties.Model.Name), which resolves on the
+    # real .NET type; extracting it here makes the resolution a small, reviewed, unit-tested unit.
+    #
+    # ON THE FAKE. That specific PSObject-adapter divergence is a property of the concrete Az SDK
+    # type and is NOT reproducible by any offline stand-in available here: a [pscustomobject] and a
+    # PowerShell class both surface every member through PSObject.Properties (so they pass the OLD
+    # code too), and a Newtonsoft JObject drops PSObject.Properties but is case-SENSITIVE and collides
+    # with its own .Name/.Properties API (so it is NOT faithful to the SDK type's case-insensitive
+    # CLR properties). Rather than ship a misleading fake, these tests lock the resolver's CONTRACT
+    # behaviourally against the shapes it must handle; the direct-access fix itself is what was
+    # verified live against the real type.
+
+    It 'resolves the model name from properties.model.name' {
+        $Dep = [pscustomobject]@{ Name = 'gpt4o-deploy'; Properties = [pscustomobject]@{ Model = [pscustomobject]@{ Name = 'gpt-4o'; Version = '2024-11-20' } } }
+        $Map = Get-RdaFoundryDeploymentModelMap -Deployments @($Dep)
+        $Map['gpt4o-deploy'] | Should -Be 'gpt-4o' -Because 'the model name resolves through direct .Properties.Model.Name access'
+    }
+
+    It 'maps two deployments to their models (the Phi-4 / Phi-4-mini live-verified shape)' {
+        $Deps = @(
+            [pscustomobject]@{ Name = 'phi4-test'; Properties = [pscustomobject]@{ Model = [pscustomobject]@{ Name = 'Phi-4' } } },
+            [pscustomobject]@{ Name = 'phi4-mini'; Properties = [pscustomobject]@{ Model = [pscustomobject]@{ Name = 'Phi-4-mini-instruct' } } }
+        )
+        $Map = Get-RdaFoundryDeploymentModelMap -Deployments $Deps
+        $Map.Count | Should -Be 2
+        $Map['phi4-test'] | Should -Be 'Phi-4'
+        $Map['phi4-mini'] | Should -Be 'Phi-4-mini-instruct'
+    }
+
+    It 'falls back to the deployment name when no model name is present' {
+        $Dep = [pscustomobject]@{ Name = 'custom-deploy'; Properties = [pscustomobject]@{ Model = $null } }
+        $Map = Get-RdaFoundryDeploymentModelMap -Deployments @($Dep)
+        $Map['custom-deploy'] | Should -Be 'custom-deploy'
+    }
+
+    It 'tolerates a top-level .Model shape and a string .Model' {
+        $DepObj = [pscustomobject]@{ Name = 'd1'; Model = [pscustomobject]@{ Name = 'DeepSeek-R1' } }
+        $DepStr = [pscustomobject]@{ Name = 'd2'; Model = 'Llama-3.3-70B' }
+        $Map = Get-RdaFoundryDeploymentModelMap -Deployments @($DepObj, $DepStr)
+        $Map['d1'] | Should -Be 'DeepSeek-R1'
+        $Map['d2'] | Should -Be 'Llama-3.3-70B'
+    }
+
+    It 'skips null / unnamed deployments and returns an empty map (never throws) for null input' {
+        (Get-RdaFoundryDeploymentModelMap -Deployments $null).Count | Should -Be 0
+        $Deps = @($null, [pscustomobject]@{ Name = ''; Properties = $null }, [pscustomobject]@{ Name = 'ok'; Properties = $null })
+        $Map = Get-RdaFoundryDeploymentModelMap -Deployments $Deps
+        $Map.Count | Should -Be 1
+        $Map['ok'] | Should -Be 'ok' -Because 'a deployment with no model identity falls back to its own name'
+    }
+}
+
 Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
 
     BeforeAll {

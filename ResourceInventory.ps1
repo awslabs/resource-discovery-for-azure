@@ -1286,7 +1286,14 @@ function ExecuteInventoryProcessing()
                             Start-Sleep -Seconds $ConsumptionBackoffSeconds
                         }
                     }
-                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+                    # The Get-UsageAggregates payload names the per-resource licensing/instance JSON
+                    # blob "InstanceData". The deployed ingestion server reads that same blob
+                    # from a Consumption CSV column named "AdditionalInfo" (VM Windows/AHB + SQL vCore
+                    # detection bind to AdditionalInfo, not InstanceData), so a column literally named
+                    # InstanceData arrives empty server-side and that detection silently degrades. Map
+                    # the source property to a column named AdditionalInfo here at the point of ingest,
+                    # so every downstream read (below) and the emitted CSV header both use AdditionalInfo.
+                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
 
@@ -1294,7 +1301,7 @@ function ExecuteInventoryProcessing()
 
                     for ($Item = 0; $Item -lt $UsageDataExport.Count; $Item++)
                     {
-                        $RawInstanceData = $UsageDataExport[$Item].InstanceData
+                        $RawInstanceData = $UsageDataExport[$Item].AdditionalInfo
                         if ([string]::IsNullOrEmpty($RawInstanceData))
                         {
                             continue
@@ -1385,12 +1392,12 @@ function ExecuteInventoryProcessing()
                             }
                         }
 
-                        $UsageDataExport[$Item].InstanceData = $InstanceObject | ConvertTo-Json -Compress
+                        $UsageDataExport[$Item].AdditionalInfo = $InstanceObject | ConvertTo-Json -Compress
 
                         $NewUsageDataExport.Add($UsageDataExport[$Item]) | Out-Null
                     }
 
-                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
 
@@ -1699,6 +1706,21 @@ function ExecuteInventoryProcessing()
                 {
                     if ($null -eq $Row) { continue }
 
+                    # FOUNDRY FOLD CAPTURE (P1). The deployed ingestion server reads ONLY
+                    # Consumption_*.csv and has NO reader for this Marketplace_*.csv, so Claude/
+                    # Anthropic usage collected here is invisible server-side unless it is ALSO
+                    # folded into the Consumption CSV as a "Foundry Models" row. Capture the RAW
+                    # (pre-obfuscation) Claude rows now, keyed by the pinned subscription, so the
+                    # fold step (GetFoundryFoldConsumption, invoked after this phase) can shape and
+                    # append them with its OWN obfuscation pass - identical in spirit to how the
+                    # Marketplace export below runs its own ConvertTo-RdaMarketplaceRow. Detection
+                    # is the single-owner predicate Test-RdaClaudeMarketplaceRow.
+                    if (Test-RdaClaudeMarketplaceRow -Row $Row)
+                    {
+                        if ($null -eq $script:FoundryFoldClaudeRows) { $script:FoundryFoldClaudeRows = [System.Collections.ArrayList]::new() }
+                        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = $sub.Id; SubName = $sub.Name; Row = $Row })
+                    }
+
                     # Field mapping + obfuscation live in ConvertTo-RdaMarketplaceRow
                     # (Functions/ResourceInventory.Functions.ps1) so the exact same code path
                     # is unit-tested. Product identifiers (PublisherName/OfferName/PlanName)
@@ -1767,6 +1789,242 @@ function ExecuteInventoryProcessing()
         if ($script:MarketplaceRecordsThisRun -eq 0 -and $script:MarketplaceFailedSubsThisRun -eq 0)
         {
             Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+        }
+
+        function GetFoundryFoldConsumption()
+        {
+            # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
+            # the deployed ingestion server - which reads ONLY Consumption_*.csv and has NO reader for
+            # Marketplace_*.csv - actually sees it. Runs AFTER GetMarketplaceConsumption (it consumes the
+            # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
+            # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
+            # off), so the fold follows the Marketplace phase's skip coherence exactly.
+            #
+            # TWO TIERS:
+            #   Tier 1 (CCU / cost, ALWAYS): one folded "Foundry Models" row per captured Claude
+            #     Marketplace row, carrying the Azure cost, marked non-token. This is the certain part.
+            #   Tier 2 (per-(model, role) TOKEN rows, ONLY where telemetry exists): probe for Azure
+            #     Foundry per-deployment token metrics at runtime and emit token rows the server can
+            #     reprice against AWS Bedrock. DEGRADES CLEANLY when the telemetry is absent.
+            #
+            # The shaping + obfuscation of each row lives in the unit-tested pure helpers
+            # (ConvertTo-RdaFoldedFoundryRow / ConvertTo-RdaFoldedFoundryTokenRow in
+            # Functions/ResourceInventory.Functions.ps1); this function is the collector wiring.
+
+            $DebugPreference = "SilentlyContinue"
+
+            if ($null -eq $Global:FoundryFoldRecordCount) { $Global:FoundryFoldRecordCount = 0 }
+            if ($null -eq $script:FoundryFoldRecordsThisRun) { $script:FoundryFoldRecordsThisRun = 0 }
+
+            $ClaudeRows = @($script:FoundryFoldClaudeRows)
+            if ($ClaudeRows.Count -eq 0)
+            {
+                # CONFIRMED ZERO, not a silent skip: the Marketplace phase ran and found no Claude/
+                # Anthropic rows to fold. Mirrors the Marketplace confirmed-zero notice.
+                Write-Log -Message ('Foundry fold: no Claude/Anthropic Marketplace rows were collected for the subscription(s) in scope, so there is nothing to fold into the Consumption CSV. This is a CONFIRMED ZERO (the Marketplace phase ran), NOT a skipped/failed section.') -Severity 'Info'
+                return
+            }
+
+            Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so the server's Foundry->Bedrock path sees them." -f $ClaudeRows.Count) -Severity 'Info'
+
+            # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
+            # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
+            if ($Obfuscate.IsPresent)
+            {
+                if (-not $script:FoundryFoldSubCache) { $script:FoundryFoldSubCache = @{} }
+                if (-not $script:FoundryFoldRgCache) { $script:FoundryFoldRgCache = @{} }
+                if (-not $script:FoundryFoldNameCache) { $script:FoundryFoldNameCache = @{} }
+            }
+
+            $FoldExport = [System.Collections.ArrayList]::new()
+
+            # ---- Tier 1: one folded cost row per captured Claude Marketplace row (always) ----
+            foreach ($Captured in $ClaudeRows)
+            {
+                $Folded = ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
+                $null = $FoldExport.Add($Folded)
+            }
+
+            # ---- Tier 2: per-(model, role) token rows, ONLY where telemetry exists ----
+            # PROBE-AND-BRANCH, MUST NOT FAIL when absent. Discover the token metric names/units at
+            # RUNTIME (never hardcode) and emit token rows only for what is actually found; otherwise
+            # skip cleanly and record that Tier 2 was unavailable.
+            #
+            # UNVERIFIED-SPELLING CAVEAT. The exact Azure Foundry token-meter metric names AND the Unit
+            # strings the server's TokensPerAzureUnit() accepts are NOT yet verified against a live
+            # Claude-on-Foundry deployment (none is available to this project). So Tier 2 is written
+            # defensively: it discovers candidate token metrics by NAME PATTERN at runtime, passes the
+            # DISCOVERED unit straight through (ConvertTo-RdaFoldedFoundryTokenRow never invents one),
+            # and flags loudly that the discovered names/units MUST be validated on a live tenant. If
+            # NOTHING is discovered - the common case today - the run is unaffected.
+            $Tier2Attempted = $false
+            $Tier2Emitted = 0
+            try
+            {
+                $Tier2Attempted = $true
+                $Tier2Rows = Get-RdaFoundryTokenTelemetry -ClaudeRows $ClaudeRows
+                foreach ($T2 in @($Tier2Rows))
+                {
+                    if ($null -eq $T2) { continue }
+                    $TokenRow = ConvertTo-RdaFoldedFoundryTokenRow -ModelIdentity $T2.ModelIdentity -Role $T2.Role -TokenCount $T2.TokenCount -TokenUnit $T2.TokenUnit -UsageStartTime $T2.UsageStartTime -UsageEndTime $T2.UsageEndTime -ResourceId $T2.ResourceId -ResourceLocation $T2.ResourceLocation -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
+                    if ($null -ne $TokenRow)
+                    {
+                        $null = $FoldExport.Add($TokenRow)
+                        $Tier2Emitted++
+                    }
+                }
+            }
+            catch
+            {
+                # Tier 2 is best-effort. A failure here must NEVER fail the run or the Tier 1 fold.
+                Write-Log -Message ("Foundry fold Tier 2 (per-model token telemetry) could not be collected: {0}. Tier 1 (CCU/cost) rows are unaffected. Tier 2 needs live Azure Foundry per-deployment token metrics, which were not available here." -f $_.Exception.Message) -Severity 'Warning'
+            }
+
+            if ($Tier2Attempted -and $Tier2Emitted -eq 0)
+            {
+                Write-Log -Message ('Foundry fold Tier 2: no per-model token telemetry was discovered for the in-scope Claude usage, so only Tier 1 (CCU/cost) rows were folded. This is expected unless a live Azure Foundry deployment exposes per-deployment input/output/cached/cache-write token metrics. CAVEAT: the exact Foundry token-meter names/units are NOT yet verified against a live Claude-on-Foundry deployment and MUST be validated there.') -Severity 'Warning'
+            }
+            elseif ($Tier2Emitted -gt 0)
+            {
+                Write-Log -Message ("Foundry fold Tier 2: emitted {0} per-(model, role) token row(s). CAVEAT: the discovered Foundry token-meter names/units are NOT yet verified against a live Claude-on-Foundry deployment - validate the MeterName role suffixes and Unit strings on a live tenant before trusting the AWS token reprice." -f $Tier2Emitted) -Severity 'Warning'
+            }
+
+            # ---- Append the folded rows onto the SAME Consumption CSV the server reads ----
+            # Export-Csv -Append with the identical column set the first-party path emits, so a folded
+            # row is schema-identical to a native consumption row (it just carries MeterCategory=
+            # 'Foundry Models' + the fold markers inside AdditionalInfo). If the first-party phase wrote
+            # no rows, -Append creates the file with the same header.
+            if ($FoldExport.Count -gt 0)
+            {
+                $FoldExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+            }
+
+            $Global:FoundryFoldRecordCount += $FoldExport.Count
+            $script:FoundryFoldRecordsThisRun += $FoldExport.Count
+            Write-Log -Message ("Foundry fold: appended {0} folded 'Foundry Models' row(s) to the Consumption CSV ({1} Tier 1 cost row(s) + {2} Tier 2 token row(s))." -f $FoldExport.Count, $ClaudeRows.Count, $Tier2Emitted) -Severity 'Info'
+        }
+
+        function Get-RdaFoundryTokenTelemetry([array]$ClaudeRows)
+        {
+            # TIER 2 RUNTIME DISCOVERY (probe-and-branch). Best-effort discovery of per-(model, role)
+            # token telemetry for Claude-on-Foundry usage. Returns an array of plain data objects
+            # { ModelIdentity, Role, TokenCount, TokenUnit, UsageStartTime, UsageEndTime, ResourceId,
+            # ResourceLocation }; the caller shapes each into a Consumption row. Returns an EMPTY array
+            # (never throws to the caller for an ordinary "absent" case) when no telemetry is found.
+            #
+            # WHY IT DISCOVERS RATHER THAN HARDCODES. The metric NAMES that carry Foundry per-deployment
+            # token counts, and the UNIT strings on them, are NOT yet verified against a live Claude-on-
+            # Foundry deployment. So this queries Get-AzMetricDefinition on candidate resources and
+            # matches token metrics by NAME PATTERN at runtime (input/output/prompt/completion/cache +
+            # token), reads the DISCOVERED unit off the definition, and maps the metric to a logical
+            # role. Nothing about the names/units is assumed ahead of time. If the Az cmdlets are absent
+            # (offline/unit-test context) or no candidate resources exist, it returns empty.
+            #
+            # CANDIDATE RESOURCES. Azure AI Foundry / Azure OpenAI token metrics live on
+            # Microsoft.CognitiveServices/accounts (and Foundry deployments beneath them). Candidates are
+            # taken from the run's own inventory dictionary when present, so no extra discovery call is
+            # needed; each is probed independently and a failure on one never aborts the rest.
+            $Discovered = [System.Collections.ArrayList]::new()
+
+            # If the metric cmdlet is unavailable (e.g. offline test host), there is nothing to probe.
+            if (-not (Get-Command -Name Get-AzMetricDefinition -ErrorAction SilentlyContinue))
+            {
+                return @()
+            }
+
+            # Collect candidate Cognitive Services / Foundry account resource IDs from the inventory
+            # dictionary (URI-keyed). This avoids an extra ARM discovery call and scopes the probe to
+            # resources actually present in this run.
+            $CandidateIds = [System.Collections.Generic.List[string]]::new()
+            if ($null -ne $Global:ResourceIdDictionary)
+            {
+                foreach ($Key in $Global:ResourceIdDictionary.Keys)
+                {
+                    if ($Key -match '(?i)/providers/Microsoft\.CognitiveServices/accounts/') { $CandidateIds.Add($Key) }
+                }
+            }
+
+            if ($CandidateIds.Count -eq 0)
+            {
+                # No Foundry/Cognitive Services accounts in inventory: nothing to probe. The caller logs
+                # the clean-degrade notice.
+                return @()
+            }
+
+            # Map a discovered metric name to a logical role using the SAME substrings the server parses
+            # (input/output/cached/cache-write). Returns $null when the metric is not a recognizable
+            # token metric so it is skipped.
+            $RoleFromMetricName = {
+                param([string]$Name)
+                $NameLower = $Name.ToLower()
+                if ($NameLower -notmatch 'token') { return $null }
+                if ($NameLower -match 'cache.*write|cache.?wr|write.*cache') { return 'cache-write' }
+                if ($NameLower -match 'cache.*read|cached.*(input|inp|prompt)|cache.?read') { return 'cached-input' }
+                if ($NameLower -match 'output|completion|generated') { return 'output' }
+                if ($NameLower -match 'input|prompt') { return 'input' }
+                return $null
+            }
+
+            $LookbackStart = (Get-Date).AddDays(-31)
+            $LookbackEnd = (Get-Date)
+
+            foreach ($ResId in $CandidateIds)
+            {
+                try
+                {
+                    $Defs = @(Get-AzMetricDefinition -ResourceId $ResId -ErrorAction Stop)
+                }
+                catch
+                {
+                    # Probe failure on one resource must not abort the rest.
+                    Write-Log -Message ("Foundry fold Tier 2: metric-definition probe failed for a candidate resource; skipping it. {0}" -f $_.Exception.Message) -Severity 'Info' -NoConsole -ToDebugLog
+                    continue
+                }
+
+                # A single model identity per account is the best we can infer without a live token
+                # dimension; use the Claude identity from the collected rows when there is exactly one,
+                # else a bare 'Claude'. (A live deployment would expose a model dimension to split on;
+                # that split MUST be validated on a live tenant.)
+                $ModelIdentity = 'Claude'
+                $DistinctModels = @($ClaudeRows | ForEach-Object { Get-RdaClaudeModelIdentity -Row $_.Row } | Sort-Object -Unique)
+                if ($DistinctModels.Count -eq 1) { $ModelIdentity = $DistinctModels[0] }
+
+                foreach ($Def in $Defs)
+                {
+                    $MetricName = if ($Def.Name.Value) { $Def.Name.Value } else { [string]$Def.Name }
+                    $Role = & $RoleFromMetricName $MetricName
+                    if ($null -eq $Role) { continue }
+
+                    try
+                    {
+                        $Metric = Get-AzMetric -ResourceId $ResId -MetricName $MetricName -StartTime $LookbackStart -EndTime $LookbackEnd -AggregationType Total -WarningAction SilentlyContinue -ErrorAction Stop
+                    }
+                    catch
+                    {
+                        Write-Log -Message ("Foundry fold Tier 2: metric read failed for '{0}'; skipping. {1}" -f $MetricName, $_.Exception.Message) -Severity 'Info' -NoConsole -ToDebugLog
+                        continue
+                    }
+
+                    # DISCOVERED unit off the metric, never hardcoded.
+                    $DiscoveredUnit = if ($Metric.Unit) { [string]$Metric.Unit } else { 'Count' }
+                    $TokenTotal = 0
+                    foreach ($Series in @($Metric.Data)) { if ($null -ne $Series.Total) { $TokenTotal += [double]$Series.Total } }
+                    if ($TokenTotal -le 0) { continue }
+
+                    $null = $Discovered.Add([pscustomobject]@{
+                            ModelIdentity    = $ModelIdentity
+                            Role             = $Role
+                            TokenCount       = $TokenTotal
+                            TokenUnit        = $DiscoveredUnit
+                            UsageStartTime   = $LookbackStart
+                            UsageEndTime     = $LookbackEnd
+                            ResourceId       = $ResId
+                            ResourceLocation = 'global'
+                        })
+                }
+            }
+
+            return $Discovered.ToArray()
         }
     }
 
@@ -2228,6 +2486,17 @@ resources
             GetMarketplaceConsumption
             $MarketplacePhaseTimer.Stop()
             $script:PhaseTimings['Marketplace consumption collection (billing)'] = $MarketplacePhaseTimer.Elapsed
+
+            # P1 FOUNDRY FOLD. Folds the Claude/Anthropic Marketplace rows the phase above captured
+            # into the SAME first-party Consumption_*.csv the server reads, as 'Foundry Models' rows,
+            # so Claude usage is no longer dropped server-side. Runs under the SAME gate as the
+            # Marketplace phase (only when neither -SkipConsumption nor -SkipMarketplace is set), so
+            # the fold follows the identical skip coherence. It appends to the Consumption CSV
+            # written by GetResourceConsumption above.
+            $FoundryFoldPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetFoundryFoldConsumption
+            $FoundryFoldPhaseTimer.Stop()
+            $script:PhaseTimings['Foundry fold (Claude -> Consumption CSV)'] = $FoundryFoldPhaseTimer.Elapsed
         }
 
         # ADDITIVE Foundry model billing-plane coverage collector. Gated by the SAME
@@ -2600,7 +2869,7 @@ if ($ConsumptionCreated)
 
 if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 {
-    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
+    "AdditionalInfo,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
 }
 
 # Marketplace CSV parallels the Consumption CSV: an empty-but-present file (header only)

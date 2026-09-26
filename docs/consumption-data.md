@@ -48,11 +48,11 @@ crash](#recovering-from-a-consumption-crash)).
 ## The columns
 
 The CSV has 15 columns. Ten come straight from each usage-aggregation record;
-five are derived from the `InstanceData` JSON on each record.
+five are derived from the `AdditionalInfo` JSON on each record.
 
 | Column | Source | Meaning |
 |--------|--------|---------|
-| `InstanceData` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. |
+| `AdditionalInfo` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. **This column was renamed from `InstanceData` so it binds to the server field of the same name** (the ingestion server reads VM Windows/AHB + SQL vCore licensing detail from `AdditionalInfo`). The raw Azure `Get-UsageAggregates` payload still names the source field `InstanceData`; RDA maps it onto this `AdditionalInfo` column at ingest. |
 | `MeterCategory` | usage record | Top-level meter grouping, e.g. `Virtual Machines`, `Storage`, `Stream Analytics`. |
 | `MeterId` | usage record | Azure's global meter GUID. Same for every customer using that meter — **not** customer-specific. |
 | `MeterName` | usage record | Specific meter, e.g. `Standard Streaming Unit`, `P10 Disks`. |
@@ -62,9 +62,9 @@ five are derived from the `InstanceData` JSON on each record.
 | `Unit` | usage record | Unit for `Quantity`, e.g. `1 Hour`, `10000 GB`. |
 | `UsageStartTime` | usage record | Start of the aggregation interval. |
 | `UsageEndTime` | usage record | End of the aggregation interval. |
-| `ResourceId` | `InstanceData.Microsoft.Resources.resourceUri` | ARM resource URI the usage is attributed to. Under `-Obfuscate`, identifying segments are masked but the ARM path *structure* is preserved (see below). |
-| `ResourceLocation` | `InstanceData.Microsoft.Resources.location` | Location of the resource. |
-| `ConsumptionMeter` | `InstanceData.Microsoft.Resources.additionalInfo.ConsumptionMeter` | Meter identifier from the resource's additional info (may be empty). |
+| `ResourceId` | `AdditionalInfo.Microsoft.Resources.resourceUri` | ARM resource URI the usage is attributed to. Under `-Obfuscate`, identifying segments are masked but the ARM path *structure* is preserved (see below). |
+| `ResourceLocation` | `AdditionalInfo.Microsoft.Resources.location` | Location of the resource. |
+| `ConsumptionMeter` | `AdditionalInfo.Microsoft.Resources.additionalInfo.ConsumptionMeter` | Meter identifier from the resource's additional info (may be empty). |
 | `ReservationId` | `additionalInfo.ReservationId` | Reservation the usage was applied to, if any. Masked to `obfuscated` under `-Obfuscate`. |
 | `ReservationOrderId` | `additionalInfo.ReservationOrderId` | Reservation order, if any. Masked to `obfuscated` under `-Obfuscate`. |
 
@@ -80,7 +80,7 @@ five are derived from the `InstanceData` JSON on each record.
   subscription has its own folder/CSV, so the owning subscription is implicit.
 - **Every `additionalInfo` key as its own column.** Only `ConsumptionMeter`,
   `ReservationId`, and `ReservationOrderId` are broken out. Any other
-  `additionalInfo` keys remain inside the raw `InstanceData` JSON (column 1) —
+  `additionalInfo` keys remain inside the raw `AdditionalInfo` JSON (column 1) —
   not lost, just not columnarised.
 
 ## Obfuscation of consumption data
@@ -255,3 +255,61 @@ See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
 For the parameters that turn these phases off (`-SkipConsumption`,
 `-SkipMarketplace`) and the other data-collection switches, see
 [variables/metrics-and-consumption.md](variables/metrics-and-consumption.md).
+
+## Foundry fold — Claude/Anthropic usage folded into the Consumption CSV
+
+The ingestion server that consumes RDA output reads **only** `Consumption_*.csv`;
+it has no reader for `Marketplace_*.csv`. So Claude/Anthropic usage collected by the
+Marketplace phase above would be silently dropped server-side. To close that gap,
+RDA runs an **additive** *Foundry fold* step immediately after the Marketplace phase
+(under the **same** `-SkipConsumption` / `-SkipMarketplace` gate) that folds each
+Claude/Anthropic Marketplace row into the **same** `Consumption_*.csv`, tagged so the
+server's Foundry→Bedrock path picks it up. The first-party consumption rows and their
+semantics are untouched; folded rows are simply **appended** with the identical
+15-column schema.
+
+A folded row is a normal consumption row with:
+
+- `MeterCategory` = **`Foundry Models`** (the exact string the server keys the
+  Foundry→Bedrock path on — Claude has no first-party Azure retail meter, so RDA sets
+  this explicitly).
+- `MeterName` = the **Claude model identity** parsed from the Marketplace
+  `OfferName`/`PlanName` (e.g. `Claude Sonnet 4.5`), so the server can resolve the
+  model. The model identity stays **readable** under `-Obfuscate` (it is product
+  identity, not a customer secret), exactly like the Marketplace product fields.
+- `ResourceId` + `MeterId` are always **non-empty**: the Marketplace row's own ids are
+  used when present, otherwise a **stable, deterministic** id is synthesized from the
+  offer identity (a SHA-256 over publisher/offer/plan/instance), so the same offer maps
+  to the same id across runs. Under `-Obfuscate` the `ResourceId` is masked through the
+  same ARM-structure-preserving path as every other row.
+- The Azure cost (`PretaxCost` + `Currency`) and the fold markers (`IsFoundryFold`,
+  `FoldTier`, `IsTokenMeter`, `ModelIdentity`) live inside the `AdditionalInfo` JSON,
+  because the Consumption schema has no dedicated cost column (the first-party path
+  likewise stows per-resource detail there).
+
+The fold has **two tiers**:
+
+- **Tier 1 (CCU / cost — always).** One folded row per Claude Marketplace row, marked
+  **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Marketplace unit is
+  preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The server attributes the
+  Azure cost but does **not** compute a token price from it.
+- **Tier 2 (per-(model, role) token rows — only where telemetry exists).** Where the
+  environment exposes per-deployment token metrics (Azure Foundry per-deployment token
+  metrics via `Get-AzMetric`), RDA emits one folded row per (model, role) with the role
+  encoded in `MeterName` (`… - Inp Tkns`, `… - Outp Tkns`, `… - Cd Inp Tkns`,
+  `… - Cd Wr Tkns`), the token count as `Quantity`, and the token `Unit` **discovered at
+  runtime** (never hardcoded). This is what lets the server compute the AWS Bedrock
+  comparison. Tier 2 **probes and branches**: if no token telemetry is present it skips
+  cleanly and logs that Tier 2 was unavailable — it never fails the run.
+
+> **⚠️ Unverified against a live tenant.** The exact Azure Foundry token-meter
+> `MeterName` spellings and `Unit` strings are **not yet verified** against a live
+> Claude-on-Foundry deployment (none was available when this was built). Tier 2 is
+> written defensively — it discovers metric names/units at runtime and matches the
+> server's documented role substrings — but the discovered spellings/units **must be
+> validated on a live tenant** before the AWS token reprice is trusted. Tier 1 (cost)
+> is unaffected by this caveat.
+
+If the Marketplace phase collected no Claude/Anthropic rows, the fold logs a
+**confirmed zero** (the phase ran; there was simply nothing to fold), not a silent
+skip.

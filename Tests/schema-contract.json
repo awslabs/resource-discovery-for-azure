@@ -48,7 +48,7 @@
 
   "consumption": {
     "requiredColumns": [
-      "InstanceData", "MeterCategory", "MeterId", "MeterName", "MeterRegion",
+      "AdditionalInfo", "MeterCategory", "MeterId", "MeterName", "MeterRegion",
       "MeterSubCategory", "Quantity", "Unit", "UsageStartTime", "UsageEndTime",
       "ResourceId", "ResourceLocation", "ConsumptionMeter", "ReservationId", "ReservationOrderId"
     ],

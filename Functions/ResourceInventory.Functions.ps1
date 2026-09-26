@@ -197,6 +197,364 @@ function Global:ConvertTo-RdaMarketplaceRow
         InstanceName     = $OutInstanceName
     }
 }
+function Global:Test-RdaClaudeMarketplaceRow
+{
+    # Returns $true when a Marketplace row (PSMarketplace shape) is an Anthropic/Claude
+    # offer that should be folded into the first-party Consumption CSV as a "Foundry Models"
+    # row (see ConvertTo-RdaFoldedFoundryRow and the GetFoundryFoldConsumption collector).
+    #
+    # WHY A TOKEN MATCH, NOT AN EXACT PUBLISHER STRING. The exact PublisherName/OfferName/
+    # PlanName spellings Azure Marketplace uses for a Claude-on-Foundry offer are not yet
+    # verified against a live billed row (no such subscription is available to this project),
+    # so this matches on the stable, human-meaningful tokens "anthropic" and "claude" anywhere
+    # in the three product-identity fields rather than hardcoding one brittle full string. That
+    # is the same "product identity lives in PublisherName/OfferName/PlanName" contract the
+    # Marketplace collector already documents. The match is case-insensitive.
+    param([Parameter(Mandatory = $true)][AllowNull()]$Row)
+
+    if ($null -eq $Row) { return $false }
+    $Haystack = ("{0} {1} {2}" -f $Row.PublisherName, $Row.OfferName, $Row.PlanName)
+    return ($Haystack -imatch '\b(anthropic|claude)\b')
+}
+
+function Global:Get-RdaClaudeModelIdentity
+{
+    # Derives a server-recognizable Claude MODEL identity string from a Marketplace row's
+    # product-identity fields (OfferName/PlanName, then PublisherName as a last resort).
+    #
+    # SERVER CONTRACT. The ingestion server resolves the model by alias-matching a recognizable
+    # Claude token (e.g. "Claude Sonnet 4.5", "Claude Opus 4.5", "Claude Haiku 4.5") out of
+    # MeterName/ProductName. This returns the best such string we can read from the row so the
+    # folded row's MeterName carries it. When the row names a specific family (sonnet/opus/haiku)
+    # and/or a version, that specific identity is returned; otherwise a bare "Claude" is returned
+    # so the row is still attributable to Claude even when the model cannot be pinned down.
+    #
+    # CAVEAT (unverified against a live tenant). The precise OfferName/PlanName spellings Azure
+    # uses for Claude-on-Foundry are not yet confirmed against a real billed row. This parser is
+    # deliberately tolerant (family + optional version tokens) rather than an exact-string table,
+    # and MUST be validated once a live Claude-on-Foundry deployment is available.
+    param([Parameter(Mandatory = $true)]$Row)
+
+    $Text = ("{0} {1} {2}" -f $Row.OfferName, $Row.PlanName, $Row.PublisherName)
+
+    # Family (sonnet/opus/haiku) - the strongest model signal.
+    $Family = $null
+    if ($Text -imatch '\b(sonnet|opus|haiku)\b') { $Family = (Get-Culture).TextInfo.ToTitleCase($Matches[1].ToLower()) }
+
+    # Version like "4.5", "3.7", "3.5", "4", "3" if present near the family or anywhere in the text.
+    $Version = $null
+    if ($Text -imatch '\b(\d+(?:\.\d+)?)\b') { $Version = $Matches[1] }
+
+    if ($Family)
+    {
+        if ($Version) { return ("Claude {0} {1}" -f $Family, $Version) }
+        return ("Claude {0}" -f $Family)
+    }
+
+    # No family token: still return a Claude identity so the row is attributable. Include a
+    # version if one was present.
+    if ($Version) { return ("Claude {0}" -f $Version) }
+    return 'Claude'
+}
+
+function Global:ConvertTo-RdaFoldedFoundryRow
+{
+    # TIER 1 FOLD (CCU / cost, always available). Maps ONE Claude/Anthropic Marketplace row
+    # (PSMarketplace shape, as returned by Get-AzConsumptionMarketplace) to a row shaped like
+    # the FIRST-PARTY Consumption CSV, so the deployed ingestion server - which reads ONLY
+    # Consumption_*.csv and has NO reader for Marketplace_*.csv - actually sees Claude usage.
+    #
+    # WHY. The server's Foundry->Bedrock path admits a consumption row ONLY when its
+    # MeterCategory == "Foundry Models" (exact string). Claude has no first-party Azure retail
+    # meter, so Claude usage arrives only on the Marketplace endpoint and is silently dropped
+    # server-side. Folding it into the Consumption CSV with MeterCategory="Foundry Models" and
+    # the Claude model identity in MeterName is what makes the server attribute the Azure cost.
+    #
+    # NON-TOKEN (CCU / cost) MARKING. This Tier 1 row carries the Marketplace PretaxCost as an
+    # Azure cost, NOT a token count. The server must attribute that Azure cost but must NOT try
+    # to compute an AWS Bedrock token price from it (that is Tier 2's job, when per-model token
+    # telemetry exists). So the row is marked non-token: Unit is a cost/quantity unit (never a
+    # token unit) and additionalInfo.IsTokenMeter=$false. The per-(model,role) TOKEN rows are
+    # produced separately by Tier 2 with the role encoded in MeterName and a token Unit.
+    #
+    # OUTPUT SHAPE. Returns an object carrying EXACTLY the first-party Consumption CSV columns
+    # (AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity,
+    # Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter,
+    # ReservationId, ReservationOrderId) so the collector can Select-Object + Export-Csv -Append
+    # it straight onto the existing Consumption_*.csv with no schema change.
+    #   - MeterCategory = "Foundry Models" (exact, server contract).
+    #   - MeterName     = the Claude model identity (server resolves the model from it).
+    #   - Quantity      = the Marketplace ConsumedQuantity (usage quantity, mirrors first-party).
+    #   - Unit          = the Marketplace UnitOfMeasure, or a neutral cost unit; NEVER a token unit.
+    #   - AdditionalInfo = a JSON blob shaped like the first-party path's
+    #                      {"Microsoft.Resources":{resourceUri,location,additionalInfo:{...}}},
+    #                      carrying PretaxCost/Currency (the Azure cost the server attributes),
+    #                      the readable product identity, and the fold markers. Cost lives here
+    #                      because the Consumption CSV has no dedicated cost column - the
+    #                      first-party path likewise carries per-resource detail inside this blob.
+    #
+    # SYNTHESIZED, STABLE, OBFUSCATION-CONSISTENT ResourceId + MeterId. The server requires a
+    # NON-EMPTY ResourceId and MeterId. A Marketplace row's InstanceId/MeterId may be empty, so
+    # when absent we SYNTHESIZE them deterministically from the row's stable identity fields (a
+    # SHA256 over publisher/offer/plan/instance) so the same offer maps to the same ids across
+    # runs. Under -Obfuscate the ResourceId is routed through the SAME Build-ObfuscatedResourceUri
+    # path the first-party consumption + Marketplace rows use, so a folded row cross-references the
+    # rest of the bundle exactly like every other row and never leaks a real identifier.
+    #
+    # OBFUSCATION PARITY. Same param surface as ConvertTo-RdaMarketplaceRow: the caller passes the
+    # shared URI-keyed name dictionary and the per-run caches. Product identity (the "which model"
+    # signal) stays readable in MeterName by design, exactly as Marketplace keeps PublisherName/
+    # OfferName/PlanName readable.
+    param(
+        [Parameter(Mandatory = $true)]$Row,
+        [bool]$Obfuscate = $false,
+        # URI-keyed shared resource-ID dictionary ($Global:ResourceIdDictionary), passed through to
+        # Build-ObfuscatedResourceUri exactly as the Marketplace/consumption paths do.
+        $UriKeyedNameDictionary = $null,
+        [hashtable]$SubCache = $null,
+        [hashtable]$RgCache = $null,
+        [hashtable]$NameCache = $null
+    )
+
+    # --- Model identity (readable, drives server model resolution via MeterName) ---
+    $ModelIdentity = Get-RdaClaudeModelIdentity -Row $Row
+
+    # --- Stable synthetic ids from the row's identity, used when the row lacks its own ---
+    $IdentitySeed = ("{0}|{1}|{2}|{3}" -f $Row.PublisherName, $Row.OfferName, $Row.PlanName, $Row.InstanceId)
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try
+    {
+        $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($IdentitySeed))
+    }
+    finally
+    {
+        $Sha.Dispose()
+    }
+    $HashHex = -join ($HashBytes | ForEach-Object { $_.ToString('x2') })
+    # A GUID-shaped slice so the synthetic ids look like the ARM/meter ids they stand in for and
+    # are stable for a given offer identity across runs.
+    $SynthGuid = ("{0}-{1}-{2}-{3}-{4}" -f $HashHex.Substring(0, 8), $HashHex.Substring(8, 4), $HashHex.Substring(12, 4), $HashHex.Substring(16, 4), $HashHex.Substring(20, 12))
+
+    # MeterId: prefer the row's own, else the synthetic (server requires non-empty).
+    $MeterId = if (-not [string]::IsNullOrEmpty($Row.MeterId)) { $Row.MeterId } else { ("foundryfold-{0}" -f $SynthGuid) }
+
+    # ResourceId: prefer the row's InstanceId, else a synthetic SaaS-shaped ARM URI so the server
+    # sees a well-formed non-empty resource id. Kept as an ARM path so obfuscation preserves its
+    # structure exactly like a real one.
+    $RawResourceId = if (-not [string]::IsNullOrEmpty($Row.InstanceId))
+    {
+        $Row.InstanceId
+    }
+    elseif (-not [string]::IsNullOrEmpty($Row.SubscriptionGuid))
+    {
+        ("/subscriptions/{0}/providers/Microsoft.Foundry/foundryModels/{1}" -f $Row.SubscriptionGuid, $SynthGuid)
+    }
+    else
+    {
+        ("/providers/Microsoft.Foundry/foundryModels/{0}" -f $SynthGuid)
+    }
+
+    $ResourceLocation = if (-not [string]::IsNullOrEmpty($Row.MeterRegion)) { $Row.MeterRegion } elseif (-not [string]::IsNullOrEmpty($Row.ResourceLocation)) { $Row.ResourceLocation } else { 'global' }
+
+    # --- Obfuscation of the ResourceId (parity with the Marketplace/consumption paths) ---
+    $OutResourceId = $RawResourceId
+    if ($Obfuscate)
+    {
+        if ($null -eq $SubCache) { $SubCache = @{} }
+        if ($null -eq $RgCache) { $RgCache = @{} }
+        if ($null -eq $NameCache) { $NameCache = @{} }
+
+        $Prefix = if ("$($Row.InstanceId) $($Row.InstanceName) $($Row.ResourceGroup)" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$RawResourceId" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+        $OutResourceId = Build-ObfuscatedResourceUri -RawUri $RawResourceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $UriKeyedNameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+    }
+
+    # --- AdditionalInfo JSON blob (mirror the first-party {"Microsoft.Resources":{...}} shape) ---
+    # Cost lives here because the Consumption CSV carries no dedicated cost column; the first-party
+    # path likewise stows per-resource licensing detail inside this same blob. The fold markers let
+    # the server (and a human reading the CSV) tell a folded Claude cost row from a native one.
+    $AdditionalInfoObject = [PSCustomObject]@{
+        'Microsoft.Resources' = [PSCustomObject]@{
+            resourceUri    = $OutResourceId
+            location       = $ResourceLocation
+            additionalInfo = [PSCustomObject]@{
+                # Fold provenance + non-token marking.
+                IsFoundryFold  = $true
+                FoldTier       = 1
+                IsTokenMeter   = $false
+                ModelIdentity  = $ModelIdentity
+                # The Azure cost the server attributes for this Claude usage.
+                PretaxCost     = $Row.PretaxCost
+                Currency       = $Row.Currency
+                # The Marketplace usage quantity + its original unit, preserved for fidelity (the
+                # emitted Unit column is forced to a neutral non-token 'CCU' - see the Unit note).
+                ConsumedQuantity        = $Row.ConsumedQuantity
+                MarketplaceUnitOfMeasure = $Row.UnitOfMeasure
+                # Readable product identity (never masked - the "which offer" signal).
+                PublisherName  = $Row.PublisherName
+                OfferName      = $Row.OfferName
+                PlanName       = $Row.PlanName
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        AdditionalInfo     = ($AdditionalInfoObject | ConvertTo-Json -Compress -Depth 6)
+        MeterCategory      = 'Foundry Models'
+        MeterId            = $MeterId
+        MeterName          = $ModelIdentity
+        MeterRegion        = $ResourceLocation
+        # Carry the readable model identity as the sub-category too, a second place the server can
+        # read the model from, mirroring how the product identity is preserved on Marketplace rows.
+        MeterSubCategory   = $ModelIdentity
+        # Usage quantity, mirroring the first-party path (NOT a token count - this is the CCU/cost row).
+        Quantity           = $Row.ConsumedQuantity
+        # A FIXED non-token unit. The server decides token-vs-cost partly from the Unit
+        # (Quantity x TokensPerAzureUnit(Unit)); a token-shaped Marketplace unit like "1M Tokens"
+        # on this cost row could make the server misprice the CCU/usage Quantity as tokens. So this
+        # Tier 1 row ALWAYS carries a neutral unit and marks itself non-token; the real Marketplace
+        # unit is preserved in additionalInfo.MarketplaceUnitOfMeasure for fidelity. Per-role TOKEN
+        # rows (with a token unit) are Tier 2's job.
+        Unit               = 'CCU'
+        UsageStartTime     = $Row.UsageStart
+        UsageEndTime       = $Row.UsageEnd
+        ResourceId         = $OutResourceId
+        ResourceLocation   = $ResourceLocation
+        ConsumptionMeter   = $ModelIdentity
+        ReservationId      = ''
+        ReservationOrderId = ''
+    }
+}
+
+function Global:Get-RdaFoundryRoleMeterSuffix
+{
+    # Maps a logical token ROLE to the MeterName suffix the server parses it back out of.
+    #
+    # SERVER CONTRACT (role parsing from MeterName text):
+    #   input        <- contains inp / input
+    #   output       <- contains outp / out / output
+    #   cached-input <- "cd inp" / "cached inp" / "cache read"
+    #   cache-write  <- "cd wr" / "cache write"
+    # So a per-role token row's MeterName MUST encode the role. This returns a suffix chosen to
+    # match the server's tokens unambiguously (e.g. "Inp Tkns", "Outp Tkns", "Cd Inp Tkns",
+    # "Cd Wr Tkns"), appended to the model identity to form MeterName like
+    # "Claude Sonnet 4.5 - Inp Tkns".
+    #
+    # CAVEAT (unverified against a live tenant). The exact Azure Foundry token-meter MeterName
+    # spellings are NOT yet verified against a live Claude-on-Foundry deployment. These suffixes
+    # are chosen to satisfy the server's DOCUMENTED substring rules above, but MUST be validated
+    # once a live deployment exists. Returns $null for an unrecognized role so the caller can skip
+    # rather than emit a row the server cannot classify.
+    param([Parameter(Mandatory = $true)][string]$Role)
+
+    switch -Regex ($Role.ToLower())
+    {
+        '^(cached[-_ ]?input|cache[-_ ]?read|cd[-_ ]?inp)$' { return 'Cd Inp Tkns' }
+        '^(cache[-_ ]?write|cd[-_ ]?wr)$' { return 'Cd Wr Tkns' }
+        '^(input|inp)$' { return 'Inp Tkns' }
+        '^(output|outp|out)$' { return 'Outp Tkns' }
+        default { return $null }
+    }
+}
+
+function Global:ConvertTo-RdaFoldedFoundryTokenRow
+{
+    # TIER 2 FOLD (per-(model, role) TOKEN rows, only where token telemetry exists). Maps ONE
+    # discovered (model, role, token-count) triple into a row shaped like the first-party
+    # Consumption CSV, with the ROLE encoded in MeterName and a TOKEN Unit, so the server can
+    # compute the AWS Bedrock token-price comparison.
+    #
+    # This is the counterpart to the Tier 1 (CCU/cost) fold. Tier 1 always runs from the
+    # Marketplace cost row; Tier 2 runs ONLY when the environment actually exposes per-model
+    # input/output/cached/cache-write token counts (discovered at runtime by the collector via
+    # Get-AzMetric on Foundry per-deployment token metrics and/or a linked Application Insights
+    # resource). The collector DISCOVERS the metric names/units at runtime and does NOT hardcode
+    # them; this pure mapper just shapes one already-discovered datum into a server row.
+    #
+    # RETURNS $null when the role is unrecognized (so no un-parseable row is emitted) - the
+    # collector treats $null as "skip this datum" and records that Tier 2 was partial.
+    #
+    # CAVEAT (unverified against a live tenant). The exact Azure Foundry token-meter Unit strings
+    # the server's TokensPerAzureUnit() accepts, and the exact MeterName spellings, are NOT yet
+    # verified against a live Claude-on-Foundry deployment. The caller passes the Unit it
+    # discovered at runtime; this mapper does not invent one. Validate on a live tenant.
+    param(
+        [Parameter(Mandatory = $true)][string]$ModelIdentity,
+        [Parameter(Mandatory = $true)][string]$Role,
+        [Parameter(Mandatory = $true)]$TokenCount,
+        # The token Unit as DISCOVERED at runtime (never hardcoded). Passed straight through so the
+        # server's Quantity x TokensPerAzureUnit(Unit) math sees the real discovered unit.
+        [Parameter(Mandatory = $true)][string]$TokenUnit,
+        $UsageStartTime = $null,
+        $UsageEndTime = $null,
+        [string]$ResourceId = $null,
+        [string]$ResourceLocation = 'global',
+        [string]$MeterId = $null,
+        [bool]$Obfuscate = $false,
+        $UriKeyedNameDictionary = $null,
+        [hashtable]$SubCache = $null,
+        [hashtable]$RgCache = $null,
+        [hashtable]$NameCache = $null
+    )
+
+    $RoleSuffix = Get-RdaFoundryRoleMeterSuffix -Role $Role
+    if ($null -eq $RoleSuffix) { return $null }
+
+    $MeterName = ("{0} - {1}" -f $ModelIdentity, $RoleSuffix)
+
+    # Stable synthetic ids when the caller did not supply them (server requires non-empty).
+    $IdentitySeed = ("{0}|{1}|{2}" -f $ModelIdentity, $Role, $ResourceId)
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($IdentitySeed)) } finally { $Sha.Dispose() }
+    $HashHex = -join ($HashBytes | ForEach-Object { $_.ToString('x2') })
+    $SynthGuid = ("{0}-{1}-{2}-{3}-{4}" -f $HashHex.Substring(0, 8), $HashHex.Substring(8, 4), $HashHex.Substring(12, 4), $HashHex.Substring(16, 4), $HashHex.Substring(20, 12))
+
+    $OutMeterId = if (-not [string]::IsNullOrEmpty($MeterId)) { $MeterId } else { ("foundryfold-tok-{0}" -f $SynthGuid) }
+    $RawResourceId = if (-not [string]::IsNullOrEmpty($ResourceId)) { $ResourceId } else { ("/providers/Microsoft.Foundry/foundryModels/{0}" -f $SynthGuid) }
+
+    $OutResourceId = $RawResourceId
+    if ($Obfuscate)
+    {
+        if ($null -eq $SubCache) { $SubCache = @{} }
+        if ($null -eq $RgCache) { $RgCache = @{} }
+        if ($null -eq $NameCache) { $NameCache = @{} }
+        $Prefix = if ("$RawResourceId" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$RawResourceId" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+        $OutResourceId = Build-ObfuscatedResourceUri -RawUri $RawResourceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $UriKeyedNameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+    }
+
+    $AdditionalInfoObject = [PSCustomObject]@{
+        'Microsoft.Resources' = [PSCustomObject]@{
+            resourceUri    = $OutResourceId
+            location       = $ResourceLocation
+            additionalInfo = [PSCustomObject]@{
+                IsFoundryFold = $true
+                FoldTier      = 2
+                IsTokenMeter  = $true
+                ModelIdentity = $ModelIdentity
+                TokenRole     = $Role
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        AdditionalInfo     = ($AdditionalInfoObject | ConvertTo-Json -Compress -Depth 6)
+        MeterCategory      = 'Foundry Models'
+        MeterId            = $OutMeterId
+        # Role encoded in MeterName so the server parses (model, role) back out of it.
+        MeterName          = $MeterName
+        MeterRegion        = $ResourceLocation
+        MeterSubCategory   = $ModelIdentity
+        # Token count as Quantity, with the runtime-DISCOVERED token Unit.
+        Quantity           = $TokenCount
+        Unit               = $TokenUnit
+        UsageStartTime     = $UsageStartTime
+        UsageEndTime       = $UsageEndTime
+        ResourceId         = $OutResourceId
+        ResourceLocation   = $ResourceLocation
+        ConsumptionMeter   = $MeterName
+        ReservationId      = ''
+        ReservationOrderId = ''
+    }
+}
 
 function Global:Get-RdaFoundryModelMatchTokens
 {

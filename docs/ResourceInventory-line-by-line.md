@@ -3054,7 +3054,7 @@ Nothing downstream needs to join on them, so they are simply destroyed rather th
 ### Writing the page and looping (lines 2054-2062)
 
 ```powershell
-                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, ..., ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, ..., ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
 ```
@@ -3817,7 +3817,7 @@ if ($ConsumptionCreated)
 
 if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 {
-    "InstanceData,MeterCategory,MeterId,...,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
+    "AdditionalInfo,MeterCategory,MeterId,...,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }
 ```
 

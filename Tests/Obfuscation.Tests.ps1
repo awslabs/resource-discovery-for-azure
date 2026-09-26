@@ -310,21 +310,21 @@ Describe "Consumption Obfuscation" {
         }
     }
 
-    It "Should have obfuscated ResourceUri inside InstanceData JSON" {
+    It "Should have obfuscated ResourceUri inside AdditionalInfo JSON" {
         if ($null -eq $script:ConsumptionFile) { Set-ItResult -Skipped -Because "no consumption file in fixture"; return }
         $Csv = Import-Csv $script:ConsumptionFile.FullName
         if ($Csv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
 
         foreach ($row in $Csv)
         {
-            if (![string]::IsNullOrEmpty($row.InstanceData))
+            if (![string]::IsNullOrEmpty($row.AdditionalInfo))
             {
-                $InstanceData = $row.InstanceData | ConvertFrom-Json
+                $InstanceData = $row.AdditionalInfo | ConvertFrom-Json
                 $Uri = $InstanceData.'Microsoft.Resources'.ResourceUri
                 if (![string]::IsNullOrEmpty($Uri))
                 {
-                    $Uri | Should -Match $script:ConsumptionSafePattern -Because "InstanceData ResourceUri should be obfuscated (flat token or structure-preserving ARM path)"
-                    $Uri | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "InstanceData ResourceUri must not contain a real subscription GUID"
+                    $Uri | Should -Match $script:ConsumptionSafePattern -Because "AdditionalInfo ResourceUri should be obfuscated (flat token or structure-preserving ARM path)"
+                    $Uri | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "AdditionalInfo ResourceUri must not contain a real subscription GUID"
                 }
             }
         }
@@ -379,7 +379,7 @@ Describe "Consumption CSV Headers" {
             return
         }
 
-        $ExpectedHeaders = @('InstanceData', 'MeterCategory', 'MeterId', 'MeterName', 'MeterRegion', 'MeterSubCategory', 'Quantity', 'Unit', 'UsageStartTime', 'UsageEndTime', 'ResourceId', 'ResourceLocation', 'ConsumptionMeter', 'ReservationId', 'ReservationOrderId')
+        $ExpectedHeaders = @('AdditionalInfo', 'MeterCategory', 'MeterId', 'MeterName', 'MeterRegion', 'MeterSubCategory', 'Quantity', 'Unit', 'UsageStartTime', 'UsageEndTime', 'ResourceId', 'ResourceLocation', 'ConsumptionMeter', 'ReservationId', 'ReservationOrderId')
         foreach ($header in $ExpectedHeaders)
         {
             $FirstLine | Should -Match $header -Because "CSV should contain header '$header'"

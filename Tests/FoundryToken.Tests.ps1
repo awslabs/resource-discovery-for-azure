@@ -28,6 +28,21 @@
         but are preserved in AdditionalInfo for fidelity.
 #>
 
+# These three suppressions cover the AST-execution regression test in the
+# 'GetFoundryFoldConsumption ... null captured row' Describe, which runs the REAL
+# fold function body extracted verbatim from ResourceInventory.ps1 rather than a
+# re-implementation. Inline suppression is not honored inside Pester scriptblocks,
+# so they are declared at file scope. They target load-bearing test scaffolding, not
+# defects: Invoke-Expression materializes the real body; Write-Log is a required fake;
+# $Obfuscate is consumed inside that Invoke-Expression'd body (invisible to the analyzer).
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingInvokeExpression', '',
+    Justification = 'Executes the REAL fold function body extracted verbatim from source via the AST, not a re-implementation.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Write-Log is a required test fake for the extracted fold function body, not an accidental override.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'Obfuscate',
+    Justification = 'Consumed inside the fold function body executed via Invoke-Expression, which the analyzer cannot see statically.')]
+param()
+
 BeforeAll {
     $script:Repo = Split-Path $PSScriptRoot -Parent
     $script:FunctionsPath = Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1'

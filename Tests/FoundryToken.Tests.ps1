@@ -460,3 +460,115 @@ Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
         'SkipFoundryTokens' | Should -BeIn $Params
     }
 }
+
+
+Describe 'Test-RdaFoundryMetricPermanentFailure: permanent (skip) vs transient (retry) classification' {
+    # RESILIENCE REGRESSION. A live run saw Get-AzMetric for a metric an account does not support
+    # ('TotalCalls') return HTTP 400 / BadRequest, and the token-query retry loop RETRIED it five
+    # times - a pointless retry storm because a 400 never succeeds on retry. This classifier draws
+    # the permanent/transient line (mirroring Extension/Metrics.ps1) so an unsupported metric is
+    # skipped immediately and only genuinely transient errors burn the retry budget.
+
+    It 'classifies a 400 / BadRequest as PERMANENT (skip, do not retry)' {
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage "invalid status code 'BadRequest'" | Should -BeTrue
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'The request failed with HTTP (400) BadRequest.' | Should -BeTrue
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'status code: 400' | Should -BeTrue
+    }
+
+    It 'classifies "metric not supported for this resource" as PERMANENT' {
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'Failed to find metric configuration: metric TotalCalls is not valid for this resource.' | Should -BeTrue
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage "invalid status code 'NotFound'" | Should -BeTrue
+    }
+
+    It 'classifies throttle / timeout / 5xx as TRANSIENT (retry, NOT a permanent skip)' {
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'TooManyRequests (429): rate is limited' | Should -BeFalse
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'The operation timed out' | Should -BeFalse
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'temporarily unavailable (503)' | Should -BeFalse
+    }
+
+    It 'treats a throttle that ALSO mentions a 4xx word as TRANSIENT (transient wins)' {
+        # A long chained message can carry both; a genuinely retryable throttle must never be
+        # mistaken for a permanent skip.
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'TooManyRequests 429; downstream returned BadRequest earlier' | Should -BeFalse
+    }
+
+    It 'returns $false (retry, fail loud) for an empty/unknown message rather than silently skipping' {
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage '' | Should -BeFalse
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage $null | Should -BeFalse
+        Test-RdaFoundryMetricPermanentFailure -ErrorMessage 'some unrecognized transient network error' | Should -BeFalse
+    }
+}
+
+Describe 'Robustness wiring: permanent-skip + per-account isolation (ResourceInventory.ps1)' {
+    # These assert the collector SOURCE, not a live run: the collector body is nested inside
+    # ExecuteInventoryProcessing and is not independently invocable offline (same reason the other
+    # wiring assertions in this file are AST/source-based). They lock the two resilience behaviours
+    # the captain directed: (1) an unsupported metric is skipped without a retry storm; (2) one bad
+    # account never aborts the subscription's phase - the loop continues to the next account.
+
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
+
+        $script:QueryFnText = ($Ast.FindAll(
+                { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'Invoke-RdaFoundryTokenMetricQuery' },
+                $true) | Select-Object -First 1).Extent.Text
+
+        $script:CollectorFnText = ($Ast.FindAll(
+                { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'GetFoundryTokenConsumption' },
+                $true) | Select-Object -First 1).Extent.Text
+    }
+
+    It 'the metric-query retry loop consults the permanent-failure classifier before retrying' {
+        $script:QueryFnText | Should -Not -BeNullOrEmpty
+        $script:QueryFnText | Should -Match 'Test-RdaFoundryMetricPermanentFailure' -Because 'an unsupported-metric 400 must be skipped, not retried'
+    }
+
+    It 'the permanent-skip check returns before the retry-attempt counter is incremented (no retry storm)' {
+        # The permanent classifier's early-return must sit ahead of the $FtAttempt++ retry increment,
+        # otherwise a 400 would still consume the retry budget. Assert the ordering in the source.
+        $IdxPermanent = $script:QueryFnText.IndexOf('Test-RdaFoundryMetricPermanentFailure')
+        $IdxIncrement = $script:QueryFnText.IndexOf('$FtAttempt++')
+        $IdxPermanent | Should -BeGreaterThan -1
+        $IdxIncrement | Should -BeGreaterThan -1
+        $IdxPermanent | Should -BeLessThan $IdxIncrement -Because 'the permanent skip must short-circuit before the retry increment'
+    }
+
+    It 'the per-account loop body is wrapped in try/catch with continue, so one bad account does not abort the phase' {
+        $script:CollectorFnText | Should -Not -BeNullOrEmpty
+        # The catch narrates an isolated per-account skip and the loop continues.
+        $script:CollectorFnText | Should -Match 'isolated per-account skip'
+        # The account foreach must contain a try, a catch, and a continue in the catch path.
+        $script:CollectorFnText | Should -Match 'foreach \(\$Account in \$FtAccounts\)'
+    }
+
+    It 'the account foreach has a matching try and catch (AST), not just inner discovery guards' {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
+        $Collector = $Ast.FindAll(
+            { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'GetFoundryTokenConsumption' },
+            $true) | Select-Object -First 1
+        # Find the foreach over $FtAccounts, then assert its body contains at least one TryStatementAst
+        # whose catch ends in a continue (the per-account backstop).
+        $AcctLoop = $Collector.FindAll(
+            { param($Node)
+                $Node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $Node.Condition.Extent.Text -match 'FtAccounts' },
+            $true) | Select-Object -First 1
+        $AcctLoop | Should -Not -BeNullOrEmpty -Because 'the account loop must exist'
+        $Tries = @($AcctLoop.Body.FindAll(
+                { param($Node) $Node -is [System.Management.Automation.Language.TryStatementAst] },
+                $true))
+        $Tries.Count | Should -BeGreaterThan 0 -Because 'the account body must be wrapped in try/catch'
+        $HasContinueCatch = $false
+        foreach ($Try in $Tries)
+        {
+            foreach ($Catch in $Try.CatchClauses)
+            {
+                if ($Catch.Body.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.ContinueStatementAst] }, $true).Count -gt 0)
+                {
+                    $HasContinueCatch = $true
+                }
+            }
+        }
+        $HasContinueCatch | Should -BeTrue -Because 'a caught per-account failure must continue to the next account, never abort the phase'
+    }
+}

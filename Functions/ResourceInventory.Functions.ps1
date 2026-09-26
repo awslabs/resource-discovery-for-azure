@@ -491,6 +491,49 @@ function Global:Get-RdaFoundryDeploymentModelMap
     return $Map
 }
 
+function Global:Test-RdaFoundryMetricPermanentFailure
+{
+    # TIER 2 (per-model TOKEN counts) - pure classifier. Given a Get-AzMetric error message, returns
+    # $true when the failure is PERMANENT for THIS metric on THIS account (so it must NOT be retried,
+    # just skipped once and logged), $false when it is a transient error worth retrying.
+    #
+    # WHY THIS EXISTS (a live-data resilience fix). Not every account supports every token metric.
+    # A real run saw Get-AzMetric for 'TotalCalls' return HTTP 400 / BadRequest ("metric not valid
+    # for this resource") and the token-query retry loop RETRIED it five times - a pointless retry
+    # storm, because a 400 will never succeed on the next attempt. The metrics phase already draws
+    # this exact line (Extension/Metrics.ps1 Get-RdaMetricFailureClass): 400/BadRequest/NotFound are
+    # permanent, 429/throttle/timeout are transient. This mirrors that split for the Foundry token
+    # path so an unsupported metric is skipped immediately and only genuinely transient errors burn
+    # the retry budget. Authorization (403) and auth-expiry (401) are handled separately by the
+    # caller (Test-RdaConsumptionDenial / Test-RdaAuthExpiry) and are intentionally NOT re-classified
+    # here, so this owner is only the "bad request / not supported for this resource" line.
+    #
+    # It is a pure function so the offline tests can prove the retry storm is gone without a live call.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$ErrorMessage)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
+
+    # A throttle/timeout can co-occur with a 4xx-shaped word in a long chained message; classify it
+    # as TRANSIENT first so a genuinely retryable throttle is never mistaken for a permanent skip.
+    if ($ErrorMessage -match '(?i)(TooManyRequests|\b429\b|throttl|rate limit|\btimed? ?out\b|\b408\b|temporarily unavailable|\b503\b)') { return $false }
+
+    # Permanent: the request itself is invalid for this metric/resource and will never succeed.
+    # Mirrors Extension/Metrics.ps1's "invalid status code 'BadRequest|NotFound'" and a bare 400.
+    $PermanentPattern = '(?i)(' + (@(
+            "invalid status code '?(?:BadRequest|NotFound)'?"
+            '(?<![\w-])BadRequest(?![\w-])'
+            '\(400\)'
+            '\bstatus\s?code\D{0,40}400\b'
+            '(?<![\w-])NotFound(?![\w-])'
+            '\(404\)'
+            'metric[^.]{0,60}(?:not (?:valid|supported|found)|is not)'
+        ) -join '|') + ')'
+
+    return [bool]($ErrorMessage -match $PermanentPattern)
+}
+
 function Global:Get-RdaFoundryTokenRole
 {
     # TIER 2 (per-model TOKEN counts). Maps ONE Azure AI Foundry / Cognitive Services token

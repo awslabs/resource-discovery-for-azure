@@ -2034,127 +2034,149 @@ function ExecuteInventoryProcessing()
                 $AccountId = $Account.Id
                 $AccountLocation = if ($null -ne $Account.Location -and -not [string]::IsNullOrWhiteSpace([string]$Account.Location)) { [string]$Account.Location } else { 'global' }
 
-                # --- DISCOVERY: model deployments on this account (ARM) ---
-                $FtDeployments = $null
+                # PER-ACCOUNT ISOLATION. The whole account body runs inside this try so that ANY
+                # failure on ONE account - an odd/differently-shaped account that breaks name
+                # resolution, a metric-shape surprise, anything unforeseen - is caught, logged as a
+                # confirmed per-account skip (with the reason), and the foreach CONTINUES to the next
+                # account. A single bad account must NEVER abort this subscription's Foundry-token
+                # phase or the run: a real run had one differently-shaped account fail and a healthy
+                # Phi-4 account in the SAME subscription then went uncollected. Collect everything
+                # collectable even when some accounts are broken. (The inner try/catch blocks below
+                # still handle the two EXPECTED failure modes with their own specific messages; this
+                # outer one is the backstop for the unexpected.)
                 try
                 {
-                    $FtDeployments = @(Get-AzCognitiveServicesAccountDeployment -ResourceGroupName $Account.ResourceGroupName -AccountName $Account.AccountName -ErrorAction Stop)
+                    # --- DISCOVERY: model deployments on this account (ARM) ---
+                    $FtDeployments = $null
+                    try
+                    {
+                        $FtDeployments = @(Get-AzCognitiveServicesAccountDeployment -ResourceGroupName $Account.ResourceGroupName -AccountName $Account.AccountName -ErrorAction Stop)
+                    }
+                    catch
+                    {
+                        Write-Log -Message ("Foundry tokens: could not list model deployments for account {0} in {1}: {2}. Skipping this account." -f $Account.AccountName, $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                        continue
+                    }
+
+                    if ($null -eq $FtDeployments -or $FtDeployments.Count -eq 0)
+                    {
+                        Write-Log -Message ("Foundry tokens: account {0} in {1} has no model deployments. Nothing to collect for it." -f $Account.AccountName, $sub.Name) -Severity 'Info'
+                        continue
+                    }
+
+                    # Map the deployment NAME (the ModelDeploymentName metric dimension value) to the
+                    # underlying model identity used in MeterName. Resolution is a pure, unit-tested helper
+                    # (Get-RdaFoundryDeploymentModelMap in Functions/ResourceInventory.Functions.ps1) that
+                    # reads via DIRECT null-safe member access - the real Az SDK Deployment type does not
+                    # surface its CLR properties as adapted PSObject members, so PSObject.Properties['Name']
+                    # is absent while $Dep.Name works, and the earlier membership-gated read skipped every
+                    # real deployment ("none resolved a usable name" -> zero token rows on live data).
+                    $FtDeployModelMap = Get-RdaFoundryDeploymentModelMap -Deployments $FtDeployments
+
+                    if ($FtDeployModelMap.Count -eq 0)
+                    {
+                        Write-Log -Message ("Foundry tokens: account {0} in {1} exposed deployments but none resolved a usable name. Skipping it." -f $Account.AccountName, $sub.Name) -Severity 'Warning'
+                        continue
+                    }
+
+                    # --- TOKEN METRICS: one Get-AzMetric per metric on the ACCOUNT, split per model ---
+                    # Collect priced + fidelity metrics into per-model buckets keyed by ModelDeploymentName.
+                    # $FtModelBuckets[<deployName>] = @{ Priced = @{ metric = total }; Fidelity = @{ metric = total } }
+                    $FtModelBuckets = @{}
+                    $AllMetricNames = @($FtTokenMetricNames + $FtFidelityMetricNames)
+                    foreach ($MetricName in $AllMetricNames)
+                    {
+                        $MetricResult = Invoke-RdaFoundryTokenMetricQuery -AccountResourceId $AccountId -MetricName $MetricName -StartTime $FtStartTime -EndTime $FtEndTime -SubName $sub.Name
+                        if ($null -eq $MetricResult) { continue }
+
+                        $PerModel = @(Get-RdaFoundryTokenSeriesTotals -MetricResult $MetricResult -DimensionName 'ModelDeploymentName')
+                        foreach ($ModelTotal in $PerModel)
+                        {
+                            $DeployName = $ModelTotal.ModelDeploymentName
+                            if ([string]::IsNullOrWhiteSpace($DeployName)) { continue }
+                            if (-not $FtModelBuckets.ContainsKey($DeployName)) { $FtModelBuckets[$DeployName] = @{ Priced = @{}; Fidelity = @{} } }
+                            if ($FtFidelityMetricNames -contains $MetricName)
+                            {
+                                $FtModelBuckets[$DeployName].Fidelity[$MetricName] = $ModelTotal.Total
+                            }
+                            else
+                            {
+                                $FtModelBuckets[$DeployName].Priced[$MetricName] = $ModelTotal.Total
+                            }
+                        }
+                    }
+
+                    # --- Shape one folded row per (account, model, role) that has a non-zero token total ---
+                    foreach ($DeployName in $FtModelBuckets.Keys)
+                    {
+                        # Resolve the model identity for MeterName; fall back to the deployment name.
+                        $ModelName = if ($FtDeployModelMap.ContainsKey($DeployName)) { $FtDeployModelMap[$DeployName] } else { $DeployName }
+                        $Bucket = $FtModelBuckets[$DeployName]
+                        $Fidelity = $Bucket.Fidelity
+
+                        $RowsForModel = 0
+                        $RoleAgg = [ordered]@{}
+                        foreach ($MetricName in $Bucket.Priced.Keys)
+                        {
+                            $RoleInfo = Get-RdaFoundryTokenRole -MetricName $MetricName
+                            if ($null -eq $RoleInfo) { continue }
+                            $TokenQty = [double]$Bucket.Priced[$MetricName]
+                            if (-not $RoleAgg.Contains($RoleInfo.Role))
+                            {
+                                $RoleAgg[$RoleInfo.Role] = @{ MeterWord = $RoleInfo.MeterWord; Quantity = 0.0; Sources = @() }
+                            }
+                            $RoleAgg[$RoleInfo.Role].Quantity += $TokenQty
+                            $RoleAgg[$RoleInfo.Role].Sources += $MetricName
+                        }
+
+                        foreach ($RoleKey in $RoleAgg.Keys)
+                        {
+                            $RoleEntry = $RoleAgg[$RoleKey]
+                            $TokenQty = [double]$RoleEntry.Quantity
+                            # Skip a zero-token role: it is not usage, and emitting it would clutter the
+                            # CSV with priceless rows. A model with NO non-zero role is logged below.
+                            if ($TokenQty -le 0) { continue }
+
+                            $Folded = ConvertTo-RdaFoldedFoundryTokenRow `
+                                -AccountResourceId $AccountId `
+                                -ModelName $ModelName `
+                                -RoleMeterWord $RoleEntry.MeterWord `
+                                -Role $RoleKey `
+                                -TokenQuantity $TokenQty `
+                                -SourceMetricName ($RoleEntry.Sources -join '+') `
+                                -AccountLocation $AccountLocation `
+                                -UsageStartTime $FtStartTime `
+                                -UsageEndTime $FtEndTime `
+                                -TotalTokens $(if ($Fidelity.ContainsKey('TotalTokens')) { $Fidelity['TotalTokens'] } else { $null }) `
+                                -ModelRequests $(if ($Fidelity.ContainsKey('ModelRequests')) { $Fidelity['ModelRequests'] } else { $null }) `
+                                -TotalCalls $(if ($Fidelity.ContainsKey('TotalCalls')) { $Fidelity['TotalCalls'] } else { $null }) `
+                                -Obfuscate:$Obfuscate.IsPresent `
+                                -UriKeyedNameDictionary $Global:ResourceIdDictionary `
+                                -SubCache $script:FoundryTokenSubCache `
+                                -RgCache $script:FoundryTokenRgCache `
+                                -NameCache $script:FoundryTokenNameCache
+                            $null = $FtFoldExport.Add($Folded)
+                            $RowsForModel++
+                        }
+
+                        if ($RowsForModel -eq 0)
+                        {
+                            # CONFIRMED ZERO for this model: the account + deployment exist and the token
+                            # metrics were queried, but every per-role total was zero. This is expected
+                            # when a model is deployed but not yet used, or when metrics lag ingestion -
+                            # distinct from a failure. Logged, not folded.
+                            Write-Log -Message ("Foundry tokens: model '{0}' (deployment '{1}') on account {2} in {3} has zero token usage in the window (deployed but unused, or metrics lag). Confirmed zero - not a failure." -f $ModelName, $DeployName, $Account.AccountName, $sub.Name) -Severity 'Info'
+                        }
+                    }
                 }
                 catch
                 {
-                    Write-Log -Message ("Foundry tokens: could not list model deployments for account {0} in {1}: {2}. Skipping this account." -f $Account.AccountName, $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    # This ONE account failed unexpectedly. Isolate it: log a confirmed per-account
+                    # skip with the reason and CONTINUE to the next account. The subscription's phase
+                    # (and any healthy sibling account in the same subscription) is unaffected.
+                    $AcctLabel = if ($null -ne $Account -and $Account.AccountName) { $Account.AccountName } else { '(unknown account)' }
+                    Write-Log -Message ("Foundry tokens: account {0} in {1} failed unexpectedly and was skipped ({2}). Other accounts in this subscription are still collected; this is an isolated per-account skip, not a phase/run abort." -f $AcctLabel, $sub.Name, $_.Exception.Message) -Severity 'Warning'
                     continue
-                }
-
-                if ($null -eq $FtDeployments -or $FtDeployments.Count -eq 0)
-                {
-                    Write-Log -Message ("Foundry tokens: account {0} in {1} has no model deployments. Nothing to collect for it." -f $Account.AccountName, $sub.Name) -Severity 'Info'
-                    continue
-                }
-
-                # Map the deployment NAME (the ModelDeploymentName metric dimension value) to the
-                # underlying model identity used in MeterName. Resolution is a pure, unit-tested helper
-                # (Get-RdaFoundryDeploymentModelMap in Functions/ResourceInventory.Functions.ps1) that
-                # reads via DIRECT null-safe member access - the real Az SDK Deployment type does not
-                # surface its CLR properties as adapted PSObject members, so PSObject.Properties['Name']
-                # is absent while $Dep.Name works, and the earlier membership-gated read skipped every
-                # real deployment ("none resolved a usable name" -> zero token rows on live data).
-                $FtDeployModelMap = Get-RdaFoundryDeploymentModelMap -Deployments $FtDeployments
-
-                if ($FtDeployModelMap.Count -eq 0)
-                {
-                    Write-Log -Message ("Foundry tokens: account {0} in {1} exposed deployments but none resolved a usable name. Skipping it." -f $Account.AccountName, $sub.Name) -Severity 'Warning'
-                    continue
-                }
-
-                # --- TOKEN METRICS: one Get-AzMetric per metric on the ACCOUNT, split per model ---
-                # Collect priced + fidelity metrics into per-model buckets keyed by ModelDeploymentName.
-                # $FtModelBuckets[<deployName>] = @{ Priced = @{ metric = total }; Fidelity = @{ metric = total } }
-                $FtModelBuckets = @{}
-                $AllMetricNames = @($FtTokenMetricNames + $FtFidelityMetricNames)
-                foreach ($MetricName in $AllMetricNames)
-                {
-                    $MetricResult = Invoke-RdaFoundryTokenMetricQuery -AccountResourceId $AccountId -MetricName $MetricName -StartTime $FtStartTime -EndTime $FtEndTime -SubName $sub.Name
-                    if ($null -eq $MetricResult) { continue }
-
-                    $PerModel = @(Get-RdaFoundryTokenSeriesTotals -MetricResult $MetricResult -DimensionName 'ModelDeploymentName')
-                    foreach ($ModelTotal in $PerModel)
-                    {
-                        $DeployName = $ModelTotal.ModelDeploymentName
-                        if ([string]::IsNullOrWhiteSpace($DeployName)) { continue }
-                        if (-not $FtModelBuckets.ContainsKey($DeployName)) { $FtModelBuckets[$DeployName] = @{ Priced = @{}; Fidelity = @{} } }
-                        if ($FtFidelityMetricNames -contains $MetricName)
-                        {
-                            $FtModelBuckets[$DeployName].Fidelity[$MetricName] = $ModelTotal.Total
-                        }
-                        else
-                        {
-                            $FtModelBuckets[$DeployName].Priced[$MetricName] = $ModelTotal.Total
-                        }
-                    }
-                }
-
-                # --- Shape one folded row per (account, model, role) that has a non-zero token total ---
-                foreach ($DeployName in $FtModelBuckets.Keys)
-                {
-                    # Resolve the model identity for MeterName; fall back to the deployment name.
-                    $ModelName = if ($FtDeployModelMap.ContainsKey($DeployName)) { $FtDeployModelMap[$DeployName] } else { $DeployName }
-                    $Bucket = $FtModelBuckets[$DeployName]
-                    $Fidelity = $Bucket.Fidelity
-
-                    $RowsForModel = 0
-                    $RoleAgg = [ordered]@{}
-                    foreach ($MetricName in $Bucket.Priced.Keys)
-                    {
-                        $RoleInfo = Get-RdaFoundryTokenRole -MetricName $MetricName
-                        if ($null -eq $RoleInfo) { continue }
-                        $TokenQty = [double]$Bucket.Priced[$MetricName]
-                        if (-not $RoleAgg.Contains($RoleInfo.Role))
-                        {
-                            $RoleAgg[$RoleInfo.Role] = @{ MeterWord = $RoleInfo.MeterWord; Quantity = 0.0; Sources = @() }
-                        }
-                        $RoleAgg[$RoleInfo.Role].Quantity += $TokenQty
-                        $RoleAgg[$RoleInfo.Role].Sources += $MetricName
-                    }
-
-                    foreach ($RoleKey in $RoleAgg.Keys)
-                    {
-                        $RoleEntry = $RoleAgg[$RoleKey]
-                        $TokenQty = [double]$RoleEntry.Quantity
-                        # Skip a zero-token role: it is not usage, and emitting it would clutter the
-                        # CSV with priceless rows. A model with NO non-zero role is logged below.
-                        if ($TokenQty -le 0) { continue }
-
-                        $Folded = ConvertTo-RdaFoldedFoundryTokenRow `
-                            -AccountResourceId $AccountId `
-                            -ModelName $ModelName `
-                            -RoleMeterWord $RoleEntry.MeterWord `
-                            -Role $RoleKey `
-                            -TokenQuantity $TokenQty `
-                            -SourceMetricName ($RoleEntry.Sources -join '+') `
-                            -AccountLocation $AccountLocation `
-                            -UsageStartTime $FtStartTime `
-                            -UsageEndTime $FtEndTime `
-                            -TotalTokens $(if ($Fidelity.ContainsKey('TotalTokens')) { $Fidelity['TotalTokens'] } else { $null }) `
-                            -ModelRequests $(if ($Fidelity.ContainsKey('ModelRequests')) { $Fidelity['ModelRequests'] } else { $null }) `
-                            -TotalCalls $(if ($Fidelity.ContainsKey('TotalCalls')) { $Fidelity['TotalCalls'] } else { $null }) `
-                            -Obfuscate:$Obfuscate.IsPresent `
-                            -UriKeyedNameDictionary $Global:ResourceIdDictionary `
-                            -SubCache $script:FoundryTokenSubCache `
-                            -RgCache $script:FoundryTokenRgCache `
-                            -NameCache $script:FoundryTokenNameCache
-                        $null = $FtFoldExport.Add($Folded)
-                        $RowsForModel++
-                    }
-
-                    if ($RowsForModel -eq 0)
-                    {
-                        # CONFIRMED ZERO for this model: the account + deployment exist and the token
-                        # metrics were queried, but every per-role total was zero. This is expected
-                        # when a model is deployed but not yet used, or when metrics lag ingestion -
-                        # distinct from a failure. Logged, not folded.
-                        Write-Log -Message ("Foundry tokens: model '{0}' (deployment '{1}') on account {2} in {3} has zero token usage in the window (deployed but unused, or metrics lag). Confirmed zero - not a failure." -f $ModelName, $DeployName, $Account.AccountName, $sub.Name) -Severity 'Info'
-                    }
                 }
             }
 
@@ -2231,6 +2253,18 @@ function ExecuteInventoryProcessing()
                 if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
                 {
                     Write-Log -Message ("Foundry tokens: metric '{0}' DENIED for {1}: {2}. Authorization failure (needs Monitoring Reader on the account), not transient - not retried." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Warning'
+                    return $null
+                }
+
+                # PERMANENT (non-retryable) request error, e.g. HTTP 400 / BadRequest "this metric is
+                # not valid for this resource". Not every account supports every token metric; a 400
+                # will never succeed on retry, so skip THIS metric immediately (log once) instead of
+                # burning the retry budget on a pointless storm. Only genuinely transient errors below
+                # (throttle/timeout) are retried. Mirrors Extension/Metrics.ps1's permanent/transient
+                # split; the classifier is the pure, unit-tested Test-RdaFoundryMetricPermanentFailure.
+                if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $_.Exception.Message)
+                {
+                    Write-Log -Message ("Foundry tokens: metric '{0}' not supported for this account in {1} ({2}). Skipping this metric (permanent - not retried); other metrics on this account still collected." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Info'
                     return $null
                 }
 

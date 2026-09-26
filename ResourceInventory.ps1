@@ -1791,74 +1791,74 @@ function ExecuteInventoryProcessing()
         {
             Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
         }
+    }
 
-        function GetFoundryFoldConsumption()
+    function GetFoundryFoldConsumption()
+    {
+        # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
+        # the deployed ingestion server - which reads ONLY Consumption_*.csv and has NO reader for
+        # Marketplace_*.csv - actually sees it. Runs AFTER GetMarketplaceConsumption (it consumes the
+        # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
+        # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
+        # off), so the fold follows the Marketplace phase's skip coherence exactly.
+        #
+        #   Tier 1 (CCU / cost, ALWAYS): one folded "Foundry Models" row per captured Claude
+        #     Marketplace row, carrying the Azure cost, marked non-token. This is the certain part.
+        #
+        # Tier 2 per-model token-role fold deferred - needs live-tenant metric-name verification
+        # + account->Claude correlation; see findings ledger.
+        #
+        # The shaping + obfuscation of each row lives in the unit-tested pure helper
+        # (ConvertTo-RdaFoldedFoundryRow in Functions/ResourceInventory.Functions.ps1); this
+        # function is the collector wiring.
+
+        $DebugPreference = "SilentlyContinue"
+
+        if ($null -eq $Global:FoundryFoldRecordCount) { $Global:FoundryFoldRecordCount = 0 }
+        if ($null -eq $script:FoundryFoldRecordsThisRun) { $script:FoundryFoldRecordsThisRun = 0 }
+
+        $ClaudeRows = @($script:FoundryFoldClaudeRows)
+        if ($ClaudeRows.Count -eq 0)
         {
-            # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
-            # the deployed ingestion server - which reads ONLY Consumption_*.csv and has NO reader for
-            # Marketplace_*.csv - actually sees it. Runs AFTER GetMarketplaceConsumption (it consumes the
-            # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
-            # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
-            # off), so the fold follows the Marketplace phase's skip coherence exactly.
-            #
-            #   Tier 1 (CCU / cost, ALWAYS): one folded "Foundry Models" row per captured Claude
-            #     Marketplace row, carrying the Azure cost, marked non-token. This is the certain part.
-            #
-            # Tier 2 per-model token-role fold deferred - needs live-tenant metric-name verification
-            # + account->Claude correlation; see findings ledger.
-            #
-            # The shaping + obfuscation of each row lives in the unit-tested pure helper
-            # (ConvertTo-RdaFoldedFoundryRow in Functions/ResourceInventory.Functions.ps1); this
-            # function is the collector wiring.
-
-            $DebugPreference = "SilentlyContinue"
-
-            if ($null -eq $Global:FoundryFoldRecordCount) { $Global:FoundryFoldRecordCount = 0 }
-            if ($null -eq $script:FoundryFoldRecordsThisRun) { $script:FoundryFoldRecordsThisRun = 0 }
-
-            $ClaudeRows = @($script:FoundryFoldClaudeRows)
-            if ($ClaudeRows.Count -eq 0)
-            {
-                # CONFIRMED ZERO, not a silent skip: the Marketplace phase ran and found no Claude/
-                # Anthropic rows to fold. Mirrors the Marketplace confirmed-zero notice.
-                Write-Log -Message ('Foundry fold: no Claude/Anthropic Marketplace rows were collected for the subscription(s) in scope, so there is nothing to fold into the Consumption CSV. This is a CONFIRMED ZERO (the Marketplace phase ran), NOT a skipped/failed section.') -Severity 'Info'
-                return
-            }
-
-            Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so the server's Foundry->Bedrock path sees them." -f $ClaudeRows.Count) -Severity 'Info'
-
-            # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
-            # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
-            if ($Obfuscate.IsPresent)
-            {
-                if (-not $script:FoundryFoldSubCache) { $script:FoundryFoldSubCache = @{} }
-                if (-not $script:FoundryFoldRgCache) { $script:FoundryFoldRgCache = @{} }
-                if (-not $script:FoundryFoldNameCache) { $script:FoundryFoldNameCache = @{} }
-            }
-
-            $FoldExport = [System.Collections.ArrayList]::new()
-
-            # ---- Tier 1: one folded cost row per captured Claude Marketplace row (always) ----
-            foreach ($Captured in $ClaudeRows)
-            {
-                $Folded = ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
-                $null = $FoldExport.Add($Folded)
-            }
-
-            # ---- Append the folded rows onto the SAME Consumption CSV the server reads ----
-            # Export-Csv -Append with the identical column set the first-party path emits, so a folded
-            # row is schema-identical to a native consumption row (it just carries MeterCategory=
-            # 'Foundry Models' + the fold markers inside AdditionalInfo). If the first-party phase wrote
-            # no rows, -Append creates the file with the same header.
-            if ($FoldExport.Count -gt 0)
-            {
-                $FoldExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
-            }
-
-            $Global:FoundryFoldRecordCount += $FoldExport.Count
-            $script:FoundryFoldRecordsThisRun += $FoldExport.Count
-            Write-Log -Message ("Foundry fold: appended {0} folded 'Foundry Models' (Tier 1 CCU/cost) row(s) to the Consumption CSV." -f $FoldExport.Count) -Severity 'Info'
+            # CONFIRMED ZERO, not a silent skip: the Marketplace phase ran and found no Claude/
+            # Anthropic rows to fold. Mirrors the Marketplace confirmed-zero notice.
+            Write-Log -Message ('Foundry fold: no Claude/Anthropic Marketplace rows were collected for the subscription(s) in scope, so there is nothing to fold into the Consumption CSV. This is a CONFIRMED ZERO (the Marketplace phase ran), NOT a skipped/failed section.') -Severity 'Info'
+            return
         }
+
+        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so the server's Foundry->Bedrock path sees them." -f $ClaudeRows.Count) -Severity 'Info'
+
+        # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
+        # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
+        if ($Obfuscate.IsPresent)
+        {
+            if (-not $script:FoundryFoldSubCache) { $script:FoundryFoldSubCache = @{} }
+            if (-not $script:FoundryFoldRgCache) { $script:FoundryFoldRgCache = @{} }
+            if (-not $script:FoundryFoldNameCache) { $script:FoundryFoldNameCache = @{} }
+        }
+
+        $FoldExport = [System.Collections.ArrayList]::new()
+
+        # ---- Tier 1: one folded cost row per captured Claude Marketplace row (always) ----
+        foreach ($Captured in $ClaudeRows)
+        {
+            $Folded = ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
+            $null = $FoldExport.Add($Folded)
+        }
+
+        # ---- Append the folded rows onto the SAME Consumption CSV the server reads ----
+        # Export-Csv -Append with the identical column set the first-party path emits, so a folded
+        # row is schema-identical to a native consumption row (it just carries MeterCategory=
+        # 'Foundry Models' + the fold markers inside AdditionalInfo). If the first-party phase wrote
+        # no rows, -Append creates the file with the same header.
+        if ($FoldExport.Count -gt 0)
+        {
+            $FoldExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+        }
+
+        $Global:FoundryFoldRecordCount += $FoldExport.Count
+        $script:FoundryFoldRecordsThisRun += $FoldExport.Count
+        Write-Log -Message ("Foundry fold: appended {0} folded 'Foundry Models' (Tier 1 CCU/cost) row(s) to the Consumption CSV." -f $FoldExport.Count) -Severity 'Info'
     }
 
     function GetFoundryTokenConsumption()

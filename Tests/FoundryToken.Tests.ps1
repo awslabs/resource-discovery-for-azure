@@ -455,6 +455,35 @@ Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
         $NeverCalled -join ', ' | Should -BeNullOrEmpty
     }
 
+    It 'both Foundry collectors are DIRECT children of ExecuteInventoryProcessing, so they are in scope at their call sites' {
+        # REGRESSION: GetFoundryFoldConsumption was defined nested INSIDE the sibling
+        # GetMarketplaceConsumption, so it parsed and FindAll(...,$true) still located it, but at
+        # runtime it was out of scope where ExecuteInventoryProcessing calls it -> a terminating
+        # 'not recognized' error that aborted the phase before the Tier 2 token collector ran.
+        # The recursive 'no dead wiring' test above cannot catch this because it does not check the
+        # enclosing-function chain. Assert on the typed AST that each collector's NEAREST enclosing
+        # function is ExecuteInventoryProcessing itself (a direct child), not another nested helper.
+        $Outer = $script:Ast.FindAll(
+            { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'ExecuteInventoryProcessing' },
+            $true) | Select-Object -First 1
+        $Outer | Should -Not -BeNullOrEmpty
+
+        function Get-EnclosingFunctionName([System.Management.Automation.Language.Ast]$Node) {
+            $p = $Node.Parent
+            while ($null -ne $p -and -not ($p -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $p = $p.Parent }
+            if ($null -eq $p) { return $null }
+            return $p.Name
+        }
+
+        foreach ($FnName in @('GetFoundryFoldConsumption', 'GetFoundryTokenConsumption')) {
+            $Def = $Outer.FindAll(
+                { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $FnName },
+                $true) | Select-Object -First 1
+            $Def | Should -Not -BeNullOrEmpty -Because "$FnName must be defined within ExecuteInventoryProcessing"
+            (Get-EnclosingFunctionName $Def) | Should -Be 'ExecuteInventoryProcessing' -Because "$FnName is called from the ExecuteInventoryProcessing body, so it must be a direct child there to be in scope"
+        }
+    }
+
     It 'the token phase switch -SkipFoundryTokens is declared on the inner script' {
         $Params = @($script:Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
         'SkipFoundryTokens' | Should -BeIn $Params

@@ -12,9 +12,9 @@ footprint against the Azure Monitor "metric queries" free tier.
 ## Prerequisites
 
 - PowerShell 7+ (`pwsh`)
-- The `Az` PowerShell modules. The tool checks for and can install the ones it
-  needs: `Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`,
-  `Az.ResourceGraph`.
+- The `Az` PowerShell submodules the tool checks for and can install — see
+  [Installing the required PowerShell modules](../README.md#installing-the-required-powershell-modules)
+  in the README for the authoritative list.
 - Reader (or higher) on the subscription(s) you want to inventory.
 
 ## Get the code

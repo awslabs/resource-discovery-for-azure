@@ -468,14 +468,16 @@ Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
             $true) | Select-Object -First 1
         $Outer | Should -Not -BeNullOrEmpty
 
-        function Get-EnclosingFunctionName([System.Management.Automation.Language.Ast]$Node) {
-            $p = $Node.Parent
-            while ($null -ne $p -and -not ($p -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $p = $p.Parent }
-            if ($null -eq $p) { return $null }
-            return $p.Name
+        function Get-EnclosingFunctionName([System.Management.Automation.Language.Ast]$Node)
+        {
+            $P = $Node.Parent
+            while ($null -ne $P -and -not ($P -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $P = $P.Parent }
+            if ($null -eq $P) { return $null }
+            return $P.Name
         }
 
-        foreach ($FnName in @('GetFoundryFoldConsumption', 'GetFoundryTokenConsumption')) {
+        foreach ($FnName in @('GetFoundryFoldConsumption', 'GetFoundryTokenConsumption'))
+        {
             $Def = $Outer.FindAll(
                 { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq $FnName },
                 $true) | Select-Object -First 1

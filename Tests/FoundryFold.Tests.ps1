@@ -11,10 +11,8 @@
              - Test-RdaClaudeMarketplaceRow  (detection)
              - Get-RdaClaudeModelIdentity    (model identity from OfferName/PlanName)
              - ConvertTo-RdaFoldedFoundryRow  (Tier 1: CCU/cost, non-token)
-             - Get-RdaFoundryRoleMeterSuffix  (role -> server-parseable MeterName suffix)
-             - ConvertTo-RdaFoldedFoundryTokenRow (Tier 2: per-(model,role) token row)
-           and the collector wiring (GetFoundryFoldConsumption + Get-RdaFoundryTokenTelemetry
-           in ResourceInventory.ps1) asserted against the source/AST.
+           and the collector wiring (GetFoundryFoldConsumption in ResourceInventory.ps1)
+           asserted against the source/AST.
 
       P2 - the emitted Consumption CSV column is AdditionalInfo (the name the server
            binds), NOT InstanceData.
@@ -114,6 +112,15 @@ Describe 'Get-RdaClaudeModelIdentity: model identity parsing' {
         # Never returns empty: the row is still attributable to Claude.
         Get-RdaClaudeModelIdentity -Row (script:New-FakeClaudeRow -Offer 'anthropic offer' -Plan 'payg') | Should -Match '^Claude'
     }
+    It 'does NOT attach a non-adjacent number (e.g. a plan token quantity) as a version' {
+        Get-RdaClaudeModelIdentity -Row (script:New-FakeClaudeRow -Offer 'Anthropic Claude Sonnet' -Plan '100000 tokens') | Should -Be 'Claude Sonnet'
+    }
+    It 'parses a version that precedes the family token' {
+        Get-RdaClaudeModelIdentity -Row (script:New-FakeClaudeRow -Offer 'Claude 3 Sonnet') | Should -Be 'Claude Sonnet 3'
+    }
+    It 'does not attach any number when no family token is present' {
+        Get-RdaClaudeModelIdentity -Row (script:New-FakeClaudeRow -Offer 'anthropic 100000' -Plan 'payg') | Should -Be 'Claude'
+    }
 }
 
 Describe 'ConvertTo-RdaFoldedFoundryRow: Tier 1 fold (CCU/cost, non-token)' {
@@ -198,77 +205,6 @@ Describe 'ConvertTo-RdaFoldedFoundryRow: obfuscation parity' {
     }
 }
 
-Describe 'Get-RdaFoundryRoleMeterSuffix: role -> server-parseable MeterName suffix' {
-    # The server parses the role out of MeterName by substring: input<-inp/input,
-    # output<-outp/out/output, cached-input<-"cd inp"/"cache read", cache-write<-"cd wr"/"cache write".
-    It 'maps input to a suffix containing the input substring' {
-        (Get-RdaFoundryRoleMeterSuffix -Role 'input') | Should -Match '(?i)inp'
-    }
-    It 'maps output to a suffix containing the output substring' {
-        (Get-RdaFoundryRoleMeterSuffix -Role 'output') | Should -Match '(?i)outp|out'
-    }
-    It 'maps cached-input to a "Cd Inp" suffix (server: "cd inp")' {
-        (Get-RdaFoundryRoleMeterSuffix -Role 'cached-input') | Should -Match '(?i)cd inp'
-        (Get-RdaFoundryRoleMeterSuffix -Role 'cache read') | Should -Match '(?i)cd inp'
-    }
-    It 'maps cache-write to a "Cd Wr" suffix (server: "cd wr")' {
-        (Get-RdaFoundryRoleMeterSuffix -Role 'cache-write') | Should -Match '(?i)cd wr'
-        (Get-RdaFoundryRoleMeterSuffix -Role 'cd wr') | Should -Match '(?i)cd wr'
-    }
-    It 'returns $null for an unrecognized role so the caller skips it' {
-        Get-RdaFoundryRoleMeterSuffix -Role 'nonsense' | Should -BeNullOrEmpty
-    }
-}
-
-Describe 'ConvertTo-RdaFoldedFoundryTokenRow: Tier 2 per-(model,role) token row' {
-    It 'encodes the role in MeterName and uses the DISCOVERED token unit' {
-        $Out = ConvertTo-RdaFoldedFoundryTokenRow -ModelIdentity 'Claude Sonnet 4.5' -Role 'input' -TokenCount 1234567 -TokenUnit 'Tokens' -ResourceId '/subscriptions/s/rg/x'
-        $Out.MeterCategory | Should -BeExactly 'Foundry Models'
-        $Out.MeterName | Should -Match '(?i)claude sonnet 4\.5'
-        $Out.MeterName | Should -Match '(?i)inp'          # server parses role=input from this
-        $Out.Quantity | Should -Be 1234567
-        $Out.Unit | Should -Be 'Tokens'                    # discovered unit passed straight through
-    }
-    It 'marks the row as a TOKEN meter (Tier 2) inside AdditionalInfo' {
-        $Out = ConvertTo-RdaFoldedFoundryTokenRow -ModelIdentity 'Claude' -Role 'output' -TokenCount 10 -TokenUnit 'Count'
-        $Ai = $Out.AdditionalInfo | ConvertFrom-Json
-        $Ai.'Microsoft.Resources'.additionalInfo.IsTokenMeter | Should -BeTrue
-        $Ai.'Microsoft.Resources'.additionalInfo.FoldTier | Should -Be 2
-        $Ai.'Microsoft.Resources'.additionalInfo.TokenRole | Should -Be 'output'
-    }
-    It 'emits the first-party Consumption column set' {
-        $Out = ConvertTo-RdaFoldedFoundryTokenRow -ModelIdentity 'Claude' -Role 'input' -TokenCount 1 -TokenUnit 'Count'
-        $Actual = @($Out.PSObject.Properties.Name) | Sort-Object
-        ($Actual -join ',') | Should -Be (($script:ConsumptionColumns | Sort-Object) -join ',')
-    }
-    It 'returns $null for an unrecognized role (never emits an un-parseable row)' {
-        ConvertTo-RdaFoldedFoundryTokenRow -ModelIdentity 'Claude' -Role 'weird' -TokenCount 5 -TokenUnit 'Count' | Should -BeNullOrEmpty
-    }
-}
-
-Describe 'Tier 2 runtime discovery (Get-RdaFoundryTokenTelemetry) degrades cleanly' {
-    # The discovery function lives inside ExecuteInventoryProcessing in ResourceInventory.ps1 and is
-    # not dot-sourceable in isolation. Its clean-degrade CONTRACT is asserted here against the source
-    # (the behaviour is proven by the pure-mapper tests above + the wiring guards below): when the
-    # metric cmdlet is unavailable OR there are no candidate Cognitive Services / Foundry resources,
-    # it returns an EMPTY array rather than throwing, and every per-resource probe is guarded.
-    It 'returns early with an empty result when Get-AzMetricDefinition is unavailable' {
-        $script:InvSrc | Should -Match "Get-Command -Name Get-AzMetricDefinition"
-        $script:InvSrc | Should -Match "return @\(\)"
-    }
-    It 'scopes candidates to CognitiveServices/Foundry accounts from the inventory dictionary' {
-        $script:InvSrc | Should -Match "Microsoft\\\.CognitiveServices/accounts"
-    }
-    It 'wraps each per-resource metric probe so one failure never aborts the rest' {
-        # A try/catch around Get-AzMetricDefinition and around Get-AzMetric inside the discovery fn.
-        $script:InvSrc | Should -Match 'Get-AzMetricDefinition -ResourceId'
-        $script:InvSrc | Should -Match 'Get-AzMetric -ResourceId'
-    }
-    It 'reads the DISCOVERED unit off the metric rather than hardcoding a token unit' {
-        $script:InvSrc | Should -Match '\$Metric\.Unit'
-    }
-}
-
 Describe 'Foundry fold collector wiring (ResourceInventory.ps1)' {
     It 'captures raw Claude rows during the Marketplace loop via the detection predicate' {
         $script:InvSrc | Should -Match 'Test-RdaClaudeMarketplaceRow -Row \$Row'
@@ -280,18 +216,11 @@ Describe 'Foundry fold collector wiring (ResourceInventory.ps1)' {
         $script:InvSrc | Should -Match 'GetFoundryFoldConsumption'
         # The Tier 1 fold uses the tested pure mapper.
         $script:InvSrc | Should -Match 'ConvertTo-RdaFoldedFoundryRow'
-        # The Tier 2 path uses the tested pure mapper + the runtime discovery fn.
-        $script:InvSrc | Should -Match 'ConvertTo-RdaFoldedFoundryTokenRow'
-        $script:InvSrc | Should -Match 'Get-RdaFoundryTokenTelemetry'
     }
     It 'appends folded rows to the Consumption CSV with the first-party column set' {
         # The fold Export-Csv -Append targets the Consumption CSV, not a new file, with the same
         # 15 columns as the first-party path.
         $script:InvSrc | Should -Match 'AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId \| Export-Csv -LiteralPath \$Global:ConsumptionFileCsv -Encoding utf8 -Append'
-    }
-    It 'Tier 2 is wrapped so a failure never fails the run (best-effort)' {
-        # A try/catch around the Tier 2 discovery+shaping inside GetFoundryFoldConsumption.
-        $script:InvSrc | Should -Match 'could not be collected'
     }
     It 'every nested function defined in ExecuteInventoryProcessing is actually invoked (no dead wiring)' {
         # Same AST guard as MarketplaceCollector.Tests.ps1: a nested helper defined but never called
@@ -314,7 +243,7 @@ Describe 'Foundry fold collector wiring (ResourceInventory.ps1)' {
                 $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
 
         $NeverCalled = @($Defined | Where-Object { $Invoked -notcontains $_ })
-        $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'GetFoundryFoldConsumption and Get-RdaFoundryTokenTelemetry must have live call sites'
+        $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'GetFoundryFoldConsumption must have a live call site'
     }
 }
 

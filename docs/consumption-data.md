@@ -287,28 +287,15 @@ A folded row is a normal consumption row with:
   because the Consumption schema has no dedicated cost column (the first-party path
   likewise stows per-resource detail there).
 
-The fold has **two tiers**:
+The fold emits a **Tier 1 (CCU / cost)** row for every captured Claude Marketplace
+row, marked **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Marketplace
+unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The server attributes
+the Azure cost but does **not** compute a token price from it.
 
-- **Tier 1 (CCU / cost — always).** One folded row per Claude Marketplace row, marked
-  **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Marketplace unit is
-  preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The server attributes the
-  Azure cost but does **not** compute a token price from it.
-- **Tier 2 (per-(model, role) token rows — only where telemetry exists).** Where the
-  environment exposes per-deployment token metrics (Azure Foundry per-deployment token
-  metrics via `Get-AzMetric`), RDA emits one folded row per (model, role) with the role
-  encoded in `MeterName` (`… - Inp Tkns`, `… - Outp Tkns`, `… - Cd Inp Tkns`,
-  `… - Cd Wr Tkns`), the token count as `Quantity`, and the token `Unit` **discovered at
-  runtime** (never hardcoded). This is what lets the server compute the AWS Bedrock
-  comparison. Tier 2 **probes and branches**: if no token telemetry is present it skips
-  cleanly and logs that Tier 2 was unavailable — it never fails the run.
-
-> **⚠️ Unverified against a live tenant.** The exact Azure Foundry token-meter
-> `MeterName` spellings and `Unit` strings are **not yet verified** against a live
-> Claude-on-Foundry deployment (none was available when this was built). Tier 2 is
-> written defensively — it discovers metric names/units at runtime and matches the
-> server's documented role substrings — but the discovered spellings/units **must be
-> validated on a live tenant** before the AWS token reprice is trusted. Tier 1 (cost)
-> is unaffected by this caveat.
+> **Tier 2 per-model token-role fold deferred** — a per-(model, role) token-row tier
+> needs live-tenant Foundry token metric-name verification and an account→Claude
+> correlation before it can be trusted, neither of which is available yet; see the
+> findings ledger.
 
 If the Marketplace phase collected no Claude/Anthropic rows, the fold logs a
 **confirmed zero** (the phase ran; there was simply nothing to fold), not a silent

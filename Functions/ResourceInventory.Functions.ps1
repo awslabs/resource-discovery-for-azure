@@ -241,9 +241,17 @@ function Global:Get-RdaClaudeModelIdentity
     $Family = $null
     if ($Text -imatch '\b(sonnet|opus|haiku)\b') { $Family = (Get-Culture).TextInfo.ToTitleCase($Matches[1].ToLower()) }
 
-    # Version like "4.5", "3.7", "3.5", "4", "3" if present near the family or anywhere in the text.
+    # Version like "4.5", "3.7", "4", "3" ONLY when it sits ADJACENT to the family token (either
+    # side), e.g. "Claude 3 Sonnet" or "Sonnet 4.5". A Claude model version is a single-digit major
+    # with an optional minor (never a large plan quantity like "100000 tokens"), so the number is
+    # bounded to \d(?:\.\d+)? - a bare "100000" adjacent to the family is NOT treated as a version.
     $Version = $null
-    if ($Text -imatch '\b(\d+(?:\.\d+)?)\b') { $Version = $Matches[1] }
+    if ($Family)
+    {
+        $Fam = [regex]::Escape($Family)
+        if ($Text -imatch ('\b(\d(?:\.\d+)?)\s+' + $Fam + '\b')) { $Version = $Matches[1] }
+        elseif ($Text -imatch ('\b' + $Fam + '\s+(\d(?:\.\d+)?)\b')) { $Version = $Matches[1] }
+    }
 
     if ($Family)
     {
@@ -251,9 +259,8 @@ function Global:Get-RdaClaudeModelIdentity
         return ("Claude {0}" -f $Family)
     }
 
-    # No family token: still return a Claude identity so the row is attributable. Include a
-    # version if one was present.
-    if ($Version) { return ("Claude {0}" -f $Version) }
+    # No family token: still return a Claude identity so the row is attributable. Without a family
+    # to anchor a version, do NOT attach a spurious number.
     return 'Claude'
 }
 
@@ -420,137 +427,6 @@ function Global:ConvertTo-RdaFoldedFoundryRow
         ResourceId         = $OutResourceId
         ResourceLocation   = $ResourceLocation
         ConsumptionMeter   = $ModelIdentity
-        ReservationId      = ''
-        ReservationOrderId = ''
-    }
-}
-
-function Global:Get-RdaFoundryRoleMeterSuffix
-{
-    # Maps a logical token ROLE to the MeterName suffix the server parses it back out of.
-    #
-    # SERVER CONTRACT (role parsing from MeterName text):
-    #   input        <- contains inp / input
-    #   output       <- contains outp / out / output
-    #   cached-input <- "cd inp" / "cached inp" / "cache read"
-    #   cache-write  <- "cd wr" / "cache write"
-    # So a per-role token row's MeterName MUST encode the role. This returns a suffix chosen to
-    # match the server's tokens unambiguously (e.g. "Inp Tkns", "Outp Tkns", "Cd Inp Tkns",
-    # "Cd Wr Tkns"), appended to the model identity to form MeterName like
-    # "Claude Sonnet 4.5 - Inp Tkns".
-    #
-    # CAVEAT (unverified against a live tenant). The exact Azure Foundry token-meter MeterName
-    # spellings are NOT yet verified against a live Claude-on-Foundry deployment. These suffixes
-    # are chosen to satisfy the server's DOCUMENTED substring rules above, but MUST be validated
-    # once a live deployment exists. Returns $null for an unrecognized role so the caller can skip
-    # rather than emit a row the server cannot classify.
-    param([Parameter(Mandatory = $true)][string]$Role)
-
-    switch -Regex ($Role.ToLower())
-    {
-        '^(cached[-_ ]?input|cache[-_ ]?read|cd[-_ ]?inp)$' { return 'Cd Inp Tkns' }
-        '^(cache[-_ ]?write|cd[-_ ]?wr)$' { return 'Cd Wr Tkns' }
-        '^(input|inp)$' { return 'Inp Tkns' }
-        '^(output|outp|out)$' { return 'Outp Tkns' }
-        default { return $null }
-    }
-}
-
-function Global:ConvertTo-RdaFoldedFoundryTokenRow
-{
-    # TIER 2 FOLD (per-(model, role) TOKEN rows, only where token telemetry exists). Maps ONE
-    # discovered (model, role, token-count) triple into a row shaped like the first-party
-    # Consumption CSV, with the ROLE encoded in MeterName and a TOKEN Unit, so the server can
-    # compute the AWS Bedrock token-price comparison.
-    #
-    # This is the counterpart to the Tier 1 (CCU/cost) fold. Tier 1 always runs from the
-    # Marketplace cost row; Tier 2 runs ONLY when the environment actually exposes per-model
-    # input/output/cached/cache-write token counts (discovered at runtime by the collector via
-    # Get-AzMetric on Foundry per-deployment token metrics and/or a linked Application Insights
-    # resource). The collector DISCOVERS the metric names/units at runtime and does NOT hardcode
-    # them; this pure mapper just shapes one already-discovered datum into a server row.
-    #
-    # RETURNS $null when the role is unrecognized (so no un-parseable row is emitted) - the
-    # collector treats $null as "skip this datum" and records that Tier 2 was partial.
-    #
-    # CAVEAT (unverified against a live tenant). The exact Azure Foundry token-meter Unit strings
-    # the server's TokensPerAzureUnit() accepts, and the exact MeterName spellings, are NOT yet
-    # verified against a live Claude-on-Foundry deployment. The caller passes the Unit it
-    # discovered at runtime; this mapper does not invent one. Validate on a live tenant.
-    param(
-        [Parameter(Mandatory = $true)][string]$ModelIdentity,
-        [Parameter(Mandatory = $true)][string]$Role,
-        [Parameter(Mandatory = $true)]$TokenCount,
-        # The token Unit as DISCOVERED at runtime (never hardcoded). Passed straight through so the
-        # server's Quantity x TokensPerAzureUnit(Unit) math sees the real discovered unit.
-        [Parameter(Mandatory = $true)][string]$TokenUnit,
-        $UsageStartTime = $null,
-        $UsageEndTime = $null,
-        [string]$ResourceId = $null,
-        [string]$ResourceLocation = 'global',
-        [string]$MeterId = $null,
-        [bool]$Obfuscate = $false,
-        $UriKeyedNameDictionary = $null,
-        [hashtable]$SubCache = $null,
-        [hashtable]$RgCache = $null,
-        [hashtable]$NameCache = $null
-    )
-
-    $RoleSuffix = Get-RdaFoundryRoleMeterSuffix -Role $Role
-    if ($null -eq $RoleSuffix) { return $null }
-
-    $MeterName = ("{0} - {1}" -f $ModelIdentity, $RoleSuffix)
-
-    # Stable synthetic ids when the caller did not supply them (server requires non-empty).
-    $IdentitySeed = ("{0}|{1}|{2}" -f $ModelIdentity, $Role, $ResourceId)
-    $Sha = [System.Security.Cryptography.SHA256]::Create()
-    try { $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($IdentitySeed)) } finally { $Sha.Dispose() }
-    $HashHex = -join ($HashBytes | ForEach-Object { $_.ToString('x2') })
-    $SynthGuid = ("{0}-{1}-{2}-{3}-{4}" -f $HashHex.Substring(0, 8), $HashHex.Substring(8, 4), $HashHex.Substring(12, 4), $HashHex.Substring(16, 4), $HashHex.Substring(20, 12))
-
-    $OutMeterId = if (-not [string]::IsNullOrEmpty($MeterId)) { $MeterId } else { ("foundryfold-tok-{0}" -f $SynthGuid) }
-    $RawResourceId = if (-not [string]::IsNullOrEmpty($ResourceId)) { $ResourceId } else { ("/providers/Microsoft.Foundry/foundryModels/{0}" -f $SynthGuid) }
-
-    $OutResourceId = $RawResourceId
-    if ($Obfuscate)
-    {
-        if ($null -eq $SubCache) { $SubCache = @{} }
-        if ($null -eq $RgCache) { $RgCache = @{} }
-        if ($null -eq $NameCache) { $NameCache = @{} }
-        $Prefix = if ("$RawResourceId" -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or "$RawResourceId" -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
-        $OutResourceId = Build-ObfuscatedResourceUri -RawUri $RawResourceId -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $UriKeyedNameDictionary -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
-    }
-
-    $AdditionalInfoObject = [PSCustomObject]@{
-        'Microsoft.Resources' = [PSCustomObject]@{
-            resourceUri    = $OutResourceId
-            location       = $ResourceLocation
-            additionalInfo = [PSCustomObject]@{
-                IsFoundryFold = $true
-                FoldTier      = 2
-                IsTokenMeter  = $true
-                ModelIdentity = $ModelIdentity
-                TokenRole     = $Role
-            }
-        }
-    }
-
-    return [PSCustomObject]@{
-        AdditionalInfo     = ($AdditionalInfoObject | ConvertTo-Json -Compress -Depth 6)
-        MeterCategory      = 'Foundry Models'
-        MeterId            = $OutMeterId
-        # Role encoded in MeterName so the server parses (model, role) back out of it.
-        MeterName          = $MeterName
-        MeterRegion        = $ResourceLocation
-        MeterSubCategory   = $ModelIdentity
-        # Token count as Quantity, with the runtime-DISCOVERED token Unit.
-        Quantity           = $TokenCount
-        Unit               = $TokenUnit
-        UsageStartTime     = $UsageStartTime
-        UsageEndTime       = $UsageEndTime
-        ResourceId         = $OutResourceId
-        ResourceLocation   = $ResourceLocation
-        ConsumptionMeter   = $MeterName
         ReservationId      = ''
         ReservationOrderId = ''
     }

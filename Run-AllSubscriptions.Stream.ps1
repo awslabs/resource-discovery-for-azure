@@ -187,6 +187,8 @@ $Global:MarketplaceFailedSubs = @()
 
 $Global:CollectorFailures = @()
 
+$Global:MemoryReadings = @()
+
 $PairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
 for ($i = 0; $i -lt $PairCount; $i++)
 {
@@ -212,7 +214,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
             throw "Script exited with code $LASTEXITCODE"
         }
 
-        $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+        $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
         $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount; Zip = $Global:ZipOutputFile }
 
         if ($ResCount -eq 0)
@@ -282,6 +284,7 @@ $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Globa
 $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 $MarketplaceFailedSubs = if ($null -ne $Global:MarketplaceFailedSubs) { @($Global:MarketplaceFailedSubs) } else { @() }
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+$MemoryReadings = if ($null -ne $Global:MemoryReadings) { @($Global:MemoryReadings) } else { @() }
 
 $Summary = [pscustomobject]@{
     StreamId               = $StreamId
@@ -301,6 +304,7 @@ $Summary = [pscustomobject]@{
     MarketplaceFailedSubs  = @($MarketplaceFailedSubs)
     CollectorFailures      = @($CollectorFailures)
     ArchiveWriteFailures   = @($ArchiveWriteFailures)
+    MemoryReadings         = @($MemoryReadings)
 }
 try
 {

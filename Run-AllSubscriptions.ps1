@@ -276,6 +276,8 @@ $Global:MarketplaceRecordCount = 0
 
 $Global:CollectorFailures = @()
 
+$Global:MemoryReadings = @()
+
 $RootResult = Get-RdaInventoryRoot -NoInherit
 if (-not $RootResult.Ok)
 {
@@ -1194,7 +1196,7 @@ if ($ParallelStreams -le 1)
                 throw "Script exited with code $LASTEXITCODE"
             }
 
-            $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+            $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
             $SubResourceCounts += [pscustomobject]@{
                 Name  = $Sub.Name
                 Id    = $Sub.Id
@@ -1349,7 +1351,7 @@ else
                     if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
                     throw "Script exited with code $LASTEXITCODE"
                 }
-                $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+                $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
                 $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount; Zip = $Global:ZipOutputFile }
                 if ($ResCount -eq 0)
                 {
@@ -1602,6 +1604,11 @@ else
                 {
                     if ($null -eq $Global:CollectorFailures) { $Global:CollectorFailures = @() }
                     $Global:CollectorFailures += @($StreamSummary.CollectorFailures)
+                }
+                if ($StreamSummary.MemoryReadings -and $StreamSummary.MemoryReadings.Count -gt 0)
+                {
+                    if ($null -eq $Global:MemoryReadings) { $Global:MemoryReadings = @() }
+                    $Global:MemoryReadings += @($StreamSummary.MemoryReadings)
                 }
                 if ($StreamSummary.ArchiveWriteFailures -and $StreamSummary.ArchiveWriteFailures.Count -gt 0)
                 {
@@ -2265,6 +2272,7 @@ try
         -MetricsFailedSubs $Global:MetricsFailedSubs `
         -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
         -MarketplaceFailedSubs $Global:MarketplaceFailedSubs `
+        -MemoryReadings $Global:MemoryReadings `
         -ConsumptionRecordCount $ConsumptionRecordTotal `
         -MarketplaceRecordCount $MarketplaceRecordTotal `
         -MetricsApiCallCount $MetricsApiCallTotal `

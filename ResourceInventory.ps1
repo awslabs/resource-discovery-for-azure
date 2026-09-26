@@ -57,6 +57,7 @@ function Variables
 {
     $Global:ResourceContainers = @()
     $Global:Resources = @()
+    $Global:ResourceCount = 0
     $Global:Subscriptions = ''
     $Global:ReportName = $ReportName
     $Global:Version = GetLocalVersion
@@ -564,6 +565,10 @@ function RunInventorySetup()
     CheckPowerShell
     GetSubscriptionsData
 
+    # Taken after sign-in and the subscription list, so the difference to the 'discovery' reading is
+    # the Resource Graph rows alone and not the modules and tokens the setup loaded.
+    Write-RdaMemorySnapshot -Phase 'start' -Compact -Record
+
     try
     {
         ResourceInventoryLoop
@@ -576,6 +581,11 @@ function RunInventorySetup()
         Write-Log -Message ('  If this is a Resource Graph response-size failure on one specific resource type, exclude that type from the discovery query to let the rest of the subscription complete.') -Severity 'Error'
         exit 1
     }
+
+    # The wrapper reports this count after the run. It reads the count rather than the array, so
+    # the array can be released once the collectors and the placement CSV have finished with it.
+    $Global:ResourceCount = @($Global:Resources).Count
+    Write-RdaMemorySnapshot -Phase 'discovery' -Compact -Record
 
     if ($Obfuscate.IsPresent)
     {
@@ -1149,6 +1159,10 @@ function ExecuteInventoryProcessing()
                 continue
             }
 
+            # Start each billing pull from a compacted heap, so what earlier phases and subscriptions
+            # freed is actually available to it.
+            Write-RdaMemorySnapshot -Phase 'Before the consumption pull' -Compact
+
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
             $ConsumptionRecordsThisSub = 0
@@ -1171,6 +1185,9 @@ function ExecuteInventoryProcessing()
                     }
 
                     $Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }
+                    # The previous page is written and only its token was still needed, so release its
+                    # response before this page downloads. The loop condition reads the page fetched below.
+                    $UsageData = $null
 
                     $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
@@ -1210,10 +1227,10 @@ function ExecuteInventoryProcessing()
                             {
                                 # Backing off cannot free memory, and this error carries no Retry-After,
                                 # so the normal budget would only repeat it through ~26 minutes of
-                                # exponential backoff. Release the previous page, compact the heap and
-                                # retry this page once. Nothing has been written for this page yet, so
-                                # the retry cannot duplicate rows. A second out-of-memory error ends this
-                                # subscription's consumption; the outer catch reports it.
+                                # exponential backoff. Drop anything the previous page still holds,
+                                # compact the heap and retry this page once. Nothing has been written for
+                                # this page yet, so the retry cannot duplicate rows. A second out-of-memory
+                                # error ends this subscription's consumption; the outer catch reports it.
                                 if ($ConsumptionOutOfMemoryRetried) { throw }
                                 $ConsumptionOutOfMemoryRetried = $true
                                 Write-Log -Message ("Consumption page query for {0} ran out of memory: {1}. Compacting memory and retrying this page once." -f $sub.Name, $_.Exception.Message.TrimEnd('.')) -Severity 'Warning'
@@ -1415,6 +1432,15 @@ function ExecuteInventoryProcessing()
                     $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
+
+                    # The page is on disk now, so drop its rows before the next page downloads. $UsageData
+                    # stays: the loop condition and the next request read its continuation token.
+                    $UsageDataExport = $null
+                    $NewUsageDataExport = $null
+                    if (($ConsumptionPageIndex % 10) -eq 0)
+                    {
+                        Write-RdaMemorySnapshot -Phase ('Consumption page {0}' -f $ConsumptionPageIndex)
+                    }
 
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
             }
@@ -1835,6 +1861,7 @@ function ExecuteInventoryProcessing()
 
     ProcessMetricsResult
     ProcessResourceResult
+    Write-RdaMemorySnapshot -Phase 'collectors' -Compact -Record
 
     if ($CapacityPlan.IsPresent)
     {
@@ -1866,6 +1893,15 @@ function ExecuteInventoryProcessing()
             Write-Log -Message ("VM placement CSV failed: {0}. The rest of the run is unaffected." -f $_.Exception.Message) -Severity 'Error'
         }
     }
+
+    # The placement CSV was the last reader of the raw Resource Graph rows and of the collector
+    # output. The Inventory JSON is on disk, billing reads the subscription list and the
+    # obfuscation dictionaries, and the HTML report reads the JSON file, so nothing after this
+    # point needs either structure. Release them here so the billing pull, and the next
+    # subscription under the wrapper, do not carry this subscription's inventory in memory.
+    $Global:Resources = $null
+    $Global:SmaResources = $null
+    Write-RdaMemorySnapshot -Phase 'released' -Compact -Record
 
     if (!$SkipMetrics.IsPresent)
     {
@@ -2273,9 +2309,11 @@ if ($SkipConsumption.IsPresent -or $SkipMarketplace.IsPresent -or !$MarketplaceC
     "PublisherName,OfferName,PlanName,OrderNumber,ConsumedService,ConsumedQuantity,UnitOfMeasure,PretaxCost,Currency,IsEstimated,MeterId,UsageStart,UsageEnd,SubscriptionGuid,SubscriptionName,ResourceGroup,InstanceId,InstanceName" | Out-File -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8
 }
 
+Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
+
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
@@ -2289,7 +2327,7 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 

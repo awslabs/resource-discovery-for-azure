@@ -274,6 +274,44 @@ Describe 'Test-RdaOutOfMemory: out-of-memory text only' {
     }
 }
 
+Describe 'Write-RdaMemorySnapshot: one reading, to the local debug log only' {
+    BeforeAll {
+        $script:PriorDebugLogFile = $Global:DebugLogFile
+        $script:PriorErrorLogFile = $Global:ErrorLogFile
+        $script:SnapshotLog = Join-Path ([System.IO.Path]::GetTempPath()) ('MemorySnapshot_{0}.log' -f [guid]::NewGuid().ToString('N'))
+        $Global:DebugLogFile = $script:SnapshotLog
+        $Global:ErrorLogFile = $null
+    }
+    AfterAll {
+        $Global:DebugLogFile = $script:PriorDebugLogFile
+        $Global:ErrorLogFile = $script:PriorErrorLogFile
+        Remove-Item -LiteralPath $script:SnapshotLog -Force -ErrorAction SilentlyContinue
+    }
+    BeforeEach {
+        Remove-Item -LiteralPath $script:SnapshotLog -Force -ErrorAction SilentlyContinue
+    }
+    It 'writes <Label> as one debug-log line and nothing to the console' -ForEach @(
+        @{ Label = 'a plain reading'; Compact = $false; Suffix = '' }
+        @{ Label = 'a reading after a compacting collection'; Compact = $true; Suffix = ', after a compacting collection' }
+    ) {
+        $PriorCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try
+        {
+            # A comma-decimal culture: the figures must still be written with a dot.
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::new('de-DE')
+            $Emitted = @(Write-RdaMemorySnapshot -Phase 'Unit test phase' -Compact:$Compact 6>&1)
+        }
+        finally
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $PriorCulture
+        }
+
+        $Emitted.Count | Should -Be 0 -Because 'a memory reading goes to the local debug log, never to the console or the pipeline'
+        $Lines = @(Get-Content -LiteralPath $script:SnapshotLog)
+        $Lines.Count | Should -Be 1
+        $Lines[0] | Should -Match ('\[Memory\] Unit test phase: managed heap \d+(\.\d)? MB, process working set \d+(\.\d)? MB, memory available to the runtime \d+ MB{0}\.$' -f [regex]::Escape($Suffix))
+    }
+}
 Describe 'The page loop gives an out-of-memory error one compacted retry, then stops' {
 
     BeforeAll {

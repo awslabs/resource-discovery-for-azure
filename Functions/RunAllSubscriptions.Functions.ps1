@@ -1197,6 +1197,7 @@ function Get-RunSummaryLogContent
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
         $MarketplaceFailedSubs = @(),
+        $MemoryReadings = @(),
         [int]$ConsumptionRecordCount = 0,
         [int]$MarketplaceRecordCount = 0,
         [int]$MetricsApiCallCount = 0,
@@ -1369,6 +1370,16 @@ function Get-RunSummaryLogContent
         $Lines.Add('      help - the partner must enable it in Partner Center.')
         $Lines.Add('    - Subscription not transitioned to the Azure plan.')
         $Lines.Add('    - A subscription offer the legacy usage API does not serve.')
+    }
+
+    # Per-subscription memory readings from the inner script (megabytes and counts only, so they
+    # appear in both modes). They show how much the host was holding at each phase and whether it
+    # grew from one subscription to the next, which is what a run that ran out of memory needs.
+    $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Obfuscated:$Obfuscated)
+    if ($MemoryLines.Count -gt 0)
+    {
+        $Lines.Add('')
+        foreach ($MemoryLine in $MemoryLines) { $Lines.Add($MemoryLine) }
     }
 
     if (-not $Obfuscated)

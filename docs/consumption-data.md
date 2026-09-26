@@ -23,7 +23,9 @@ Per subscription, the collector:
 - Pages through the results using the API's **`ContinuationToken`** until there
   are no more pages.
 - Writes each page to the CSV as it goes (`Export-Csv -Append`), so rows are
-  flushed incrementally rather than held in memory to the end.
+  flushed incrementally rather than held in memory to the end. Only the
+  `ContinuationToken` is carried from one page to the next; each page's rows
+  are released once they are written.
 
 ### Authentication pre-check
 
@@ -47,9 +49,17 @@ handled by the per-subscription failure path (see [Recovering from a consumption
 crash](#recovering-from-a-consumption-crash)).
 
 Running out of memory is not transient, because waiting frees nothing. The first
-out-of-memory error on a page releases the previous page, compacts the heap and
-retries that page once; a second one stops that subscription's consumption with
-an Error that says how to re-run it in a fresh PowerShell process.
+out-of-memory error on a page compacts the heap and retries that page once; a
+second one stops that subscription's consumption with an Error that says how to
+re-run it in a fresh PowerShell process.
+
+Before each subscription's billing pull, RDA runs a compacting garbage
+collection and writes a `[Memory]` line to the local `DebugLog_*.log`: the
+managed heap, the process working set, and the memory available to the runtime.
+It writes another every 10 pages. If a run does run out of memory, these lines
+show how much was already in use when billing began and whether it grew from
+one subscription to the next. The HTML report's VM billing-coverage check reads
+this CSV one row at a time rather than loading it whole.
 
 ## The columns
 

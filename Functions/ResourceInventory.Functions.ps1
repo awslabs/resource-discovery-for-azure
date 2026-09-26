@@ -709,6 +709,7 @@ function Write-RdaShareableDiagnosticsLog
         [string]$RunDateTime,
         [string]$Version,
         $PhaseTimings,
+        $MemoryReadings = @(),
         [int]$ConsumptionRecordCount = 0,
         [bool]$ConsumptionRequested = $true,
         [int]$MarketplaceRecordCount = 0,
@@ -893,6 +894,16 @@ function Write-RdaShareableDiagnosticsLog
         else
         {
             $DiagLines.Add('Metric-query API calls issued: n/a (-SkipMetrics was passed)')
+        }
+
+        # Megabytes and counts only, so the same rows appear in the obfuscated bundle. Filtered to
+        # this run's stamp: the readings global is not reset by a standalone run, so a prompt that
+        # has run the script before still holds the earlier run's rows.
+        $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Stamp $RunDateTime -Obfuscated:$Obfuscated)
+        if ($MemoryLines.Count -gt 0)
+        {
+            $DiagLines.Add('')
+            foreach ($MemoryLine in $MemoryLines) { $DiagLines.Add($MemoryLine) }
         }
 
         $DiagnosticsFile = ($DefaultPath + "Diagnostics_" + $ReportName + "_" + $RunDateTime + ".log")

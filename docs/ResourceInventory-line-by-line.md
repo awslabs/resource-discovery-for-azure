@@ -2841,7 +2841,7 @@ Between subscriptions, clearing it is the fix.
 ### Flattening each usage record (lines 1769-1814)
 
 ```powershell
-                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
                     $ConsumptionRecordsThisSub += $UsageDataExport.Count
@@ -2856,7 +2856,7 @@ Between subscriptions, clearing it is the fix.
                         #  loop sits inside the per-subscription try/catch that throw would
                         #  abort the WHOLE subscription's consumption. Such a record has no
                         #  resourceUri to attribute or join anyway, so skip just that one.]
-                        $RawInstanceData = $UsageDataExport[$Item].InstanceData
+                        $RawInstanceData = $UsageDataExport[$Item].AdditionalInfo
                         if ([string]::IsNullOrEmpty($RawInstanceData))
                         {
                             continue
@@ -2874,7 +2874,7 @@ Between subscriptions, clearing it is the fix.
 
 | Line | Code | What it does |
 |---|---|---|
-| 1769 | `$UsageData.UsageAggregations.Properties \| Select-Object ...` | Digs down two levels into the response and projects ten fields. `InstanceData` is a **JSON string inside a JSON response**, which is why it has to be parsed separately. |
+| 1769 | `$UsageData.UsageAggregations.Properties \| Select-Object ...` | Digs down two levels into the response and projects ten fields. The raw Azure field is `InstanceData`; it is aliased here to the emitted column name `AdditionalInfo` (a calculated `Select-Object` property `@{Name='AdditionalInfo';Expression={$_.InstanceData}}`) so it binds to the server field of the same name. It is a **JSON string inside a JSON response**, which is why it has to be parsed separately. |
 | 1774 | `[System.Collections.ArrayList]::new()` | An `ArrayList` rather than `@()` because this loop appends thousands of items per page, and `+=` on a PowerShell array copies the whole array every time, which is quadratic. `ArrayList.Add` is constant time. |
 | 1776 | `for ($Item = 0; ...)` | An index based `for` rather than `foreach`, because the loop **mutates** `$UsageDataExport[$Item]` in place. |
 | 1786-1790 | the null `InstanceData` guard | A real bug fix. Some meters, marketplace purchases and certain reservations and tenant level charges, have no `InstanceData` at all. `.tolower()` on null throws, and because this loop sits inside the per subscription `try`, that single record would abort the **entire** subscription's consumption. Such a record has no resource URI to attribute anyway, so skipping just that one record is exactly right. |

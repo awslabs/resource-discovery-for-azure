@@ -1842,6 +1842,12 @@ function ExecuteInventoryProcessing()
         # ---- Tier 1: one folded cost row per captured Claude Marketplace row (always) ----
         foreach ($Captured in $ClaudeRows)
         {
+            # ConvertTo-RdaFoldedFoundryRow's -Row is Mandatory, so a null captured row would throw
+            # a terminating parameter-binding error ("Cannot bind argument to parameter 'Row'").
+            # Under the run's default SilentlyContinue that terminating error aborts the whole
+            # consumption block BEFORE the Tier 2 token phase runs, silently collecting zero token
+            # rows. Skip a null row so one bad captured entry cannot defeat the token collection.
+            if ($null -eq $Captured.Row) { continue }
             $Folded = ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
             $null = $FoldExport.Add($Folded)
         }

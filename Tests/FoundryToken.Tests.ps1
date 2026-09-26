@@ -560,3 +560,78 @@ Describe 'Robustness wiring: permanent-skip + per-account isolation (ResourceInv
         $HasContinueCatch | Should -BeTrue -Because 'a caught per-account failure must continue to the next account, never abort the phase'
     }
 }
+
+
+Describe 'GetFoundryFoldConsumption: a null captured row must not abort the phase (Tier 2 regression)' {
+    # REGRESSION (live). The Tier 1 fold captured Claude Marketplace rows and, for each, called the
+    # pure helper ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row. That -Row is [Parameter(Mandatory)],
+    # so a null captured row threw a TERMINATING "Cannot bind argument to parameter 'Row' because it
+    # is null." Under the run's default $ErrorActionPreference=SilentlyContinue that terminating error
+    # aborted the whole consumption block BEFORE the Tier 2 GetFoundryTokenConsumption phase ran, so
+    # zero Foundry token rows reached Consumption_*.csv - defeating the change's primary intent.
+    #
+    # This test executes the REAL fold function body (extracted verbatim from ResourceInventory.ps1
+    # via the AST, not a re-implementation) with a capture list that mixes a null Row and a valid
+    # Claude row, under SilentlyContinue, and asserts observable behavior: the fold returns normally
+    # (no terminating abort), a following phase flag is reached, and the valid row is still folded.
+
+    BeforeAll {
+        $ErrParse = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$ErrParse)
+        $FoldDef = $Ast.FindAll(
+            { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'GetFoundryFoldConsumption' },
+            $true) | Select-Object -First 1
+        # Materialize the real nested function at script scope so we can invoke its actual body.
+        Invoke-Expression $FoldDef.Extent.Text
+    }
+
+    It 'folds a valid Claude row and skips a null captured row without a terminating abort' {
+        $ErrorActionPreference = 'SilentlyContinue'
+
+        # Minimal fakes for the globals/vars the fold body touches.
+        function Write-Log { param($Message, $Severity) }
+        $Global:ResourceIdDictionary = @{}
+        $Global:FoundryFoldRecordCount = $null
+        $script:FoundryFoldRecordsThisRun = $null
+        $Obfuscate = [pscustomobject]@{ IsPresent = $false }
+        $Global:ConsumptionFileCsv = Join-Path ([System.IO.Path]::GetTempPath()) ("rda_fold_regression_{0}.csv" -f ([guid]::NewGuid()))
+
+        $ValidRow = [pscustomobject]@{
+            PublisherName = 'Anthropic'; OfferName = 'Claude Sonnet 4.5 offer'; PlanName = 'payg'
+            InstanceId = '/subscriptions/11111111-1111-1111-1111-111111111111/rg/foo'; MeterId = 'm1'
+            ConsumedQuantity = 42.0; UnitOfMeasure = '1M Tokens'; PretaxCost = 1.0; Currency = 'USD'
+            SubscriptionGuid = '11111111-1111-1111-1111-111111111111'; SubscriptionName = 'Sub'; ResourceGroup = 'rg'
+        }
+        $script:FoundryFoldClaudeRows = [System.Collections.ArrayList]::new()
+        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = 's'; SubName = 'S'; Row = $null })
+        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = 's2'; SubName = 'S2'; Row = $ValidRow })
+
+        # Model the call-site sequence (fold then the Tier 2 token phase) in one block with no
+        # isolation, exactly as ExecuteInventoryProcessing does: a terminating fold error would set
+        # $TokenPhaseReached = $false, reproducing the intent-defeating abort.
+        $TokenPhaseReached = $false
+        try
+        {
+            GetFoundryFoldConsumption
+            $TokenPhaseReached = $true
+        }
+        catch
+        {
+            $TokenPhaseReached = $false
+        }
+
+        try
+        {
+            $TokenPhaseReached | Should -BeTrue -Because 'a null captured row must not abort the phase before the Tier 2 token collector runs'
+            $Global:FoundryFoldRecordCount | Should -Be 1 -Because 'the one VALID Claude row is still folded; only the null row is skipped'
+            Test-Path -LiteralPath $Global:ConsumptionFileCsv | Should -BeTrue
+            $Rows = @(Import-Csv -LiteralPath $Global:ConsumptionFileCsv)
+            $Rows.Count | Should -Be 1
+            $Rows[0].MeterCategory | Should -BeExactly 'Foundry Models'
+        }
+        finally
+        {
+            if (Test-Path -LiteralPath $Global:ConsumptionFileCsv) { Remove-Item -LiteralPath $Global:ConsumptionFileCsv -Force }
+        }
+    }
+}

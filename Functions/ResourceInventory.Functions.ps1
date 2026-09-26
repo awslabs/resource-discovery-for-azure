@@ -1267,7 +1267,11 @@ function Global:Get-RdaFoundryTokenMetrics
         {
             $M = Get-AzMetric -ResourceId $AccountId -MetricName $MetricName -AggregationType Total -StartTime $StartTime -EndTime $EndTime -TimeGrain '1.00:00:00' -MetricFilter $DimFilter -WarningAction SilentlyContinue -ErrorAction Stop
             $Total = 0.0
-            foreach ($Series in @($M.Data)) { foreach ($Pt in @($Series.Data)) { if ($null -ne $Pt.Total) { $Total += [double]$Pt.Total } } }
+            $PointLists = @()
+            $SeriesList = $M.Timeseries
+            if ($null -ne $SeriesList) { $PointLists = @(@($SeriesList) | ForEach-Object { $_.Data }) }
+            else { $PointLists = @($M.Data) }
+            foreach ($Pt in @($PointLists)) { if ($null -ne $Pt -and $null -ne $Pt.Total) { $Total += [double]$Pt.Total } }
             return $Total
         }
         catch { return $null }

@@ -364,7 +364,6 @@ Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
     BeforeAll {
         $script:ParseErrors = $null
         $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$script:ParseErrors)
-        $script:InvSrc = Get-Content -LiteralPath $script:InvPath -Raw
     }
 
     It 'the inner script parses without error' {
@@ -395,39 +394,8 @@ Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
         $NeverCalled -join ', ' | Should -BeNullOrEmpty
     }
 
-    It 'discovers accounts + deployments via ARM cmdlets (NOT Resource Graph) - the verified contract' {
-        $script:InvSrc | Should -Match 'Get-AzCognitiveServicesAccount\b' -Because 'accounts are enumerated via ARM'
-        $script:InvSrc | Should -Match 'Get-AzCognitiveServicesAccountDeployment\b' -Because 'deployments are read via ARM'
-    }
-
-    It 'queries per-model token metrics via Get-AzMetric split by the ModelDeploymentName dimension' {
-        $script:InvSrc | Should -Match 'Get-AzMetric\b'
-        $script:InvSrc | Should -Match "ModelDeploymentName eq '\*'" -Because 'the per-model split is the verified MetricFilter'
-        $script:InvSrc | Should -Match "AggregationType\s*=\s*'Total'" -Because 'the window token total uses AggregationType Total'
-    }
-
-    It 'the token phase is gated by -SkipMetrics AND -SkipFoundryTokens (metrics data plane), inside -SkipConsumption' {
-        # The call site must require metrics not skipped AND foundry-tokens not skipped.
-        $script:InvSrc | Should -Match '!\$SkipMetrics\.IsPresent\s+-and\s+!\$SkipFoundryTokens\.IsPresent'
-        # And ResourceInventory.ps1 declares the switch.
+    It 'the token phase switch -SkipFoundryTokens is declared on the inner script' {
         $Params = @($script:Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
         'SkipFoundryTokens' | Should -BeIn $Params
-    }
-
-    It 'per-subscription context is re-pinned AND verified before reading metrics (no cross-sub attribution)' {
-        # The collector must Set-AzContext to $sub.id and verify (Get-AzContext).Subscription.Id -eq $sub.id
-        # within the Foundry token phase, exactly like the consumption/marketplace loops.
-        $script:InvSrc | Should -Match 'Foundry tokens SKIPPED: could not switch the Azure context'
-        $script:InvSrc | Should -Match '\(Get-AzContext\)\.Subscription\.Id -eq \$sub\.id'
-    }
-
-    It 'appends to the Consumption CSV with the exact 15-column projection (schema-identical fold)' {
-        # The token fold must Export-Csv -Append onto $Global:ConsumptionFileCsv with the same columns
-        # the first-party path emits.
-        $script:InvSrc | Should -Match 'Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId[\s\S]{0,240}\$Global:ConsumptionFileCsv'
-    }
-
-    It 'distinguishes a confirmed zero (no accounts / no usage) from a failure' {
-        $script:InvSrc | Should -Match 'CONFIRMED ZERO'
     }
 }

@@ -80,7 +80,7 @@ PowerShell reads the whole file, registers the functions, and only then executes
 | 115 | `Variables` | (top level) | Creates every `$Global:` variable the rest of the run reads |
 | 156 | `RunInventorySetup` | (top level) | Everything that has to happen before resources can be collected |
 | 158 | `CheckVersion` | `RunInventorySetup` | Compare local version against GitHub, warn only |
-| 227 | `CheckCliRequirements` | `RunInventorySetup` | Verify and import the five Az submodules |
+| 227 | `CheckCliRequirements` | `RunInventorySetup` | Verify and import the six Az submodules |
 | 341 | `CheckPowerShell` | `RunInventorySetup` | Detect platform, build the output folder path |
 | 436 | `LoginSession` | `RunInventorySetup` | All authentication paths |
 | 619 | `GetSubscriptionsData` | `RunInventorySetup` | Create the report folder, mark session initialised |
@@ -608,7 +608,7 @@ A version check must never gate the inventory.
         #  the Azure CLI and its resource-graph extension are no longer prerequisites]
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        # [long comment: this tool calls cmdlets from only five Az submodules, so it
+        # [long comment: this tool calls cmdlets from only six Az submodules, so it
         #  validates exactly those and does NOT require the ~80-submodule Az rollup.
         #  Checking the submodules rather than the Az umbrella is what lets a slim
         #  install pass - a slim install has no Az meta-module at all.]
@@ -635,7 +635,7 @@ A version check must never gate the inventory.
             throw ('Required Azure PowerShell submodule(s) not found: {0}. See log above for installation instructions.' -f ($MissingAzSubModules -join ', '))
         }
 
-        # [long comment: import ONLY the five submodules, not the Az rollup. Importing
+        # [long comment: import ONLY the six submodules, not the Az rollup. Importing
         #  Az pulls ~80 submodules and stalls 20-40s with no output, which looks like a
         #  hang. This import also doubles as the broken-install probe: -ListAvailable
         #  only checks the manifest, importing actually loads the assemblies.]
@@ -2610,7 +2610,7 @@ It pulls billing and usage data per subscription, and it contains more defensive
   │  │  for each usage record:                               │   │
   │  │     parse InstanceData JSON                           │   │
   │  │     flatten 5 fields onto the row                     │   │
-  │  │     rebuild a rich InstanceData object                │   │
+  │  │     rebuild a rich AdditionalInfo object              │   │
   │  │     if -Obfuscate: mask the ARM path, keep structure  │   │
   │  │  append the page to the CSV                           │   │
   │  └───────────────────────────────────────────────────────┘   │

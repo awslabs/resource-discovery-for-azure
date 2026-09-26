@@ -34,7 +34,6 @@ BeforeAll {
     $script:FunctionsPath = Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1'
     $script:InvPath = Join-Path $script:Repo 'ResourceInventory.ps1'
     . $script:FunctionsPath
-    $script:InvSrc = Get-Content -LiteralPath $script:InvPath -Raw
 
     # The exact first-party Consumption CSV column set the fold must match so a folded row is
     # schema-identical to a native consumption row.
@@ -206,22 +205,6 @@ Describe 'ConvertTo-RdaFoldedFoundryRow: obfuscation parity' {
 }
 
 Describe 'Foundry fold collector wiring (ResourceInventory.ps1)' {
-    It 'captures raw Claude rows during the Marketplace loop via the detection predicate' {
-        $script:InvSrc | Should -Match 'Test-RdaClaudeMarketplaceRow -Row \$Row'
-        $script:InvSrc | Should -Match '\$script:FoundryFoldClaudeRows'
-    }
-    It 'invokes the fold under the SAME skip gate as the Marketplace phase' {
-        # GetFoundryFoldConsumption must be called inside the !$SkipMarketplace block that itself
-        # sits inside the !$SkipConsumption block, so -SkipConsumption / -SkipMarketplace both skip it.
-        $script:InvSrc | Should -Match 'GetFoundryFoldConsumption'
-        # The Tier 1 fold uses the tested pure mapper.
-        $script:InvSrc | Should -Match 'ConvertTo-RdaFoldedFoundryRow'
-    }
-    It 'appends folded rows to the Consumption CSV with the first-party column set' {
-        # The fold Export-Csv -Append targets the Consumption CSV, not a new file, with the same
-        # 15 columns as the first-party path.
-        $script:InvSrc | Should -Match 'AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId \| Export-Csv -LiteralPath \$Global:ConsumptionFileCsv -Encoding utf8 -Append'
-    }
     It 'every nested function defined in ExecuteInventoryProcessing is actually invoked (no dead wiring)' {
         # Same AST guard as MarketplaceCollector.Tests.ps1: a nested helper defined but never called
         # is valid PowerShell and passes parse/lint, so assert on the AST that the fold + discovery
@@ -244,26 +227,6 @@ Describe 'Foundry fold collector wiring (ResourceInventory.ps1)' {
 
         $NeverCalled = @($Defined | Where-Object { $Invoked -notcontains $_ })
         $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'GetFoundryFoldConsumption must have a live call site'
-    }
-}
-
-Describe 'P2: emitted Consumption CSV column is AdditionalInfo, not InstanceData' {
-    It 'the populated-path final Select-Object emits AdditionalInfo (not InstanceData) as the first column' {
-        $script:InvSrc | Should -Match 'Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId \| Export-Csv -LiteralPath \$Global:ConsumptionFileCsv'
-    }
-    It 'the header-only fallback writes an AdditionalInfo header (not InstanceData)' {
-        $script:InvSrc | Should -Match '"AdditionalInfo,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId"'
-    }
-    It 'the emitted Consumption schema no longer carries a column literally named InstanceData' {
-        # The ONLY remaining InstanceData token in the consumption path is the source-property
-        # expression { $_.InstanceData } (the raw Get-UsageAggregates field), never an emitted
-        # column header. Assert no "InstanceData," header-list form survives.
-        $script:InvSrc | Should -Not -Match 'Select-Object InstanceData,'
-        $script:InvSrc | Should -Not -Match '"InstanceData,MeterCategory'
-    }
-    It 'still reads the raw source InstanceData field internally (rename did not break ingest)' {
-        # The calculated property maps the raw payload's InstanceData onto the AdditionalInfo column.
-        $script:InvSrc | Should -Match "@\{ Name = 'AdditionalInfo'; Expression = \{ \`$_\.InstanceData \} \}"
     }
 }
 

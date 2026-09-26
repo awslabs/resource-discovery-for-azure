@@ -294,7 +294,9 @@ $Summary = [pscustomobject]@{
     ConsumptionRecords     = $ConsumptionTotal
     MetricsApiCalls        = $MetricsApiCallTotal
     MarketplaceRecords     = $MarketplaceTotal
-    ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
+    # No dedupe: Select-Object -Unique treats any two [pscustomobject] rows as equal, so it
+    # kept only the first failure of each stream.
+    ConsumptionFailedSubs  = @($ConsumptionFailedSubs)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     MarketplaceFailedSubs  = @($MarketplaceFailedSubs)
     CollectorFailures      = @($CollectorFailures)

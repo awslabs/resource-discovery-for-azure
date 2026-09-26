@@ -2,10 +2,9 @@
 <#
     MetricsErrorClassification.Tests.ps1
 
-    Locks two properties of Extension/Metrics.ps1's per-call failure handling that
-    were each raised as a WARNING, fixed, and then left with NOTHING guarding them.
+    Locks two properties of Extension/Metrics.ps1's per-call failure handling.
 
-    1. CLASSIFICATION ORDER (review finding #489).
+    1. CLASSIFICATION ORDER.
        The permanent check is anchored on the quoted status phrase:
            "invalid status code '(?<Status>NotFound|BadRequest)'"
        The throttle check is a LOOSE substring match:
@@ -17,7 +16,7 @@
        exists to avoid. The file's own comment says "the permanent check MUST stay
        first"; this test is what makes that enforceable rather than aspirational.
 
-    2. PERMANENT-FAILURE DIAGNOSABILITY (review finding #479).
+    2. PERMANENT-FAILURE DIAGNOSABILITY.
        A 404 is nearly always the resource (deleted between discovery and the
        call), but a 400 may equally be OUR request being wrong - an unsupported
        TimeGrain from -MetricsIntervalMinutes, or a metric definition aimed at the
@@ -60,7 +59,7 @@ Describe 'Metrics per-call failure classification' {
     }
 
     It 'evaluates the anchored permanent check BEFORE the loose throttle check' {
-        # This is the whole finding. Compare source positions.
+        # The ordering is the property under test, so compare source positions.
         $PermIdx = $script:MetricsSrc.IndexOf("invalid status code '?(?<Status>NotFound|BadRequest")
         $ThrottleIdx = $script:MetricsSrc.IndexOf("'429|throttl|TooManyRequests|rate limit'")
 
@@ -177,8 +176,8 @@ Describe 'Permanent failures are reported diagnosably, not silently' {
     }
 
     It 'carries the first line of the Azure error text through to the listing' {
-        # Finding #479: without this, the raw Get-AzMetric message for these two
-        # classes is logged NOWHERE, since the per-call Write-Error was removed.
+        # Without this, the raw Get-AzMetric message for these two classes is
+        # logged NOWHERE, since the per-call Write-Error was removed.
         $script:MetricsSrc | Should -Match '\$FirstLine\s*=\s*if \(\[string\]::IsNullOrWhiteSpace\(\$rec\.Error\)\)' -Because 'the error text must be extracted with an empty-safe guard'
         $script:MetricsSrc | Should -Match "no error text captured" -Because 'an absent message must be stated as absent rather than rendering blank'
     }

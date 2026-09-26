@@ -37,13 +37,19 @@ consumption phase (the rest of the inventory continues).
 
 ### Transient-failure retry
 
-Each page request is wrapped in a bounded retry (**3 attempts, exponential
-backoff**). A single transient HTTP error — e.g. `Error while copying content to
-a stream`, a timeout, or 429/503 throttling — retries the **same** page (the
-previous page's `ContinuationToken` is preserved), so no rows are duplicated or
-skipped. A permanent error exhausts the retries and is handled by the
-per-subscription failure path (see [Recovering from a consumption
+Each page request is wrapped in a bounded retry (**30 attempts, exponential
+backoff**, or the server's `Retry-After` when it sends one). A single transient
+HTTP error - e.g. `Error while copying content to a stream`, a timeout, or
+429/503 throttling - retries the **same** page (the previous page's
+`ContinuationToken` is preserved), so no rows are duplicated or skipped. An
+authorization denial is not retried, and an error that outlasts the retries is
+handled by the per-subscription failure path (see [Recovering from a consumption
 crash](#recovering-from-a-consumption-crash)).
+
+Running out of memory is not transient, because waiting frees nothing. The first
+out-of-memory error on a page releases the previous page, compacts the heap and
+retries that page once; a second one stops that subscription's consumption with
+an Error that says how to re-run it in a fresh PowerShell process.
 
 ## The columns
 

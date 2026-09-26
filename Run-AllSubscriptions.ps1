@@ -259,6 +259,15 @@ $FailedSubscriptions = @()
 
 $ArchiveWriteFailures = @()
 
+# Two writers only ever add to these run-wide health totals: ResourceInventory.ps1, which runs in
+# this process on the sequential path, and the per-stream summary aggregation on the parallel path.
+# A PowerShell prompt (Cloud Shell included) keeps one process across runs, so start every run from
+# zero, or a second run reports the first run's records and failures as its own.
+$Global:ConsumptionRecordCount = 0
+$Global:ConsumptionFailedSubs = @()
+
+$Global:MetricsApiCallCount = 0
+
 $Global:MetricsFailedSubs = @()
 
 $Global:MarketplaceFailedSubs = @()
@@ -1908,6 +1917,7 @@ if ($null -ne $OuterZipFile)
             -MetricsFailedSubs $Global:MetricsFailedSubs `
             -MarketplaceFailedSubs $Global:MarketplaceFailedSubs `
             -CollectorFailures $Global:CollectorFailures `
+            -ProcessedSubscriptions $SubResourceCounts `
             -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
             -Detailed:$Detailed -Obfuscated:$Obfuscate
     }

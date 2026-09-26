@@ -365,3 +365,26 @@ function Test-RdaAuthExpiry
     return [bool]($ErrorMessage -match $AuthExpiryPattern)
 }
 
+function Test-RdaOutOfMemory
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$ErrorMessage)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
+
+    # Matches only the two default .NET out-of-memory messages, case-sensitively: the runtime's
+    # "Exception of type 'System.OutOfMemoryException' was thrown." (Az cmdlets can wrap it in
+    # "One or more errors occurred. (...)"), and the default text of a constructed
+    # OutOfMemoryException or InsufficientMemoryException. A bare type name does not match, so
+    # an echoed resource name such as 'rg-OutOfMemoryException-01' is not mistaken for one.
+    # Text alone cannot tell this process running out of memory from a service error that
+    # echoes the same sentence; such an echo gets one immediate retry instead of the backoff.
+    $OutOfMemoryPattern = '(' + (@(
+            'Exception of type ''System\.OutOfMemoryException'' was thrown'
+            'Insufficient memory to continue the execution of the program'
+        ) -join '|') + ')'
+
+    return [bool]($ErrorMessage -cmatch $OutOfMemoryPattern)
+}
+

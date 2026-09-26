@@ -207,11 +207,11 @@ Describe 'A mid-loop reconnect must re-pin the subscription scope before retryin
 
 Describe 'A token that lapses AGAIN mid-loop is refreshed a second time (intra-page gap)' {
 
-    # THE DEFECT THIS GUARDS (WARNING 726). The per-page guard above stops a
+    # THE DEFECT THIS GUARDS. The per-page guard above stops a
     # PERMANENT 401 from reconnecting on every one of the 30 attempts. But the
     # retry loop can run long on its own: each retry sleeps a server-directed
     # Retry-After clamped to 300s, so up to $ConsumptionMaxRetries attempts is
-    # ~26 minutes worst case - long enough for even a freshly reconnected token to
+    # ~150 minutes worst case - long enough for even a freshly reconnected token to
     # reach its own policy lifetime. The original once-per-page boolean, once set,
     # blocked ALL further refreshes: a token that lapsed a SECOND time mid-loop
     # could not be refreshed, so the loop burned its remaining budget against a
@@ -283,7 +283,8 @@ Describe 'A token that lapses AGAIN mid-loop is refreshed a second time (intra-p
         # separately callable); the source guards above pin that the real code
         # matches this shape.
         BeforeAll {
-            function Invoke-RefreshModel {
+            function Invoke-RefreshModel
+            {
                 param(
                     [int]$RefreshMax = 3,
                     # A closure returning $true if the Nth reconnect attempt yields a usable token.
@@ -313,25 +314,25 @@ Describe 'A token that lapses AGAIN mid-loop is refreshed a second time (intra-p
         }
 
         It 'refreshes more than once when the token keeps lapsing after successful reconnects' {
-            # The core of 726: a second lapse after a good reconnect gets a second
+            # The core of the defect: a second lapse after a good reconnect gets a second
             # refresh (the old boolean stopped at exactly one).
-            $r = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $true }
-            $r.RefreshCount | Should -BeGreaterThan 1
+            $Result = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $true }
+            $Result.RefreshCount | Should -BeGreaterThan 1
         }
 
         It 'never exceeds the bounded refresh budget even if every attempt lapses' {
-            $r = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $true }
-            $r.RefreshCount | Should -Be 3
-            $r.Reconnects | Should -Be 3
+            $Result = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $true }
+            $Result.RefreshCount | Should -Be 3
+            $Result.Reconnects | Should -Be 3
         }
 
         It 'reconnects at most ONCE when the reconnect never yields a usable token (permanent 401)' {
             # A permanent 401: the reconnect "returns" but Test-DataPlaneAuthReady
             # reports no usable token, so the guard is never re-armed and the loop
             # rides out its budget without a reconnect storm.
-            $r = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $false }
-            $r.Reconnects | Should -Be 1
-            $r.RefreshCount | Should -Be 1
+            $Result = Invoke-RefreshModel -RefreshMax 3 -ReconnectSucceeds { param($n) $false }
+            $Result.Reconnects | Should -Be 1
+            $Result.RefreshCount | Should -Be 1
         }
     }
 }

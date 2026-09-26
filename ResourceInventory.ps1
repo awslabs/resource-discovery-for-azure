@@ -1176,7 +1176,7 @@ function ExecuteInventoryProcessing()
                     $ConsumptionAttempt = 0
                     $ConsumptionAuthRefreshedThisPage = $false
                     # The retry loop can run long: up to $ConsumptionMaxRetries attempts, each
-                    # sleeping a server-directed Retry-After clamped to 300s (~26 min worst case),
+                    # sleeping a server-directed Retry-After clamped to 300s (~150 min worst case),
                     # which can outlive the token this page started with. The per-page guard below
                     # ($ConsumptionAuthRefreshedThisPage) stops a PERMANENT 401 reconnecting on every
                     # attempt, but on its own it also blocks a legitimate SECOND lapse: once a
@@ -1190,6 +1190,7 @@ function ExecuteInventoryProcessing()
                     # keeps "succeeding" then immediately lapsing still terminates.
                     $ConsumptionAuthRefreshMax = 3
                     $ConsumptionAuthRefreshCount = 0
+                    $ConsumptionOutOfMemoryRetried = $false
                     while ($true)
                     {
                         try
@@ -1203,6 +1204,29 @@ function ExecuteInventoryProcessing()
                             {
                                 Write-Log -Message ("Consumption page query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
                                 throw
+                            }
+
+                            if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                            {
+                                # Backing off cannot free memory, and this error carries no Retry-After,
+                                # so the normal budget would only repeat it through ~26 minutes of
+                                # exponential backoff. Release the previous page, compact the heap and
+                                # retry this page once. Nothing has been written for this page yet, so
+                                # the retry cannot duplicate rows. A second out-of-memory error ends this
+                                # subscription's consumption; the outer catch reports it.
+                                if ($ConsumptionOutOfMemoryRetried) { throw }
+                                $ConsumptionOutOfMemoryRetried = $true
+                                Write-Log -Message ("Consumption page query for {0} ran out of memory: {1}. Compacting memory and retrying this page once." -f $sub.Name, $_.Exception.Message.TrimEnd('.')) -Severity 'Warning'
+                                # $Params already holds this page's continuation token, so nothing reads
+                                # the previous page's objects again.
+                                $UsageData = $null
+                                $UsageDataExport = $null
+                                $NewUsageDataExport = $null
+                                [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                                [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+                                [System.GC]::WaitForPendingFinalizers()
+                                [System.GC]::Collect()
+                                continue
                             }
 
                             if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
@@ -1399,6 +1423,26 @@ function ExecuteInventoryProcessing()
                 $ConsumptionFailedThisSub = $true
                 $ConsumptionFailureMessage = ("{0} (stopped at consumption page {1}, after {2} record(s); this subscription's consumption is INCOMPLETE)" -f $_.Exception.Message, $ConsumptionPageIndex, $ConsumptionRecordsThisSub)
                 Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $ConsumptionFailureMessage) -Severity 'Warning'
+                if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                {
+                    if (-not [string]::IsNullOrEmpty($SubscriptionID))
+                    {
+                        # This bundle holds one subscription, so its consumption can be re-collected
+                        # and merged back without touching another subscription's data. An obfuscated
+                        # run is re-run obfuscated and seeded with this report folder's dictionary, so
+                        # the re-collected rows carry no real identifiers and their resource tokens
+                        # still join this run's inventory.
+                        $ConsumptionRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. Re-run it on its own in a fresh PowerShell process, or on a host with more memory (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics{2}), then merge its consumption back in as described in docs/recovery-and-diagnostics.md under: A subscription's consumption pull was interrupted." -f $sub.Name, $sub.Id, $ConsumptionRerunObfuscation) -Severity 'Error'
+                    }
+                    else
+                    {
+                        # Without -SubscriptionID one bundle holds every subscription in scope, and
+                        # merging a single subscription's re-run into it would replace the others'
+                        # consumption.
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. This report covers every subscription in scope, so re-run the whole report in a fresh PowerShell process, or on a host with more memory." -f $sub.Name) -Severity 'Error'
+                    }
+                }
             }
 
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }

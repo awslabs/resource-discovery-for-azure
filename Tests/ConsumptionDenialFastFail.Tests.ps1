@@ -19,9 +19,19 @@
     below assert BOTH directions - a denial must abandon immediately, and every
     transient class must still retry.
 
-    Fully offline. The denial classifier is pure, and the loop's structure is
-    asserted from source (it is inline in a paging loop, not a function, so it
-    cannot be invoked without a live billing subscription).
+    OUT OF MEMORY. Backing off cannot free memory, so an out-of-memory failure,
+    as classified by Test-RdaOutOfMemory (also in Functions/Common.Functions.ps1),
+    gets one heap compaction and one retry of the same page, then ends that
+    subscription's consumption loudly instead of riding out the 30-attempt budget.
+
+    Fully offline. The classifiers are pure, and most of the loop's structure is
+    asserted from source (it is inline in a paging loop, not a function). The
+    out-of-memory tests go further: they lift the real page loop, the whole paging
+    try/catch and the outer catch's out-of-memory report out of ResourceInventory.ps1
+    by AST and run them with the billing call, Export-Csv, Write-Log and Start-Sleep
+    replaced and Get-RdaRetryAfterSeconds stubbed. None of the injected errors is an
+    expired token, so the re-authentication branch never runs; Test-DataPlaneAuthReady
+    is stubbed to throw so that stays loud if it ever does.
 #>
 
 BeforeAll {
@@ -227,5 +237,253 @@ Describe 'Cost of the defect this fixes' {
             $Total += [math]::Min([math]::Pow(2, $Attempt), $BackoffCap)
         }
         [math]::Round($Total / 60, 0) | Should -BeGreaterThan 20 -Because 'this is the wasted wall time the fast-fail removes, per subscription'
+    }
+}
+
+Describe 'Test-RdaOutOfMemory: out-of-memory text only' {
+
+    It 'classifies <Label> as out of memory, and not as a denial' -ForEach @(
+        @{ Label = 'the allocation failure, from the runtime''s own message template'; Msg = (([System.Exception]::new([NullString]::Value).Message) -replace 'System\.Exception', 'System.OutOfMemoryException') }
+        @{ Label = 'the allocation failure as seen in the field'; Msg = "Exception of type 'System.OutOfMemoryException' was thrown." }
+        @{ Label = 'the Az cmdlet wrapper around it'; Msg = "One or more errors occurred. (Exception of type 'System.OutOfMemoryException' was thrown.)" }
+        @{ Label = 'the default text of a constructed exception'; Msg = ([System.OutOfMemoryException]::new().Message) }
+        @{ Label = 'an aggregate around a constructed exception'; Msg = ([System.AggregateException]::new([System.Exception[]]@([System.OutOfMemoryException]::new())).Message) }
+        @{ Label = 'an InsufficientMemoryException'; Msg = ([System.InsufficientMemoryException]::new().Message) }
+    ) {
+        Test-RdaOutOfMemory -ErrorMessage $Msg | Should -BeTrue
+        Test-RdaConsumptionDenial -ErrorMessage $Msg | Should -BeFalse -Because 'the page loop checks for a denial first, and a denial is abandoned without any retry'
+    }
+
+    It 'does NOT classify <Label> as out of memory' -ForEach @(
+        @{ Label = 'a 403 denial'; Msg = 'Response status code does not indicate success: 403 (Forbidden).' }
+        @{ Label = 'a 429 throttle'; Msg = 'Operation returned an invalid status code 429 TooManyRequests' }
+        @{ Label = 'the transient stream-copy error'; Msg = 'Error while copying content to a stream' }
+        @{ Label = 'an expired token'; Msg = 'ExpiredAuthenticationToken: The access token expiry UTC time is earlier than current UTC time' }
+        @{ Label = 'a resource group named rg-OutOfMemoryException-01'; Msg = 'Error while copying content to a stream for rg-OutOfMemoryException-01' }
+        @{ Label = 'a lower-cased echo of the type name'; Msg = 'The operation has timed out for outofmemoryexception' }
+        @{ Label = 'the runtime sentence in lower case'; Msg = "exception of type 'system.outofmemoryexception' was thrown." }
+        @{ Label = 'a resource named OutOfMemoryException-01'; Msg = 'Error while copying content to a stream for OutOfMemoryException-01' }
+        @{ Label = 'a resource named MyOutOfMemoryException'; Msg = 'The operation has timed out for MyOutOfMemoryException' }
+        @{ Label = 'a resource named OutOfMemoryExceptionHandler'; Msg = 'Error while copying content to a stream for OutOfMemoryExceptionHandler' }
+        @{ Label = 'the bare type name without the runtime message'; Msg = 'The operation has timed out for System.OutOfMemoryException' }
+        @{ Label = 'a server that reports running out of memory'; Msg = 'Operation returned an invalid status code 500. The server ran out of memory, retry later' }
+        @{ Label = 'an empty message'; Msg = '' }
+        @{ Label = 'a null message'; Msg = $null }
+    ) {
+        Test-RdaOutOfMemory -ErrorMessage $Msg | Should -BeFalse
+    }
+}
+
+Describe 'The page loop gives an out-of-memory error one compacted retry, then stops' {
+
+    BeforeAll {
+        # Execute the SHIPPED code rather than a copy of it: lift the page loop (with every
+        # statement that precedes it in the page body) and the whole paging try/catch out of
+        # GetResourceConsumption by AST, and replace only the leaf commands they call. The inputs
+        # they read from their caller are set at the top of the lifted code so every test starts
+        # equal; the previous page's continuation token is 'token-page-2'.
+        $ParseErrors = $null
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$ParseErrors)
+        if ($ParseErrors) { throw ('ResourceInventory.ps1 does not parse: ' + (($ParseErrors | ForEach-Object { $_.Message }) -join '; ')) }
+        $Fn = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'GetResourceConsumption' }, $true)
+        if (-not $Fn) { throw 'GetResourceConsumption was not found in ResourceInventory.ps1.' }
+        $Loop = $Fn.Find({ param($N) $N -is [System.Management.Automation.Language.WhileStatementAst] -and $N.Condition.Extent.Text -eq '$true' -and $N.Extent.Text -match 'Get-UsageAggregates' }, $true)
+        if (-not $Loop) { throw 'The page loop (while ($true) around Get-UsageAggregates) was not found in GetResourceConsumption.' }
+        $Setup = @($Loop.Parent.Statements | Where-Object { $_.Extent.EndOffset -le $Loop.Extent.StartOffset })
+        $script:PageSetup = @($Setup | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] })
+        if ($script:PageSetup.Count -eq 0) { throw 'No per-page assignments were found ahead of the page loop.' }
+        # The statement that owns the setup: it has to be the paging do/while, so the setup runs once per page.
+        $script:PageScope = $Loop.Parent.Parent
+        $Inputs = @(
+            '$sub = [pscustomobject]@{ Name = ''test-sub''; Id = ''12345678-1234-1234-1234-123456789012'' }'
+            '$ReportedStartTime = ''2026-08-01'''
+            '$ReportedEndTime = ''2026-08-31'''
+            '$ConsumptionPageIndex = 1'
+            '$UsageData = [pscustomobject]@{ ContinuationToken = ''token-page-2'' }'
+        )
+        $script:PageLoop = [scriptblock]::Create(((@($Inputs) + @($Setup | ForEach-Object { $_.Extent.Text }) + $Loop.Extent.Text) -join [Environment]::NewLine))
+        $script:OomClause = $Loop.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -match '^Test-RdaOutOfMemory\b' }, $true)
+
+        # The per-subscription catch and the try it closes: the whole paging try/catch runs with the
+        # per-subscription counters that precede it, so an error after the fetch can be followed
+        # into the outer catch.
+        $OuterCatch = $Fn.Find({ param($N) $N -is [System.Management.Automation.Language.CatchClauseAst] -and $N.Extent.Text -match 'stopped at consumption page' }, $true)
+        if (-not $OuterCatch) { throw 'The per-subscription consumption catch was not found in GetResourceConsumption.' }
+        $PagingTry = $OuterCatch.Parent
+        $PerSubscription = @($PagingTry.Parent.Statements | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Extent.EndOffset -le $PagingTry.Extent.StartOffset -and
+                $_.Left.Extent.Text -match '^\$(Consumption\w+|UsageData)$'
+            })
+        $SubscriptionInputs = @(
+            '$sub = [pscustomobject]@{ Name = ''test-sub''; Id = ''12345678-1234-1234-1234-123456789012'' }'
+            '$ReportedStartTime = ''2026-08-01'''
+            '$ReportedEndTime = ''2026-08-31'''
+            '$ResourceGroup = $null'
+            '$Obfuscate = [switch]$false'
+            '$SubscriptionID = ''12345678-1234-1234-1234-123456789012'''
+            '$DefaultPath = ''report-folder/'''
+        )
+        $script:PagingBlock = [scriptblock]::Create(((@($SubscriptionInputs) + @($PerSubscription | ForEach-Object { $_.Extent.Text }) + $PagingTry.Extent.Text) -join [Environment]::NewLine))
+
+        # The out-of-memory report in the per-subscription catch, run inside a catch of its own so
+        # $_ carries the error it inspects. Its inputs are parameters of the lifted block.
+        $script:OuterOomClause = $OuterCatch.Body.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -match '^Test-RdaOutOfMemory\b' }, $true)
+        if ($script:OuterOomClause)
+        {
+            $script:OuterOomBlock = [scriptblock]::Create((@(
+                        'param($sub, $Obfuscate, $SubscriptionID, $DefaultPath)'
+                        'try { throw "Exception of type ''System.OutOfMemoryException'' was thrown." }'
+                        'catch'
+                        '{'
+                        $script:OuterOomClause.Extent.Text
+                        '}'
+                    ) -join [Environment]::NewLine))
+        }
+
+        # Lives in Functions/ResourceInventory.Functions.ps1, which this file does not load; the
+        # backoff length is irrelevant here because Start-Sleep is mocked.
+        function Get-RdaRetryAfterSeconds { 0 }
+        # The re-authentication branch must never run here; if a test ever reaches it, fail loudly
+        # instead of opening a real sign-in from an offline suite.
+        function Test-DataPlaneAuthReady { throw 'The re-authentication branch ran in an offline test.' }
+    }
+
+    BeforeEach {
+        $script:Fetches = 0
+        $script:Tokens = @()
+        Mock Start-Sleep { }
+        Mock Write-Log { }
+    }
+
+    It 'resets the out-of-memory guard on every page, with the other per-page retry state' {
+        $script:PageScope | Should -BeOfType ([System.Management.Automation.Language.DoWhileStatementAst]) -Because 'the setup has to run once per page, inside the paging do/while'
+        $Guard = @($script:PageSetup | Where-Object { $_.Left.Extent.Text -eq '$ConsumptionOutOfMemoryRetried' })
+        $Guard.Count | Should -Be 1
+        $Guard[0].Right.Extent.Text | Should -Be '$false' -Because 'each page must get its own single retry'
+    }
+
+    It 'releases the previous page and forces a full compacting collection before it retries' {
+        $script:OomClause | Should -Not -BeNullOrEmpty -Because 'the retry catch must single out an out-of-memory error'
+        $Body = $script:OomClause.Clauses[0].Item2
+        $Continue = $Body.Find({ param($N) $N -is [System.Management.Automation.Language.ContinueStatementAst] }, $true)
+        $CompactOnce = $Body.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '[System.Runtime.GCSettings]::LargeObjectHeapCompactionMode' -and $N.Right.Extent.Text -match '::CompactOnce$' }, $true)
+        $Collect = $Body.Find({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '[System.GC]' -and $N.Member.Extent.Text -eq 'Collect' }, $true)
+        $Released = @($Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Right.Extent.Text -eq '$null' }, $true))
+
+        $Continue | Should -Not -BeNullOrEmpty
+        $CompactOnce | Should -Not -BeNullOrEmpty
+        $Collect | Should -Not -BeNullOrEmpty
+        (@($Collect.Arguments | ForEach-Object { $_.Extent.Text }) -join ', ') | Should -Be '[System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true' -Because 'only a forced, blocking, compacting full collection applies the compaction mode'
+        foreach ($Name in '$UsageData', '$UsageDataExport', '$NewUsageDataExport')
+        {
+            $Release = $Released | Where-Object { $_.Left.Extent.Text -eq $Name } | Select-Object -First 1
+            $Release | Should -Not -BeNullOrEmpty -Because "$Name holds the previous page"
+            $Release.Extent.StartOffset | Should -BeLessThan $Collect.Extent.StartOffset -Because 'a page still referenced cannot be collected'
+        }
+        $CompactOnce.Extent.StartOffset | Should -BeLessThan $Collect.Extent.StartOffset -Because 'the compaction mode applies to the next full collection'
+        $Collect.Extent.StartOffset | Should -BeLessThan $Continue.Extent.StartOffset
+    }
+
+    It 'retries the same page once after an out-of-memory error, without backing off, and carries on' {
+        function Get-UsageAggregates
+        {
+            param($ContinuationToken)
+            $script:Fetches++
+            $script:Tokens += , $ContinuationToken
+            if ($script:Fetches -eq 1) { throw "Exception of type 'System.OutOfMemoryException' was thrown." }
+            [pscustomobject]@{ Marker = 'page-2'; ContinuationToken = $null }
+        }
+
+        . $script:PageLoop
+
+        $script:Fetches | Should -Be 2 -Because 'one retry after the compaction'
+        ($script:Tokens -join ',') | Should -Be 'token-page-2,token-page-2' -Because 'the retry asks for the same page, not page 1 again'
+        $UsageData.Marker | Should -Be 'page-2' -Because 'the retried page is handed on to the export'
+        Should -Invoke Start-Sleep -Exactly -Times 0 -Because 'backing off cannot free memory'
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'ran out of memory' -and $Message -notmatch '\.\.' }
+    }
+
+    It 'stops after a second out-of-memory error instead of spending the retry budget' {
+        function Get-UsageAggregates
+        {
+            $script:Fetches++
+            # Serves the page from the third call on, so a regression that spends the normal retry
+            # budget on out-of-memory completes the page instead and fails the assertions below.
+            if ($script:Fetches -ge 3) { return [pscustomobject]@{ ContinuationToken = $null } }
+            throw "One or more errors occurred. (Exception of type 'System.OutOfMemoryException' was thrown.)"
+        }
+
+        $Thrown = { . $script:PageLoop } | Should -Throw -PassThru
+        Test-RdaOutOfMemory -ErrorMessage $Thrown.Exception.Message | Should -BeTrue -Because 'the outer catch recognises the stop with the same classifier'
+        $script:Fetches | Should -Be 2 -Because 'one compacted retry, not the 30-attempt budget'
+        Should -Invoke Start-Sleep -Exactly -Times 0
+    }
+
+    It 'still retries an ordinary transient error with backoff' {
+        function Get-UsageAggregates
+        {
+            $script:Fetches++
+            if ($script:Fetches -le 2) { throw 'Error while copying content to a stream' }
+            [pscustomobject]@{ ContinuationToken = $null }
+        }
+
+        . $script:PageLoop
+
+        $script:Fetches | Should -Be 3
+        Should -Invoke Start-Sleep -Exactly -Times 2 -Because 'transient errors keep the existing backoff'
+    }
+
+    It 'does not retry an out-of-memory error raised while a page is written' {
+        # Export-Csv may already have appended part of the page, so a retry here could write the
+        # same billing rows twice; the error must go straight to the per-subscription catch.
+        function Get-UsageAggregates
+        {
+            $script:Fetches++
+            [pscustomobject]@{
+                ContinuationToken = $null
+                UsageAggregations = @([pscustomobject]@{ Properties = [pscustomobject]@{
+                            InstanceData     = '{"Microsoft.Resources":{"resourceUri":"/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-test/providers/Microsoft.Compute/virtualMachines/vm-test","location":"westeurope","additionalInfo":{}}}'
+                            MeterCategory    = 'Virtual Machines'
+                            MeterId          = 'meter-1'
+                            MeterName        = 'D2s v3'
+                            MeterRegion      = 'EU West'
+                            MeterSubCategory = ''
+                            Quantity         = 24
+                            Unit             = '1 Hour'
+                            UsageStartTime   = '2026-08-01T00:00:00Z'
+                            UsageEndTime     = '2026-08-02T00:00:00Z'
+                        }
+                    })
+            }
+        }
+        # The lifted block leaves the CSV path unset and passes -Encoding as a string, so the mock
+        # drops the path validation and the Encoding type the real cmdlet converts it with.
+        Mock Export-Csv { throw "Exception of type 'System.OutOfMemoryException' was thrown." } -RemoveParameterType Encoding -RemoveParameterValidation LiteralPath
+
+        . $script:PagingBlock
+
+        $script:Fetches | Should -Be 1 -Because 'the fetch succeeded, so it is not repeated'
+        Should -Invoke Export-Csv -Exactly -Times 1 -Because 'the page is not written a second time'
+        $ConsumptionFailedThisSub | Should -BeTrue
+        $ConsumptionFailureMessage | Should -Match 'stopped at consumption page 1, after 0 record\(s\)'
+        Should -Invoke Write-Log -Exactly -Times 0 -ParameterFilter { $Message -match 'retrying this page once' }
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'ran out of memory' -and $Message -match 'fresh PowerShell process' }
+    }
+
+    It 'reports an out-of-memory stop at Error severity, with how to recover (<Label>)' -ForEach @(
+        @{ Label = 'one identifiable subscription'; Obfuscated = $false; SubscriptionID = '12345678-1234-1234-1234-123456789012' }
+        @{ Label = 'one obfuscated subscription'; Obfuscated = $true; SubscriptionID = '12345678-1234-1234-1234-123456789012' }
+        @{ Label = 'a standalone report over every subscription'; Obfuscated = $false; SubscriptionID = '' }
+    ) {
+        $script:OuterOomClause | Should -Not -BeNullOrEmpty -Because 'the per-subscription catch must single out an out-of-memory stop'
+
+        & $script:OuterOomBlock -sub ([pscustomobject]@{ Name = 'test-sub'; Id = '12345678-1234-1234-1234-123456789012' }) -Obfuscate ([switch]$Obfuscated) -SubscriptionID $SubscriptionID -DefaultPath 'report-folder/'
+
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'ran out of memory' -and $Message -match 'fresh PowerShell process' }
+        $MergeAdvice = if ($SubscriptionID) { 1 } else { 0 }
+        Should -Invoke Write-Log -Exactly -Times $MergeAdvice -ParameterFilter { $Message -match '-SubscriptionID 12345678-1234-1234-1234-123456789012 -SkipMetrics' -and $Message -match 'docs/recovery-and-diagnostics\.md' } -Because 'only a one-subscription report can take back a merged re-run'
+        $Seeded = if ($Obfuscated) { 1 } else { 0 }
+        Should -Invoke Write-Log -Exactly -Times $Seeded -ParameterFilter { $Message -match ([regex]::Escape(' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to report-folder/>')) } -Because 'an obfuscated run is re-run obfuscated and seeded with its own dictionary'
     }
 }

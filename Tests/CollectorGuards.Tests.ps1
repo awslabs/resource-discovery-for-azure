@@ -146,7 +146,7 @@ Describe 'AutomationAcc dual creation-time / lastModifiedTime guards' {
         # (creationTime on the account, lastModifiedTime on the runbook), and it is
         # excluded from $script:DateCases because its record depends on nested-id
         # linking. Without these cases its blank shapes would be the one gap in the
-        # coverage that answers finding #155.
+        # blank-timestamp coverage above.
         $Acct = New-Res -Type 'microsoft.automation/automationaccounts' -Name 'acct1' -Props @{ creationTime = $BlankValue; State = 'Ok'; sku = @{ name = 'Basic' } }
         $Rb = New-Res -Type 'microsoft.automation/automationaccounts/runbooks' -Name 'rb1' `
             -Id '/subscriptions/sub1/resourceGroups/rg1/providers/microsoft.automation/automationAccounts/acct1/runbooks/rb1' `

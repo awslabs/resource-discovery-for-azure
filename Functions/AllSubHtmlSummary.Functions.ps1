@@ -133,6 +133,7 @@ function New-RdaAllSubHtmlSummary
         $MetricsFailedSubs = @(),
         $MarketplaceFailedSubs = @(),
         $CollectorFailures = @(),
+        $ProcessedSubscriptions = @(),
 
         $TenantId,
         $Version,
@@ -307,12 +308,39 @@ function New-RdaAllSubHtmlSummary
         $ChartsHtml = "<div class='charts'><div class='chart-card'><h3>Resources by service (run-wide)</h3>$DonutSvg</div><div class='chart-card'><h3>Top services</h3>$BarSvg</div></div>"
     }
 
+    # Join a row to its subscription through the report folder named by the wrapper's zip path.
+    # Display names repeat across subscriptions and obfuscated rows carry tokens, so neither can
+    # safely tie a failure to a row.
+    $FolderSubscriptionId = @{}
+    foreach ($Processed in @(@($ProcessedSubscriptions) | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Zip) -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) }))
+    {
+        $ReportFolder = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName([string]$Processed.Zip))
+        if (-not [string]::IsNullOrWhiteSpace($ReportFolder)) { $FolderSubscriptionId[$ReportFolder] = [string]$Processed.Id }
+    }
+    $ConsumpIds = @($ConsumpList | ForEach-Object { [string]$_.Id })
+
     $Rows = New-Object System.Text.StringBuilder
     foreach ($Sr in $SubReports)
     {
         $NameSafe = ConvertTo-HtmlSafe $Sr.Name
         $CountText = $Sr.Total.ToString('N0', [cultureinfo]::InvariantCulture)
-        $HealthCell = if ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
+        $RowSubscriptionId = if ($Sr.Folder -and $FolderSubscriptionId.ContainsKey($Sr.Folder)) { $FolderSubscriptionId[$Sr.Folder] } else { $null }
+        $HealthCell = if (-not $Sr.Link)
+        {
+            '<span class="tag warn">incomplete</span>'
+        }
+        elseif ($RowSubscriptionId -and ($ConsumpIds -contains $RowSubscriptionId))
+        {
+            '<span class="tag warn">consumption incomplete</span>'
+        }
+        elseif ($Sr.Total -eq 0)
+        {
+            '<span class="tag warn">0 resources</span>'
+        }
+        else
+        {
+            '<span class="tag ok">ok</span>'
+        }
         $LinkCell = if ($Sr.Link) { ('<a href="{0}">open &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.Link)) } else { '<span class="muted">no report</span>' }
         [void]$Rows.AppendFormat('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td>{3}</td></tr>', $NameSafe, $CountText, $HealthCell, $LinkCell)
     }

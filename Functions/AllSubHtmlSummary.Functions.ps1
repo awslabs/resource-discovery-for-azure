@@ -318,6 +318,8 @@ function New-RdaAllSubHtmlSummary
         if (-not [string]::IsNullOrWhiteSpace($ReportFolder)) { $FolderSubscriptionId[$ReportFolder] = [string]$Processed.Id }
     }
     $ConsumpIds = @($ConsumpList | ForEach-Object { [string]$_.Id })
+    $MetricsIds = @($MetricsList | ForEach-Object { [string]$_.Id })
+    $MarketplaceIds = @($MarketplaceList | ForEach-Object { [string]$_.Id })
 
     $Rows = New-Object System.Text.StringBuilder
     foreach ($Sr in $SubReports)
@@ -332,6 +334,14 @@ function New-RdaAllSubHtmlSummary
         elseif ($RowSubscriptionId -and ($ConsumpIds -contains $RowSubscriptionId))
         {
             '<span class="tag warn">consumption incomplete</span>'
+        }
+        elseif ($RowSubscriptionId -and ($MetricsIds -contains $RowSubscriptionId))
+        {
+            '<span class="tag warn">metrics incomplete</span>'
+        }
+        elseif ($RowSubscriptionId -and ($MarketplaceIds -contains $RowSubscriptionId))
+        {
+            '<span class="tag warn">marketplace incomplete</span>'
         }
         elseif ($Sr.Total -eq 0)
         {

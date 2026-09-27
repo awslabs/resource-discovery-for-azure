@@ -404,11 +404,22 @@ function Write-RdaMemorySnapshot
     # too fragmented for the next large allocation.
     # -Record also appends the reading to $Global:MemoryReadings, keyed by the subscription being
     # processed and the run stamp, so the wrapper's RunSummary.log and the shareable Diagnostics
-    # log can show how much memory each phase of each subscription held. The figures carry no
-    # identifier, so the same rows are safe in an obfuscated bundle.
+    # log can show how much memory each phase of each subscription held. A recorded reading is
+    # always taken after the compacting collection, which is what the rendered block's header
+    # states, and its phase must be one of the five the renderer lays out; a misspelled phase would
+    # otherwise render as a silent gap. The figures carry no identifier, so the same rows are safe
+    # in an obfuscated bundle.
+    if ($Record)
+    {
+        $RecordedPhases = @('start', 'discovery', 'collectors', 'released', 'end')
+        if ($Phase -notin $RecordedPhases)
+        {
+            throw [System.ArgumentException]::new(("A recorded memory reading must use one of the phases the summary renders ({0}); got '{1}'." -f ($RecordedPhases -join ', '), $Phase), 'Phase')
+        }
+    }
     try
     {
-        if ($Compact)
+        if ($Compact -or $Record)
         {
             [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
             [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)

@@ -105,7 +105,8 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Literal
         $BilledVmIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop | ForEach-Object {
             $ConsumptionRowCount++
-            if ($_.MeterCategory -eq 'Virtual Machines' -and $null -ne $_.ResourceId)
+            # Import-Csv yields '' for an empty cell, never $null, so test for text rather than presence.
+            if ($_.MeterCategory -eq 'Virtual Machines' -and -not [string]::IsNullOrWhiteSpace([string]$_.ResourceId))
             {
                 [void]$BilledVmIds.Add([string]$_.ResourceId)
             }

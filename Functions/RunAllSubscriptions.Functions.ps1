@@ -1376,11 +1376,18 @@ function Get-RunSummaryLogContent
     # subscription id, or by position when obfuscated. They show how much the host was holding at
     # each phase and whether it grew from one subscription to the next, which is what a run that
     # ran out of memory needs.
+    # An explicit empty state, so a summary with no readings (every subscription failed before its
+    # first reading, or a stream worker died before writing its summary) is not mistaken for one
+    # produced by a build without the block.
     $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Obfuscated:$Obfuscated)
+    $Lines.Add('')
     if ($MemoryLines.Count -gt 0)
     {
-        $Lines.Add('')
         foreach ($MemoryLine in $MemoryLines) { $Lines.Add($MemoryLine) }
+    }
+    else
+    {
+        $Lines.Add('Memory: no readings recorded (no subscription reached its first reading)')
     }
 
     if (-not $Obfuscated)

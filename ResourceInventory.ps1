@@ -1907,9 +1907,12 @@ function ExecuteInventoryProcessing()
     # output. The Inventory JSON is on disk, billing reads the subscription list and the
     # obfuscation dictionaries, and the HTML report reads the JSON file, so nothing after this
     # point needs either structure. Release them here so the billing pull, and the next
-    # subscription under the wrapper, do not carry this subscription's inventory in memory.
+    # subscription under the wrapper, do not carry this subscription's inventory in memory. The
+    # metrics phase writes its own files and its result object has no reader after it returns, so
+    # it goes with them.
     $Global:Resources = $null
     $Global:SmaResources = $null
+    $Global:AzMetrics = $null
     Write-RdaMemorySnapshot -Phase 'released' -Compact -Record
 
     if (!$SkipMetrics.IsPresent)

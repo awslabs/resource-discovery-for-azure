@@ -2776,6 +2776,17 @@ That is a good general habit for anything that mutates ambient state.
                                 throw
                             }
 
+                            if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                            {
+                                # [comment: backing off cannot free memory. Release the previous
+                                #  page, compact the heap and retry this page once; a second
+                                #  out of memory error on the page re-throws to the outer catch.]
+                                if ($ConsumptionOutOfMemoryRetried) { throw }
+                                $ConsumptionOutOfMemoryRetried = $true
+                                [...]
+                                continue
+                            }
+
                             $ConsumptionAttempt++
                             if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }
 

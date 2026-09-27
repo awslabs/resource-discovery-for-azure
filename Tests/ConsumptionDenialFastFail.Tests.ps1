@@ -274,44 +274,6 @@ Describe 'Test-RdaOutOfMemory: out-of-memory text only' {
     }
 }
 
-Describe 'Write-RdaMemorySnapshot: one reading, to the local debug log only' {
-    BeforeAll {
-        $script:PriorDebugLogFile = $Global:DebugLogFile
-        $script:PriorErrorLogFile = $Global:ErrorLogFile
-        $script:SnapshotLog = Join-Path ([System.IO.Path]::GetTempPath()) ('MemorySnapshot_{0}.log' -f [guid]::NewGuid().ToString('N'))
-        $Global:DebugLogFile = $script:SnapshotLog
-        $Global:ErrorLogFile = $null
-    }
-    AfterAll {
-        $Global:DebugLogFile = $script:PriorDebugLogFile
-        $Global:ErrorLogFile = $script:PriorErrorLogFile
-        Remove-Item -LiteralPath $script:SnapshotLog -Force -ErrorAction SilentlyContinue
-    }
-    BeforeEach {
-        Remove-Item -LiteralPath $script:SnapshotLog -Force -ErrorAction SilentlyContinue
-    }
-    It 'writes <Label> as one debug-log line and nothing to the console' -ForEach @(
-        @{ Label = 'a plain reading'; Compact = $false; Suffix = '' }
-        @{ Label = 'a reading after a compacting collection'; Compact = $true; Suffix = ', after a compacting collection' }
-    ) {
-        $PriorCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
-        try
-        {
-            # A comma-decimal culture: the figures must still be written with a dot.
-            [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::new('de-DE')
-            $Emitted = @(Write-RdaMemorySnapshot -Phase 'Unit test phase' -Compact:$Compact 6>&1)
-        }
-        finally
-        {
-            [System.Threading.Thread]::CurrentThread.CurrentCulture = $PriorCulture
-        }
-
-        $Emitted.Count | Should -Be 0 -Because 'a memory reading goes to the local debug log, never to the console or the pipeline'
-        $Lines = @(Get-Content -LiteralPath $script:SnapshotLog)
-        $Lines.Count | Should -Be 1
-        $Lines[0] | Should -Match ('\[Memory\] Unit test phase: managed heap \d+(\.\d)? MB, process working set \d+(\.\d)? MB, memory available to the runtime \d+ MB{0}\.$' -f [regex]::Escape($Suffix))
-    }
-}
 Describe 'The page loop gives an out-of-memory error one compacted retry, then stops' {
 
     BeforeAll {
@@ -442,6 +404,13 @@ Describe 'The page loop gives an out-of-memory error one compacted retry, then s
         Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'ran out of memory' -and $Message -notmatch '\.\.' }
     }
 
+    It 'checks for a denial before the out-of-memory test, so a denial is never retried' {
+        $Text = $script:PageLoop.ToString()
+        $Denial = $Text.IndexOf('Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message', [System.StringComparison]::Ordinal)
+        $Oom = $Text.IndexOf('Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message', [System.StringComparison]::Ordinal)
+        $Denial | Should -BeGreaterThan -1
+        $Oom | Should -BeGreaterThan $Denial -Because 'a denial is abandoned outright; only a non-denial gets the compacted retry'
+    }
     It 'stops after a second out-of-memory error instead of spending the retry budget' {
         function Get-UsageAggregates
         {
@@ -508,11 +477,25 @@ Describe 'The page loop gives an out-of-memory error one compacted retry, then s
         Should -Invoke Write-Log -Exactly -Times 0 -ParameterFilter { $Message -match 'retrying this page once' }
         Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'ran out of memory' -and $Message -match 'fresh PowerShell process' }
     }
+    It 'reports a second out-of-memory fetch failure through the per-subscription catch' {
+        function Get-UsageAggregates
+        {
+            $script:Fetches++
+            throw "Exception of type 'System.OutOfMemoryException' was thrown."
+        }
+        . $script:PagingBlock
+        $script:Fetches | Should -Be 2 -Because 'one compacted retry, then the stop'
+        $ConsumptionFailedThisSub | Should -BeTrue
+        $ConsumptionFailureMessage | Should -Match 'stopped at consumption page 1, after 0 record\(s\)'
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'retrying this page once' }
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'ran out of memory' -and $Message -match 'fresh PowerShell process' }
+    }
 
     It 'reports an out-of-memory stop at Error severity, with how to recover (<Label>)' -ForEach @(
         @{ Label = 'one identifiable subscription'; Obfuscated = $false; SubscriptionID = '12345678-1234-1234-1234-123456789012' }
         @{ Label = 'one obfuscated subscription'; Obfuscated = $true; SubscriptionID = '12345678-1234-1234-1234-123456789012' }
         @{ Label = 'a standalone report over every subscription'; Obfuscated = $false; SubscriptionID = '' }
+        @{ Label = 'an obfuscated standalone report over every subscription'; Obfuscated = $true; SubscriptionID = '' }
     ) {
         $script:OuterOomClause | Should -Not -BeNullOrEmpty -Because 'the per-subscription catch must single out an out-of-memory stop'
 
@@ -521,7 +504,9 @@ Describe 'The page loop gives an out-of-memory error one compacted retry, then s
         Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'ran out of memory' -and $Message -match 'fresh PowerShell process' }
         $MergeAdvice = if ($SubscriptionID) { 1 } else { 0 }
         Should -Invoke Write-Log -Exactly -Times $MergeAdvice -ParameterFilter { $Message -match '-SubscriptionID 12345678-1234-1234-1234-123456789012 -SkipMetrics' -and $Message -match 'docs/recovery-and-diagnostics\.md' } -Because 'only a one-subscription report can take back a merged re-run'
-        $Seeded = if ($Obfuscated) { 1 } else { 0 }
-        Should -Invoke Write-Log -Exactly -Times $Seeded -ParameterFilter { $Message -match ([regex]::Escape(' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to report-folder/>')) } -Because 'an obfuscated run is re-run obfuscated and seeded with its own dictionary'
+        $Seeded = if ($Obfuscated -and $SubscriptionID) { 1 } else { 0 }
+        Should -Invoke Write-Log -Exactly -Times $Seeded -ParameterFilter { $Message -match ([regex]::Escape(' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to report-folder/>')) } -Because 'an obfuscated one-subscription re-run is seeded with its own dictionary so its tokens still join; a whole-report re-run starts a fresh dictionary'
+        $WholeReport = if ($SubscriptionID) { 0 } else { 1 }
+        Should -Invoke Write-Log -Exactly -Times $WholeReport -ParameterFilter { $Severity -eq 'Error' -and $Message -match 're-run the whole report in a fresh PowerShell process' } -Because 'a bundle over every subscription cannot take back one subscription''s merged re-run'
     }
 }

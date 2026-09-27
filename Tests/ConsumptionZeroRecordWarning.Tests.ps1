@@ -1,5 +1,6 @@
 # Offline tests pinning the "consumption requested but ZERO records collected" warning: a header-only
 # Consumption CSV once shipped unflagged (the console gate excluded the exact 0/0 case). The warning must fire only when all five guards hold: requested, 0 records, 0 consumption failures, >=1 sub ran, and >=1 ran without recording a failure.
+# The last two Describes pin the warning's inputs: the run-wide totals start from zero on every run (a stale record count would disarm the warning) and every stream's consumption failures reach the parent (a dropped row would mis-gate it).
 
 BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -628,6 +629,16 @@ Describe 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' {
             } | ForEach-Object { $_.Left.Extent.Text.Substring('$Global:'.Length) } | Sort-Object -Unique)
         $StreamResets.Count | Should -BeGreaterThan 0 -Because 'the stream worker resets its own run-wide totals'
         (@($Pinned | Sort-Object -Unique) -join ',') | Should -Be ($StreamResets -join ',') -Because 'every total the stream worker resets must also be reset for the sequential path, and pinned here'
+    }
+
+    It 'pins every run-wide total the wrapper itself resets before the dispatch' -ForEach @(@{ Pinned = @($script:RunTotals | ForEach-Object { $_.Name }) }) {
+        $WrapperResets = @($script:WrapperTopLevel | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Operator -eq 'Equals' -and
+                $_.Left.Extent.Text -match '^\$Global:\w+$' -and
+                $_.Extent.EndOffset -le $script:DispatchStatement.Extent.StartOffset
+            } | ForEach-Object { $_.Left.Extent.Text.Substring('$Global:'.Length) } | Sort-Object -Unique)
+        (@($Pinned | Sort-Object -Unique) -join ',') | Should -Be ($WrapperResets -join ',') -Because 'a total reset only in the wrapper would never be mirrored in the stream worker'
     }
 
     It 'resets $Global:<Name> at the top level, before any subscription is processed' -ForEach $script:RunTotals {

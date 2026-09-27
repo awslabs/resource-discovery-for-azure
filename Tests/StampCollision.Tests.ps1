@@ -8,10 +8,11 @@
     the hex tail, e.g. ResourcesReport_20260101000000000ab1f.zip vs
     ResourcesReport_20260101000000000c02e.zip.
 
-    Get-RdaReportId keys on '(\d{15,})', which captures only the leading digit run
-    and therefore returns the SAME key for both. Get-RdaInventorySource then groups
-    on that key and keeps one member per group, dropping the other WITHOUT recording
-    it in Missing/Unreadable/Rejected/Skipped - a silent loss of one subscription.
+    Get-RdaReportId once keyed on '(\d{15,})', which captured only the leading digit
+    run and so returned the SAME key for both. Get-RdaInventorySource then grouped on
+    that key and kept one member per group, dropping the other WITHOUT recording it
+    in Missing/Unreadable/Rejected/Skipped - a silent loss of one subscription. The
+    key now includes the hex tail.
 
     All fixture data is invented. No real subscription, tenant, resource or
     customer identifier appears anywhere in this file.

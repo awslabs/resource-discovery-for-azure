@@ -518,7 +518,7 @@ Describe 'New-RdaAllSubHtmlSummary per-subscription Health cell' {
         $Html | Should -Match ([regex]::Escape('<td>(name unavailable - 0 resources)</td><td class="num">0</td><td><span class="tag warn">consumption incomplete</span></td>')) -Because 'a consumption failure matters more than an empty inventory'
     }
 
-    It 'marks only the subscription whose consumption failed, matched by id rather than display name' {
+    It 'marks only the subscription whose consumption failed, matched through its report folder rather than display name' {
         $Run = New-Run
         $FailedDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Shared Name'
         $HealthyDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Shared Name'
@@ -552,7 +552,7 @@ Describe 'New-RdaAllSubHtmlSummary per-subscription Health cell' {
 
         $Html | Should -Match '<span class="tag warn">consumption incomplete</span>'
         $Html | Should -Not -Match 'Fabrikam-Billing'
-        $Html | Should -Not -Match $FailedId -Because 'the id only joins the row; it is never rendered'
+        $Html | Should -Not -Match ([regex]::Escape($FailedId)) -Because 'the id only joins the row; it is never rendered'
     }
 
     It 'does not guess a failure onto a row by name when no per-subscription records are passed' {
@@ -580,7 +580,20 @@ Describe 'New-RdaAllSubHtmlSummary per-subscription Health cell' {
             $Elements = @($Call.CommandElements)
             $At = @(0..($Elements.Count - 1) | Where-Object { $Elements[$_] -is [System.Management.Automation.Language.CommandParameterAst] -and $Elements[$_].ParameterName -eq 'ProcessedSubscriptions' })
             $At.Count | Should -Be 1 -Because 'each MainSummary build needs the records to join a failure to its row'
-            $Elements[$At[0] + 1].Extent.Text | Should -Be '$SubResourceCounts'
+            $Records = $Elements[$At[0] + 1]
+            $Records | Should -BeOfType ([System.Management.Automation.Language.VariableExpressionAst]) -Because 'the wrapper hands over the records it built, not a literal'
+            # Every place the wrapper builds one of those records must give it the two keys the join
+            # filters on; a record without them is dropped silently and its row reads ok.
+            $Builds = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Operator -eq 'PlusEquals' -and $N.Left.Extent.Text -eq $Records.Extent.Text }, $true))
+            $Builds.Count | Should -BeGreaterThan 0 -Because 'the sequential, single-subscription and parallel paths each build the records'
+            foreach ($Build in $Builds)
+            {
+                $Table = $Build.Right.Find({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] }, $true)
+                $Table | Should -Not -BeNullOrEmpty -Because ('line {0} builds a record without a hashtable' -f $Build.Extent.StartLineNumber)
+                $Keys = @($Table.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text })
+                $Keys | Should -Contain 'Id' -Because ('line {0} must carry the Id the consumption failure is matched on' -f $Build.Extent.StartLineNumber)
+                $Keys | Should -Contain 'Zip' -Because ('line {0} must carry the Zip whose folder joins the row' -f $Build.Extent.StartLineNumber)
+            }
         }
     }
 }

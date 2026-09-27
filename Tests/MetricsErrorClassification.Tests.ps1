@@ -5,8 +5,9 @@
     Locks two properties of Extension/Metrics.ps1's per-call failure handling.
 
     1. CLASSIFICATION ORDER.
-       The permanent check is anchored on the quoted status phrase:
-           "invalid status code '(?<Status>NotFound|BadRequest)'"
+       The permanent check is anchored on the status phrase, "invalid status code"
+       followed by the status name, quotes optional; the regex is read from the
+       file itself below.
        The throttle check is a LOOSE substring match:
            '429|throttl|TooManyRequests|rate limit'
        The exception message echoes the full ARM resource id, so a resource whose
@@ -36,7 +37,6 @@
 BeforeAll {
     $script:MetricsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Extension/Metrics.ps1'
     $script:MetricsSrc = Get-Content -LiteralPath $script:MetricsPath -Raw
-    $script:MetricsLines = Get-Content -LiteralPath $script:MetricsPath
 
     # Extract the permanent pattern FROM THE SOURCE rather than retyping it. A
     # hardcoded copy keeps passing after the real classifier is weakened, so every
@@ -143,7 +143,7 @@ Describe 'The anchored permanent pattern cannot be fooled by a resource id' {
         # A resource group may legally contain digits and parentheses, so a looser
         # '404' or 'ResourceNotFound' substring test could match the id itself.
         $Msg = "Error on /subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/rg-404-test/providers/Microsoft.Compute/virtualMachines/vm1"
-        $Msg -match $script:PermanentPattern | Should -BeFalse -Because 'anchoring on the quoted status phrase is what prevents an id from being read as a status'
+        $Msg -match $script:PermanentPattern | Should -BeFalse -Because 'anchoring on the status phrase is what prevents an id from being read as a status'
     }
 }
 
@@ -158,7 +158,7 @@ Describe 'A resource id containing 429 is classified permanent, not throttled' {
         ($Msg -match $script:PermanentPattern) | Should -BeTrue -Because 'it is genuinely a NotFound'
         ($Msg -match $script:ThrottlePattern) | Should -BeTrue -Because 'the id contains 429, which is why the loose test must not run first'
 
-        # Replay the file's own if/elseif in the file's own order.
+        # Replay the file's own sequential checks in the file's own order.
         $Permanent = $false
         $Throttled = $false
         if ($Msg -match $script:PermanentPattern) { $Permanent = $true }

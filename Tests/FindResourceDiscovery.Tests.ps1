@@ -195,7 +195,7 @@ Describe 'Stamp-less discovery de-dup keys on full path, not base name' {
     }
 
     It 'still collapses two views of ONE stamped report to a single source' {
-        $Root = Join-Path $Script:TestRoot ('d1s-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Root = Join-Path $Script:TestRoot ('dedup-stamped-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
         $Stamp = '202601010000000000abc'
         # A loose json and the per-sub zip beside it, sharing one stamp.
@@ -226,7 +226,7 @@ Describe 'All-excluded is not reported as a wrong path' {
     }
 
     It 'still tells the operator to check the path when nothing at all was found' {
-        $Root = Join-Path $Script:TestRoot ('e1e-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Root = Join-Path $Script:TestRoot ('excluded-empty-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
 
         $Result = Find-RdaResource -Path $Root -ResourceType 'VMWare' -ThrottleLimit 2
@@ -256,7 +256,7 @@ Describe 'Emitted RdaResourceType uses the inventory key casing, not the query' 
     }
 
     It 'still counts coverage correctly when query and key casing differ' {
-        $Dir = Join-Path $Script:TestRoot ('p1c-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Dir = Join-Path $Script:TestRoot ('casing-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
         $Zip = Join-Path $Dir 'ResourcesReport_202601010000000000d02.zip'
         New-CasedPerSubZip -ZipPath $Zip -Stamp '202601010000000000d02' -KeyCasing 'VMWare'

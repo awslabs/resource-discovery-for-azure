@@ -582,7 +582,7 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
     It 'handles null/empty health collections without throwing (standalone-run safety)' {
         { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
                 -FailedSubscriptions $null -CollectorFailures $null `
-                -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
+                -MetricsFailedSubs $null -ConsumptionFailedSubs $null -MemoryReadings $null } | Should -Not -Throw
     }
 }
 

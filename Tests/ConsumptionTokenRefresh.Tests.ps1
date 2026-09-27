@@ -18,14 +18,16 @@
 
     THE FIX. The retry catch now, after the denial short-circuit, recognises an
     auth-expiry error (Test-RdaAuthExpiry) and re-establishes the Azure context
-    ONCE per page (Test-DataPlaneAuthReady) before the existing backoff retries
-    the SAME page. The ContinuationToken guard re-sends the previous page's
+    once per expiry episode, bounded per page (Test-DataPlaneAuthReady), before
+    the existing backoff retries the SAME page. The ContinuationToken guard re-sends the previous page's
     token, so no rows are skipped or duplicated.
 
     WHAT MUST NOT REGRESS.
       - A genuine 403 denial must still short-circuit BEFORE any refresh.
-      - The refresh is at most ONCE per page (a permanent 401 must ride out the
-        budget and fail loud, not reconnect on every attempt).
+      - The refresh is bounded per page: at most once per expiry episode, re-armed
+        only by a successful reconnect, so a permanent 401 reconnects at most once
+        and then rides out the budget to fail loud rather than reconnecting on
+        every attempt.
       - Test-RdaAuthExpiry must not false-positive on an id/RG/URL echoed back in
         a billing exception (the same anchoring hazard the denial predicate has).
 
@@ -134,7 +136,7 @@ Describe 'The retry loop refreshes a lapsed token before retrying the page' {
         $DenialIdx | Should -BeLessThan $AuthIdx -Because 'a denial must short-circuit before any reconnect is attempted'
     }
 
-    It 'attempts the reconnect at most ONCE per page (guarded)' {
+    It 'attempts the reconnect at most once per expiry episode (guarded per page)' {
         # A genuinely permanent 401 (revoked / interaction-required refresh token)
         # cannot be fixed by reconnecting. Without the guard it would reconnect on
         # every one of the 30 attempts; with it, it reconnects once, then rides out

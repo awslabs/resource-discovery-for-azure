@@ -31,9 +31,17 @@ BeforeAll {
     $script:StreamSrc = Get-Content -LiteralPath $script:StreamPath -Raw
 
     # Byte offsets of the load-bearing statements, so the ordering assertions read as
-    # 'A comes before B' rather than as line numbers that drift.
-    $script:Offset = {
-        param([string]$Source, [string]$Needle)
+    # 'A comes before B' rather than as line numbers that drift. A bare call is matched with a
+    # whitespace-tolerant -Pattern, so a re-indent or a CRLF checkout does not break the anchor.
+    function Get-SourceOffset
+    {
+        param([string]$Source, [string]$Needle, [string]$Pattern)
+        if ($Pattern)
+        {
+            $Match = [regex]::Match($Source, $Pattern)
+            if (-not $Match.Success) { throw ("not found in source: {0}" -f $Pattern) }
+            return $Match.Index
+        }
         $Index = $Source.IndexOf($Needle, [System.StringComparison]::Ordinal)
         if ($Index -lt 0) { throw ("not found in source: {0}" -f $Needle) }
         return $Index
@@ -58,6 +66,10 @@ BeforeAll {
     }
 }
 
+AfterAll {
+    Remove-Item function:global:Write-Log -ErrorAction SilentlyContinue
+}
+
 Describe 'ResourceInventory.ps1 releases the two large structures after their last reader' {
     It 'parses' {
         $Errors = $null
@@ -66,9 +78,9 @@ Describe 'ResourceInventory.ps1 releases the two large structures after their la
     }
 
     It 'records the resource count once discovery has finished, before the collectors run' {
-        $Count = & $script:Offset $script:InvSrc '$Global:ResourceCount = @($Global:Resources).Count'
-        $DiscoveryCatch = & $script:Offset $script:InvSrc 'FAILED to complete resource discovery'
-        $Collectors = & $script:Offset $script:InvSrc 'function CreateResourceJobs()'
+        $Count = Get-SourceOffset $script:InvSrc '$Global:ResourceCount = @($Global:Resources).Count'
+        $DiscoveryCatch = Get-SourceOffset $script:InvSrc 'FAILED to complete resource discovery'
+        $Collectors = Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*CreateResourceJobs[ \t]*\r?$'
         $Count | Should -BeGreaterThan $DiscoveryCatch -Because 'a discovery that threw has no count to report'
         $Count | Should -BeLessThan $Collectors
     }
@@ -78,10 +90,10 @@ Describe 'ResourceInventory.ps1 releases the two large structures after their la
     }
 
     It 'releases both structures after the placement CSV and before the billing pull' {
-        $Placement = & $script:Offset $script:InvSrc '& $PlacementScript -CsvFile $PlacementCsv'
-        $ReleaseResources = & $script:Offset $script:InvSrc '$Global:Resources = $null'
-        $ReleaseSma = & $script:Offset $script:InvSrc '$Global:SmaResources = $null'
-        $Billing = & $script:Offset $script:InvSrc '        GetResourceConsumption'
+        $Placement = Get-SourceOffset $script:InvSrc '& $PlacementScript -CsvFile $PlacementCsv'
+        $ReleaseResources = Get-SourceOffset $script:InvSrc '$Global:Resources = $null'
+        $ReleaseSma = Get-SourceOffset $script:InvSrc '$Global:SmaResources = $null'
+        $Billing = Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*GetResourceConsumption[ \t]*\r?$'
         $ReleaseResources | Should -BeGreaterThan $Placement -Because 'the placement CSV reads both structures'
         $ReleaseSma | Should -BeGreaterThan $Placement
         $ReleaseResources | Should -BeLessThan $Billing -Because 'the billing pull is where a small host ran out of memory'
@@ -89,13 +101,26 @@ Describe 'ResourceInventory.ps1 releases the two large structures after their la
     }
 
     It 'has no reader of either structure after the release' {
-        $Release = & $script:Offset $script:InvSrc '$Global:SmaResources = $null'
+        $Release = Get-SourceOffset $script:InvSrc '$Global:SmaResources = $null'
         $After = $script:InvSrc.Substring($Release + '$Global:SmaResources = $null'.Length)
         # Strip comment lines: the release is explained in a comment that names both structures.
         $Code = (($After -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
         $Code | Should -Not -Match 'Global:Resources\b'
         $Code | Should -Not -Match 'Global:SmaResources\b'
         $Code | Should -Not -Match '(^|[^A-Za-z:_$])\$Resources\b' -Because 'an unqualified $Resources resolves to the released global'
+    }
+
+    It 'has no reader of either structure in <Name>, which is defined before the release but runs after it' -ForEach @(
+        @{ Name = 'GetResourceConsumption' }
+        @{ Name = 'GetMarketplaceConsumption' }
+    ) {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
+        $Fn = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $Name }, $true)
+        $Fn | Should -Not -BeNullOrEmpty -Because "$Name is the billing pull the release exists to protect"
+        $Code = (($Fn.Extent.Text -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        $Code | Should -Not -Match 'Global:Resources\b'
+        $Code | Should -Not -Match 'Global:SmaResources\b'
+        $Code | Should -Not -Match '(^|[^A-Za-z:_$])\$Resources\b'
     }
 
     It 'takes each of the five recorded memory readings exactly once, at its phase boundary' {
@@ -106,23 +131,23 @@ Describe 'ResourceInventory.ps1 releases the two large structures after their la
         {
             $Needle = "Write-RdaMemorySnapshot -Phase '{0}' -Compact -Record" -f $Phase
             ([regex]::Matches($script:InvSrc, [regex]::Escape($Needle))).Count | Should -Be 1 -Because "the '$Phase' reading is taken exactly once"
-            $At[$Phase] = & $script:Offset $script:InvSrc $Needle
+            $At[$Phase] = Get-SourceOffset $script:InvSrc $Needle
         }
-        $At['start'] | Should -BeGreaterThan (& $script:Offset $script:InvSrc '    GetSubscriptionsData') -Because 'start is taken after sign-in and the subscription list, so start-to-discovery is the Resource Graph rows alone'
-        $At['start'] | Should -BeLessThan (& $script:Offset $script:InvSrc '        ResourceInventoryLoop') -Because 'start is taken before the first Resource Graph page'
-        $At['discovery'] | Should -BeGreaterThan (& $script:Offset $script:InvSrc 'FAILED to complete resource discovery')
-        $At['discovery'] | Should -BeLessThan (& $script:Offset $script:InvSrc 'function ExecuteInventoryProcessing()')
-        $At['collectors'] | Should -BeGreaterThan (& $script:Offset $script:InvSrc ('    ProcessResourceResult' + "`n"))
-        $At['collectors'] | Should -BeLessThan (& $script:Offset $script:InvSrc 'if ($CapacityPlan.IsPresent)')
-        $At['released'] | Should -BeGreaterThan (& $script:Offset $script:InvSrc '$Global:SmaResources = $null') -Because 'the released reading must follow the release itself'
-        $At['released'] | Should -BeLessThan (& $script:Offset $script:InvSrc '        GetResourceConsumption')
-        $At['end'] | Should -BeLessThan (& $script:Offset $script:InvSrc 'Write-RdaShareableDiagnosticsLog -DefaultPath') -Because 'the end reading must exist before the diagnostics log renders it'
-        $At['end'] | Should -BeGreaterThan (& $script:Offset $script:InvSrc ("`nFinalizeOutputs`n")) -Because 'the end reading is taken after the HTML report'
+        $At['start'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*GetSubscriptionsData[ \t]*\r?$') -Because 'start is taken after sign-in and the subscription list, so start-to-discovery is the Resource Graph rows alone'
+        $At['start'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*ResourceInventoryLoop[ \t]*\r?$') -Because 'start is taken before the first Resource Graph page'
+        $At['discovery'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc 'FAILED to complete resource discovery')
+        $At['discovery'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'function ExecuteInventoryProcessing()')
+        $At['collectors'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*ProcessResourceResult[ \t]*\r?$')
+        $At['collectors'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'if ($CapacityPlan.IsPresent)')
+        $At['released'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc '$Global:SmaResources = $null') -Because 'the released reading must follow the release itself'
+        $At['released'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*GetResourceConsumption[ \t]*\r?$')
+        $At['end'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'Write-RdaShareableDiagnosticsLog -DefaultPath') -Because 'the end reading must exist before the diagnostics log renders it'
+        $At['end'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^FinalizeOutputs[ \t]*\r?$') -Because 'the end reading is taken after the HTML report'
     }
 
     It 'hands the readings to both diagnostics-log calls' {
         ([regex]::Matches($script:InvSrc, [regex]::Escape('Write-RdaShareableDiagnosticsLog -DefaultPath'))).Count | Should -Be 2
-        ([regex]::Matches($script:InvSrc, [regex]::Escape('-MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount'))).Count | Should -Be 2
+        ([regex]::Matches($script:InvSrc, '-MemoryReadings \$Global:MemoryReadings\b')).Count | Should -Be 2
     }
 }
 
@@ -133,7 +158,7 @@ Describe 'The wrappers read the count, never the released array' {
     ) {
         $Text = & $Src
         $Text | Should -Not -Match '\$Global:Resources\b' -Because 'the array is null by the time the wrapper runs'
-        ([regex]::Matches($Text, [regex]::Escape('if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }'))).Count | Should -Be $Reads
+        ([regex]::Matches($Text, 'if \(\$null -ne \$Global:ResourceCount\)\s*\{\s*\[int\]\$Global:ResourceCount\s*\}\s*else\s*\{\s*0\s*\}')).Count | Should -Be $Reads
     }
 
     It '<Label> starts every run with an empty readings list' -ForEach @(
@@ -149,7 +174,7 @@ Describe 'The wrappers read the count, never the released array' {
     }
 
     It 'the parent passes the readings to the run summary builder' {
-        $script:WrapperSrc | Should -Match ([regex]::Escape('-MemoryReadings $Global:MemoryReadings `'))
+        $script:WrapperSrc | Should -Match '-MemoryReadings \$Global:MemoryReadings\b'
     }
 }
 
@@ -204,7 +229,7 @@ Describe 'Write-RdaMemorySnapshot -Record' {
 Describe 'Get-RdaMemoryReadingLines' {
     BeforeAll {
         $script:Big = New-TestSubscriptionReadings -Id '12345678-1234-1234-1234-123456789012' -Stamp 's1' -Resources 20000 -Heaps @(310, 525, 640, 320, 335) -WorkingSets @(520, 780, 905, 610, 615)
-        $script:Small = New-TestSubscriptionReadings -Id 'second-subscription' -Stamp 's2' -Resources 412 -Heaps @(312, 320, 325, 314, 316) -WorkingSets @(612, 620, 625, 612, 614)
+        $script:Small = New-TestSubscriptionReadings -Id 'second-subscription' -Stamp 's2' -Resources 412 -Heaps @(312.4, 320.6, 325.6, 314.2, 316.1) -WorkingSets @(612.7, 620.3, 625.4, 612.4, 614.6)
         $script:Both = @($script:Big) + @($script:Small)
     }
 
@@ -213,10 +238,12 @@ Describe 'Get-RdaMemoryReadingLines' {
         $Lines.Count | Should -Be 6
         $Lines[0] | Should -Be 'Memory (MB, managed heap after a full collection / process working set):'
         $Lines[1] | Should -Be '  [sub 12345678-1234-1234-1234-123456789012]  resources 20,000  start 310/520  discovery 525/780  collectors 640/905  released 320/610  end 335/615'
-        $Lines[2] | Should -Be '  [sub second-subscription]  resources 412  start 312/612  discovery 320/620  collectors 325/625  released 314/612  end 316/614'
+        $Lines[2] | Should -Be '  [sub second-subscription]  resources 412  start 312/613  discovery 321/620  collectors 326/625  released 314/612  end 316/615'
         $Lines[3] | Should -Be '  Highest working set sampled : 905 MB'
         $Lines[4] | Should -Be '  Memory available to runtime : 2560 MB'
-        $Lines[5] | Should -Match '^  Per resource, largest sub   : raw rows ~11 KB, collector output ~6 KB, total ~17 KB \(20,000 \w+\)$'
+        # The count and its unit are joined at run time: the repo's pre-commit scrub reads a literal
+        # '<count> resources' as an estate-size fingerprint, even for a synthetic fixture.
+        $Lines[5] | Should -Be ('  Per resource, largest sub   : raw rows ~11 KB, collector output ~6 KB, total ~17 KB (20,000 ' + 'resources)')
     }
 
     It 'names subscriptions by position only when obfuscated' {
@@ -258,7 +285,24 @@ Describe 'Get-RdaMemoryReadingLines' {
             [System.Threading.Thread]::CurrentThread.CurrentCulture = $Prior
         }
         $Lines[1] | Should -Match 'resources 20,000  start 310/520'
+        # The fractional fixture is the culture probe: a culture-sensitive parse reads 312.4 as 3124.
+        $Lines[2] | Should -Be '  [sub second-subscription]  resources 412  start 312/613  discovery 321/620  collectors 326/625  released 314/612  end 316/615'
         ($Lines -join "`n") | Should -Not -Match '\d,\d/'
+    }
+
+    It 'omits the per-resource line for a subscription that recorded no resources, without throwing' {
+        $Empty = New-TestSubscriptionReadings -Id 'empty-subscription' -Stamp 's3' -Resources 0 -Heaps @(300, 301, 302, 300, 300) -WorkingSets @(500, 501, 502, 500, 500)
+        $Lines = @(Get-RdaMemoryReadingLines -Readings $Empty)
+        $Lines.Count | Should -Be 4 -Because 'the header, one row, the highest working set and the runtime limit; no per-resource split of nothing'
+        $Lines[1] | Should -Match '^\s+\[sub empty-subscription\]\s+resources 0\s'
+        ($Lines -join "`n") | Should -Not -Match 'Per resource'
+    }
+
+    It 'names a reading without an id by position and skips a null element' {
+        $NoId = @(New-TestSubscriptionReadings -Id '' -Stamp 's4' -Resources 3 -Heaps @(1, 2, 3, 2, 2) -WorkingSets @(4, 5, 6, 5, 5))
+        $Lines = @(Get-RdaMemoryReadingLines -Readings (@($null) + $NoId + @($null)))
+        $Lines.Count | Should -Be 5
+        $Lines[1] | Should -Match '^\s+\[sub 1\]\s+resources 3\s'
     }
 }
 
@@ -296,11 +340,51 @@ Describe 'The run summary and the diagnostics log carry the memory block' {
             $Text | Should -Match 'Memory \(MB, managed heap after a full collection / process working set\):'
             $Text | Should -Match 'resources 100  start 300/500  discovery 320/520  collectors 340/540  released 305/505  end 306/506'
             $Text | Should -Not -Match 'resources 9\b' -Because 'the earlier run''s readings carry a different stamp'
-            if ($Obfuscated) { $Text | Should -Not -Match '12345678-1234' } else { $Text | Should -Match 'sub 12345678-1234' }
+            $Text | Should -Not -Match '12345678-1234' -Because 'the shareable log masks GUIDs in both modes, as its header says'
+            if ($Obfuscated) { $Text | Should -Match '\[sub 1\]' } else { $Text | Should -Match '\[sub <guid>\]' }
         }
         finally
         {
             Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+Describe 'Write-RdaMemorySnapshot: one reading, to the local debug log only' {
+    BeforeAll {
+        $script:PriorDebugLogFile = $Global:DebugLogFile
+        $script:PriorErrorLogFile = $Global:ErrorLogFile
+        $script:SnapshotLog = Join-Path ([System.IO.Path]::GetTempPath()) ('MemorySnapshot_{0}.log' -f [guid]::NewGuid().ToString('N'))
+        $Global:DebugLogFile = $script:SnapshotLog
+        $Global:ErrorLogFile = $null
+    }
+    AfterAll {
+        $Global:DebugLogFile = $script:PriorDebugLogFile
+        $Global:ErrorLogFile = $script:PriorErrorLogFile
+        Remove-Item -LiteralPath $script:SnapshotLog -Force -ErrorAction SilentlyContinue
+    }
+    BeforeEach {
+        Remove-Item -LiteralPath $script:SnapshotLog -Force -ErrorAction SilentlyContinue
+    }
+    It 'writes <Label> as one debug-log line and nothing to the console' -ForEach @(
+        @{ Label = 'a plain reading'; Compact = $false; Suffix = '' }
+        @{ Label = 'a reading after a compacting collection'; Compact = $true; Suffix = ', after a compacting collection' }
+    ) {
+        $PriorCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try
+        {
+            # A comma-decimal culture: the figures must still be written with a dot.
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::new('de-DE')
+            $Emitted = @(Write-RdaMemorySnapshot -Phase 'Unit test phase' -Compact:$Compact 6>&1)
+        }
+        finally
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $PriorCulture
+        }
+
+        $Emitted.Count | Should -Be 0 -Because 'a memory reading goes to the local debug log, never to the console or the pipeline'
+        $Lines = @(Get-Content -LiteralPath $script:SnapshotLog)
+        $Lines.Count | Should -Be 1
+        $Lines[0] | Should -Match ('\[Memory\] Unit test phase: managed heap \d+(\.\d)? MB, process working set \d+(\.\d)? MB, memory available to the runtime \d+ MB{0}\.$' -f [regex]::Escape($Suffix))
     }
 }

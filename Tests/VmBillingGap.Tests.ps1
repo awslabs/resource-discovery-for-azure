@@ -201,6 +201,24 @@ Describe 'VM billing-coverage banner' {
 
     # The billed-VM count ignores letter case, so a VM whose ResourceId repeats in another case is one VM.
     # Counting by exact case here would give 6 billed VMs against 5 running, and no banner at all.
+    # A 'Virtual Machines' row with no ResourceId is a billing line that cannot be joined to any VM,
+    # so it must not count as a billed VM. Import-Csv yields '' for the empty cell, never $null.
+    It 'does not count a VM-meter row whose ResourceId is blank' {
+        $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_blank.csv'
+        $Rows = @()
+        for ($i = 0; $i -lt 3; $i++) { $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) } }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = '' }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = '   ' }
+        $Rows | Select-Object MeterCategory, ResourceId | Export-Csv -Path $Csv -Encoding utf8 -NoTypeInformation
+
+        # 5 running, 3 distinct billed -> gap 2 of 5 = 40%; the two blank rows must not make it 5 billed
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'only 3 VMs'
+        $Html | Should -Match '2 running VMs \(40%\)'
+    }
+
     It 'counts a VM once when its ResourceId repeats in a different letter case' {
         $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 0
         $Csv = Join-Path $script:WorkDir 'con_case.csv'

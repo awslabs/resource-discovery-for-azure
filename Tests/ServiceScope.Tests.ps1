@@ -41,6 +41,9 @@ Describe 'Service Scope' {
         $Keys = @($script:Inventory.PSObject.Properties.Name)
         $Unexpected = @($Keys | Where-Object { $_ -notin $Allowed })
         $Unexpected | Should -BeNullOrEmpty -Because ("only [{0}] (+ metadata) should be present; found disallowed key(s) [{1}]" -f ($script:Expected -join ', '), ($Unexpected -join ', '))
+        # Every collector that runs adds its key, with an empty array when it found nothing, so an
+        # inventory holding only the metadata key means the requested collectors never ran.
+        @($Keys | Where-Object { $_ -notin $script:MetadataKeys }).Count | Should -BeGreaterThan 0 -Because 'a -Service run must emit the requested collector keys, even when they are empty'
     }
 
     It 'does not emit any service key outside the requested set' {

@@ -539,6 +539,40 @@ Describe 'New-RdaAllSubHtmlSummary per-subscription Health cell' {
         $Html | Should -Match '<td>Shared Name</td><td class="num">3</td><td><span class="tag ok">ok</span></td>' -Because 'two subscriptions can share a display name, so a failure is tied to a row by id only'
     }
 
+    It 'marks a <Phase> failure on its own row, ranked below a consumption failure' -ForEach @(
+        @{ Phase = 'metrics'; Parameter = 'MetricsFailedSubs'; Tag = 'metrics incomplete' }
+        @{ Phase = 'marketplace'; Parameter = 'MarketplaceFailedSubs'; Tag = 'marketplace incomplete' }
+    ) {
+        $Run = New-Run
+        $FailedDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Phase Failed'
+        $BothDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Both Failed'
+        $HealthyDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 4 } -SubName 'Healthy'
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Phase Failed'; Id = 'phase-failed-subscription'; Count = 2; Zip = (Join-Path $FailedDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription'; Count = 3; Zip = (Join-Path $BothDir 'ResourcesReport_b.zip') }
+            [pscustomobject]@{ Name = 'Healthy'; Id = 'healthy-subscription'; Count = 4; Zip = (Join-Path $HealthyDir 'ResourcesReport_c.zip') }
+        )
+        $PhaseFailures = @(
+            [pscustomobject]@{ Name = 'Phase Failed'; Id = 'phase-failed-subscription'; Message = 'stopped' }
+            [pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription'; Message = 'stopped' }
+        )
+        $Out = Join-Path $Run 'main.html'
+        $Splat = @{
+            RunOutputDirectory     = $Run
+            HtmlFile               = $Out
+            ProcessedSubscriptions = $Processed
+            $Parameter             = $PhaseFailures
+            ConsumptionFailedSubs  = @([pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription' })
+        }
+
+        New-RdaAllSubHtmlSummary @Splat | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match ('<td>Phase Failed</td><td class="num">2</td><td><span class="tag warn">{0}</span></td>' -f $Tag)
+        $Html | Should -Match '<td>Both Failed</td><td class="num">3</td><td><span class="tag warn">consumption incomplete</span></td>' -Because 'a consumption failure outranks the other phases on one row'
+        $Html | Should -Match '<td>Healthy</td><td class="num">4</td><td><span class="tag ok">ok</span></td>'
+    }
+
     It 'marks an obfuscated row without printing the real subscription name or id' {
         $Run = New-Run
         $Dir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated

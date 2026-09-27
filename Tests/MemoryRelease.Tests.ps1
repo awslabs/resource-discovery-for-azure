@@ -93,11 +93,14 @@ Describe 'ResourceInventory.ps1 releases the two large structures after their la
         $Placement = Get-SourceOffset $script:InvSrc '& $PlacementScript -CsvFile $PlacementCsv'
         $ReleaseResources = Get-SourceOffset $script:InvSrc '$Global:Resources = $null'
         $ReleaseSma = Get-SourceOffset $script:InvSrc '$Global:SmaResources = $null'
+        $ReleaseMetrics = Get-SourceOffset $script:InvSrc '$Global:AzMetrics = $null'
         $Billing = Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*GetResourceConsumption[ \t]*\r?$'
         $ReleaseResources | Should -BeGreaterThan $Placement -Because 'the placement CSV reads both structures'
         $ReleaseSma | Should -BeGreaterThan $Placement
         $ReleaseResources | Should -BeLessThan $Billing -Because 'the billing pull is where a small host ran out of memory'
         $ReleaseSma | Should -BeLessThan $Billing
+        $ReleaseMetrics | Should -BeGreaterThan $Placement -Because 'the metrics result has no reader after the metrics phase'
+        $ReleaseMetrics | Should -BeLessThan $Billing
     }
 
     It 'has no reader of either structure after the release' {
@@ -213,6 +216,15 @@ Describe 'Write-RdaMemorySnapshot -Record' {
         ($R.PSObject.Properties.Name -join ',') | Should -Be 'Id,Stamp,Phase,Resources,HeapMB,WorkingSetMB,LimitMB'
     }
 
+    It 'refuses to record a phase the summary does not render' {
+        { Write-RdaMemorySnapshot -Phase 'strat' -Record } | Should -Throw -ExpectedMessage '*one of the phases the summary renders*'
+        $Global:MemoryReadings | Should -BeNullOrEmpty
+    }
+
+    It 'still takes an ad-hoc reading without -Record under any phase name' {
+        { Write-RdaMemorySnapshot -Phase 'Before the consumption pull' } | Should -Not -Throw
+    }
+
     It 'records nothing without -Record' {
         Write-RdaMemorySnapshot -Phase 'start'
         $Global:MemoryReadings | Should -BeNullOrEmpty
@@ -312,12 +324,14 @@ Describe 'The run summary and the diagnostics log carry the memory block' {
         $script:Other = New-TestSubscriptionReadings -Id '12345678-1234-1234-1234-123456789012' -Stamp 'run-0' -Resources 9 -Heaps @(1, 2, 3, 4, 5) -WorkingSets @(1, 2, 3, 4, 5)
     }
 
-    It 'Get-RunSummaryLogContent renders the block when readings exist and omits it otherwise' {
+    It 'Get-RunSummaryLogContent renders the block when readings exist and states the empty case otherwise' {
         $With = @(Get-RunSummaryLogContent -Version '0.0.0' -MemoryReadings $script:Readings) -join "`n"
         $With | Should -Match 'Memory \(MB, managed heap after a full collection / process working set\):'
         $With | Should -Match 'resources 100  start 300/500'
+        $With | Should -Not -Match 'no readings recorded'
         $Without = @(Get-RunSummaryLogContent -Version '0.0.0') -join "`n"
         $Without | Should -Not -Match 'Memory \(MB'
+        $Without | Should -Match 'Memory: no readings recorded' -Because 'a summary without readings must say so, not look like a build without the block'
     }
 
     It 'Get-RunSummaryLogContent hides subscription ids in the block when obfuscated' {

@@ -190,8 +190,8 @@ See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
 
 `Get-UsageAggregates` above returns **first-party Azure** metered usage only — it
 carries no `PublisherType` and never reports Azure Marketplace / third-party SaaS
-charges (for example an ISV offer sold through Azure Marketplace, such as an
-Anthropic/Claude offer surfaced via Azure AI Foundry). Those charges live behind a
+charges (for example an ISV offer sold through Azure Marketplace, such as a
+model or SaaS offer surfaced via Azure AI Foundry). Those charges live behind a
 **different** endpoint. To close that coverage gap, RDA runs a second, **additive**
 collector that emits a separate `Marketplace_<ReportName>_<timestamp>.csv`. The
 first-party `Consumption_*` schema and code path are untouched.
@@ -218,7 +218,7 @@ envelope as the first-party consumption loop.
 (third-party). The Marketplace endpoint returns **only** Marketplace rows (its
 `PSMarketplace` output type has no `PublisherType` property at all), so **no
 client-side filtering is needed** — every row it returns is a Marketplace row.
-The "is this Anthropic?" question is answered by `PublisherName` / `OfferName`;
+The "which publisher is this?" question is answered by `PublisherName` / `OfferName`;
 RDA does **not** hardcode any publisher/offer literal — the field is the contract.
 
 ### The columns

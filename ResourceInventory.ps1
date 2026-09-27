@@ -1499,7 +1499,7 @@ function ExecuteInventoryProcessing()
         # Get-UsageAggregates (legacy Microsoft.Commerce/UsageAggregates), which
         # returns ONLY first-party Azure metered usage and carries no PublisherType.
         # Azure Marketplace / third-party SaaS charges (e.g. an ISV offer sold via
-        # Azure Marketplace, such as an Anthropic/Claude offer surfaced through Azure
+        # Azure Marketplace, such as a model or SaaS offer surfaced through Azure
         # AI Foundry) live behind a DIFFERENT endpoint that RDA never called, so
         # Marketplace usage was invisible regardless of whether any existed. This
         # closes that endpoint-coverage gap.
@@ -1825,7 +1825,7 @@ function ExecuteInventoryProcessing()
         # first-party consumption zero-record warning so an empty file reads as "verified
         # none", not "collector never ran". The Marketplace endpoint returns only
         # Marketplace-publisher rows, so zero here means no third-party/Marketplace charges
-        # (e.g. no Anthropic-via-Marketplace usage) landed on the in-scope subscriptions in
+        # (e.g. no ISV SaaS usage) landed on the in-scope subscriptions in
         # the window.
         #
         # Keyed on the $script:-scoped per-invocation values, NOT the $Global: ones: the
@@ -1834,7 +1834,7 @@ function ExecuteInventoryProcessing()
         # subscription's rows and suppress this notice for every later zero-row subscription.
         if ($script:MarketplaceRecordsThisRun -eq 0 -and $script:MarketplaceFailedSubsThisRun -eq 0)
         {
-            Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+            Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an ISV SaaS offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
         }
     }
 

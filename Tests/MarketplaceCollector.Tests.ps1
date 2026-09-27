@@ -36,16 +36,16 @@ BeforeAll {
     $script:InvSrc = Get-Content -LiteralPath $script:InvPath -Raw
     # A representative Marketplace row shaped like PSMarketplace. Property names are the
     # documented ones (verified against the installed cmdlet's output type). Uses a
-    # deliberately Anthropic-flavoured publisher/offer so the test proves those product
+    # fictional ISV publisher/offer so the test proves those product
     # identifiers are NOT hardcoded and NOT masked - the field is the contract, not a literal.
     function script:New-FakeMarketplaceRow
     {
         param(
-            [string]$Publisher = 'anthropic',
-            [string]$Offer = 'claude-in-foundry',
+            [string]$Publisher = 'contoso',
+            [string]$Offer = 'contoso-assistant-in-foundry',
             [string]$Plan = 'pay-as-you-go',
-            [string]$InstanceId = '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/claude-saas-01',
-            [string]$InstanceName = 'claude-saas-01',
+            [string]$InstanceId = '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/contoso-saas-01',
+            [string]$InstanceName = 'contoso-saas-01',
             [string]$ResourceGroup = 'rg-ai-prod',
             [string]$SubscriptionName = 'AI Production',
             [string]$SubscriptionGuid = '11111111-1111-1111-1111-111111111111'
@@ -80,8 +80,8 @@ Describe 'ConvertTo-RdaMarketplaceRow: documented field mapping (non-obfuscated)
         $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$false
 
         # Every field from the task's documented column set, plus the cheap extras.
-        $Out.PublisherName    | Should -Be 'anthropic'
-        $Out.OfferName        | Should -Be 'claude-in-foundry'
+        $Out.PublisherName    | Should -Be 'contoso'
+        $Out.OfferName        | Should -Be 'contoso-assistant-in-foundry'
         $Out.PlanName         | Should -Be 'pay-as-you-go'
         $Out.OrderNumber      | Should -Be 'ORD-4242'
         $Out.ConsumedService  | Should -Be 'Microsoft.SaaS'
@@ -96,8 +96,8 @@ Describe 'ConvertTo-RdaMarketplaceRow: documented field mapping (non-obfuscated)
         $Out.SubscriptionGuid | Should -Be '11111111-1111-1111-1111-111111111111'
         $Out.SubscriptionName | Should -Be 'AI Production'
         $Out.ResourceGroup    | Should -Be 'rg-ai-prod'
-        $Out.InstanceId       | Should -Be '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/claude-saas-01'
-        $Out.InstanceName     | Should -Be 'claude-saas-01'
+        $Out.InstanceId       | Should -Be '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/contoso-saas-01'
+        $Out.InstanceName     | Should -Be 'contoso-saas-01'
     }
 
     It 'emits exactly the documented column set (no extra, no missing)' {
@@ -136,9 +136,9 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $Row = script:New-FakeMarketplaceRow
         $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
         # Product identifiers are not customer secrets - they must survive verbatim so the
-        # "which ISV / which offer" (Anthropic-vs-not) signal is preserved.
-        $Out.PublisherName | Should -Be 'anthropic'
-        $Out.OfferName     | Should -Be 'claude-in-foundry'
+        # "which ISV / which offer" signal is preserved.
+        $Out.PublisherName | Should -Be 'contoso'
+        $Out.OfferName     | Should -Be 'contoso-assistant-in-foundry'
         $Out.PlanName      | Should -Be 'pay-as-you-go'
     }
 
@@ -184,12 +184,12 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
 
         # None of the real values may survive anywhere in the masked identity fields.
-        $Out.InstanceId       | Should -Not -Match 'claude-saas-01'
+        $Out.InstanceId       | Should -Not -Match 'contoso-saas-01'
         $Out.InstanceId       | Should -Not -Match 'rg-ai-prod'
         $Out.InstanceId       | Should -Not -Match '11111111-1111-1111-1111-111111111111'
         $Out.ResourceGroup    | Should -Not -Be 'rg-ai-prod'
         $Out.SubscriptionName | Should -Not -Be 'AI Production'
-        $Out.InstanceName     | Should -Not -Be 'claude-saas-01'
+        $Out.InstanceName     | Should -Not -Be 'contoso-saas-01'
 
         # The InstanceId is an ARM resource id and must stay structurally an ARM id
         # (segment-by-segment rebuild), so a downstream consumer can still parse it.
@@ -198,7 +198,7 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
 
     It 'is deterministic within a run: the same real value maps to the same token' {
         $R1 = script:New-FakeMarketplaceRow -SubscriptionName 'AI Production' -ResourceGroup 'rg-ai-prod'
-        $R2 = script:New-FakeMarketplaceRow -SubscriptionName 'AI Production' -ResourceGroup 'rg-ai-prod' -InstanceName 'claude-saas-02' -InstanceId '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/claude-saas-02'
+        $R2 = script:New-FakeMarketplaceRow -SubscriptionName 'AI Production' -ResourceGroup 'rg-ai-prod' -InstanceName 'contoso-saas-02' -InstanceId '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/contoso-saas-02'
         $O1 = ConvertTo-RdaMarketplaceRow -Row $R1 -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
         $O2 = ConvertTo-RdaMarketplaceRow -Row $R2 -Obfuscate:$true -SubGuidTokenMap $script:SubGuidTokenMap -RgTokenMap $script:RgTokenMap -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
 
@@ -209,7 +209,7 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
     }
 
     It 'classifies dev/test instances with the nonprod_ prefix' {
-        $Row = script:New-FakeMarketplaceRow -InstanceId '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-dev/providers/Microsoft.SaaS/resources/claude-dev' -ResourceGroup 'rg-dev' -InstanceName 'claude-dev'
+        $Row = script:New-FakeMarketplaceRow -InstanceId '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-dev/providers/Microsoft.SaaS/resources/contoso-dev' -ResourceGroup 'rg-dev' -InstanceName 'contoso-dev'
         $Out = ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$true -SubCache $script:Sub -RgCache $script:Rg -NameCache $script:Nm
         $Out.ResourceGroup | Should -Match '^nonprod_'
         $Out.InstanceName  | Should -Match '^nonprod_'
@@ -320,7 +320,7 @@ Describe 'Marketplace collector reuses the shared auth/retry decision helpers' {
 
         $Refreshed | Should -BeTrue -Because 'an expired token must trigger the refresh path (not a denial, not a plain transient)'
         $Result.Count | Should -Be 1 -Because 'after the refresh+retry the second call succeeds'
-        $Result[0].PublisherName | Should -Be 'anthropic'
+        $Result[0].PublisherName | Should -Be 'contoso'
     }
 }
 

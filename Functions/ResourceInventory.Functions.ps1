@@ -54,7 +54,7 @@ function Global:ConvertTo-RdaMarketplaceRow
     #
     # OBFUSCATION. When -Obfuscate is active the caller passes $Obfuscate = $true. PublisherName /
     # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer" -
-    # e.g. Anthropic-vs-not - signal), not customer secrets, so they are left READABLE by design.
+    # e.g. which ISV published it - signal), not customer secrets, so they are left READABLE by design.
     # Every identifying field is masked:
     #   - OrderNumber is masked, unlike the three product fields above, because it identifies a
     #     specific customer PURCHASE rather than a product. See the $OrderCache param and the
@@ -880,8 +880,8 @@ function Write-RdaShareableDiagnosticsLog
             # HONEST NEGATIVE (mirrors the consumption zero-records note above). The
             # Microsoft.Consumption/marketplaces endpoint returns ONLY Marketplace-publisher
             # rows, so a successful call with zero rows is a CONFIRMED absence of Azure
-            # Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace
-            # offer) in the window - not a missing or failed section. The Marketplace CSV
+            # Marketplace / third-party SaaS charges (e.g. an ISV SaaS offer) in the
+            # window - not a missing or failed section. The Marketplace CSV
             # holds only its header in that case.
             $DiagLines.Add('  Note: ZERO Marketplace rows is a CONFIRMED zero (endpoint reached, no third-party/Marketplace charges billed), not a skipped section.')
         }

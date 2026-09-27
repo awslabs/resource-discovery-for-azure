@@ -58,6 +58,8 @@ function Variables
     $Global:ResourceContainers = @()
     $Global:Resources = @()
     $Global:ResourceCount = 0
+    $Global:ErrorLogFile = $null
+    $Global:DebugLogFile = $null
     $Global:Subscriptions = ''
     $Global:ReportName = $ReportName
     $Global:Version = GetLocalVersion
@@ -564,6 +566,7 @@ function RunInventorySetup()
     CheckCliRequirements
     CheckPowerShell
     GetSubscriptionsData
+    InitializeLogFiles
 
     # Taken after sign-in and the subscription list, so the difference to the 'discovery' reading is
     # the Resource Graph rows alone and not the modules and tokens the setup loaded.
@@ -687,6 +690,34 @@ function RunInventorySetup()
     }
 }
 
+function InitializeLogFiles()
+{
+    # The two local log paths are set as soon as the report folder exists, so this subscription's
+    # sign-in errors and its 'start' and 'discovery' memory readings land in this subscription's
+    # files. Variables clears both paths first, so under the wrapper nothing is appended to the
+    # previous subscription's logs.
+    if ($RunAllSubs.IsPresent)
+    {
+        $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+        $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+        $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
+    }
+    else
+    {
+        $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+    }
+
+    if ($RunAllSubs.IsPresent)
+    {
+        $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+        $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+        $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
+    }
+    else
+    {
+        $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+    }
+}
 function ExecuteInventoryProcessing()
 {
     function InitializeInventoryProcessing()
@@ -698,28 +729,6 @@ function ExecuteInventoryProcessing()
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
         $Global:MarketplaceFileCsv = ($DefaultPath + "Marketplace_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
-
-        if ($RunAllSubs.IsPresent)
-        {
-            $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
-        }
-        else
-        {
-            $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
-        }
-
-        if ($RunAllSubs.IsPresent)
-        {
-            $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
-        }
-        else
-        {
-            $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
-        }
 
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
@@ -1459,7 +1468,7 @@ function ExecuteInventoryProcessing()
                         # the re-collected rows carry no real identifiers and their resource tokens
                         # still join this run's inventory.
                         $ConsumptionRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
-                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. Re-run it on its own in a fresh PowerShell process, or on a host with more memory (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics{2}), then merge its consumption back in as described in docs/recovery-and-diagnostics.md under: A subscription's consumption pull was interrupted." -f $sub.Name, $sub.Id, $ConsumptionRerunObfuscation) -Severity 'Error'
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. Re-run it on its own in a fresh PowerShell process, or on a host with more memory (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics -SkipMarketplace{2}), then merge its consumption back in as described in docs/recovery-and-diagnostics.md under: A subscription's consumption pull was interrupted." -f $sub.Name, $sub.Id, $ConsumptionRerunObfuscation) -Severity 'Error'
                     }
                     else
                     {

@@ -453,9 +453,9 @@ function Get-RdaMemoryReadingLines
     # Renders the readings Write-RdaMemorySnapshot -Record collected: one row per subscription with
     # the managed heap and working set at each phase, then the highest working set seen, the memory
     # the runtime says it may use, and the per-resource cost of the largest subscription. The rows
-    # carry counts and megabytes only. Under -Obfuscated a subscription is named by its position;
-    # otherwise by its id, as the other detail sections do. -Stamp keeps a standalone run's log to
-    # its own readings when the same prompt has run the script before.
+    # carry counts and megabytes. Under -Obfuscated a subscription is named by its position;
+    # otherwise by its id, which the diagnostics writer masks like its other sections. -Stamp keeps
+    # a standalone run's log to its own readings when the same prompt has run the script before.
     $Lines = [System.Collections.Generic.List[string]]::new()
     $Rows = @(@($Readings) | Where-Object { $null -ne $_ -and -not [string]::IsNullOrEmpty([string]$_.Phase) })
     if (-not [string]::IsNullOrEmpty($Stamp))

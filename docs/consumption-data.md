@@ -40,7 +40,7 @@ consumption phase (the rest of the inventory continues).
 ### Transient-failure retry
 
 Each page request is wrapped in a bounded retry (**30 attempts, exponential
-backoff**, or the server's `Retry-After` when it sends one). A single transient
+backoff**, or the server's `Retry-After`, capped at five minutes, when it sends one). A single transient
 HTTP error - e.g. `Error while copying content to a stream`, a timeout, or
 429/503 throttling - retries the **same** page (the previous page's
 `ContinuationToken` is preserved), so no rows are duplicated or skipped. An
@@ -50,7 +50,7 @@ crash](#recovering-from-a-consumption-crash)).
 
 Running out of memory is not transient, because waiting frees nothing. The first
 out-of-memory error on a page compacts the heap and retries that page once; a
-second one stops that subscription's consumption with an Error that says how to
+second one on the same page stops that subscription's consumption with an Error that says how to
 re-run it in a fresh PowerShell process.
 
 Before each subscription's billing pull, RDA runs a compacting garbage

@@ -53,8 +53,8 @@ function Global:ConvertTo-RdaMarketplaceRow
     #   https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list  (api-version 2023-05-01)
     #
     # OBFUSCATION. When -Obfuscate is active the caller passes $Obfuscate = $true. PublisherName /
-    # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer" -
-    # e.g. which ISV published it - signal), not customer secrets, so they are left READABLE by design.
+    # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer"
+    # signal), not customer secrets, so they are left READABLE by design.
     # Every identifying field is masked:
     #   - OrderNumber is masked, unlike the three product fields above, because it identifies a
     #     specific customer PURCHASE rather than a product. See the $OrderCache param and the
@@ -896,14 +896,24 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add('Metric-query API calls issued: n/a (-SkipMetrics was passed)')
         }
 
-        # Megabytes and counts only, so the same rows appear in the obfuscated bundle. Filtered to
-        # this run's stamp: the readings global is not reset by a standalone run, so a prompt that
-        # has run the script before still holds the earlier run's rows.
-        $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Stamp $RunDateTime -Obfuscated:$Obfuscated)
+        # Counts and megabytes, labelled by subscription. The label passes through the same scrub as
+        # every other '[sub ...]' line here, so the default log masks the id as its header says.
+        # Filtered to this run's stamp: the readings global is not reset by a standalone run, so a
+        # prompt that has run the script before still holds the earlier run's rows. Rendered in its
+        # own try/catch so a rendering fault costs this block, not the whole log.
+        $MemoryLines = @()
+        try
+        {
+            $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Stamp $RunDateTime -Obfuscated:$Obfuscated)
+        }
+        catch
+        {
+            $MemoryLines = @(('Memory readings unavailable: {0}' -f (Protect-DiagnosticText $_.Exception.Message $DiagScrubMap)))
+        }
         if ($MemoryLines.Count -gt 0)
         {
             $DiagLines.Add('')
-            foreach ($MemoryLine in $MemoryLines) { $DiagLines.Add($MemoryLine) }
+            foreach ($MemoryLine in $MemoryLines) { $DiagLines.Add((Protect-DiagnosticText $MemoryLine $DiagScrubMap)) }
         }
 
         $DiagnosticsFile = ($DefaultPath + "Diagnostics_" + $ReportName + "_" + $RunDateTime + ".log")

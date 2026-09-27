@@ -1372,9 +1372,10 @@ function Get-RunSummaryLogContent
         $Lines.Add('    - A subscription offer the legacy usage API does not serve.')
     }
 
-    # Per-subscription memory readings from the inner script (megabytes and counts only, so they
-    # appear in both modes). They show how much the host was holding at each phase and whether it
-    # grew from one subscription to the next, which is what a run that ran out of memory needs.
+    # Per-subscription memory readings from the inner script: counts and megabytes, labelled by
+    # subscription id, or by position when obfuscated. They show how much the host was holding at
+    # each phase and whether it grew from one subscription to the next, which is what a run that
+    # ran out of memory needs.
     $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Obfuscated:$Obfuscated)
     if ($MemoryLines.Count -gt 0)
     {

@@ -125,6 +125,19 @@ catch
     exit 1
 }
 
+# Tell the parent this stream no longer needs the snapshot. Once every stream has left its marker or
+# ended, the parent deletes the snapshot, so the token cache it holds is on disk for seconds rather than
+# for the whole run. If the marker cannot be written the parent keeps the snapshot until this job ends.
+$ImportMarkerPath = Get-StreamImportMarkerPath -AzContextPath $AzContextPath -StreamId $StreamId
+try
+{
+    Set-Content -LiteralPath $ImportMarkerPath -Value $StreamId -Encoding utf8 -ErrorAction Stop
+}
+catch
+{
+    Write-Stream ("WARNING: could not record the Az context import at {0}: {1}. The parent keeps the snapshot until this stream ends." -f $ImportMarkerPath, $_.Exception.Message) 'Yellow'
+}
+
 $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId)
 
 $StreamBlobArgs = @{}

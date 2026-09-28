@@ -1502,13 +1502,70 @@ else
             Write-Host ("Note: per-stream tags only prefix the wrapper's narration. The inner script's") -ForegroundColor DarkGray
             Write-Host ("Write-Host/Write-Log output is unprefixed and will interleave across streams.") -ForegroundColor DarkGray
             Write-Host ""
+            # The snapshot holds the signed-in account's token cache. Each worker leaves a marker once it
+            # has imported it, and $Jobs is in stream order, so the snapshot can go as soon as no stream
+            # can still need it: each has imported or has already ended. That keeps the token cache on
+            # disk for seconds instead of for the whole run, and the markers go with it, so a run that
+            # is killed later leaves neither behind. A stream that is still starting keeps the snapshot
+            # in place; a removal that fails is retried on the next pass; the finally below is the fallback.
+            $script:SnapshotReleased = $false
+            $script:SnapshotReleaseWarned = $false
+            $ImportMarkerPaths = @(0..($StreamCount - 1) | ForEach-Object { Get-StreamImportMarkerPath -AzContextPath $AzContextSnapshot -StreamId ([string]$_) })
+            $ReleaseSnapshotIfImported = {
+                # Runs in a child scope, so the flags live in the script scope.
+                if ($script:SnapshotReleased) { return }
+                $MarkerPresent = [bool[]]@($ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+                $JobState = [string[]]@($Jobs | ForEach-Object { [string]$_.State })
+                # A check that fails must keep the snapshot: an error here would otherwise fall through to the removal.
+                $Releasable = $false
+                try
+                {
+                    $Answer = @(Test-AzContextSnapshotReleasable -MarkerPresent $MarkerPresent -JobState $JobState -ErrorAction Stop)
+                    $Releasable = $Answer.Count -eq 1 -and $Answer[0] -is [bool] -and $Answer[0]
+                }
+                catch
+                {
+                    if (-not $script:SnapshotReleaseWarned)
+                    {
+                        $script:SnapshotReleaseWarned = $true
+                        Write-Host ("WARNING: could not check whether the Az context snapshot can be removed yet: {0}. It is removed at the end of the run." -f $_.Exception.Message.TrimEnd('.', ' ')) -ForegroundColor Yellow
+                    }
+                }
+                if (-not $Releasable) { return }
+                try
+                {
+                    if (Test-Path -LiteralPath $AzContextSnapshot -PathType Leaf)
+                    {
+                        Remove-Item -LiteralPath $AzContextSnapshot -Force -ErrorAction Stop
+                        Write-Host "Az context snapshot removed: no stream still needs it." -ForegroundColor DarkGray
+                    }
+                    $script:SnapshotReleased = $true
+                }
+                catch
+                {
+                    if (-not $script:SnapshotReleaseWarned)
+                    {
+                        $script:SnapshotReleaseWarned = $true
+                        Write-Host ("WARNING: could not remove the Az context snapshot yet: {0}. Removal is retried, and attempted again at the end of the run." -f $_.Exception.Message.TrimEnd('.', ' ')) -ForegroundColor Yellow
+                    }
+                    return
+                }
+                foreach ($ImportMarker in $ImportMarkerPaths)
+                {
+                    try { if (Test-Path -LiteralPath $ImportMarker -PathType Leaf) { Remove-Item -LiteralPath $ImportMarker -Force -ErrorAction Stop } }
+                    catch { Write-Verbose ("Could not remove stream import marker {0}: {1}" -f $ImportMarker, $_.Exception.Message) }
+                }
+            }
+
             $Jobs | Receive-Job
             while (@($Jobs | Where-Object { $_.State -eq 'Running' }).Count -gt 0)
             {
                 $Jobs | Receive-Job
+                & $ReleaseSnapshotIfImported
                 Start-Sleep -Milliseconds 1500
             }
             $Jobs | Receive-Job
+            & $ReleaseSnapshotIfImported
 
             foreach ($j in $Jobs)
             {
@@ -1728,6 +1785,12 @@ else
                     Write-Host ("WARNING: could not remove Az context snapshot at {0}: {1}" -f $AzContextSnapshot, $_.Exception.Message) -ForegroundColor Yellow
                     Write-Host "  This file contains an Azure token cache and should be deleted manually." -ForegroundColor Yellow
                 }
+            }
+            # The import markers carry only a stream number; sweep them with the snapshot they belong to.
+            foreach ($ImportMarker in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter ((Split-Path -Path $AzContextSnapshot -Leaf) + '.imported-*') -File -Force -ErrorAction SilentlyContinue))
+            {
+                try { Remove-Item -LiteralPath $ImportMarker.FullName -Force -ErrorAction Stop }
+                catch { Write-Verbose ("Could not remove stream import marker {0}: {1}" -f $ImportMarker.FullName, $_.Exception.Message) }
             }
         }
     }

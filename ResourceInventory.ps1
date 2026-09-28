@@ -1991,8 +1991,10 @@ function FinalizeOutputs
             # writes SHARDED Metrics_<ReportName>_<stamp>_*.json files; the unsharded path is only
             # created by the empty-metrics fallback in the packaging block, which runs AFTER this.
             # Testing the single path here would report "not written" while real shards sit on disk.
-            $MetricsGlob = if ([string]::IsNullOrWhiteSpace($Global:MetricsJsonFile)) { $null }
-            else { [IO.Path]::Combine((Split-Path -LiteralPath $Global:MetricsJsonFile -Parent), ((Split-Path -LiteralPath $Global:MetricsJsonFile -Leaf) -replace '\.json$', '*.json')) }
+            # Same folder and name pattern as the packaging block's shard check, so the two agree;
+            # $Global:MetricsJsonFile only confirms the output paths were set up.
+            $MetricsShardFilter = if ([string]::IsNullOrWhiteSpace($Global:MetricsJsonFile) -or [string]::IsNullOrWhiteSpace($Global:DefaultPath)) { $null }
+            else { 'Metrics_{0}_{1}*.json' -f $Global:ReportName, $Global:CurrentDateTime }
 
             $WrittenOutputs = @(
                 @{ Label = 'Inventory JSON'; Path = $Global:JsonFile }
@@ -2000,7 +2002,7 @@ function FinalizeOutputs
                 @{ Label = 'Marketplace CSV'; Path = $Global:MarketplaceFileCsv }
             ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Path) -and (Test-Path -LiteralPath $_.Path -PathType Leaf) }
 
-            if ($MetricsGlob -and @(Get-ChildItem -Path $MetricsGlob -File -ErrorAction SilentlyContinue).Count -gt 0)
+            if ($MetricsShardFilter -and @(Get-ChildItem -LiteralPath $Global:DefaultPath -Filter $MetricsShardFilter -File -ErrorAction SilentlyContinue).Count -gt 0)
             {
                 $WrittenOutputs = @($WrittenOutputs) + @{ Label = 'Metrics JSON' }
             }

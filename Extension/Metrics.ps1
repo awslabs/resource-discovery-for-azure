@@ -688,6 +688,20 @@ if ($Task -eq 'Processing')
 
     $MetricDiagnostics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
+    # Every Get-AzMetric attempt runs on this one runspace pool. A pool runspace is reused
+    # across calls, so Az.Accounts and Az.Monitor load once per runspace rather than once per
+    # attempt, and no call waits behind the process-wide Start-ThreadJob throttle (5 by default).
+    # Runspaces are created on demand; the headroom above ConcurrencyLimit is for timed-out
+    # calls that are abandoned while they still hold one.
+    $MetricCallPool = $null
+    $MetricAbandonedCalls = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+    if ($MetricCount -gt 0)
+    {
+        $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+        [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * 2)
+        $MetricCallPool.Open()
+    }
+
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, throttle retries={5} (honours Retry-After up to {6}s), lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays), $MetricMaxThrottleRetries, $MetricMaxRetryAfterSeconds)
 
@@ -716,6 +730,8 @@ if ($Task -eq 'Processing')
                 $RetryAfterFnDef = $using:MetricRetryAfterFnDef
                 if ($RetryAfterFnDef) { Set-Item -Path function:Get-RdaRetryAfterSeconds -Value ([scriptblock]::Create($RetryAfterFnDef)) }
                 $DiagBag = $using:MetricDiagnostics
+                $CallPool = $using:MetricCallPool
+                $AbandonedCalls = $using:MetricAbandonedCalls
 
                 $MetricError = $false
                 $MetricName = $_.MetricName
@@ -857,6 +873,44 @@ if ($Task -eq 'Processing')
                     }
                 }
 
+                function Wait-RdaMetricCall
+                {
+                    param($Handle, [int]$TimeoutSeconds)
+
+                    # Short slices keep the wait responsive to a pipeline stop such as Ctrl+C.
+                    $Clock = [System.Diagnostics.Stopwatch]::StartNew()
+                    while (-not $Handle.IsCompleted)
+                    {
+                        $RemainingMs = ($TimeoutSeconds * 1000) - $Clock.ElapsedMilliseconds
+                        if ($RemainingMs -le 0) { return $false }
+                        [void]$Handle.AsyncWaitHandle.WaitOne([int][math]::Min($RemainingMs, 500))
+                    }
+                    return $true
+                }
+
+                function Receive-RdaMetricCall
+                {
+                    param($Call, $Handle)
+
+                    try
+                    {
+                        $Output = $Call.EndInvoke($Handle)
+                    }
+                    catch
+                    {
+                        # EndInvoke wraps the failure in a MethodInvocationException. Rethrow the
+                        # record Get-AzMetric raised instead, so the classifier, the error-body reader
+                        # and the Retry-After reader see Azure's exception and its response.
+                        $Inner = $_.Exception.InnerException
+                        if ($Inner -is [System.Management.Automation.IContainsErrorRecord] -and $null -ne $Inner.ErrorRecord)
+                        {
+                            throw $Inner.ErrorRecord
+                        }
+                        throw
+                    }
+                    foreach ($Item in $Output) { $Item }
+                }
+
                 $MetricArgs = @{
                     ResourceId      = $_.Id
                     MetricName      = $_.MetricName
@@ -890,16 +944,16 @@ if ($Task -eq 'Processing')
                         $Permanent = $false
                         $PermanentOutcome = $null
 
-                        $Job = Start-ThreadJob -ScriptBlock {
-                            param($MArgs)
-                            Get-AzMetric @MArgs
-                        } -ArgumentList $MetricArgs
+                        $Call = [powershell]::Create()
+                        $Call.RunspacePool = $CallPool
+                        [void]$Call.AddCommand('Get-AzMetric').AddParameters($MetricArgs)
+                        $CallHandle = $Call.BeginInvoke()
 
-                        if (Wait-Job -Job $Job -Timeout $CallTimeoutSeconds)
+                        if (Wait-RdaMetricCall -Handle $CallHandle -TimeoutSeconds $CallTimeoutSeconds)
                         {
                             try
                             {
-                                $MetricQuery = Receive-Job -Job $Job -ErrorAction Stop
+                                $MetricQuery = Receive-RdaMetricCall -Call $Call -Handle $CallHandle
                                 $Succeeded = $true
                             }
                             catch
@@ -926,15 +980,18 @@ if ($Task -eq 'Processing')
                             }
                             finally
                             {
-                                Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+                                $Call.Dispose()
                             }
                         }
                         else
                         {
                             $TimedOut = $true
                             $LastError = ("Timed out after {0}s" -f $CallTimeoutSeconds)
-                            Stop-Job -Job $Job -ErrorAction SilentlyContinue
-                            Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+                            # Stop without waiting. A call blocked in a network read only returns when
+                            # the read does, so a synchronous stop would hold this runspace until then.
+                            # The abandoned call keeps its pool runspace until it finishes.
+                            [void]$Call.BeginStop($null, $null)
+                            $AbandonedCalls.Add([PSCustomObject]@{ Call = $Call; Handle = $CallHandle })
                         }
 
                         if ($Succeeded)
@@ -1109,6 +1166,18 @@ if ($Task -eq 'Processing')
         }
     }
 
+    $MetricAbandonedCount = $MetricAbandonedCalls.Count
+    $MetricAbandonedRunning = 0
+    if ($null -ne $MetricCallPool)
+    {
+        foreach ($Abandoned in $MetricAbandonedCalls)
+        {
+            if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
+        }
+        # BeginClose returns at once; the pool finishes closing after the last abandoned call returns.
+        [void]$MetricCallPool.BeginClose($null, $null)
+    }
+
     Write-RdaProgress -Activity 'Metrics collection' -Completed
 
     $PhaseStopwatch.Stop()
@@ -1125,6 +1194,11 @@ if ($Task -eq 'Processing')
 
     Write-MetricsDiag ("===== Metrics phase summary =====")
     Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Unauthorized: {8} | Forbidden: {9} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1), $UnauthorizedCount, $ForbiddenCount)
+
+    if ($MetricAbandonedCount -gt 0)
+    {
+        Write-MetricsDiag ("{0} timed-out call(s) were stopped without waiting for them; {1} had still not returned at phase end and hold a pool runspace until they do." -f $MetricAbandonedCount, $MetricAbandonedRunning)
+    }
 
     $PerCallHttpCalls = if ($DiagRecords.Count -gt 0) { [int]($DiagRecords | Measure-Object -Property Attempts -Sum).Sum } else { 0 }
     $BatchHttpCalls = [int]$script:MetricsBatchHttpCalls

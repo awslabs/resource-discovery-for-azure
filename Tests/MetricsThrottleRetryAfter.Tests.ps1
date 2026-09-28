@@ -4,12 +4,16 @@
 # Throttled/failed, ignoring the server's Retry-After. Get-RdaMetricRetryPlan now gives throttled
 # attempts their own budget and waits at least Retry-After (bounded). Extracted by AST like
 # MetricsErrorBodyCapture.Tests.ps1 does, because the function lives inside the -Parallel block.
+# The last Describe covers the per-attempt timeout: each attempt runs on a shared runspace pool
+# and a timed-out attempt is stopped without waiting for it.
 
 BeforeAll {
     $Repo = Split-Path $PSScriptRoot -Parent
     $script:MetricsSrc = Get-Content -LiteralPath (Join-Path $Repo 'Extension/Metrics.ps1') -Raw
     $Tokens = $null; $Errors = $null
     $Ast = [System.Management.Automation.Language.Parser]::ParseInput($script:MetricsSrc, [ref]$Tokens, [ref]$Errors)
+    if (@($Errors).Count -gt 0) { throw ('Extension/Metrics.ps1 does not parse: {0}' -f $Errors[0].Message) }
+    $script:Ast = $Ast
     $FnAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricRetryPlan' }, $true) | Select-Object -First 1
     if (-not $FnAst) { throw 'Get-RdaMetricRetryPlan was not found in Extension/Metrics.ps1' }
     . ([scriptblock]::Create($FnAst.Extent.Text))
@@ -24,8 +28,10 @@ BeforeAll {
 
     function Plan([hashtable]$Over)
     {
-        $P = @{ Attempt = 0; Throttled = $false; ThrottledAttempts = 0; RetryAfterSeconds = 0; Permanent = $false
-            MaxRetries = $script:MaxRetries; MaxThrottleRetries = $script:MaxThrottle; MaxRetryAfterSeconds = $script:MaxRetryAfter }
+        $P = @{
+            Attempt = 0; Throttled = $false; ThrottledAttempts = 0; RetryAfterSeconds = 0; Permanent = $false
+            MaxRetries = $script:MaxRetries; MaxThrottleRetries = $script:MaxThrottle; MaxRetryAfterSeconds = $script:MaxRetryAfter
+        }
         foreach ($K in $Over.Keys) { $P[$K] = $Over[$K] }
         Get-RdaMetricRetryPlan @P
     }
@@ -166,5 +172,180 @@ Describe 'Get-RdaMetricFailureClass - one failed attempt, classified from its me
         $script:MetricsSrc | Should -Match 'Unauthorized: \{8\} \| Forbidden: \{9\}'
         $script:MetricsSrc | Should -Match 'ACCESS FAILURE: '
         $script:MetricsSrc | Should -Match 'Re-authenticate \(Connect-AzAccount\)'
+    }
+}
+
+Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
+    BeforeAll {
+        foreach ($Name in 'Wait-RdaMetricCall', 'Receive-RdaMetricCall')
+        {
+            $Fn = $script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $Name }, $true) | Select-Object -First 1
+            if (-not $Fn) { throw ('{0} was not found in Extension/Metrics.ps1' -f $Name) }
+            . ([scriptblock]::Create($Fn.Extent.Text))
+        }
+        $script:Pool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+        [void]$script:Pool.SetMaxRunspaces(4)
+        $script:Pool.Open()
+        $script:Stuck = [System.Collections.Generic.List[object]]::new()
+
+        function Start-PoolCall([scriptblock]$Body, [object[]]$ArgumentList = @())
+        {
+            $Call = [powershell]::Create()
+            $Call.RunspacePool = $script:Pool
+            [void]$Call.AddScript($Body)
+            foreach ($A in $ArgumentList) { [void]$Call.AddArgument($A) }
+            [pscustomobject]@{ Call = $Call; Handle = $Call.BeginInvoke() }
+        }
+    }
+    AfterAll {
+        # Let any deliberately stuck call finish so the pool closes cleanly.
+        foreach ($S in @($script:Stuck)) { [void]$S.Handle.AsyncWaitHandle.WaitOne(10000); $S.Call.Dispose() }
+        if ($script:Pool)
+        {
+            $script:Pool.Close()
+            $script:Pool.Dispose()
+        }
+    }
+
+    It 'issues no job cmdlet at all: no Start-ThreadJob, Wait-Job, Receive-Job, Stop-Job or Remove-Job' {
+        # Start-ThreadJob runs at most 5 jobs at a time process-wide and builds a new runspace,
+        # with a fresh Az module load, for every attempt.
+        $JobCmds = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -in @('Start-ThreadJob', 'Start-Job', 'Wait-Job', 'Receive-Job', 'Stop-Job', 'Remove-Job') }, $true))
+        $JobCmds.Count | Should -Be 0 -Because ('a per-attempt job must not come back: {0}' -f (($JobCmds | ForEach-Object { $_.Extent.Text }) -join ' | '))
+    }
+    It 'runs every attempt on one pool built from CreateDefault2 and sized above ConcurrencyLimit' {
+        $script:MetricsSrc | Should -Match ([regex]::Escape('[runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())'))
+        $script:MetricsSrc | Should -Match 'SetMaxRunspaces\(\[math\]::Max\(1, \[int\]\$ConcurrencyLimit\) \* 2\)' -Because 'the headroom keeps abandoned calls from starving live ones'
+        $script:MetricsSrc | Should -Match '\$CallPool = \$using:MetricCallPool'
+        # Without the assignment each [powershell] gets a private runspace and reloads Az on every attempt.
+        $script:MetricsSrc | Should -Match '\$Call = \[powershell\]::Create\(\)\s*\$Call\.RunspacePool = \$CallPool'
+        @([regex]::Matches($script:MetricsSrc, '\[powershell\]::Create\(\)')).Count | Should -Be 1 -Because 'every attempt must go through the one pooled construction above'
+        $script:MetricsSrc | Should -Match "AddCommand\('Get-AzMetric'\)\.AddParameters\(\`$MetricArgs\)"
+    }
+    It 'stops a timed-out attempt without waiting and keeps it out of the classifier' {
+        $script:MetricsSrc | Should -Not -Match '\$Call\.(Stop|EndStop)\(' -Because 'a synchronous stop waits for a call blocked in a network read'
+        $script:MetricsSrc | Should -Match '(?s)if \(Wait-RdaMetricCall -Handle \$CallHandle -TimeoutSeconds \$CallTimeoutSeconds\).*?finally\s*\{\s*\$Call\.Dispose\(\)\s*\}\s*\}\s*else\s*\{\s*\$TimedOut = \$true\s*\$LastError = \("Timed out after \{0\}s" -f \$CallTimeoutSeconds\).*?\[void\]\$Call\.BeginStop\(\$null, \$null\)\s*\$AbandonedCalls\.Add'
+    }
+    It 'closes the pool after the last batch without waiting on abandoned calls' {
+        $script:MetricsSrc | Should -Match '\[void\]\$MetricCallPool\.BeginClose\(\$null, \$null\)'
+        $script:MetricsSrc | Should -Not -Match '\$MetricCallPool\.(Close|Dispose)\(\)' -Because 'both wait for a call that is still blocked'
+    }
+
+    It 'Wait-RdaMetricCall returns true as soon as a quick call completes' {
+        $P = Start-PoolCall { 'done' }
+        try
+        {
+            $Sw = [System.Diagnostics.Stopwatch]::StartNew()
+            Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 30 | Should -BeTrue
+            $Sw.Elapsed.TotalSeconds | Should -BeLessThan 10
+        }
+        finally { $P.Call.Dispose() }
+    }
+    It 'Wait-RdaMetricCall gives up at the timeout on a call blocked in .NET, and BeginStop does not wait for it' {
+        # Thread.Sleep stands in for a network read: a pipeline stop cannot interrupt it.
+        $P = Start-PoolCall { [System.Threading.Thread]::Sleep(6000); 'late' }
+        $script:Stuck.Add($P)
+        $Sw = [System.Diagnostics.Stopwatch]::StartNew()
+        Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 1 | Should -BeFalse
+        $Waited = $Sw.Elapsed.TotalSeconds
+        $Waited | Should -BeGreaterOrEqual 0.9
+        $Waited | Should -BeLessThan 3
+        $Sw.Restart()
+        [void]$P.Call.BeginStop($null, $null)
+        $Sw.Elapsed.TotalSeconds | Should -BeLessThan 1 -Because 'a synchronous stop would hold the caller until the blocked call returned'
+        $P.Handle.IsCompleted | Should -BeFalse -Because 'the call really was still blocked, so the timeout path was exercised'
+    }
+    It 'Receive-RdaMetricCall returns one result as the object itself, like assigning Receive-Job output' {
+        $P = Start-PoolCall { [pscustomobject]@{ Data = @(1, 2, 3) } }
+        try
+        {
+            $null = Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 30
+            $R = Receive-RdaMetricCall -Call $P.Call -Handle $P.Handle
+            # Test the variable itself: piping it into Should would unroll a one-item wrapper.
+            ($R -is [System.Collections.ICollection]) | Should -BeFalse -Because 'the aggregation reads $MetricQuery.Data off one metric object'
+            ($R -is [System.Management.Automation.PSCustomObject]) | Should -BeTrue
+            @($R.Data).Count | Should -Be 3
+        }
+        finally { $P.Call.Dispose() }
+    }
+    It 'Receive-RdaMetricCall returns $null for no output and an array for several' {
+        $P = Start-PoolCall { }
+        try
+        {
+            $null = Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 30
+            $R = Receive-RdaMetricCall -Call $P.Call -Handle $P.Handle
+            $null -eq $R | Should -BeTrue
+        }
+        finally { $P.Call.Dispose() }
+        $P = Start-PoolCall { 1; 2 }
+        try
+        {
+            $null = Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 30
+            $R = Receive-RdaMetricCall -Call $P.Call -Handle $P.Handle
+            ($R -is [object[]]) | Should -BeTrue
+            $R.Count | Should -Be 2
+        }
+        finally { $P.Call.Dispose() }
+    }
+    It 'BeginStop on a call still queued behind a blocked one completes it and frees the slot' {
+        # The degraded case: every runspace is held by an abandoned call, so the next attempt queues.
+        $Tight = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+        [void]$Tight.SetMaxRunspaces(1)
+        $Tight.Open()
+        $Calls = @()
+        try
+        {
+            $Bodies = @(
+                { [System.Threading.Thread]::Sleep(4000); 'blocker' }
+                { 'queued' }
+                { 'next' }
+            )
+            foreach ($Body in $Bodies)
+            {
+                $C = [powershell]::Create()
+                $C.RunspacePool = $Tight
+                [void]$C.AddScript($Body)
+                $Calls += [pscustomobject]@{ Call = $C; Handle = $null }
+            }
+            $Calls[0].Handle = $Calls[0].Call.BeginInvoke()
+            Start-Sleep -Milliseconds 300
+            $Calls[1].Handle = $Calls[1].Call.BeginInvoke()
+            Wait-RdaMetricCall -Handle $Calls[1].Handle -TimeoutSeconds 1 | Should -BeFalse -Because 'it is queued behind the blocked call'
+            [void]$Calls[1].Call.BeginStop($null, $null)
+            $Calls[1].Handle.AsyncWaitHandle.WaitOne(2000) | Should -BeTrue -Because 'a queued call that is stopped completes at once'
+            $Calls[2].Handle = $Calls[2].Call.BeginInvoke()
+            Wait-RdaMetricCall -Handle $Calls[2].Handle -TimeoutSeconds 15 | Should -BeTrue
+            (Receive-RdaMetricCall -Call $Calls[2].Call -Handle $Calls[2].Handle) | Should -Be 'next' -Because 'the stopped queued call did not keep the slot'
+        }
+        finally
+        {
+            foreach ($Entry in $Calls) { if ($Entry.Handle) { [void]$Entry.Handle.AsyncWaitHandle.WaitOne(10000) }; $Entry.Call.Dispose() }
+            $Tight.Close()
+            $Tight.Dispose()
+        }
+    }
+    It 'Receive-RdaMetricCall rethrows the error the call raised, not the EndInvoke wrapper' {
+        # A cmdlet that writes an error under -ErrorAction Stop, as Get-AzMetric does.
+        $Rec = [System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new("Operation returned an invalid status code 'NotFound'"), 'RdaProbe.NotFound', 'ObjectNotFound', $null)
+        $P = Start-PoolCall { param($R) function Write-Probe { [CmdletBinding()] param($E) $PSCmdlet.WriteError($E) }; Write-Probe -E $R -ErrorAction Stop } -ArgumentList $Rec
+        $null = Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 30
+        $Caught = $null
+        try { $null = Receive-RdaMetricCall -Call $P.Call -Handle $P.Handle } catch { $Caught = $_ } finally { $P.Call.Dispose() }
+        $Caught | Should -Not -BeNullOrEmpty
+        $Caught.FullyQualifiedErrorId | Should -Be 'RdaProbe.NotFound,Write-Probe' -Because 'the record keeps the id and command that raised it'
+        $Caught.Exception | Should -BeOfType [System.InvalidOperationException]
+        $Caught.Exception.Message | Should -Not -Match 'Exception calling "EndInvoke"'
+        (Get-RdaMetricFailureClass -Message $Caught.Exception.Message).Outcome | Should -Be 'NotFound'
+    }
+    It 'keeps the Retry-After header readable through the pool' {
+        if (-not $script:RealTypesAvailable) { Set-ItResult -Skipped -Because 'Az.Monitor (Microsoft.Rest types) is not installed here' }
+        $Rec = New-ThrottleRecord '17'
+        $P = Start-PoolCall { param($R) function Write-Probe { [CmdletBinding()] param($E) $PSCmdlet.WriteError($E) }; Write-Probe -E $R -ErrorAction Stop } -ArgumentList $Rec
+        $null = Wait-RdaMetricCall -Handle $P.Handle -TimeoutSeconds 30
+        $Caught = $null
+        try { $null = Receive-RdaMetricCall -Call $P.Call -Handle $P.Handle } catch { $Caught = $_ } finally { $P.Call.Dispose() }
+        $Caught | Should -Not -BeNullOrEmpty
+        Get-RdaRetryAfterSeconds -ErrorRecord $Caught | Should -Be 17
+        (Get-RdaMetricFailureClass -Message $Caught.Exception.Message).Throttled | Should -BeTrue
     }
 }

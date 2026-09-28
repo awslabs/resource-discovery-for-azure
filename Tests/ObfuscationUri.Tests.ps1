@@ -94,10 +94,11 @@ Describe 'Build-ObfuscatedResourceUri - structure preservation' {
     It 'nested child resource: alternating type/name masks every NAME, keeps every TYPE' {
         $Uri = "/subscriptions/$script:Sub/resourcegroups/rg1/providers/microsoft.sql/servers/srv1/databases/db1"
         $Out = Invoke-Build -Uri $Uri
-        $Out | Should -Match '/providers/microsoft\.sql/servers/prod_[0-9a-f-]+/databases/prod_[0-9a-f-]+$' `
+        $Out | Should -Match '/providers/microsoft\.sql/servers/prod_[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}/databases/prod_[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' `
             -Because 'servers and databases are TYPE segments (kept); srv1 and db1 are NAME segments (masked)'
         $Out | Should -Not -Match 'srv1'
-        $Out | Should -Not -Match 'db1'
+        # db1 is all hex, so it can occur by chance inside a minted GUID; look past the tokens' GUIDs.
+        ($Out -replace '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<guid>') | Should -Not -Match 'db1'
     }
 
     It 'mc_ resource-group prefix is preserved in the RG token' {

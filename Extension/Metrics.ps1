@@ -708,6 +708,9 @@ if ($Task -eq 'Processing')
 
     $MetricAbandonedCount = 0
     $MetricAbandonedRunning = 0
+    # Counted here and not from the bag: the per-batch drain takes a returned call OFF the bag, so
+    # the bag's size at phase end is what is still outstanding, not how many were ever abandoned.
+    $MetricAbandonedDrained = 0
 
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, throttle retries={5} (honours Retry-After up to {6}s), lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays), $MetricMaxThrottleRetries, $MetricMaxRetryAfterSeconds)
@@ -983,7 +986,11 @@ if ($Task -eq 'Processing')
                                 $Call.Dispose()
                                 $LastError = $_.Exception.Message
                                 $FailureClass = Get-RdaMetricFailureClass -Message $LastError
-                                if ($FailureClass.Permanent) { $Permanent = $true; $PermanentOutcome = $FailureClass.Outcome }
+                                # A pool that cannot dispatch does not recover inside this phase, so retrying
+                                # only spends the backoff. Get-RdaMetricFailureClass always yields an Outcome,
+                                # so $PermanentOutcome cannot be left null here (which would miss every bucket).
+                                $Permanent = $true
+                                $PermanentOutcome = $FailureClass.Outcome
                             }
 
                             if ($null -eq $CallHandle) { }
@@ -1205,11 +1212,26 @@ if ($Task -eq 'Processing')
                 # the rest of the phase, which is the retention this pooling exists to avoid.
                 $StillRunning = [System.Collections.Generic.List[object]]::new()
                 $Drained = $null
-                while ($MetricAbandonedCalls.TryTake([ref]$Drained))
+                try
                 {
-                    if ($Drained.Handle.IsCompleted) { $Drained.Call.Dispose() } else { $StillRunning.Add($Drained) }
+                    while ($MetricAbandonedCalls.TryTake([ref]$Drained))
+                    {
+                        if ($Drained.Handle.IsCompleted)
+                        {
+                            $Drained.Call.Dispose()
+                            $MetricAbandonedDrained++
+                        }
+                        else
+                        {
+                            $StillRunning.Add($Drained)
+                        }
+                    }
                 }
-                foreach ($Pending in $StillRunning) { $MetricAbandonedCalls.Add($Pending) }
+                finally
+                {
+                    # A call taken off the bag but not yet put back would be lost if the loop threw.
+                    foreach ($Pending in $StillRunning) { $MetricAbandonedCalls.Add($Pending) }
+                }
 
                 $RangeIdx++
             }
@@ -1218,14 +1240,24 @@ if ($Task -eq 'Processing')
     finally
     {
         # BeginClose, not Close: the latter waits for a call still blocked in a network read.
-        $MetricAbandonedCount = $MetricAbandonedCalls.Count
+        $MetricAbandonedCount = $MetricAbandonedDrained + $MetricAbandonedCalls.Count
         if ($null -ne $MetricCallPool)
         {
-            foreach ($Abandoned in $MetricAbandonedCalls)
+            try
             {
-                if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
+                foreach ($Abandoned in $MetricAbandonedCalls)
+                {
+                    if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
+                }
+                [void]$MetricCallPool.BeginClose($null, $null)
             }
-            [void]$MetricCallPool.BeginClose($null, $null)
+            catch
+            {
+                # Reaching here on the throw path means an exception is already in flight, and it may be
+                # the out-of-memory this pooling exists to survive. A teardown failure must not replace
+                # the exception the operator needs to see.
+                Write-Verbose ("[Metrics] Pool teardown reported: {0}" -f $_.Exception.Message)
+            }
         }
     }
 

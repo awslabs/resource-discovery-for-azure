@@ -281,8 +281,16 @@ Describe 'It is DIAGNOSTICS ONLY - the body must not reach control flow or outpu
         # The classification must remain a function of $LastError alone. If the body
         # ever fed a branch here, a malformed body would change retry behaviour.
         # Classification lives in Get-RdaMetricFailureClass and is called with the message alone.
-        $ClassBlock = [regex]::Match($script:MetricsSrc, '(?s)function Get-RdaMetricFailureClass\s*\{.*?\n                \}').Value
-        $ClassBlock | Should -Not -BeNullOrEmpty -Because 'the classification function must be findable'
+        # The function's extent, not a closing-brace-indentation regex. This function is nested inside
+        # the parallel scriptblock, so its brace column moves whenever the enclosing nesting changes,
+        # and a column-anchored text match then runs on past the function into unrelated code that may
+        # legitimately mention the body. The extent is exactly the function at any indentation.
+        $ClassAst = [System.Management.Automation.Language.Parser]::ParseInput($script:MetricsSrc, [ref]$null, [ref]$null)
+        $ClassFn = @($ClassAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Get-RdaMetricFailureClass' }, $true))
+        $ClassFn.Count | Should -Be 1 -Because 'the classification function must be findable, and have a single owner'
+        $ClassBlock = $ClassFn[0].Extent.Text
+        @($ClassFn[0].Body.ParamBlock.Parameters).Count | Should -Be 1 -Because 'it must classify from the message alone'
+        $ClassFn[0].Body.ParamBlock.Parameters[0].Name.Extent.Text | Should -Be '$Message'
         $ClassBlock | Should -Not -Match 'CallErrorBody|ErrorBody' -Because 'the response body must never influence a retry or skip decision'
         $script:MetricsSrc | Should -Match '(?m)Get-RdaMetricFailureClass -Message \$LastError\s*$' -Because 'the loop must classify from $LastError only'
     }

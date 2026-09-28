@@ -238,7 +238,6 @@ Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
         # 'elseif', not 'if': an undispatched call is short-circuited first, so it is never waited on
         # and never lands on the abandoned bag. Anchored on 'elseif' deliberately - 'if \(Wait-' would
         # also match inside 'elseif \(Wait-' and would pass whether the guard is there or not.
-        $script:MetricsSrc | Should -Match 'if \(\$null -eq \$CallHandle\) \{ \}' -Because 'the dispatch guard has to come first'
         $script:MetricsSrc | Should -Match '(?s)elseif \(Wait-RdaMetricCall -Handle \$CallHandle -TimeoutSeconds \$CallTimeoutSeconds\).*?finally\s*\{\s*\$Call\.Dispose\(\)\s*\}\s*\}\s*else\s*\{\s*\$TimedOut = \$true\s*\$LastError = \("Timed out after \{0\}s" -f \$CallTimeoutSeconds\).*?\[void\]\$Call\.BeginStop\(\$null, \$null\)\s*\$AbandonedCalls\.Add'
     }
     It 'closes the pool after the last batch without waiting on abandoned calls' {
@@ -366,38 +365,55 @@ Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
 }
 
 Describe 'Pool lifecycle - released on every exit, drained per batch, errors surfaced' {
-    BeforeAll {
-        $script:LifecycleAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
-    }
-
     It 'closes the pool in a finally that guards the whole batch loop, not just the normal exit' {
         # The wrapper catches a failed subscription and carries on in the SAME process, so a pool
         # released only where the loop falls through leaves one open pool per failed subscription -
         # precisely when memory is already short, which is the opposite of why pooling exists.
-        $Close = @($script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'BeginClose' }, $true))
+        $Close = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'BeginClose' }, $true))
         $Close.Count | Should -Be 1 -Because 'one owner of the pool teardown'
 
-        $Try = $Close[0].Parent
-        while ($null -ne $Try -and -not ($Try -is [System.Management.Automation.Language.TryStatementAst])) { $Try = $Try.Parent }
-        $Try | Should -Not -BeNullOrEmpty -Because 'the teardown must be in a try/finally, not on the fall-through path'
-        $Try.Finally | Should -Not -BeNullOrEmpty
-        $Close[0].Extent.StartOffset | Should -BeGreaterOrEqual $Try.Finally.Extent.StartOffset -Because 'it has to be in the finally, not the body'
+        # Every enclosing try, not merely the nearest one: the teardown itself sits in a try/catch so a
+        # teardown failure cannot replace an in-flight exception, and that puts a catch-only try in
+        # between. Requiring the teardown to fall INSIDE some enclosing finally's extent, and that same
+        # try to own the batch loop, is what a fall-through teardown cannot satisfy.
+        $Offset = $Close[0].Extent.StartOffset
+        $Ancestors = [System.Collections.Generic.List[object]]::new()
+        $Node = $Close[0].Parent
+        while ($null -ne $Node)
+        {
+            if ($Node -is [System.Management.Automation.Language.TryStatementAst]) { $Ancestors.Add($Node) }
+            $Node = $Node.Parent
+        }
+        @($Ancestors).Count | Should -BeGreaterThan 0 -Because 'the teardown must be in a try/finally, not on the fall-through path'
 
-        $Guarded = @($Try.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ForStatementAst] -and $N.Condition.Extent.Text -match 'MetricCount' }, $true))
+        $Guard = @($Ancestors | Where-Object {
+                $null -ne $_.Finally -and
+                $Offset -ge $_.Finally.Extent.StartOffset -and $Offset -lt $_.Finally.Extent.EndOffset
+            })
+        $Guard.Count | Should -Be 1 -Because 'exactly one enclosing finally owns the teardown'
+        $Guarded = @($Guard[0].Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ForStatementAst] -and $N.Condition.Extent.Text -match 'MetricCount' }, $true))
         $Guarded.Count | Should -Be 1 -Because 'the batch loop is what can throw'
-        $Try.Body.Extent.Text | Should -Match 'ForEach-Object -Parallel' -Because 'the parallel dispatch must be inside the guarded region'
+        $Guard[0].Body.Extent.Text | Should -Match 'ForEach-Object -Parallel' -Because 'the parallel dispatch must be inside the guarded region'
+
+        # The teardown is itself shielded. On the throw path an exception is already in flight, and it
+        # may be the out-of-memory this pooling exists to survive: a failure while disposing a call or
+        # closing a broken pool must not replace the exception the operator needs to see.
+        $Shield = @($Guard[0].Finally.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.CatchClauses.Count -ge 1 }, $true))
+        $Shield.Count | Should -Be 1 -Because 'the teardown itself must be guarded against masking an in-flight exception'
+        $Offset | Should -BeGreaterOrEqual $Shield[0].Body.Extent.StartOffset -Because 'the teardown has to be inside that shield'
+        $Offset | Should -BeLessThan $Shield[0].Body.Extent.EndOffset
     }
 
     It 'still uses BeginClose, never Close or Dispose, on the pool' {
         # Both wait for a call blocked in a network read.
-        $Bad = @($script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -in @('Close', 'Dispose') }, $true))
+        $Bad = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -in @('Close', 'Dispose') }, $true))
         $Bad.Count | Should -Be 0
     }
 
     It 'drains the abandoned calls after every batch, not only at phase end' {
         # Draining only at phase end keeps a call abandoned in an early batch, and whatever payload it
         # later received, alive for the rest of the phase.
-        $Drain = @($script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'TryTake' }, $true))
+        $Drain = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'TryTake' }, $true))
         $Drain.Count | Should -Be 1 -Because 'the per-batch drain takes completed calls off the bag'
 
         $Loop = $Drain[0].Parent
@@ -405,7 +421,46 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         $Enclosing = $Loop.Parent
         while ($null -ne $Enclosing -and -not ($Enclosing -is [System.Management.Automation.Language.ForStatementAst] -and $Enclosing.Condition.Extent.Text -match 'MetricCount')) { $Enclosing = $Enclosing.Parent }
         $Enclosing | Should -Not -BeNullOrEmpty -Because 'the drain must sit inside the per-batch loop'
-        $script:MetricsSrc | Should -Match 'foreach \(\$Pending in \$StillRunning\) \{ \$MetricAbandonedCalls\.Add\(\$Pending\) \}' -Because 'a call that has not returned yet must go back on the bag'
+        $ReAdd = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.ForEachStatementAst] -and $N.Condition.Extent.Text -eq '$StillRunning' }, $true))
+        $ReAdd.Count | Should -Be 1 -Because 'a call that has not returned yet must go back on the bag'
+        $ReAdd[0].Body.Extent.Text | Should -Match '\$MetricAbandonedCalls\.Add\(\$Pending\)'
+    }
+
+    It 'counts every abandoned call, not just the ones still outstanding at phase end' {
+        # The per-batch drain takes a RETURNED call off the bag, so the bag's size at phase end is what
+        # is still running, not how many were ever abandoned. Reading the reported total from the bag
+        # alone made the diagnostic under-report, usually to zero, precisely when it was needed. This
+        # runs the real drain bytes rather than mirroring them, so the accounting itself is under test.
+        $DrainTry = @($script:Ast.FindAll({ param($N)
+                    $N -is [System.Management.Automation.Language.TryStatementAst] -and
+                    @($N.Body.Statements | Where-Object {
+                            $_ -is [System.Management.Automation.Language.WhileStatementAst] -and
+                            $_.Condition.Extent.Text -match 'TryTake'
+                        }).Count -eq 1 }, $true))
+        $DrainTry.Count | Should -Be 1 -Because 'one owner of the per-batch drain'
+        $DrainTry[0].Finally | Should -Not -BeNullOrEmpty -Because 'a call taken off the bag must go back even if the loop throws'
+
+        $Init = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -in @('$StillRunning', '$Drained') }, $true))
+        $Init.Count | Should -Be 2 -Because 'the drain sets up exactly its list and its out-variable'
+        $Total = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$MetricAbandonedCount' -and $N.Right.Extent.Text -match 'MetricAbandonedCalls' }, $true))
+        $Total.Count | Should -Be 1 -Because 'one owner of the reported total'
+
+        $Disposed = [System.Collections.Generic.List[string]]::new()
+        $MetricAbandonedCalls = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+        foreach ($Spec in @(@('a', $true), @('b', $false), @('c', $true), @('d', $false), @('e', $true)))
+        {
+            $Fake = [pscustomobject]@{ Id = $Spec[0] }
+            $Fake | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $Disposed.Add($this.Id) }.GetNewClosure()
+            $MetricAbandonedCalls.Add([pscustomobject]@{ Handle = [pscustomobject]@{ IsCompleted = $Spec[1] }; Call = $Fake })
+        }
+        $MetricAbandonedDrained = 0
+        $Bytes = ($Init | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+        . ([scriptblock]::Create(($Bytes, $DrainTry[0].Extent.Text, $Total[0].Extent.Text) -join [Environment]::NewLine))
+
+        @($Disposed | Sort-Object) | Should -Be @('a', 'c', 'e') -Because 'only the calls that had already returned are released'
+        $MetricAbandonedDrained | Should -Be 3 -Because 'the drain has to remember what it released'
+        $MetricAbandonedCalls.Count | Should -Be 2 -Because 'the two that had not returned go back on the bag'
+        $MetricAbandonedCount | Should -Be 5 -Because 'the reported total is every call that was abandoned, drained ones included'
     }
 
     It 'surfaces an error left in the call error stream instead of reporting an empty success' {
@@ -418,12 +473,34 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
     It 'disposes the call and keeps the retry budget when the dispatch itself fails' {
         # A broken or closed pool fails at BeginInvoke, before the call is dispatched: without this the
         # [powershell] leaks and the exception escapes the retry loop, skipping the budget entirely.
-        $script:MetricsSrc | Should -Match '(?s)\$CallHandle = \$null\s*\r?\n\s*try\s*\{.*?\$CallHandle = \$Call\.BeginInvoke\(\).*?\}\s*\r?\n\s*catch\s*\{.*?\$Call\.Dispose\(\)'
-        $script:MetricsSrc | Should -Match 'if \(\$null -eq \$CallHandle\) \{ \}' -Because 'an undispatched call must not be waited on'
+        # Asserted on the AST rather than source text: a '(?s).*?' reaching for $Call.Dispose() runs
+        # past this catch and matches the wait branch's finally, so deleting the dispose that this test
+        # exists to protect would still pass.
+        $Dispatch = @($script:Ast.FindAll({ param($N)
+                    $N -is [System.Management.Automation.Language.TryStatementAst] -and
+                    @($N.Body.Statements | Where-Object {
+                            $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                            $_.Left.Extent.Text -eq '$CallHandle' -and $_.Right.Extent.Text -match 'BeginInvoke'
+                        }).Count -eq 1 }, $true))
+        $Dispatch.Count | Should -Be 1 -Because 'one guarded dispatch'
+        $Catch = $Dispatch[0].CatchClauses[0]
+        $Catch | Should -Not -BeNullOrEmpty -Because 'the dispatch must have a catch, or the exception escapes the retry loop'
+        @($Catch.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$Call' -and $N.Member.Extent.Text -eq 'Dispose' }, $true)).Count |
+            Should -Be 1 -Because 'an undispatched [powershell] must not leak'
+        @($Catch.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ThrowStatementAst] }, $true)).Count |
+            Should -Be 0 -Because 'rethrowing here would skip the retry budget entirely'
+        $Catch.Body.Extent.Text | Should -Match '\$Permanent = \$true' -Because 'a pool that cannot dispatch does not recover inside this phase, so retrying only spends the backoff'
+
+        # The guard and the wait have to be clauses of the SAME chain, guard first. Two independent
+        # text pins could not tell that apart from a guard sitting on an unrelated if.
+        $Chain = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses.Count -ge 2 -and $N.Clauses[0].Item1.Extent.Text -eq '$null -eq $CallHandle' }, $true))
+        $Chain.Count | Should -Be 1 -Because 'the dispatch guard heads exactly one chain'
+        @($Chain[0].Clauses[0].Item2.Statements).Count | Should -Be 0 -Because 'an undispatched call must not be waited on, and there is nothing else to do for it'
+        $Chain[0].Clauses[1].Item1.Extent.Text | Should -Match '^Wait-RdaMetricCall ' -Because 'the wait is the next clause, so it is reached only when the call was dispatched'
     }
 
     It 'Receive-RdaMetricCall rethrows a written error as a record the classifier can read' {
-        $Fn = $script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Receive-RdaMetricCall' }, $true) | Select-Object -First 1
+        $Fn = $script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Receive-RdaMetricCall' }, $true) | Select-Object -First 1
         . ([scriptblock]::Create($Fn.Extent.Text))
         $Pool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
         [void]$Pool.SetMaxRunspaces(2); $Pool.Open()

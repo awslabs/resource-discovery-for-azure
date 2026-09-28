@@ -1665,11 +1665,16 @@ function ExecuteInventoryProcessing()
             }
 
             Write-Log -Message ("Gathering Marketplace consumption for: {0}" -f $sub.Name) -Severity 'Info'
+            Write-RdaMemorySnapshot -Phase ('Before the Marketplace pull for {0}' -f $sub.Name)
 
             $MarketplaceRecordsThisSub = 0
             $MarketplaceFailedThisSub = $false
             $MarketplaceFailureMessage = $null
             $MarketplaceData = $null
+            # Reset here, not only after the export: every path that throws skips the release
+            # below, which would otherwise leave the previous subscription's converted rows
+            # alive through this subscription's fetch.
+            $MarketplaceExport = $null
 
             try
             {
@@ -1678,6 +1683,10 @@ function ExecuteInventoryProcessing()
                 $MpAuthRefreshedThisCall = $false
                 $MpAuthRefreshMax = 3
                 $MpAuthRefreshCount = 0
+                # Per SUBSCRIPTION, like the rest of this block: declared outside the foreach the
+                # whole run would share one retry and every later subscription would abandon its
+                # Marketplace data on its first out-of-memory error without compacting at all.
+                $MarketplaceOutOfMemoryRetried = $false
                 while ($true)
                 {
                     try
@@ -1704,7 +1713,41 @@ function ExecuteInventoryProcessing()
                             throw
                         }
 
-                        if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
+                        # Read once into a local: the classifiers below take a string, and the
+                        # out-of-memory branch reports the same text after a collection has run.
+                        $MpErrorText = [string]$_.Exception.Message
+
+                        if (Test-RdaOutOfMemory -ErrorMessage $MpErrorText)
+                        {
+                            # Backing off cannot free memory and this error carries no Retry-After, so
+                            # the transient budget would only repeat it through ~25 minutes of
+                            # exponential backoff. Unlike the first-party page loop, which re-requests
+                            # one 1000-row page, this endpoint returns the whole window in a single
+                            # response: the request size is IDENTICAL on the retry, so compaction is the
+                            # only thing that changed and this recovers a fragmented large object heap,
+                            # not an exhausted one. One attempt only; a second ends this subscription's
+                            # Marketplace pull and the outer catch reports it. Nothing has been written
+                            # yet - the export runs only after this loop breaks - so no row can double.
+                            if ($MarketplaceOutOfMemoryRetried) { throw }
+                            $MarketplaceOutOfMemoryRetried = $true
+                            Write-Log -Message ("Marketplace query for {0} ran out of memory: {1}. Compacting memory and retrying this subscription's Marketplace pull once." -f $sub.Name, $MpErrorText.TrimEnd('.')) -Severity 'Warning'
+                            # The fetched response only. $MarketplaceExport cannot hold anything here -
+                            # it is assigned after this loop breaks - and the run-wide Marketplace token
+                            # maps and caches must SURVIVE: dropping one would mint a different token for
+                            # a real value already written under its first token and break determinism.
+                            $MarketplaceData = $null
+                            # Same sequence as the first-party page loop's out-of-memory branch.
+                            # Write-RdaMemorySnapshot -Compact is NOT a substitute: it omits the
+                            # finalizer wait and the follow-up collection, so Az response objects
+                            # awaiting finalization would not be reclaimed.
+                            [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                            [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+                            [System.GC]::WaitForPendingFinalizers()
+                            [System.GC]::Collect()
+                            continue
+                        }
+
+                        if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText))
                         {
                             $MpAuthRefreshedThisCall = $true
                             $MpAuthRefreshCount++
@@ -1799,6 +1842,11 @@ function ExecuteInventoryProcessing()
                     $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache -OrderCache $script:MarketplaceOrderCache))
                 }
 
+                # Converted now, so drop the raw response. Both copies unavoidably coexist FOR the
+                # conversion loop above, so this does not lower the peak; it stops the raw response
+                # being retained past its last reader, through the export and the next subscription.
+                $MarketplaceData = $null
+
                 if ($MarketplaceExport.Count -gt 0)
                 {
                     $MarketplaceExport | Select-Object PublisherName, OfferName, PlanName, OrderNumber, ConsumedService, ConsumedQuantity, UnitOfMeasure, PretaxCost, Currency, IsEstimated, MeterId, UsageStart, UsageEnd, SubscriptionGuid, SubscriptionName, ResourceGroup, InstanceId, InstanceName | Export-Csv -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8 -Append -NoTypeInformation
@@ -1806,12 +1854,43 @@ function ExecuteInventoryProcessing()
 
                 $MarketplaceRecordsThisSub = $MarketplaceExport.Count
                 Write-Log -Message ("Marketplace records found for {0}: {1}" -f $sub.Name, $MarketplaceRecordsThisSub) -Severity 'Info'
+                # On disk and counted; the health record carries the count, not the rows.
+                $MarketplaceExport = $null
             }
             catch
             {
                 $MarketplaceFailedThisSub = $true
                 $MarketplaceFailureMessage = ("{0} (this subscription's Marketplace data is INCOMPLETE)" -f $_.Exception.Message)
                 Write-Log -Message ("Marketplace query failed for {0}: {1}" -f $sub.Name, $MarketplaceFailureMessage) -Severity 'Warning'
+                $MpOuterErrorText = [string]$_.Exception.Message
+                # Release on this path too. It is the point of greatest memory pressure, and without
+                # this both structures stay referenced through the health append below and on into the
+                # report render and the packaging step.
+                $MarketplaceData = $null
+                $MarketplaceExport = $null
+                if (Test-RdaOutOfMemory -ErrorMessage $MpOuterErrorText)
+                {
+                    # No merge guidance on purpose: Merge-RecoveryData exposes -RecoverConsumption and
+                    # -RecoverMetrics only, so there is no supported way to splice a re-collected
+                    # Marketplace CSV into this bundle. This endpoint also returns the whole window in
+                    # one response, so there is no page to resume from either. A re-run is therefore a
+                    # REPLACEMENT bundle, and because -SkipConsumption implies -SkipMarketplace it has
+                    # to redo the first-party consumption pull as well - say both, or the advice reads
+                    # as though only the Marketplace phase repeats. The command, the subscription id and
+                    # the dictionary path stay in this log line; the health record's Message reaches
+                    # RunSummary.log unscrubbed.
+                    # An obfuscated run MUST be re-run obfuscated and seeded with this run's dictionary,
+                    # otherwise the replacement bundle carries real names.
+                    $MarketplaceRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
+                    if (-not [string]::IsNullOrEmpty($SubscriptionID))
+                    {
+                        Write-Log -Message ("Marketplace consumption for {0} stopped because this PowerShell process ran out of memory, so its Marketplace cost data is INCOMPLETE. There is no way to merge Marketplace rows back into this bundle, so re-run this subscription in a fresh PowerShell process, or on a host with more memory, and use the report it produces INSTEAD of this one - the re-run repeats the first-party consumption pull too (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics{2})." -f $sub.Name, $sub.Id, $MarketplaceRerunObfuscation) -Severity 'Error'
+                    }
+                    else
+                    {
+                        Write-Log -Message ("Marketplace consumption for {0} stopped because this PowerShell process ran out of memory, so its Marketplace cost data is INCOMPLETE. This report covers every subscription in scope and Marketplace rows cannot be merged back in, so re-run the whole report in a fresh PowerShell process, or on a host with more memory, and use that report INSTEAD of this one." -f $sub.Name) -Severity 'Error'
+                    }
+                }
             }
 
             $Global:MarketplaceRecordCount += $MarketplaceRecordsThisSub

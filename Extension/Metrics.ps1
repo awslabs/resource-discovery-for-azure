@@ -985,12 +985,12 @@ if ($Task -eq 'Processing')
                                 # this is the one failure that would skip the retry budget entirely.
                                 $Call.Dispose()
                                 $LastError = $_.Exception.Message
-                                $FailureClass = Get-RdaMetricFailureClass -Message $LastError
-                                # A pool that cannot dispatch does not recover inside this phase, so retrying
-                                # only spends the backoff. Get-RdaMetricFailureClass always yields an Outcome,
-                                # so $PermanentOutcome cannot be left null here (which would miss every bucket).
+                                # Nothing in this phase repairs the pool, so a retry would re-bind to the same
+                                # object and only spend the backoff. Bucketed as a local Error rather than by
+                                # what the message happens to contain, so a pool fault whose text mentions 429
+                                # or authentication cannot read as an Azure access failure to the operator.
                                 $Permanent = $true
-                                $PermanentOutcome = $FailureClass.Outcome
+                                $PermanentOutcome = 'Error'
                             }
 
                             if ($null -eq $CallHandle) { }
@@ -1214,22 +1214,23 @@ if ($Task -eq 'Processing')
                 $Drained = $null
                 try
                 {
-                    while ($MetricAbandonedCalls.TryTake([ref]$Drained))
+                    while ($MetricAbandonedCalls.TryTake([ref]$Drained)) { $StillRunning.Add($Drained) }
+                    # Removed only once the dispose has actually returned, walking backwards so the removal
+                    # does not disturb the indices still to be visited. Anything that throws stays on the
+                    # list and goes back on the bag, so no call is dropped from the count or leaked.
+                    for ($Idx = $StillRunning.Count - 1; $Idx -ge 0; $Idx--)
                     {
-                        if ($Drained.Handle.IsCompleted)
+                        if ($StillRunning[$Idx].Handle.IsCompleted)
                         {
-                            $Drained.Call.Dispose()
+                            $StillRunning[$Idx].Call.Dispose()
+                            $StillRunning.RemoveAt($Idx)
                             $MetricAbandonedDrained++
-                        }
-                        else
-                        {
-                            $StillRunning.Add($Drained)
                         }
                     }
                 }
                 finally
                 {
-                    # A call taken off the bag but not yet put back would be lost if the loop threw.
+                    # Everything taken off the bag and not confirmed released goes back on it.
                     foreach ($Pending in $StillRunning) { $MetricAbandonedCalls.Add($Pending) }
                 }
 
@@ -1245,18 +1246,23 @@ if ($Task -eq 'Processing')
         {
             try
             {
+                # Closed before the disposal walk, not after: closing the pool is what actually releases
+                # the runspaces, and the walk below is best-effort bookkeeping. A throw in the walk must
+                # not be what skips the close, or the per-subscription leak is back with the failure
+                # swallowed by the catch below.
+                [void]$MetricCallPool.BeginClose($null, $null)
                 foreach ($Abandoned in $MetricAbandonedCalls)
                 {
                     if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
                 }
-                [void]$MetricCallPool.BeginClose($null, $null)
             }
             catch
             {
                 # Reaching here on the throw path means an exception is already in flight, and it may be
                 # the out-of-memory this pooling exists to survive. A teardown failure must not replace
-                # the exception the operator needs to see.
-                Write-Verbose ("[Metrics] Pool teardown reported: {0}" -f $_.Exception.Message)
+                # the exception the operator needs to see, but it must not vanish either: Write-Verbose
+                # would be discarded at the default preference.
+                Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
             }
         }
     }

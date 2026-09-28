@@ -402,6 +402,19 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         $Shield.Count | Should -Be 1 -Because 'the teardown itself must be guarded against masking an in-flight exception'
         $Offset | Should -BeGreaterOrEqual $Shield[0].Body.Extent.StartOffset -Because 'the teardown has to be inside that shield'
         $Offset | Should -BeLessThan $Shield[0].Body.Extent.EndOffset
+
+        # Closing the pool is what releases the runspaces; the disposal walk is bookkeeping. The close
+        # must come first, or a throw in the walk is what skips it, swallowed by the shield's catch.
+        $Walk = @($Shield[0].Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ForEachStatementAst] -and $N.Condition.Extent.Text -eq '$MetricAbandonedCalls' }, $true))
+        $Walk.Count | Should -Be 1
+        $Offset | Should -BeLessThan $Walk[0].Extent.StartOffset -Because 'the pool is closed before the best-effort disposal walk'
+
+        # Write-Verbose is discarded at the default preference, which would lose the one trace that a
+        # teardown failure - and so a leaked pool - ever happened.
+        # On the commands, not the text: a comment naming the rejected channel would satisfy a text match.
+        $Logged = @($Shield[0].CatchClauses[0].Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        $Logged | Should -Contain 'Write-MetricsDiag' -Because 'the teardown failure has to reach the debug log'
+        $Logged | Should -Not -Contain 'Write-Verbose' -Because 'Write-Verbose is discarded at the default preference, losing the only trace of a leaked pool'
     }
 
     It 'still uses BeginClose, never Close or Dispose, on the pool' {
@@ -447,7 +460,9 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
 
         $Disposed = [System.Collections.Generic.List[string]]::new()
         $MetricAbandonedCalls = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
-        foreach ($Spec in @(@('a', $true), @('b', $false), @('c', $true), @('d', $false), @('e', $true)))
+        # Two of the completed entries are ADJACENT on purpose. A forward walk that removes as it goes
+        # skips the item shifted into the vacated index, and an alternating fixture would not notice.
+        foreach ($Spec in @(@('a', $true), @('b', $true), @('c', $false), @('d', $true), @('e', $false)))
         {
             $Fake = [pscustomobject]@{ Id = $Spec[0] }
             $Fake | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $Disposed.Add($this.Id) }.GetNewClosure()
@@ -457,7 +472,7 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         $Bytes = ($Init | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
         . ([scriptblock]::Create(($Bytes, $DrainTry[0].Extent.Text, $Total[0].Extent.Text) -join [Environment]::NewLine))
 
-        @($Disposed | Sort-Object) | Should -Be @('a', 'c', 'e') -Because 'only the calls that had already returned are released'
+        @($Disposed | Sort-Object) | Should -Be @('a', 'b', 'd') -Because 'only the calls that had already returned are released, every one of them'
         $MetricAbandonedDrained | Should -Be 3 -Because 'the drain has to remember what it released'
         $MetricAbandonedCalls.Count | Should -Be 2 -Because 'the two that had not returned go back on the bag'
         $MetricAbandonedCount | Should -Be 5 -Because 'the reported total is every call that was abandoned, drained ones included'
@@ -490,6 +505,10 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         @($Catch.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ThrowStatementAst] }, $true)).Count |
             Should -Be 0 -Because 'rethrowing here would skip the retry budget entirely'
         $Catch.Body.Extent.Text | Should -Match '\$Permanent = \$true' -Because 'a pool that cannot dispatch does not recover inside this phase, so retrying only spends the backoff'
+        $Bucket = @($Catch.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$PermanentOutcome' }, $true))
+        $Bucket.Count | Should -Be 1
+        $Bucket[0].Right.Extent.Text | Should -Be "'Error'" -Because 'a local dispatch fault must not be bucketed by what its message happens to say, or it reads as an Azure access failure'
+        $Catch.Body.Extent.Text | Should -Not -Match 'Get-RdaMetricFailureClass' -Because 'the bucket is no longer derived from the message here'
 
         # The guard and the wait have to be clauses of the SAME chain, guard first. Two independent
         # text pins could not tell that apart from a guard sitting on an unrelated if.

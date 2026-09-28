@@ -215,16 +215,31 @@ Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
     }
     It 'runs every attempt on one pool built from CreateDefault2 and sized above ConcurrencyLimit' {
         $script:MetricsSrc | Should -Match ([regex]::Escape('[runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())'))
-        $script:MetricsSrc | Should -Match 'SetMaxRunspaces\(\[math\]::Max\(1, \[int\]\$ConcurrencyLimit\) \* 2\)' -Because 'the headroom keeps abandoned calls from starving live ones'
+        # Each of the ConcurrencyLimit parallel slots can abandon one call per attempt, so the
+        # ceiling is (MaxRetries + 1) per slot. A flat doubling saturates after two timed-out rounds,
+        # and once the pool is full BeginInvoke queues while the per-call clock is already running -
+        # so a call that never reached Azure gets recorded as a timeout and counted as an API call.
+        $script:MetricsSrc | Should -Match 'SetMaxRunspaces\(\[math\]::Max\(1, \[int\]\$ConcurrencyLimit\) \* \(\[math\]::Max\(1, \[int\]\$MetricMaxRetries\) \+ 1\)\)' -Because 'the headroom has to cover every attempt each slot can abandon, not a flat doubling'
         $script:MetricsSrc | Should -Match '\$CallPool = \$using:MetricCallPool'
-        # Without the assignment each [powershell] gets a private runspace and reloads Az on every attempt.
-        $script:MetricsSrc | Should -Match '\$Call = \[powershell\]::Create\(\)\s*\$Call\.RunspacePool = \$CallPool'
-        @([regex]::Matches($script:MetricsSrc, '\[powershell\]::Create\(\)')).Count | Should -Be 1 -Because 'every attempt must go through the one pooled construction above'
+        # Without the assignment each [powershell] gets a private runspace and reloads Az on every
+        # attempt. Asserted over the AST rather than as adjacent text, because the dispatch guard now
+        # sits between the construction and the assignment - the invariant is that the ONE construction
+        # is bound to the SHARED pool, not that the two statements are neighbours.
+        $Creates = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '[powershell]' -and $N.Member.Extent.Text -eq 'Create' }, $true))
+        $Creates.Count | Should -Be 1 -Because 'every attempt must go through the one pooled construction'
+        $PoolBinds = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$Call.RunspacePool' }, $true))
+        $PoolBinds.Count | Should -Be 1 -Because 'one binding, so no attempt can silently get a private runspace'
+        $PoolBinds[0].Right.Extent.Text | Should -Be '$CallPool' -Because 'it must bind to the pool shared through $using:, not a new one'
+        $PoolBinds[0].Extent.StartOffset | Should -BeGreaterThan $Creates[0].Extent.StartOffset -Because 'the call is constructed first, then bound'
         $script:MetricsSrc | Should -Match "AddCommand\('Get-AzMetric'\)\.AddParameters\(\`$MetricArgs\)"
     }
     It 'stops a timed-out attempt without waiting and keeps it out of the classifier' {
         $script:MetricsSrc | Should -Not -Match '\$Call\.(Stop|EndStop)\(' -Because 'a synchronous stop waits for a call blocked in a network read'
-        $script:MetricsSrc | Should -Match '(?s)if \(Wait-RdaMetricCall -Handle \$CallHandle -TimeoutSeconds \$CallTimeoutSeconds\).*?finally\s*\{\s*\$Call\.Dispose\(\)\s*\}\s*\}\s*else\s*\{\s*\$TimedOut = \$true\s*\$LastError = \("Timed out after \{0\}s" -f \$CallTimeoutSeconds\).*?\[void\]\$Call\.BeginStop\(\$null, \$null\)\s*\$AbandonedCalls\.Add'
+        # 'elseif', not 'if': an undispatched call is short-circuited first, so it is never waited on
+        # and never lands on the abandoned bag. Anchored on 'elseif' deliberately - 'if \(Wait-' would
+        # also match inside 'elseif \(Wait-' and would pass whether the guard is there or not.
+        $script:MetricsSrc | Should -Match 'if \(\$null -eq \$CallHandle\) \{ \}' -Because 'the dispatch guard has to come first'
+        $script:MetricsSrc | Should -Match '(?s)elseif \(Wait-RdaMetricCall -Handle \$CallHandle -TimeoutSeconds \$CallTimeoutSeconds\).*?finally\s*\{\s*\$Call\.Dispose\(\)\s*\}\s*\}\s*else\s*\{\s*\$TimedOut = \$true\s*\$LastError = \("Timed out after \{0\}s" -f \$CallTimeoutSeconds\).*?\[void\]\$Call\.BeginStop\(\$null, \$null\)\s*\$AbandonedCalls\.Add'
     }
     It 'closes the pool after the last batch without waiting on abandoned calls' {
         $script:MetricsSrc | Should -Match '\[void\]\$MetricCallPool\.BeginClose\(\$null, \$null\)'
@@ -347,5 +362,83 @@ Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
         $Caught | Should -Not -BeNullOrEmpty
         Get-RdaRetryAfterSeconds -ErrorRecord $Caught | Should -Be 17
         (Get-RdaMetricFailureClass -Message $Caught.Exception.Message).Throttled | Should -BeTrue
+    }
+}
+
+Describe 'Pool lifecycle - released on every exit, drained per batch, errors surfaced' {
+    BeforeAll {
+        $script:LifecycleAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
+    }
+
+    It 'closes the pool in a finally that guards the whole batch loop, not just the normal exit' {
+        # The wrapper catches a failed subscription and carries on in the SAME process, so a pool
+        # released only where the loop falls through leaves one open pool per failed subscription -
+        # precisely when memory is already short, which is the opposite of why pooling exists.
+        $Close = @($script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'BeginClose' }, $true))
+        $Close.Count | Should -Be 1 -Because 'one owner of the pool teardown'
+
+        $Try = $Close[0].Parent
+        while ($null -ne $Try -and -not ($Try -is [System.Management.Automation.Language.TryStatementAst])) { $Try = $Try.Parent }
+        $Try | Should -Not -BeNullOrEmpty -Because 'the teardown must be in a try/finally, not on the fall-through path'
+        $Try.Finally | Should -Not -BeNullOrEmpty
+        $Close[0].Extent.StartOffset | Should -BeGreaterOrEqual $Try.Finally.Extent.StartOffset -Because 'it has to be in the finally, not the body'
+
+        $Guarded = @($Try.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ForStatementAst] -and $N.Condition.Extent.Text -match 'MetricCount' }, $true))
+        $Guarded.Count | Should -Be 1 -Because 'the batch loop is what can throw'
+        $Try.Body.Extent.Text | Should -Match 'ForEach-Object -Parallel' -Because 'the parallel dispatch must be inside the guarded region'
+    }
+
+    It 'still uses BeginClose, never Close or Dispose, on the pool' {
+        # Both wait for a call blocked in a network read.
+        $Bad = @($script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -in @('Close', 'Dispose') }, $true))
+        $Bad.Count | Should -Be 0
+    }
+
+    It 'drains the abandoned calls after every batch, not only at phase end' {
+        # Draining only at phase end keeps a call abandoned in an early batch, and whatever payload it
+        # later received, alive for the rest of the phase.
+        $Drain = @($script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'TryTake' }, $true))
+        $Drain.Count | Should -Be 1 -Because 'the per-batch drain takes completed calls off the bag'
+
+        $Loop = $Drain[0].Parent
+        while ($null -ne $Loop -and -not ($Loop -is [System.Management.Automation.Language.LoopStatementAst])) { $Loop = $Loop.Parent }
+        $Enclosing = $Loop.Parent
+        while ($null -ne $Enclosing -and -not ($Enclosing -is [System.Management.Automation.Language.ForStatementAst] -and $Enclosing.Condition.Extent.Text -match 'MetricCount')) { $Enclosing = $Enclosing.Parent }
+        $Enclosing | Should -Not -BeNullOrEmpty -Because 'the drain must sit inside the per-batch loop'
+        $script:MetricsSrc | Should -Match 'foreach \(\$Pending in \$StillRunning\) \{ \$MetricAbandonedCalls\.Add\(\$Pending\) \}' -Because 'a call that has not returned yet must go back on the bag'
+    }
+
+    It 'surfaces an error left in the call error stream instead of reporting an empty success' {
+        # EndInvoke only throws when the call itself terminated. A cmdlet that WROTE an error and
+        # produced nothing would otherwise be recorded as a success with a metric value of 0.
+        $script:MetricsSrc | Should -Match '\$Call\.HadErrors -and @\(\$Output\)\.Count -eq 0 -and \$Call\.Streams\.Error\.Count -gt 0'
+        $script:MetricsSrc | Should -Match 'throw \$Call\.Streams\.Error\[0\]'
+    }
+
+    It 'disposes the call and keeps the retry budget when the dispatch itself fails' {
+        # A broken or closed pool fails at BeginInvoke, before the call is dispatched: without this the
+        # [powershell] leaks and the exception escapes the retry loop, skipping the budget entirely.
+        $script:MetricsSrc | Should -Match '(?s)\$CallHandle = \$null\s*\r?\n\s*try\s*\{.*?\$CallHandle = \$Call\.BeginInvoke\(\).*?\}\s*\r?\n\s*catch\s*\{.*?\$Call\.Dispose\(\)'
+        $script:MetricsSrc | Should -Match 'if \(\$null -eq \$CallHandle\) \{ \}' -Because 'an undispatched call must not be waited on'
+    }
+
+    It 'Receive-RdaMetricCall rethrows a written error as a record the classifier can read' {
+        $Fn = $script:LifecycleAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Receive-RdaMetricCall' }, $true) | Select-Object -First 1
+        . ([scriptblock]::Create($Fn.Extent.Text))
+        $Pool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+        [void]$Pool.SetMaxRunspaces(2); $Pool.Open()
+        try
+        {
+            $Call = [powershell]::Create(); $Call.RunspacePool = $Pool
+            # Writes a non-terminating error and emits nothing: EndInvoke returns empty and does NOT throw.
+            [void]$Call.AddScript({ Write-Error "Operation returned an invalid status code 'NotFound'"; })
+            $H = $Call.BeginInvoke(); [void]$H.AsyncWaitHandle.WaitOne(30000)
+            $Caught = $null
+            try { $null = Receive-RdaMetricCall -Call $Call -Handle $H } catch { $Caught = $_ }
+            $Caught | Should -Not -BeNullOrEmpty -Because 'an error-stream-only failure must not read as a success'
+            (Get-RdaMetricFailureClass -Message $Caught.Exception.Message).Outcome | Should -Be 'NotFound' -Because 'the classifier still has to be able to read it'
+            $Call.Dispose()
+        }
+        finally { $Pool.Close(); $Pool.Dispose() }
     }
 }

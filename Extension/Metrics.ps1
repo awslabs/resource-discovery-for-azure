@@ -692,15 +692,22 @@ if ($Task -eq 'Processing')
     # across calls, so Az.Accounts and Az.Monitor load once per runspace rather than once per
     # attempt, and no call waits behind the process-wide Start-ThreadJob throttle (5 by default).
     # Runspaces are created on demand; the headroom above ConcurrencyLimit is for timed-out
-    # calls that are abandoned while they still hold one.
+    # calls that are abandoned while they still hold one. Each of the ConcurrencyLimit parallel
+    # slots can abandon one call per attempt, so the ceiling is (MaxRetries + 1) per slot: a flat
+    # doubling saturates after two timed-out rounds, and once the pool is full BeginInvoke queues
+    # while the per-call clock is already running, so a call that never reached Azure is recorded
+    # as a timeout and still counted as an API call issued.
     $MetricCallPool = $null
     $MetricAbandonedCalls = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
     if ($MetricCount -gt 0)
     {
         $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
-        [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * 2)
+        [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
         $MetricCallPool.Open()
     }
+
+    $MetricAbandonedCount = 0
+    $MetricAbandonedRunning = 0
 
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, throttle retries={5} (honours Retry-After up to {6}s), lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays), $MetricMaxThrottleRetries, $MetricMaxRetryAfterSeconds)
@@ -710,472 +717,516 @@ if ($Task -eq 'Processing')
     $MetricsProcessed = 0
     $Defs = [System.Collections.Generic.List[object]]::new()
 
-    for ($i = 0; $i -lt $MetricCount; $i++)
+    # Released in the finally below rather than on the way out. This phase can end on a throw - a
+    # write failure under -Debug, a pipeline stop, or the out-of-memory error this pooling exists
+    # to make less likely - and Run-AllSubscriptions.ps1 catches a failed subscription and carries
+    # on in the SAME process, so a pool released only on the normal path would leave one open pool
+    # per failed subscription: exactly when memory is already short, and the opposite of the point.
+    try
     {
-        $Defs.Add($MetricDefs[$i])
-        $MetricsProcessed++
-
-        if ($Defs.Count -ge $RangeBatch -or $MetricsProcessed -ge $MetricCount)
+        for ($i = 0; $i -lt $MetricCount; $i++)
         {
-            $BatchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            Write-RdaProgress -Activity 'Metrics collection' -CurrentItem ("batch {0} ({1} call(s))" -f $RangeIdx, $Defs.Count) -Index $MetricsProcessed -Total $MetricCount -BarOnly
-            Write-Verbose ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $RangeIdx, $Defs.Count, $MetricsProcessed, $MetricCount)
+            $Defs.Add($MetricDefs[$i])
+            $MetricsProcessed++
 
-            $Defs | ForEach-Object -Parallel {
-                $AzContext = $using:MetricAzContext
-                $CallTimeoutSeconds = $using:MetricTimeoutSeconds
-                $CallMaxRetries = $using:MetricMaxRetries
-                $CallMaxThrottleRetries = $using:MetricMaxThrottleRetries
-                $CallMaxRetryAfterSeconds = $using:MetricMaxRetryAfterSeconds
-                $RetryAfterFnDef = $using:MetricRetryAfterFnDef
-                if ($RetryAfterFnDef) { Set-Item -Path function:Get-RdaRetryAfterSeconds -Value ([scriptblock]::Create($RetryAfterFnDef)) }
-                $DiagBag = $using:MetricDiagnostics
-                $CallPool = $using:MetricCallPool
-                $AbandonedCalls = $using:MetricAbandonedCalls
+            if ($Defs.Count -ge $RangeBatch -or $MetricsProcessed -ge $MetricCount)
+            {
+                $BatchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                Write-RdaProgress -Activity 'Metrics collection' -CurrentItem ("batch {0} ({1} call(s))" -f $RangeIdx, $Defs.Count) -Index $MetricsProcessed -Total $MetricCount -BarOnly
+                Write-Verbose ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $RangeIdx, $Defs.Count, $MetricsProcessed, $MetricCount)
 
-                $MetricError = $false
-                $MetricName = $_.MetricName
-                $MetricService = $_.Service
+                $Defs | ForEach-Object -Parallel {
+                    $AzContext = $using:MetricAzContext
+                    $CallTimeoutSeconds = $using:MetricTimeoutSeconds
+                    $CallMaxRetries = $using:MetricMaxRetries
+                    $CallMaxThrottleRetries = $using:MetricMaxThrottleRetries
+                    $CallMaxRetryAfterSeconds = $using:MetricMaxRetryAfterSeconds
+                    $RetryAfterFnDef = $using:MetricRetryAfterFnDef
+                    if ($RetryAfterFnDef) { Set-Item -Path function:Get-RdaRetryAfterSeconds -Value ([scriptblock]::Create($RetryAfterFnDef)) }
+                    $DiagBag = $using:MetricDiagnostics
+                    $CallPool = $using:MetricCallPool
+                    $AbandonedCalls = $using:MetricAbandonedCalls
 
-                $CallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-                $CallOutcome = 'Success'
-                $CallAttempts = 0
-                $CallErrorMsg = $null
-                $CallErrorBody = $null
+                    $MetricError = $false
+                    $MetricName = $_.MetricName
+                    $MetricService = $_.Service
 
-                function Get-RdaMetricFailureClass
-                {
-                    param([string]$Message)
-                    if ($Message -match "invalid status code '?(?<Status>NotFound|BadRequest|Unauthorized|Forbidden)'?")
+                    $CallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                    $CallOutcome = 'Success'
+                    $CallAttempts = 0
+                    $CallErrorMsg = $null
+                    $CallErrorBody = $null
+
+                    function Get-RdaMetricFailureClass
                     {
-                        return @{ Permanent = $true; Outcome = $Matches['Status']; Throttled = $false }
+                        param([string]$Message)
+                        if ($Message -match "invalid status code '?(?<Status>NotFound|BadRequest|Unauthorized|Forbidden)'?")
+                        {
+                            return @{ Permanent = $true; Outcome = $Matches['Status']; Throttled = $false }
+                        }
+                        if ($Message -match 'ExpiredAuthenticationToken|InvalidAuthenticationToken|AuthenticationFailed')
+                        {
+                            return @{ Permanent = $true; Outcome = 'Unauthorized'; Throttled = $false }
+                        }
+                        if ($Message -match 'AuthorizationFailed')
+                        {
+                            return @{ Permanent = $true; Outcome = 'Forbidden'; Throttled = $false }
+                        }
+                        if ($Message -match '429|throttl|TooManyRequests|rate limit')
+                        {
+                            return @{ Permanent = $false; Outcome = 'Throttled'; Throttled = $true }
+                        }
+                        return @{ Permanent = $false; Outcome = 'Error'; Throttled = $false }
                     }
-                    if ($Message -match 'ExpiredAuthenticationToken|InvalidAuthenticationToken|AuthenticationFailed')
-                    {
-                        return @{ Permanent = $true; Outcome = 'Unauthorized'; Throttled = $false }
-                    }
-                    if ($Message -match 'AuthorizationFailed')
-                    {
-                        return @{ Permanent = $true; Outcome = 'Forbidden'; Throttled = $false }
-                    }
-                    if ($Message -match '429|throttl|TooManyRequests|rate limit')
-                    {
-                        return @{ Permanent = $false; Outcome = 'Throttled'; Throttled = $true }
-                    }
-                    return @{ Permanent = $false; Outcome = 'Error'; Throttled = $false }
-                }
 
-                function Get-RdaMetricRetryPlan
-                {
-                    param(
-                        [int]$Attempt, [bool]$Throttled, [int]$ThrottledAttempts, [double]$RetryAfterSeconds, [bool]$Permanent,
-                        [int]$MaxRetries, [int]$MaxThrottleRetries, [double]$MaxRetryAfterSeconds
-                    )
-                    if ($Permanent) { return @{ Retry = $false; SleepSeconds = 0 } }
-                    $Retry = if ($Throttled) { $ThrottledAttempts -le $MaxThrottleRetries } else { $Attempt -lt $MaxRetries }
-                    if (-not $Retry) { return @{ Retry = $false; SleepSeconds = 0 } }
-                    $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
-                    if ($Throttled)
+                    function Get-RdaMetricRetryPlan
                     {
-                        $Backoff = [math]::Min($Backoff * 2, 60)
-                        if ($RetryAfterSeconds -gt 0) { $Backoff = [math]::Min([math]::Max($RetryAfterSeconds, $Backoff), $MaxRetryAfterSeconds) }
+                        param(
+                            [int]$Attempt, [bool]$Throttled, [int]$ThrottledAttempts, [double]$RetryAfterSeconds, [bool]$Permanent,
+                            [int]$MaxRetries, [int]$MaxThrottleRetries, [double]$MaxRetryAfterSeconds
+                        )
+                        if ($Permanent) { return @{ Retry = $false; SleepSeconds = 0 } }
+                        $Retry = if ($Throttled) { $ThrottledAttempts -le $MaxThrottleRetries } else { $Attempt -lt $MaxRetries }
+                        if (-not $Retry) { return @{ Retry = $false; SleepSeconds = 0 } }
+                        $Backoff = [math]::Min([math]::Pow(2, $Attempt), 30)
+                        if ($Throttled)
+                        {
+                            $Backoff = [math]::Min($Backoff * 2, 60)
+                            if ($RetryAfterSeconds -gt 0) { $Backoff = [math]::Min([math]::Max($RetryAfterSeconds, $Backoff), $MaxRetryAfterSeconds) }
+                        }
+                        return @{ Retry = $true; SleepSeconds = $Backoff }
                     }
-                    return @{ Retry = $true; SleepSeconds = $Backoff }
-                }
 
-                function Get-RdaMetricErrorBody
-                {
-                    param($ErrorRecord)
-
-                    try
+                    function Get-RdaMetricErrorBody
                     {
-                        if ($null -eq $ErrorRecord) { return $null }
-
-                        $Found = $null
+                        param($ErrorRecord)
 
                         try
                         {
-                            $Details = $ErrorRecord.ErrorDetails.Message
-                            if (-not [string]::IsNullOrWhiteSpace($Details)) { $Found = [string]$Details }
-                        }
-                        catch { }
+                            if ($null -eq $ErrorRecord) { return $null }
 
-                        if ([string]::IsNullOrWhiteSpace($Found))
-                        {
-                            $Visited = [System.Collections.Generic.HashSet[int]]::new()
-                            $Current = $ErrorRecord.Exception
-                            $Depth = 0
+                            $Found = $null
 
-                            while ($null -ne $Current -and $Depth -lt 10)
-                            {
-                                $Key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Current)
-                                if (-not $Visited.Add($Key)) { break }
-
-                                foreach ($Probe in @(
-                                        { $Current.Response.Content },
-                                        { $Current.Body }
-                                    ))
-                                {
-                                    try
-                                    {
-                                        $Value = & $Probe
-                                        if ($null -ne $Value -and -not ($Value -is [System.IO.Stream]))
-                                        {
-                                            $Text = [string]$Value
-                                            if (-not [string]::IsNullOrWhiteSpace($Text)) { $Found = $Text; break }
-                                        }
-                                    }
-                                    catch { }
-                                }
-
-                                if (-not [string]::IsNullOrWhiteSpace($Found)) { break }
-
-                                $Current = $Current.InnerException
-                                $Depth++
-                            }
-                        }
-
-                        if ([string]::IsNullOrWhiteSpace($Found)) { return $null }
-
-                        $Rendered = $Found
-                        try
-                        {
-                            $Parsed = $Found | ConvertFrom-Json -ErrorAction Stop
-                            $Node = if ($null -ne $Parsed.error) { $Parsed.error } else { $Parsed }
-                            $Code = [string]$Node.code
-                            $Msg = [string]$Node.message
-                            if (-not [string]::IsNullOrWhiteSpace($Code) -or -not [string]::IsNullOrWhiteSpace($Msg))
-                            {
-                                $Rendered = (@($Code, $Msg) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ': '
-                            }
-                        }
-                        catch { }
-
-                        $Rendered = ([string]$Rendered) -replace '\s+', ' '
-                        $Rendered = $Rendered.Trim()
-
-                        $BodyCap = 2000
-                        $TruncationMarkerBudget = 32
-                        if ($Rendered.Length -gt ($BodyCap + $TruncationMarkerBudget))
-                        {
-                            $HeadLen = [int]($BodyCap * 0.6)
-                            $TailLen = $BodyCap - $HeadLen
-                            $Rendered = $Rendered.Substring(0, $HeadLen) +
-                            ('...[{0} chars omitted]...' -f ($Rendered.Length - $BodyCap)) +
-                            $Rendered.Substring($Rendered.Length - $TailLen)
-                        }
-                        if ([string]::IsNullOrWhiteSpace($Rendered)) { return $null }
-                        return $Rendered
-                    }
-                    catch
-                    {
-                        return $null
-                    }
-                }
-
-                function Wait-RdaMetricCall
-                {
-                    param($Handle, [int]$TimeoutSeconds)
-
-                    # Short slices keep the wait responsive to a pipeline stop such as Ctrl+C.
-                    $Clock = [System.Diagnostics.Stopwatch]::StartNew()
-                    while (-not $Handle.IsCompleted)
-                    {
-                        $RemainingMs = ($TimeoutSeconds * 1000) - $Clock.ElapsedMilliseconds
-                        if ($RemainingMs -le 0) { return $false }
-                        [void]$Handle.AsyncWaitHandle.WaitOne([int][math]::Min($RemainingMs, 500))
-                    }
-                    return $true
-                }
-
-                function Receive-RdaMetricCall
-                {
-                    param($Call, $Handle)
-
-                    try
-                    {
-                        $Output = $Call.EndInvoke($Handle)
-                    }
-                    catch
-                    {
-                        # EndInvoke wraps the failure in a MethodInvocationException. Rethrow the
-                        # record Get-AzMetric raised instead, so the classifier, the error-body reader
-                        # and the Retry-After reader see Azure's exception and its response.
-                        $Inner = $_.Exception.InnerException
-                        if ($Inner -is [System.Management.Automation.IContainsErrorRecord] -and $null -ne $Inner.ErrorRecord)
-                        {
-                            throw $Inner.ErrorRecord
-                        }
-                        throw
-                    }
-                    foreach ($Item in $Output) { $Item }
-                }
-
-                $MetricArgs = @{
-                    ResourceId      = $_.Id
-                    MetricName      = $_.MetricName
-                    StartTime       = $_.StartTime
-                    EndTime         = $_.EndTime
-                    TimeGrain       = $_.Interval
-                    AggregationType = $_.Aggregation
-                    ErrorAction     = 'Stop'
-                    WarningAction   = 'SilentlyContinue'
-                }
-                if ($null -ne $AzContext)
-                {
-                    $MetricArgs['DefaultProfile'] = $AzContext
-                }
-
-                try
-                {
-                    $Attempt = 0
-                    $ThrottledAttempts = 0
-                    $Succeeded = $false
-                    $LastError = $null
-                    $MetricQuery = $null
-
-                    while (-not $Succeeded)
-                    {
-                        $CallAttempts = $Attempt + 1
-                        $TimedOut = $false
-                        $Throttled = $false
-                        $RetryAfterSeconds = 0
-                        $CallErrorBody = $null
-                        $Permanent = $false
-                        $PermanentOutcome = $null
-
-                        $Call = [powershell]::Create()
-                        $Call.RunspacePool = $CallPool
-                        [void]$Call.AddCommand('Get-AzMetric').AddParameters($MetricArgs)
-                        $CallHandle = $Call.BeginInvoke()
-
-                        if (Wait-RdaMetricCall -Handle $CallHandle -TimeoutSeconds $CallTimeoutSeconds)
-                        {
                             try
                             {
-                                $MetricQuery = Receive-RdaMetricCall -Call $Call -Handle $CallHandle
-                                $Succeeded = $true
+                                $Details = $ErrorRecord.ErrorDetails.Message
+                                if (-not [string]::IsNullOrWhiteSpace($Details)) { $Found = [string]$Details }
+                            }
+                            catch { }
+
+                            if ([string]::IsNullOrWhiteSpace($Found))
+                            {
+                                $Visited = [System.Collections.Generic.HashSet[int]]::new()
+                                $Current = $ErrorRecord.Exception
+                                $Depth = 0
+
+                                while ($null -ne $Current -and $Depth -lt 10)
+                                {
+                                    $Key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Current)
+                                    if (-not $Visited.Add($Key)) { break }
+
+                                    foreach ($Probe in @(
+                                            { $Current.Response.Content },
+                                            { $Current.Body }
+                                        ))
+                                    {
+                                        try
+                                        {
+                                            $Value = & $Probe
+                                            if ($null -ne $Value -and -not ($Value -is [System.IO.Stream]))
+                                            {
+                                                $Text = [string]$Value
+                                                if (-not [string]::IsNullOrWhiteSpace($Text)) { $Found = $Text; break }
+                                            }
+                                        }
+                                        catch { }
+                                    }
+
+                                    if (-not [string]::IsNullOrWhiteSpace($Found)) { break }
+
+                                    $Current = $Current.InnerException
+                                    $Depth++
+                                }
+                            }
+
+                            if ([string]::IsNullOrWhiteSpace($Found)) { return $null }
+
+                            $Rendered = $Found
+                            try
+                            {
+                                $Parsed = $Found | ConvertFrom-Json -ErrorAction Stop
+                                $Node = if ($null -ne $Parsed.error) { $Parsed.error } else { $Parsed }
+                                $Code = [string]$Node.code
+                                $Msg = [string]$Node.message
+                                if (-not [string]::IsNullOrWhiteSpace($Code) -or -not [string]::IsNullOrWhiteSpace($Msg))
+                                {
+                                    $Rendered = (@($Code, $Msg) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ': '
+                                }
+                            }
+                            catch { }
+
+                            $Rendered = ([string]$Rendered) -replace '\s+', ' '
+                            $Rendered = $Rendered.Trim()
+
+                            $BodyCap = 2000
+                            $TruncationMarkerBudget = 32
+                            if ($Rendered.Length -gt ($BodyCap + $TruncationMarkerBudget))
+                            {
+                                $HeadLen = [int]($BodyCap * 0.6)
+                                $TailLen = $BodyCap - $HeadLen
+                                $Rendered = $Rendered.Substring(0, $HeadLen) +
+                                ('...[{0} chars omitted]...' -f ($Rendered.Length - $BodyCap)) +
+                                $Rendered.Substring($Rendered.Length - $TailLen)
+                            }
+                            if ([string]::IsNullOrWhiteSpace($Rendered)) { return $null }
+                            return $Rendered
+                        }
+                        catch
+                        {
+                            return $null
+                        }
+                    }
+
+                    function Wait-RdaMetricCall
+                    {
+                        param($Handle, [int]$TimeoutSeconds)
+
+                        # Short slices keep the wait responsive to a pipeline stop such as Ctrl+C.
+                        $Clock = [System.Diagnostics.Stopwatch]::StartNew()
+                        while (-not $Handle.IsCompleted)
+                        {
+                            $RemainingMs = ($TimeoutSeconds * 1000) - $Clock.ElapsedMilliseconds
+                            if ($RemainingMs -le 0) { return $false }
+                            [void]$Handle.AsyncWaitHandle.WaitOne([int][math]::Min($RemainingMs, 500))
+                        }
+                        return $true
+                    }
+
+                    function Receive-RdaMetricCall
+                    {
+                        param($Call, $Handle)
+
+                        try
+                        {
+                            $Output = $Call.EndInvoke($Handle)
+                        }
+                        catch
+                        {
+                            # EndInvoke wraps the failure in a MethodInvocationException. Rethrow the
+                            # record Get-AzMetric raised instead, so the classifier, the error-body reader
+                            # and the Retry-After reader see Azure's exception and its response.
+                            $Inner = $_.Exception.InnerException
+                            if ($Inner -is [System.Management.Automation.IContainsErrorRecord] -and $null -ne $Inner.ErrorRecord)
+                            {
+                                throw $Inner.ErrorRecord
+                            }
+                            throw
+                        }
+                        # EndInvoke only throws when the call itself terminated. A cmdlet that WROTE an
+                        # error and produced nothing leaves it in the error stream, and returning empty
+                        # here would be recorded as a successful call with a metric value of 0 - a silent
+                        # zero in the %TimeOn denominator. Surface it so the classifier sees it, matching
+                        # what 'Receive-Job -ErrorAction Stop' did before the pool.
+                        if ($Call.HadErrors -and @($Output).Count -eq 0 -and $Call.Streams.Error.Count -gt 0)
+                        {
+                            throw $Call.Streams.Error[0]
+                        }
+                        foreach ($Item in $Output) { $Item }
+                    }
+
+                    $MetricArgs = @{
+                        ResourceId      = $_.Id
+                        MetricName      = $_.MetricName
+                        StartTime       = $_.StartTime
+                        EndTime         = $_.EndTime
+                        TimeGrain       = $_.Interval
+                        AggregationType = $_.Aggregation
+                        ErrorAction     = 'Stop'
+                        WarningAction   = 'SilentlyContinue'
+                    }
+                    if ($null -ne $AzContext)
+                    {
+                        $MetricArgs['DefaultProfile'] = $AzContext
+                    }
+
+                    try
+                    {
+                        $Attempt = 0
+                        $ThrottledAttempts = 0
+                        $Succeeded = $false
+                        $LastError = $null
+                        $MetricQuery = $null
+
+                        while (-not $Succeeded)
+                        {
+                            $CallAttempts = $Attempt + 1
+                            $TimedOut = $false
+                            $Throttled = $false
+                            $RetryAfterSeconds = 0
+                            $CallErrorBody = $null
+                            $Permanent = $false
+                            $PermanentOutcome = $null
+
+                            $Call = [powershell]::Create()
+                            $CallHandle = $null
+                            try
+                            {
+                                $Call.RunspacePool = $CallPool
+                                [void]$Call.AddCommand('Get-AzMetric').AddParameters($MetricArgs)
+                                $CallHandle = $Call.BeginInvoke()
                             }
                             catch
                             {
+                                # A broken or closed pool fails here, before the call is dispatched. Without
+                                # this the [powershell] leaks and the exception escapes the retry loop, so
+                                # this is the one failure that would skip the retry budget entirely.
+                                $Call.Dispose()
                                 $LastError = $_.Exception.Message
-
-                                $CallErrorBody = Get-RdaMetricErrorBody -ErrorRecord $_
-
                                 $FailureClass = Get-RdaMetricFailureClass -Message $LastError
-                                if ($FailureClass.Permanent)
+                                if ($FailureClass.Permanent) { $Permanent = $true; $PermanentOutcome = $FailureClass.Outcome }
+                            }
+
+                            if ($null -eq $CallHandle) { }
+                            elseif (Wait-RdaMetricCall -Handle $CallHandle -TimeoutSeconds $CallTimeoutSeconds)
+                            {
+                                try
                                 {
-                                    $Permanent = $true
-                                    $PermanentOutcome = $FailureClass.Outcome
+                                    $MetricQuery = Receive-RdaMetricCall -Call $Call -Handle $CallHandle
+                                    $Succeeded = $true
                                 }
-                                elseif ($FailureClass.Throttled)
+                                catch
                                 {
-                                    $Throttled = $true
-                                    $ThrottledAttempts++
-                                    if (Get-Command Get-RdaRetryAfterSeconds -ErrorAction SilentlyContinue)
+                                    $LastError = $_.Exception.Message
+
+                                    $CallErrorBody = Get-RdaMetricErrorBody -ErrorRecord $_
+
+                                    $FailureClass = Get-RdaMetricFailureClass -Message $LastError
+                                    if ($FailureClass.Permanent)
                                     {
-                                        try { $RetryAfterSeconds = [double](Get-RdaRetryAfterSeconds -ErrorRecord $_) } catch { $RetryAfterSeconds = 0 }
+                                        $Permanent = $true
+                                        $PermanentOutcome = $FailureClass.Outcome
+                                    }
+                                    elseif ($FailureClass.Throttled)
+                                    {
+                                        $Throttled = $true
+                                        $ThrottledAttempts++
+                                        if (Get-Command Get-RdaRetryAfterSeconds -ErrorAction SilentlyContinue)
+                                        {
+                                            try { $RetryAfterSeconds = [double](Get-RdaRetryAfterSeconds -ErrorRecord $_) } catch { $RetryAfterSeconds = 0 }
+                                        }
                                     }
                                 }
+                                finally
+                                {
+                                    $Call.Dispose()
+                                }
                             }
-                            finally
+                            else
                             {
-                                $Call.Dispose()
+                                $TimedOut = $true
+                                $LastError = ("Timed out after {0}s" -f $CallTimeoutSeconds)
+                                # Stop without waiting. A call blocked in a network read only returns when
+                                # the read does, so a synchronous stop would hold this runspace until then.
+                                # The abandoned call keeps its pool runspace until it finishes.
+                                [void]$Call.BeginStop($null, $null)
+                                $AbandonedCalls.Add([PSCustomObject]@{ Call = $Call; Handle = $CallHandle })
+                            }
+
+                            if ($Succeeded)
+                            {
+                                break
+                            }
+
+                            $Plan = Get-RdaMetricRetryPlan -Attempt $Attempt -Throttled $Throttled -ThrottledAttempts $ThrottledAttempts -RetryAfterSeconds $RetryAfterSeconds -Permanent $Permanent `
+                                -MaxRetries $CallMaxRetries -MaxThrottleRetries $CallMaxThrottleRetries -MaxRetryAfterSeconds $CallMaxRetryAfterSeconds
+                            if ($Plan.Retry)
+                            {
+                                $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
+                                $SleepSeconds = [math]::Round($Plan.SleepSeconds + $Jitter, 2)
+                                Start-Sleep -Seconds $SleepSeconds
+                            }
+                            else
+                            {
+                                $CallOutcome = if ($Permanent) { $PermanentOutcome } elseif ($TimedOut) { 'Timeout' } elseif ($Throttled) { 'Throttled' } else { 'Error' }
+
+                                break
+                            }
+
+                            $Attempt++
+                        }
+
+                        if (-not $Succeeded)
+                        {
+                            throw ("Get-AzMetric failed after {0} attempt(s): {1}" -f $CallAttempts, $LastError)
+                        }
+
+                        $MetricTotalCount = @($MetricQuery.Data).Count
+
+                        $MetricQueryResults = 0
+                        $MetricTimeSeries = 0
+
+                        switch ($_.Aggregation)
+                        {
+                            'Average'
+                            {
+                                $MetricQueryResults = $MetricQuery.Data.Average
+                            }
+                            'Maximum'
+                            {
+                                $MetricQueryResults = $MetricQuery.Data.Maximum
+                            }
+                            'Count'
+                            {
+                                $MetricQueryResults = $MetricQuery.Data.Count
+                            }
+                            'Total'
+                            {
+                                $MetricQueryResults = $MetricQuery.Data.Total
+                            }
+                            'Minimum'
+                            {
+                                $MetricQueryResults = $MetricQuery.Data.Minimum
+                            }
+                            default
+                            {
+                                throw ("Unhandled Aggregation '{0}' for metric '{1}' - no value could be read from the response." -f $_, $MetricName)
                             }
                         }
-                        else
-                        {
-                            $TimedOut = $true
-                            $LastError = ("Timed out after {0}s" -f $CallTimeoutSeconds)
-                            # Stop without waiting. A call blocked in a network read only returns when
-                            # the read does, so a synchronous stop would hold this runspace until then.
-                            # The abandoned call keeps its pool runspace until it finishes.
-                            [void]$Call.BeginStop($null, $null)
-                            $AbandonedCalls.Add([PSCustomObject]@{ Call = $Call; Handle = $CallHandle })
-                        }
 
-                        if ($Succeeded)
-                        {
-                            break
-                        }
+                        $MetricQueryResultsCount = ($MetricQueryResults.Where({ $null -ne $_ }).Count)
 
-                        $Plan = Get-RdaMetricRetryPlan -Attempt $Attempt -Throttled $Throttled -ThrottledAttempts $ThrottledAttempts -RetryAfterSeconds $RetryAfterSeconds -Permanent $Permanent `
-                            -MaxRetries $CallMaxRetries -MaxThrottleRetries $CallMaxThrottleRetries -MaxRetryAfterSeconds $CallMaxRetryAfterSeconds
-                        if ($Plan.Retry)
+                        if ($MetricQueryResultsCount -eq 0)
                         {
-                            $Jitter = (Get-Random -Minimum 0 -Maximum 1000) / 1000.0
-                            $SleepSeconds = [math]::Round($Plan.SleepSeconds + $Jitter, 2)
-                            Start-Sleep -Seconds $SleepSeconds
+                            $MetricQueryResults = 0
+                            $MetricQueryResultsCount = 0
+                            $MetricPercentileIndex = 0
+                            $MetricPercentile = 0
                         }
                         else
                         {
-                            $CallOutcome = if ($Permanent) { $PermanentOutcome } elseif ($TimedOut) { 'Timeout' } elseif ($Throttled) { 'Throttled' } else { 'Error' }
+                            $MetricQueryResultsSorted = @($MetricQueryResults | Where-Object { $null -ne $_ } | Sort-Object)
+                            $MetricPercentileIndex = [math]::Ceiling(0.95 * $MetricQueryResultsSorted.Count) - 1
+                            $MetricPercentile = $MetricQueryResultsSorted[$MetricPercentileIndex]
 
-                            break
-                        }
+                            if ($_.Series -eq 'true')
+                            {
+                                $MetricTimeSeries = $MetricQueryResults.Where({ $null -ne $_ })
+                            }
 
-                        $Attempt++
-                    }
-
-                    if (-not $Succeeded)
-                    {
-                        throw ("Get-AzMetric failed after {0} attempt(s): {1}" -f $CallAttempts, $LastError)
-                    }
-
-                    $MetricTotalCount = @($MetricQuery.Data).Count
-
-                    $MetricQueryResults = 0
-                    $MetricTimeSeries = 0
-
-                    switch ($_.Aggregation)
-                    {
-                        'Average'
-                        {
-                            $MetricQueryResults = $MetricQuery.Data.Average
-                        }
-                        'Maximum'
-                        {
-                            $MetricQueryResults = $MetricQuery.Data.Maximum
-                        }
-                        'Count'
-                        {
-                            $MetricQueryResults = $MetricQuery.Data.Count
-                        }
-                        'Total'
-                        {
-                            $MetricQueryResults = $MetricQuery.Data.Total
-                        }
-                        'Minimum'
-                        {
-                            $MetricQueryResults = $MetricQuery.Data.Minimum
-                        }
-                        default
-                        {
-                            throw ("Unhandled Aggregation '{0}' for metric '{1}' - no value could be read from the response." -f $_, $MetricName)
+                            switch ($_.Measure)
+                            {
+                                'Average' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Average).Average }
+                                'Maximum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Maximum).Maximum }
+                                'Sum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Sum).Sum }
+                                'Minimum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Minimum).Minimum }
+                                'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
+                                default
+                                {
+                                    throw ("Unhandled Measure '{0}' for metric '{1}' - the per-interval values could not be collapsed to a single figure." -f $_, $MetricName)
+                                }
+                            }
                         }
                     }
-
-                    $MetricQueryResultsCount = ($MetricQueryResults.Where({ $null -ne $_ }).Count)
-
-                    if ($MetricQueryResultsCount -eq 0)
+                    catch
                     {
                         $MetricQueryResults = 0
                         $MetricQueryResultsCount = 0
+                        $MetricTotalCount = 0
                         $MetricPercentileIndex = 0
                         $MetricPercentile = 0
-                    }
-                    else
-                    {
-                        $MetricQueryResultsSorted = @($MetricQueryResults | Where-Object { $null -ne $_ } | Sort-Object)
-                        $MetricPercentileIndex = [math]::Ceiling(0.95 * $MetricQueryResultsSorted.Count) - 1
-                        $MetricPercentile = $MetricQueryResultsSorted[$MetricPercentileIndex]
 
-                        if ($_.Series -eq 'true')
-                        {
-                            $MetricTimeSeries = $MetricQueryResults.Where({ $null -ne $_ })
-                        }
-
-                        switch ($_.Measure)
-                        {
-                            'Average' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Average).Average }
-                            'Maximum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Maximum).Maximum }
-                            'Sum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Sum).Sum }
-                            'Minimum' { $MetricQueryResults = ($MetricQueryResults | Measure-Object -Minimum).Minimum }
-                            'Largest' { $MetricQueryResults = ($MetricQueryResults | Sort-Object -Descending)[0] }
-                            default
-                            {
-                                throw ("Unhandled Measure '{0}' for metric '{1}' - the per-interval values could not be collapsed to a single figure." -f $_, $MetricName)
-                            }
-                        }
+                        $MetricError = $true
+                        if ($CallOutcome -eq 'Success') { $CallOutcome = 'Error' }
+                        $CallErrorMsg = $_.Exception.Message
                     }
-                }
-                catch
+
+                    $CallStopwatch.Stop()
+                    $DiagBag.Add([PSCustomObject]@{
+                            MetricIndex = $_.MetricIndex
+                            Service     = $MetricService
+                            Name        = $_.Name
+                            Metric      = $MetricName
+                            Interval    = $_.Interval
+                            Aggregation = $_.Aggregation
+                            Outcome     = $CallOutcome
+                            Attempts    = $CallAttempts
+                            ElapsedSec  = [math]::Round($CallStopwatch.Elapsed.TotalSeconds, 2)
+                            Error       = $CallErrorMsg
+                            ErrorBody   = $CallErrorBody
+                        })
+
+                    $Obj = @{
+                        'ID'                   = $_.Id;
+                        'Subscription'         = $_.SubName;
+                        'ResourceGroup'        = $_.ResourceGroup;
+                        'Name'                 = $_.Name;
+                        'Location'             = $_.Location;
+                        'Service'              = $_.Service;
+                        'Metric'               = $_.MetricName;
+                        'MetricAggregate'      = $_.Aggregation;
+                        'MetricTimeGrain'      = $_.Interval;
+                        'MetricMeasure'        = $_.Measure;
+                        'MetricPercentile'     = $MetricPercentile;
+                        'MetricValue'          = $MetricQueryResults;
+                        'MetricCount'          = $MetricQueryResultsCount;
+                        'MetricTotalCount'     = $MetricTotalCount;
+                        'MetricSeries'         = $MetricTimeSeries;
+                        'MetricError'          = $MetricError;
+                    }
+
+                    ($using:Tmp).Metrics.Add($Obj)
+
+                    $MetricQuery = $null
+                    $MetricQueryResults = $null
+                    $MetricQueryResultsCount = $null
+                    $MetricTotalCount = $null
+                    $MetricTimeSeries = $null
+                    $MetricQueryResultsSorted = $null
+                    $MetricPercentile = $null;
+
+                } -ThrottleLimit $ConcurrencyLimit
+
+                $Defs.Clear()
+
+                $BatchStopwatch.Stop()
+                Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $RangeIdx, [math]::Round($BatchStopwatch.Elapsed.TotalSeconds, 1), $MetricDiagnostics.Count)
+
+                if ($Obfuscate)
                 {
-                    $MetricQueryResults = 0
-                    $MetricQueryResultsCount = 0
-                    $MetricTotalCount = 0
-                    $MetricPercentileIndex = 0
-                    $MetricPercentile = 0
-
-                    $MetricError = $true
-                    if ($CallOutcome -eq 'Success') { $CallOutcome = 'Error' }
-                    $CallErrorMsg = $_.Exception.Message
+                    Protect-RdaMetrics -Metrics $Tmp.Metrics -ResourceIdDictionary $ResourceIdDictionary -ResourceNameDictionary $ResourceNameDictionary -ResourceSubDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary
                 }
 
-                $CallStopwatch.Stop()
-                $DiagBag.Add([PSCustomObject]@{
-                        MetricIndex = $_.MetricIndex
-                        Service     = $MetricService
-                        Name        = $_.Name
-                        Metric      = $MetricName
-                        Interval    = $_.Interval
-                        Aggregation = $_.Aggregation
-                        Outcome     = $CallOutcome
-                        Attempts    = $CallAttempts
-                        ElapsedSec  = [math]::Round($CallStopwatch.Elapsed.TotalSeconds, 2)
-                        Error       = $CallErrorMsg
-                        ErrorBody   = $CallErrorBody
-                    })
+                $OutputPath = $FilePath + "_" + $RangeIdx + ".json"
+                $Tmp | ConvertTo-Json -depth 5 -compress | Out-File -LiteralPath $OutputPath -Encoding utf8
+                $Tmp.Metrics.Clear()
 
-                $Obj = @{
-                    'ID'                   = $_.Id;
-                    'Subscription'         = $_.SubName;
-                    'ResourceGroup'        = $_.ResourceGroup;
-                    'Name'                 = $_.Name;
-                    'Location'             = $_.Location;
-                    'Service'              = $_.Service;
-                    'Metric'               = $_.MetricName;
-                    'MetricAggregate'      = $_.Aggregation;
-                    'MetricTimeGrain'      = $_.Interval;
-                    'MetricMeasure'        = $_.Measure;
-                    'MetricPercentile'     = $MetricPercentile;
-                    'MetricValue'          = $MetricQueryResults;
-                    'MetricCount'          = $MetricQueryResultsCount;
-                    'MetricTotalCount'     = $MetricTotalCount;
-                    'MetricSeries'         = $MetricTimeSeries;
-                    'MetricError'          = $MetricError;
+                # Release the abandoned calls that have since returned. Draining only at phase end keeps
+                # a call abandoned in an early batch - and whatever payload it later received - alive for
+                # the rest of the phase, which is the retention this pooling exists to avoid.
+                $StillRunning = [System.Collections.Generic.List[object]]::new()
+                $Drained = $null
+                while ($MetricAbandonedCalls.TryTake([ref]$Drained))
+                {
+                    if ($Drained.Handle.IsCompleted) { $Drained.Call.Dispose() } else { $StillRunning.Add($Drained) }
                 }
+                foreach ($Pending in $StillRunning) { $MetricAbandonedCalls.Add($Pending) }
 
-                ($using:Tmp).Metrics.Add($Obj)
-
-                $MetricQuery = $null
-                $MetricQueryResults = $null
-                $MetricQueryResultsCount = $null
-                $MetricTotalCount = $null
-                $MetricTimeSeries = $null
-                $MetricQueryResultsSorted = $null
-                $MetricPercentile = $null;
-
-            } -ThrottleLimit $ConcurrencyLimit
-
-            $Defs.Clear()
-
-            $BatchStopwatch.Stop()
-            Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $RangeIdx, [math]::Round($BatchStopwatch.Elapsed.TotalSeconds, 1), $MetricDiagnostics.Count)
-
-            if ($Obfuscate)
-            {
-                Protect-RdaMetrics -Metrics $Tmp.Metrics -ResourceIdDictionary $ResourceIdDictionary -ResourceNameDictionary $ResourceNameDictionary -ResourceSubDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary
+                $RangeIdx++
             }
-
-            $OutputPath = $FilePath + "_" + $RangeIdx + ".json"
-            $Tmp | ConvertTo-Json -depth 5 -compress | Out-File -LiteralPath $OutputPath -Encoding utf8
-            $Tmp.Metrics.Clear()
-
-            $RangeIdx++
         }
     }
-
-    $MetricAbandonedCount = $MetricAbandonedCalls.Count
-    $MetricAbandonedRunning = 0
-    if ($null -ne $MetricCallPool)
+    finally
     {
-        foreach ($Abandoned in $MetricAbandonedCalls)
+        # BeginClose, not Close: the latter waits for a call still blocked in a network read.
+        $MetricAbandonedCount = $MetricAbandonedCalls.Count
+        if ($null -ne $MetricCallPool)
         {
-            if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
+            foreach ($Abandoned in $MetricAbandonedCalls)
+            {
+                if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
+            }
+            [void]$MetricCallPool.BeginClose($null, $null)
         }
-        # BeginClose returns at once; the pool finishes closing after the last abandoned call returns.
-        [void]$MetricCallPool.BeginClose($null, $null)
     }
 
     Write-RdaProgress -Activity 'Metrics collection' -Completed

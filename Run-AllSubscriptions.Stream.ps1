@@ -89,6 +89,17 @@ Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 
 try
 {
+    # Once context autosave has been disabled for the CurrentUser scope, the user's
+    # AzureRmContextSettings.json records the literal 'None' as its context directory, and Az.Accounts
+    # resolves that relative name against the process working directory, which a job inherits from
+    # the wrapper. Set-Location does not change that directory. When it is a folder the user cannot
+    # write to, such as C:\Windows\System32 for a standard user, loading Az.Accounts or importing the
+    # context fails with access denied. The user's temp folder is normally writable and keeps the empty
+    # 'None' folder the module creates out of the report tree. The directory stays changed for the life
+    # of this worker, because the module resolves the name again whenever it needs it. If the move
+    # fails, the import is still attempted from the inherited directory.
+    try { [System.IO.Directory]::SetCurrentDirectory([System.IO.Path]::GetTempPath()) }
+    catch { Write-Stream ("WARNING: could not move the process directory to the temp folder: {0}" -f $_.Exception.Message) 'Yellow' }
     Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
     try { Disable-AzContextAutosave -Scope Process -ErrorAction Stop | Out-Null }
     catch { Write-Stream ("WARNING: could not disable AzContext autosave: {0}" -f $_.Exception.Message) 'Yellow' }

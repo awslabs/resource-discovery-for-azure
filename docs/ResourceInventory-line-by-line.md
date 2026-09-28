@@ -496,10 +496,10 @@ One idea runs through the whole function and is worth understanding before readi
 ## The `$Global:RdaSessionInitialized` pattern
 
 Under `-RunAllSubs`, the wrapper calls this script once per subscription **inside the same PowerShell process**.
-On a large tenant that is 125 invocations.
+On a large tenant that is hundreds of invocations.
 Some of the setup work is per subscription (each subscription needs its own output folder) but most of it is not: the version banner, the GitHub update check, the Az module import, the platform detection and the "authenticated as" line are all identical every time.
 
-Running them 125 times means 125 network calls to GitHub, 125 module import checks, and a console full of repeated banners that buries the real output.
+Repeating them per subscription means a network call to GitHub, a module import check and another copy of the banner every time, and a console full of repeated banners buries the real output.
 
 So the script uses two flags.
 
@@ -2055,7 +2055,7 @@ The overall shape here is worth remembering as a pattern: **detect the gap, atte
 
 That health list is not decoration.
 `Run-AllSubscriptions.Stream.ps1` aggregates it across parallel streams and `Run-AllSubscriptions.ps1` prints it, per subscription, in the final run summary.
-So a metrics auth failure on subscription 87 of 125 is named explicitly at the end of the run rather than being something the operator has to notice by spotting a thin report.
+So a metrics auth failure part way down a long subscription list is named explicitly at the end of the run rather than being something the operator has to notice by spotting a thin report.
 
 ### The success path (lines 1168-1183)
 

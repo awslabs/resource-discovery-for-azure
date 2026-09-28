@@ -48,7 +48,7 @@ Describe 'Literal path discipline (bracket-safe file access)' {
 
     It 'never addresses a file with -Path / -FilePath / a positional path on a wildcard-capable cmdlet' {
         $Offenders = @(foreach ($F in $script:ProductFiles) { Get-NonLiteralSites $F })
-        $Offenders | Should -BeNullOrEmpty -Because "each of these treats '[' and ']' as wildcards; use -LiteralPath (and -Filter for globs):`n" + ($Offenders -join "`n")
+        $Offenders | Should -BeNullOrEmpty -Because ("each of these treats '[' and ']' as wildcards; use -LiteralPath (and -Filter for globs):`n" + ($Offenders -join "`n"))
     }
 
     It 'escapes every Compress-Archive -DestinationPath (the module globs it even under -LiteralPath)' {
@@ -78,13 +78,66 @@ Describe 'Literal path discipline (bracket-safe file access)' {
                     }
                 }
             })
-        $Offenders | Should -BeNullOrEmpty -Because "Compress-Archive resolves -DestinationPath as a wildcard:`n" + ($Offenders -join "`n")
+        $Offenders | Should -BeNullOrEmpty -Because ("Compress-Archive resolves -DestinationPath as a wildcard:`n" + ($Offenders -join "`n"))
     }
 
     It 'builds the per-subscription report zip with LiteralPath in every Compress-Archive splat' {
         $Src = Get-Content -Raw -LiteralPath (Join-Path $script:Repo 'ResourceInventory.ps1')
         $Src | Should -Not -Match '(?m)^\s*Path\s*=\s*@\(\$Global:HtmlFile'
         ([regex]::Matches($Src, '(?m)^\s*LiteralPath\s*=\s*@\(\$Global:HtmlFile')).Count | Should -Be 2
+    }
+
+    It 'finds the metrics shards for the no-report message, even under a bracketed report folder' {
+        # Runs the FinalizeOutputs statements as written, so a parameter-set error or a wildcard path
+        # shows up here instead of as a 'Metrics JSON' label silently left off the message.
+        $Tokens = $null; $Errors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'ResourceInventory.ps1'), [ref]$Tokens, [ref]$Errors)
+        $Errors | Should -BeNullOrEmpty
+        $Check = @($Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -match 'Get-ChildItem .*\$MetricsShardFilter' }, $true))
+        $Check.Count | Should -Be 1
+        # Only the assignment that sits before the check in the same block, in source order.
+        $Setup = @($Check[0].Parent.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$MetricsShardFilter' -and $_.Extent.EndOffset -le $Check[0].Extent.StartOffset })
+        $Setup.Count | Should -Be 1
+        $Probe = [scriptblock]::Create($Setup[0].Extent.Text + "`n" + $Check[0].Clauses[0].Item1.Extent.Text)
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+        $Base = Join-Path $TmpBase ('MetricsShardProbe_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $GlobalNames = @('MetricsJsonFile', 'DefaultPath', 'ReportName', 'CurrentDateTime')
+        # Values, not the PSVariable objects: assigning a global below changes the object in place.
+        $Saved = @{}
+        foreach ($Name in $GlobalNames)
+        {
+            $Existing = Get-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+            if ($Existing) { $Saved[$Name] = $Existing.Value }
+        }
+        try
+        {
+            $Folder = [System.IO.Directory]::CreateDirectory((Join-Path $Base 'Report[1]')).FullName
+            $Global:DefaultPath = $Folder + [IO.Path]::DirectorySeparatorChar
+            $Global:ReportName = 'R[1]'
+            $Global:CurrentDateTime = '2026'
+            $Global:MetricsJsonFile = $Global:DefaultPath + 'Metrics_R[1]_2026.json'
+            [System.IO.File]::WriteAllText((Join-Path $Folder 'Metrics_R[1]_2026__1.json'), '{}')
+            & $Probe | Should -BeExactly $true
+            # Negative control: no shard of this report, only decoys a wildcard or a lost prefix would match.
+            Remove-Item -LiteralPath (Join-Path $Folder 'Metrics_R[1]_2026__1.json') -Force
+            foreach ($Decoy in @('Metrics_R1_2026__1.json', 'Metrics_Other_2026__1.json', 'Metrics_R[1]_1999__1.json', 'Inventory_R[1]_2026.json'))
+            {
+                [System.IO.File]::WriteAllText((Join-Path $Folder $Decoy), '{}')
+            }
+            & $Probe | Should -BeExactly $false
+            # A run whose output paths were never set answers no, instead of failing on a null folder.
+            $Global:DefaultPath = $null
+            & $Probe | Should -BeExactly $false
+        }
+        finally
+        {
+            foreach ($Name in $GlobalNames)
+            {
+                if ($Saved.ContainsKey($Name)) { Set-Variable -Name $Name -Scope Global -Value $Saved[$Name] }
+                else { Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue }
+            }
+            if (Test-Path -LiteralPath $Base) { Remove-Item -LiteralPath $Base -Recurse -Force }
+        }
     }
 }
 

@@ -89,6 +89,17 @@ Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 
 try
 {
+    # Once context autosave has been disabled for the CurrentUser scope, the user's
+    # AzureRmContextSettings.json records the literal 'None' as its context directory, and Az.Accounts
+    # resolves that relative name against the process working directory, which a job inherits from
+    # the wrapper. Set-Location does not change that directory. When it is a folder the user cannot
+    # write to, such as C:\Windows\System32 for a standard user, loading Az.Accounts or importing the
+    # context fails with access denied. The user's temp folder is normally writable and keeps the empty
+    # 'None' folder the module creates out of the report tree. The directory stays changed for the life
+    # of this worker, because the module resolves the name again whenever it needs it. If the move
+    # fails, the import is still attempted from the inherited directory.
+    try { [System.IO.Directory]::SetCurrentDirectory([System.IO.Path]::GetTempPath()) }
+    catch { Write-Stream ("WARNING: could not move the process directory to the temp folder: {0}" -f $_.Exception.Message) 'Yellow' }
     Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
     try { Disable-AzContextAutosave -Scope Process -ErrorAction Stop | Out-Null }
     catch { Write-Stream ("WARNING: could not disable AzContext autosave: {0}" -f $_.Exception.Message) 'Yellow' }
@@ -112,6 +123,19 @@ catch
         ResourceCounts = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 1
+}
+
+# Tell the parent this stream no longer needs the snapshot. Once every stream has left its marker or
+# ended, the parent deletes the snapshot, so the token cache it holds is on disk for seconds rather than
+# for the whole run. If the marker cannot be written the parent keeps the snapshot until this job ends.
+$ImportMarkerPath = Get-StreamImportMarkerPath -AzContextPath $AzContextPath -StreamId $StreamId
+try
+{
+    Set-Content -LiteralPath $ImportMarkerPath -Value $StreamId -Encoding utf8 -ErrorAction Stop
+}
+catch
+{
+    Write-Stream ("WARNING: could not record the Az context import at {0}: {1}. The parent keeps the snapshot until this stream ends." -f $ImportMarkerPath, $_.Exception.Message) 'Yellow'
 }
 
 $StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId)
@@ -187,6 +211,8 @@ $Global:MarketplaceFailedSubs = @()
 
 $Global:CollectorFailures = @()
 
+$Global:MemoryReadings = @()
+
 $PairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
 for ($i = 0; $i -lt $PairCount; $i++)
 {
@@ -212,7 +238,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
             throw "Script exited with code $LASTEXITCODE"
         }
 
-        $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+        $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
         $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount; Zip = $Global:ZipOutputFile }
 
         if ($ResCount -eq 0)
@@ -282,6 +308,7 @@ $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Globa
 $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 $MarketplaceFailedSubs = if ($null -ne $Global:MarketplaceFailedSubs) { @($Global:MarketplaceFailedSubs) } else { @() }
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+$MemoryReadings = if ($null -ne $Global:MemoryReadings) { @($Global:MemoryReadings) } else { @() }
 
 $Summary = [pscustomobject]@{
     StreamId               = $StreamId
@@ -294,11 +321,14 @@ $Summary = [pscustomobject]@{
     ConsumptionRecords     = $ConsumptionTotal
     MetricsApiCalls        = $MetricsApiCallTotal
     MarketplaceRecords     = $MarketplaceTotal
-    ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
+    # No dedupe: Select-Object -Unique treats any two [pscustomobject] rows as equal, so it
+    # kept only the first failure of each stream.
+    ConsumptionFailedSubs  = @($ConsumptionFailedSubs)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     MarketplaceFailedSubs  = @($MarketplaceFailedSubs)
     CollectorFailures      = @($CollectorFailures)
     ArchiveWriteFailures   = @($ArchiveWriteFailures)
+    MemoryReadings         = @($MemoryReadings)
 }
 try
 {

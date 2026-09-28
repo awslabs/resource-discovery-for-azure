@@ -53,8 +53,8 @@ function Global:ConvertTo-RdaMarketplaceRow
     #   https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list  (api-version 2023-05-01)
     #
     # OBFUSCATION. When -Obfuscate is active the caller passes $Obfuscate = $true. PublisherName /
-    # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer" -
-    # e.g. Anthropic-vs-not - signal), not customer secrets, so they are left READABLE by design.
+    # OfferName / PlanName are THIRD-PARTY PRODUCT identifiers (the "which ISV / which offer"
+    # signal), not customer secrets, so they are left READABLE by design.
     # Every identifying field is masked:
     #   - OrderNumber is masked, unlike the three product fields above, because it identifies a
     #     specific customer PURCHASE rather than a product. It is tokenised through the shared
@@ -705,6 +705,7 @@ function Write-RdaShareableDiagnosticsLog
         [string]$RunDateTime,
         [string]$Version,
         $PhaseTimings,
+        $MemoryReadings = @(),
         [int]$ConsumptionRecordCount = 0,
         [bool]$ConsumptionRequested = $true,
         [int]$MarketplaceRecordCount = 0,
@@ -830,18 +831,17 @@ function Write-RdaShareableDiagnosticsLog
         if ($ConsumptionRequested -and $ConsumptionRecordCount -eq 0 -and $ConsumpSkips.Count -eq 0)
         {
             # LIMITATION (accepted): $ConsumpSkips reads $Global:ConsumptionFailedSubs,
-            # which is run-CUMULATIVE, not per-subscription, under the wrapper - the
-            # inner ResourceInventory.ps1 nil-initializes it once and '+=' per
-            # subscription within the same process (only Run-AllSubscriptions.Stream.ps1
-            # resets it, per stream). So in a multi-sub run one earlier subscription's
+            # which accumulates across the subscriptions of one run: ResourceInventory.ps1
+            # nil-initializes it and '+='s per subscription in the same process.
+            # Run-AllSubscriptions.ps1 resets it once per run on the sequential path; with
+            # -ParallelStreams each stream is a separate process that
+            # Run-AllSubscriptions.Stream.ps1 resets once. So one earlier subscription's
             # billing failure suppresses this zero-records warning for every LATER
-            # subscription, even where those rows were genuinely all excluded by scope.
-            # This is bounded: the fetched/written counts and the full failure list are
-            # still printed above, so the operator is not left without the reason.
-            # Scoping the guard to the current subscription would require threading a
-            # current-subscription id parameter into this function - out of scope for
-            # this diagnostics writer, and the sibling guard at the 'records collected'
-            # line already behaves this way.
+            # subscription in the same run or stream, including one whose billing API
+            # genuinely returned no rows. This is bounded: the failure list above is still
+            # printed, so the log never reads as a clean run. Scoping the guard to this
+            # invocation would take a per-invocation failure count passed in the way
+            # -ConsumptionRecordCount is, which this diagnostics writer does not take.
             $DiagLines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')
             $DiagLines.Add('  and no subscription reported a billing error. The billing API answered')
             $DiagLines.Add('  successfully with no rows, so the Consumption CSV holds only its header.')
@@ -876,8 +876,8 @@ function Write-RdaShareableDiagnosticsLog
             # HONEST NEGATIVE (mirrors the consumption zero-records note above). The
             # Microsoft.Consumption/marketplaces endpoint returns ONLY Marketplace-publisher
             # rows, so a successful call with zero rows is a CONFIRMED absence of Azure
-            # Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace
-            # offer) in the window - not a missing or failed section. The Marketplace CSV
+            # Marketplace / third-party SaaS charges (e.g. an ISV SaaS offer) in the
+            # window - not a missing or failed section. The Marketplace CSV
             # holds only its header in that case.
             $DiagLines.Add('  Note: ZERO Marketplace rows is a CONFIRMED zero (endpoint reached, no third-party/Marketplace charges billed), not a skipped section.')
         }
@@ -890,6 +890,26 @@ function Write-RdaShareableDiagnosticsLog
         else
         {
             $DiagLines.Add('Metric-query API calls issued: n/a (-SkipMetrics was passed)')
+        }
+
+        # Counts and megabytes, labelled by subscription. The label passes through the same scrub as
+        # every other '[sub ...]' line here, so the default log masks the id as its header says.
+        # Filtered to this run's stamp: the readings global is not reset by a standalone run, so a
+        # prompt that has run the script before still holds the earlier run's rows. Rendered in its
+        # own try/catch so a rendering fault costs this block, not the whole log.
+        $MemoryLines = @()
+        try
+        {
+            $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Stamp $RunDateTime -Obfuscated:$Obfuscated)
+        }
+        catch
+        {
+            $MemoryLines = @(('Memory readings unavailable: {0}' -f (Protect-DiagnosticText $_.Exception.Message $DiagScrubMap)))
+        }
+        if ($MemoryLines.Count -gt 0)
+        {
+            $DiagLines.Add('')
+            foreach ($MemoryLine in $MemoryLines) { $DiagLines.Add((Protect-DiagnosticText $MemoryLine $DiagScrubMap)) }
         }
 
         $DiagnosticsFile = ($DefaultPath + "Diagnostics_" + $ReportName + "_" + $RunDateTime + ".log")

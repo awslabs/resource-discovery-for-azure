@@ -98,9 +98,21 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Literal
     $HasConsumptionData = $false
     try
     {
-        $Consumption = @(Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop)
-        $HasConsumptionData = ($Consumption.Count -gt 0)
-        $BilledVmCount = (@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
+        # Read the CSV one row at a time and keep only the distinct VM ResourceIds: a large
+        # subscription's billing file takes several times its size on disk once loaded as objects.
+        # The set ignores case, as Sort-Object -Unique does.
+        $ConsumptionRowCount = 0
+        $BilledVmIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop | ForEach-Object {
+            $ConsumptionRowCount++
+            # Import-Csv yields '' for an empty cell, never $null, so test for text rather than presence.
+            if ($_.MeterCategory -eq 'Virtual Machines' -and -not [string]::IsNullOrWhiteSpace([string]$_.ResourceId))
+            {
+                [void]$BilledVmIds.Add([string]$_.ResourceId)
+            }
+        }
+        $HasConsumptionData = ($ConsumptionRowCount -gt 0)
+        $BilledVmCount = $BilledVmIds.Count
     }
     catch
     {

@@ -24,7 +24,8 @@ BeforeAll {
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
     $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
-        'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject')
+        'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
+        'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -582,7 +583,7 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
     It 'handles null/empty health collections without throwing (standalone-run safety)' {
         { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
                 -FailedSubscriptions $null -CollectorFailures $null `
-                -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
+                -MetricsFailedSubs $null -ConsumptionFailedSubs $null -MemoryReadings $null } | Should -Not -Throw
     }
 }
 
@@ -1405,5 +1406,364 @@ Describe 'Marketplace stream/wrapper health parity' {
         $Merged = script:Merge-StreamMarketplace -StreamSummaries $Streams
         $Merged.RecordCount | Should -Be 0
         $Merged.FailedSubs.Count | Should -Be 0
+    }
+}
+
+Describe 'Az context snapshot lifecycle: it leaves the disk once every stream has imported it or ended (Get-StreamImportMarkerPath, Test-AzContextSnapshotReleasable, Get-StaleAzContextSnapshot, Invoke-PreFlightChecks)' {
+    BeforeAll {
+        # The path a printed delete command names, read back through the PowerShell parser.
+        function Get-HintLiteralPath
+        {
+            param([Parameter(Mandatory = $true)][string]$Hint)
+            $Tokens = $null
+            $ParseErrors = $null
+            $HintAst = [System.Management.Automation.Language.Parser]::ParseInput($Hint.Trim(), [ref]$Tokens, [ref]$ParseErrors)
+            if ($ParseErrors.Count -gt 0) { throw ("The delete command does not parse: {0}" -f $ParseErrors[0].Message) }
+            $Command = $HintAst.Find({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)
+            if ($Command.GetCommandName() -ne 'Remove-Item') { throw ("Expected a Remove-Item command, got: {0}" -f $Hint) }
+            $Quoted = @($Command.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.StringConstantType -eq 'SingleQuoted' })
+            if ($Quoted.Count -ne 1) { throw ("Expected one single-quoted path, found {0}" -f $Quoted.Count) }
+            return $Quoted[0].Value
+        }
+    }
+    BeforeEach {
+        $script:CaseDir = Join-Path $script:TestRoot ([guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:CaseDir -Force | Out-Null
+        $script:Snapshot = Join-Path $script:CaseDir '.rda-stream-azcontext-11111111-1111-1111-1111-111111111111.json'
+    }
+    AfterEach {
+        if (Test-Path -LiteralPath $script:CaseDir) { Remove-Item -LiteralPath $script:CaseDir -Recurse -Force }
+    }
+    It 'names the marker after the snapshot and the stream, so the sweep can find it by prefix' {
+        Get-StreamImportMarkerPath -AzContextPath $script:Snapshot -StreamId '2' | Should -BeExactly ($script:Snapshot + '.imported-2')
+    }
+    It 'releases the snapshot only when every stream has imported it or has already ended (<Why>)' -ForEach @(
+        @{ Markers = @($true, $true, $true); States = @('Running', 'Running', 'Running'); Expected = $true; Why = 'all imported' }
+        @{ Markers = @($true, $false, $true); States = @('Running', 'Running', 'Running'); Expected = $false; Why = 'one still running without a marker' }
+        @{ Markers = @($true, $false, $true); States = @('Running', 'Completed', 'Running'); Expected = $true; Why = 'the unmarked stream has completed' }
+        @{ Markers = @($false, $true); States = @('', 'Running'); Expected = $false; Why = 'an unmarked stream with no known state' }
+        @{ Markers = @($false, $true); States = @(); Expected = $false; Why = 'no job states at all' }
+        @{ Markers = @($true, $true); States = @('Running', 'Running', 'Running'); Expected = $false; Why = 'a third stream without a marker slot is unaccounted for' }
+        @{ Markers = @(); States = @(); Expected = $false; Why = 'no streams is never releasable' }
+    ) {
+        Test-AzContextSnapshotReleasable -MarkerPresent $Markers -JobState $States | Should -BeExactly $Expected
+    }
+    It 'treats an unmarked stream as done only in a final job state (<State>)' -ForEach @(
+        [enum]::GetNames([System.Management.Automation.JobState]) | ForEach-Object { @{ State = $_; Expected = ($_ -in @('Completed', 'Failed', 'Stopped')) } }
+    ) {
+        Test-AzContextSnapshotReleasable -MarkerPresent @($false, $true) -JobState @($State, 'Running') | Should -BeExactly $Expected
+    }
+    It 'keeps the snapshot when the job states are missing, and refuses a missing marker list outright' {
+        Test-AzContextSnapshotReleasable -MarkerPresent @($true) -JobState $null | Should -BeExactly $false
+        # $null cannot become a [bool[]]; the wrapper treats that error as keep, see the release block tests below.
+        { Test-AzContextSnapshotReleasable -MarkerPresent $null -JobState @('Running') } | Should -Throw -ErrorId 'ParameterArgumentTransformationError,Test-AzContextSnapshotReleasable'
+    }
+    It 'finds only snapshots, not the markers or the other stream files beside them' {
+        Set-Content -LiteralPath $script:Snapshot -Value '{}'
+        Set-Content -LiteralPath ($script:Snapshot + '.imported-0') -Value '0'
+        Set-Content -LiteralPath (Join-Path $script:CaseDir '.rda-stream-0-summary.json') -Value '{}'
+        $Found = @(Get-StaleAzContextSnapshot -InventoryRoot $script:CaseDir)
+        $Found.Count | Should -Be 1
+        $Found[0].Name | Should -Be (Split-Path -Path $script:Snapshot -Leaf)
+    }
+    It 'finds nothing when only a marker and a stream summary are left' {
+        Set-Content -LiteralPath ($script:Snapshot + '.imported-0') -Value '0'
+        Set-Content -LiteralPath (Join-Path $script:CaseDir '.rda-stream-0-summary.json') -Value '{}'
+        @(Get-StaleAzContextSnapshot -InventoryRoot $script:CaseDir).Count | Should -Be 0
+    }
+    It 'pre-flight warns about each leftover snapshot, gives one literal delete command per file, and leaves them in place' {
+        $Second = Join-Path $script:CaseDir '.rda-stream-azcontext-22222222-2222-2222-2222-222222222222.json'
+        Set-Content -LiteralPath $script:Snapshot -Value '{}'
+        Set-Content -LiteralPath $Second -Value '{}'
+        # The real Exit-Wrapper exits the process; a throwing stand-in makes any call visible in the output or as a failure.
+        function Exit-Wrapper { param([int]$Code) throw "Exit-Wrapper $Code" }
+        $Lines = @(& { Invoke-PreFlightChecks -InventoryRoot $script:CaseDir } 6>&1 | ForEach-Object { [string]$_ })
+        $Text = $Lines -join "`n"
+        $Text | Should -Not -Match 'Exit-Wrapper'
+        $Text | Should -Match 'WARNING: 2 Az context snapshot\(s\) from another parallel-streams run'
+        $Text | Should -Match 'token cache'
+        $Text | Should -Match 'written \d+ min ago'
+        foreach ($Path in @($script:Snapshot, $Second))
+        {
+            $Text | Should -Match ([regex]::Escape((Split-Path -Path $Path -Leaf)))
+            Test-Path -LiteralPath $Path -PathType Leaf | Should -BeTrue
+        }
+        $Hints = @($Lines | Where-Object { $_ -match 'Remove-Item' })
+        $Hints.Count | Should -Be 2
+        # A wildcard could also delete the snapshot of a run that is still using it.
+        $Hints | Should -Not -Match '\*'
+        $Hints | ForEach-Object { $_ | Should -Match "Remove-Item -LiteralPath '.+' -Force$" }
+        # One command per file: the two commands name the two snapshots, not one of them twice.
+        $Named = @($Hints | ForEach-Object { Get-HintLiteralPath -Hint $_ } | Sort-Object)
+        $Expected = @(Get-StaleAzContextSnapshot -InventoryRoot $script:CaseDir | ForEach-Object { $_.FullName } | Sort-Object)
+        $Named.Count | Should -Be 2
+        ($Named -join '|') | Should -BeExactly ($Expected -join '|')
+        $Text | Should -Match 'Pre-flight checks passed'
+    }
+    It 'pre-flight gives a delete command that parses and names the real file, whatever quotes the path holds' {
+        $QuotedDir = [System.IO.Directory]::CreateDirectory((Join-Path $script:CaseDir ("it's " + [char]0x2019 + 'quoted'))).FullName
+        $Quoted = Join-Path $QuotedDir '.rda-stream-azcontext-33333333-3333-3333-3333-333333333333.json'
+        Set-Content -LiteralPath $Quoted -Value '{}'
+        function Exit-Wrapper { param([int]$Code) throw "Exit-Wrapper $Code" }
+        $Lines = @(& { Invoke-PreFlightChecks -InventoryRoot $QuotedDir } 6>&1 | ForEach-Object { [string]$_ })
+        ($Lines -join "`n") | Should -Not -Match 'Exit-Wrapper'
+        $Hint = @($Lines | Where-Object { $_ -match 'Remove-Item' })
+        $Hint.Count | Should -Be 1
+        $Named = Get-HintLiteralPath -Hint $Hint[0]
+        # The path as the pre-flight listed it; Windows may report the folder casing differently from $env:TEMP.
+        $Named | Should -BeExactly @(Get-StaleAzContextSnapshot -InventoryRoot $QuotedDir)[0].FullName
+        $Named | Should -Match ([regex]::Escape("it's " + [char]0x2019 + 'quoted'))
+        Test-Path -LiteralPath $Named -PathType Leaf | Should -BeTrue
+    }
+    It 'pre-flight says nothing about snapshots when there is none' {
+        function Exit-Wrapper { param([int]$Code) throw "Exit-Wrapper $Code" }
+        $Text = @(& { Invoke-PreFlightChecks -InventoryRoot $script:CaseDir } 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        $Text | Should -Not -Match 'Exit-Wrapper'
+        $Text | Should -Match 'Pre-flight checks passed'
+        $Text | Should -Not -Match 'Az context snapshot'
+    }
+    It 'pre-flight states the age the same way in any culture, and never as a negative age (<Case>)' -ForEach @(
+        @{ Case = 'two and a half hours old'; OffsetMinutes = -150; Expected = 'written 2.5 h ago' }
+        @{ Case = 'just over two hours old'; OffsetMinutes = -120.5; Expected = 'written 2.0 h ago' }
+        @{ Case = 'dated in the future'; OffsetMinutes = 30; Expected = 'written 0 min ago' }
+    ) {
+        Set-Content -LiteralPath $script:Snapshot -Value '{}'
+        (Get-Item -LiteralPath $script:Snapshot -Force).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes($OffsetMinutes)
+        function Exit-Wrapper { param([int]$Code) throw "Exit-Wrapper $Code" }
+        # A comma decimal separator would show up here if the hours were formatted in the current culture.
+        $SavedCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::GetCultureInfo('de-DE')
+            [cultureinfo]::CurrentCulture.NumberFormat.NumberDecimalSeparator | Should -BeExactly ','
+            $Text = @(& { Invoke-PreFlightChecks -InventoryRoot $script:CaseDir } 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+        }
+        finally
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $SavedCulture
+        }
+        $Text | Should -Not -Match 'Exit-Wrapper'
+        $Text | Should -Match ([regex]::Escape($Expected))
+    }
+    Context 'the release block in Run-AllSubscriptions.ps1, run as written' {
+        BeforeAll {
+            $Tokens = $null; $ParseErrors = $null
+            $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+            if ($ParseErrors.Count -gt 0) { throw ("Run-AllSubscriptions.ps1 does not parse: {0}" -f $ParseErrors[0].Message) }
+            $Assignments = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$ReleaseSnapshotIfImported' }, $true))
+            if ($Assignments.Count -ne 1) { throw ("Expected one `$ReleaseSnapshotIfImported assignment, found {0}" -f $Assignments.Count) }
+            $script:WrapperForRelease = $WrapperAst
+            $BlockText = $Assignments[0].Right.Expression.ScriptBlock.Extent.Text
+            # Drop the outer braces; what is left is the body exactly as the wrapper runs it.
+            $script:ReleaseBlock = [scriptblock]::Create($BlockText.Substring(1, $BlockText.Length - 2))
+        }
+        BeforeEach {
+            $AzContextSnapshot = $script:Snapshot
+            # Script scope: the extracted block reads these the way it reads the wrapper's own variables.
+            $script:ImportMarkerPaths = @(0, 1 | ForEach-Object { Get-StreamImportMarkerPath -AzContextPath $AzContextSnapshot -StreamId ([string]$_) })
+            Set-Content -LiteralPath $AzContextSnapshot -Value '{}'
+            $script:SnapshotReleased = $false
+            $script:SnapshotReleaseWarned = $false
+            $script:LockSnapshot = $false
+        }
+        It 'keeps the snapshot and the markers while a stream is still starting' {
+            Set-Content -LiteralPath $script:ImportMarkerPaths[0] -Value '0'
+            $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            $Output = @(& $script:ReleaseBlock 6>&1)
+            $Output.Count | Should -Be 0
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeTrue
+            Test-Path -LiteralPath $script:ImportMarkerPaths[0] | Should -BeTrue
+            $script:SnapshotReleased | Should -BeFalse
+        }
+        It 'removes the snapshot, then the markers, once every stream has imported it, and only once' {
+            $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
+            $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            (@(& $script:ReleaseBlock 6>&1) -join "`n") | Should -Match 'no stream still needs it'
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeFalse
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeFalse }
+            $script:SnapshotReleased | Should -BeTrue
+            # Once released, a later pass leaves even a file at the same path, and fresh markers, alone.
+            Set-Content -LiteralPath $AzContextSnapshot -Value '{}'
+            $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
+            @(& $script:ReleaseBlock 6>&1).Count | Should -Be 0
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeTrue
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeTrue }
+        }
+        It 'marks the release done and sweeps the markers when the snapshot is already gone' {
+            $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
+            Remove-Item -LiteralPath $AzContextSnapshot -Force
+            $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            @(& $script:ReleaseBlock 6>&1).Count | Should -Be 0
+            $script:SnapshotReleased | Should -BeTrue
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeFalse }
+        }
+        It 'releases once the only unmarked stream has ended' {
+            Set-Content -LiteralPath $script:ImportMarkerPaths[1] -Value '1'
+            $script:Jobs = @([pscustomobject]@{ State = 'Completed' }, [pscustomobject]@{ State = 'Running' })
+            $null = @(& $script:ReleaseBlock 6>&1)
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeFalse
+            $script:SnapshotReleased | Should -BeTrue
+        }
+        It 'keeps the markers and retries when the snapshot cannot be removed, warning once' {
+            $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
+            $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            Mock Remove-Item { throw 'The process cannot access the file because it is being used by another process.' } -ParameterFilter { $script:LockSnapshot -and $LiteralPath -eq $script:Snapshot }
+            $script:LockSnapshot = $true
+            $First = @(& $script:ReleaseBlock 6>&1 | ForEach-Object { [string]$_ })
+            $Second = @(& $script:ReleaseBlock 6>&1 | ForEach-Object { [string]$_ })
+            $Warnings = @($First + $Second | Where-Object { $_ -match '^WARNING: could not remove the Az context snapshot yet' })
+            $Warnings.Count | Should -Be 1
+            # The exception text ends in a full stop of its own; the sentence after it must not double it.
+            $Warnings[0] | Should -Match 'another process\. Removal is retried'
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeTrue
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeTrue }
+            $script:SnapshotReleased | Should -BeFalse
+            $script:LockSnapshot = $false
+            $null = @(& $script:ReleaseBlock 6>&1)
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeFalse
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeFalse }
+            $script:SnapshotReleased | Should -BeTrue
+        }
+        It 'removes nothing when the release check itself fails' {
+            $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
+            $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            Mock Test-AzContextSnapshotReleasable { throw 'unexpected' }
+            $Output = @(& $script:ReleaseBlock 6>&1 | ForEach-Object { [string]$_ })
+            Should -Invoke Test-AzContextSnapshotReleasable -Exactly -Times 1
+            @($Output | Where-Object { $_ -match '^WARNING: could not check whether the Az context snapshot can be removed yet: unexpected\. It is removed at the end of the run\.$' }).Count | Should -Be 1
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeTrue
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeTrue }
+            $script:SnapshotReleased | Should -BeFalse
+        }
+        It 'removes nothing unless the release check answers exactly one boolean true (<Case>)' -ForEach @(
+            @{ Case = 'the string False'; Answer = 'False' }
+            @{ Case = 'two answers'; Answer = @($false, $true) }
+            @{ Case = 'no answer'; Answer = @() }
+        ) {
+            $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
+            $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            $script:MockAnswer = $Answer
+            Mock Test-AzContextSnapshotReleasable { $script:MockAnswer }
+            $null = @(& $script:ReleaseBlock 6>&1)
+            Should -Invoke Test-AzContextSnapshotReleasable -Exactly -Times 1
+            Test-Path -LiteralPath $AzContextSnapshot | Should -BeTrue
+            $script:ImportMarkerPaths | ForEach-Object { Test-Path -LiteralPath $_ | Should -BeTrue }
+            $script:SnapshotReleased | Should -BeFalse
+        }
+        It 'builds one marker path per stream, numbered 0 to StreamCount - 1, as the wrapper does' {
+            $Build = @($script:WrapperForRelease.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$ImportMarkerPaths' }, $true))
+            $Build.Count | Should -Be 1
+            $MakePaths = [scriptblock]::Create('param($StreamCount, $AzContextSnapshot) ' + $Build[0].Right.Extent.Text)
+            $Paths = @(& $MakePaths -StreamCount 3 -AzContextSnapshot $script:Snapshot)
+            ($Paths -join '|') | Should -BeExactly ((0, 1, 2 | ForEach-Object { $script:Snapshot + '.imported-' + $_ }) -join '|')
+        }
+        It 'names a stream that did not complete by its stream number, not its job id' {
+            $Loops = @($script:WrapperForRelease.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text -match 'job ended in state' }, $true))
+            $Loops.Count | Should -Be 1
+            $Report = [scriptblock]::Create('param($Jobs) ' + $Loops[0].Extent.Text)
+            $Lines = @(& $Report -Jobs @([pscustomobject]@{ Id = 7; State = 'Completed' }, [pscustomobject]@{ Id = 9; State = 'Failed' }) 6>&1 | ForEach-Object { [string]$_ })
+            ($Lines -join "`n") | Should -BeExactly '[stream-1] job ended in state Failed'
+        }
+    }
+    Context 'the wrapper and the worker wire the helpers in' {
+        BeforeAll {
+            function Get-ParsedScript
+            {
+                param([Parameter(Mandatory = $true)][string]$Path)
+                $Tokens = $null
+                $ParseErrors = $null
+                $ScriptAst = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$ParseErrors)
+                if ($ParseErrors.Count -gt 0) { throw ("{0} does not parse: {1}" -f $Path, $ParseErrors[0].Message) }
+                # Comments are stripped, and line endings normalised, so neither a comment quoting the code
+                # nor a CRLF checkout can change what a guard sees.
+                $Source = $ScriptAst.Extent.Text
+                $Builder = [System.Text.StringBuilder]::new($Source)
+                foreach ($Token in @($Tokens | Where-Object { $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment } | Sort-Object -Property { $_.Extent.StartOffset } -Descending))
+                {
+                    [void]$Builder.Remove($Token.Extent.StartOffset, $Token.Extent.EndOffset - $Token.Extent.StartOffset)
+                }
+                return [pscustomobject]@{ Ast = $ScriptAst; Code = ($Builder.ToString() -replace "`r`n", "`n") }
+            }
+            $Root = Split-Path $PSScriptRoot -Parent
+            $script:Wrapper = Get-ParsedScript -Path (Join-Path $Root 'Run-AllSubscriptions.ps1')
+            $script:Worker = Get-ParsedScript -Path (Join-Path $Root 'Run-AllSubscriptions.Stream.ps1')
+            $script:Ordinal = [System.StringComparison]::Ordinal
+        }
+        It 'the worker writes its marker after the import succeeded and before any subscription runs' {
+            $Code = $script:Worker.Code
+            $Import = $Code.IndexOf('Import-AzContext -Path $AzContextPath', $script:Ordinal)
+            $Marker = $Code.IndexOf('Get-StreamImportMarkerPath -AzContextPath $AzContextPath -StreamId $StreamId', $script:Ordinal)
+            $Inventory = $Code.IndexOf("& (Join-Path `$ScriptRoot 'ResourceInventory.ps1')", $script:Ordinal)
+            $Import | Should -BeGreaterThan 0
+            $Marker | Should -BeGreaterThan $Import
+            $Inventory | Should -BeGreaterThan $Marker
+            # The failed-to-start summary and its exit sit between the two, so the marker is written only once the import has worked.
+            $Between = $Code.Substring($Import, $Marker - $Import)
+            $Between | Should -Match "Status\s*=\s*'failed-to-start'"
+            $Between | Should -Match '\bexit 1\b'
+        }
+        It 'the worker never refers to the snapshot again after its marker lets the parent delete it' {
+            $Code = $script:Worker.Code
+            $Marker = $Code.IndexOf('Get-StreamImportMarkerPath -AzContextPath $AzContextPath -StreamId $StreamId', $script:Ordinal)
+            $Marker | Should -BeGreaterThan 0
+            $LineEnd = $Code.IndexOf("`n", $Marker, $script:Ordinal)
+            $LineEnd | Should -BeGreaterThan $Marker
+            $After = $Code.Substring($LineEnd)
+            # Any spelling: $AzContextPath, ${AzContextPath}, a PSBoundParameters key, or a whole-set splat.
+            $After | Should -Not -Match 'AzContextPath'
+            $After | Should -Not -Match '@PSBoundParameters'
+        }
+        It 'the worker moves its process directory to the temp folder before loading Az.Accounts' {
+            # Az.Accounts resolves a relative context directory from the user's settings file against the
+            # PROCESS directory, which Set-Location does not change. A job that starts in a folder the user
+            # cannot write to then fails Import-AzContext with access denied.
+            $Code = $script:Worker.Code
+            $Move = $Code.IndexOf('[System.IO.Directory]::SetCurrentDirectory([System.IO.Path]::GetTempPath())', $script:Ordinal)
+            $Load = $Code.IndexOf('Import-Module Az.Accounts', $script:Ordinal)
+            $Move | Should -BeGreaterThan 0
+            $Load | Should -BeGreaterThan $Move
+            $Code.IndexOf('Import-AzContext -Path $AzContextPath', $script:Ordinal) | Should -BeGreaterThan $Load
+        }
+        It 'the worker carries on with the import when the process directory cannot be moved' {
+            $Move = $script:Worker.Ast.Find({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $args[0].Extent.Text -like '*SetCurrentDirectory*' }, $true)
+            $Move | Should -Not -BeNullOrEmpty
+            $Guard = $Move.Parent
+            while ($Guard -and $Guard -isnot [System.Management.Automation.Language.TryStatementAst]) { $Guard = $Guard.Parent }
+            $Guard | Should -Not -BeNullOrEmpty
+            # Its own try, so a failure warns instead of reaching the import's FATAL catch.
+            $Guard.Extent.Text | Should -Not -Match 'Import-AzContext'
+            $Guard.CatchClauses.Count | Should -Be 1
+            $Guard.CatchClauses[0].Body.Extent.Text | Should -Match 'WARNING'
+            @($Guard.CatchClauses[0].Body.FindAll({ $args[0] -is [System.Management.Automation.Language.ThrowStatementAst] -or $args[0] -is [System.Management.Automation.Language.ExitStatementAst] -or $args[0] -is [System.Management.Automation.Language.ReturnStatementAst] }, $true)).Count | Should -Be 0
+        }
+        It 'the wrapper looks for stale snapshots before it writes its own' {
+            $Code = $script:Wrapper.Code
+            $PreFlight = $Code.IndexOf('Invoke-PreFlightChecks -InventoryRoot $InventoryRoot', $script:Ordinal)
+            $Save = $Code.IndexOf('Save-AzContext -Path $AzContextSnapshot', $script:Ordinal)
+            $PreFlight | Should -BeGreaterThan 0
+            $Save | Should -BeGreaterThan $PreFlight
+        }
+        It 'the parent checks for release once per pass of its monitoring loop and once more after it' {
+            $Loops = @($script:Wrapper.Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.WhileStatementAst] -and $args[0].Condition.Extent.Text -match "State -eq 'Running'" }, $true))
+            $Loops.Count | Should -Be 1
+            $IsReleaseCall = { param($Node) $Node -is [System.Management.Automation.Language.CommandAst] -and $Node.InvocationOperator -eq 'Ampersand' -and $Node.CommandElements[0].Extent.Text -eq '$ReleaseSnapshotIfImported' }
+            @($Loops[0].Body.FindAll({ & $IsReleaseCall $args[0] }, $true)).Count | Should -Be 1
+            # The statement straight after the loop drains output; the one after that is the final check.
+            $Siblings = @($Loops[0].Parent.Statements)
+            $At = [array]::IndexOf($Siblings, $Loops[0])
+            $At | Should -BeGreaterOrEqual 0
+            $Next = @($Siblings | Select-Object -Skip ($At + 1) -First 2)
+            @($Next | ForEach-Object { $_.FindAll({ & $IsReleaseCall $args[0] }, $true) }).Count | Should -Be 1
+            $script:Wrapper.Code | Should -Match 'Test-AzContextSnapshotReleasable -MarkerPresent \$MarkerPresent -JobState \$JobState'
+        }
+        It 'the finally block still removes the snapshot and sweeps the markers with it' {
+            $IsSnapshotRemove = { param($Node) $Node -is [System.Management.Automation.Language.CommandAst] -and $Node.GetCommandName() -eq 'Remove-Item' -and $Node.Extent.Text -match '-LiteralPath \$AzContextSnapshot\b' }
+            $Owners = @($script:Wrapper.Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.TryStatementAst] -and $args[0].Finally -and @($args[0].Finally.FindAll({ & $IsSnapshotRemove $args[0] }, $true)).Count -gt 0 }, $true))
+            $Owners.Count | Should -Be 1
+            $Finally = $Owners[0].Finally
+            $Sweep = @($Finally.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Get-ChildItem' -and $args[0].Extent.Text -match [regex]::Escape("-Filter ((Split-Path -Path `$AzContextSnapshot -Leaf) + '.imported-*')") }, $true))
+            $Sweep.Count | Should -Be 1
+            @($Finally.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].Extent.Text -eq 'Remove-Item -LiteralPath $ImportMarker.FullName -Force -ErrorAction Stop' }, $true)).Count | Should -Be 1
+        }
     }
 }

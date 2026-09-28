@@ -41,6 +41,9 @@ Describe 'Service Scope' {
         $Keys = @($script:Inventory.PSObject.Properties.Name)
         $Unexpected = @($Keys | Where-Object { $_ -notin $Allowed })
         $Unexpected | Should -BeNullOrEmpty -Because ("only [{0}] (+ metadata) should be present; found disallowed key(s) [{1}]" -f ($script:Expected -join ', '), ($Unexpected -join ', '))
+        # Every collector that runs adds its key, with an empty array when it found nothing, so an
+        # inventory holding only the metadata key means the requested collectors never ran.
+        @($Keys | Where-Object { $_ -notin $script:MetadataKeys }).Count | Should -BeGreaterThan 0 -Because 'a -Service run must emit the requested collector keys, even when they are empty'
     }
 
     It 'does not emit any service key outside the requested set' {
@@ -49,9 +52,9 @@ Describe 'Service Scope' {
         # metadata) must be one that was requested. Guards against a collector
         # leaking output when it was not in -Service.
         $Keys = @($script:Inventory.PSObject.Properties.Name | Where-Object { $_ -notin $script:MetadataKeys })
-        # With no keys the foreach never runs, so this It reported PASS having asserted
-        # nothing - the same false assurance finding 22 covered. An empty set is not
-        # evidence that scoping works, so skip loudly instead of passing green.
+        # With no keys the foreach never runs, so this It would report PASS having
+        # asserted nothing. An empty set is not evidence that scoping works, so skip
+        # loudly instead of passing green.
         if ($Keys.Count -eq 0)
         {
             Set-ItResult -Skipped -Because 'the scoped run emitted no service keys; the sibling It pins the disallowed-key case'

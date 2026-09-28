@@ -23,7 +23,9 @@ Per subscription, the collector:
 - Pages through the results using the API's **`ContinuationToken`** until there
   are no more pages.
 - Writes each page to the CSV as it goes (`Export-Csv -Append`), so rows are
-  flushed incrementally rather than held in memory to the end.
+  flushed incrementally rather than held in memory to the end. Only the
+  `ContinuationToken` is carried from one page to the next; each page's rows
+  are released once they are written.
 
 ### Authentication pre-check
 
@@ -37,13 +39,27 @@ consumption phase (the rest of the inventory continues).
 
 ### Transient-failure retry
 
-Each page request is wrapped in a bounded retry (**3 attempts, exponential
-backoff**). A single transient HTTP error — e.g. `Error while copying content to
-a stream`, a timeout, or 429/503 throttling — retries the **same** page (the
-previous page's `ContinuationToken` is preserved), so no rows are duplicated or
-skipped. A permanent error exhausts the retries and is handled by the
-per-subscription failure path (see [Recovering from a consumption
+Each page request is wrapped in a bounded retry (**30 attempts, exponential
+backoff**, or the server's `Retry-After`, capped at five minutes, when it sends one). A single transient
+HTTP error - e.g. `Error while copying content to a stream`, a timeout, or
+429/503 throttling - retries the **same** page (the previous page's
+`ContinuationToken` is preserved), so no rows are duplicated or skipped. An
+authorization denial is not retried, and an error that outlasts the retries is
+handled by the per-subscription failure path (see [Recovering from a consumption
 crash](#recovering-from-a-consumption-crash)).
+
+Running out of memory is not transient, because waiting frees nothing. The first
+out-of-memory error on a page compacts the heap and retries that page once; a
+second one on the same page stops that subscription's consumption with an Error that says how to
+re-run it in a fresh PowerShell process.
+
+Before each subscription's billing pull, RDA runs a compacting garbage
+collection and writes a `[Memory]` line to the local `DebugLog_*.log`: the
+managed heap, the process working set, and the memory available to the runtime.
+It writes another every 10 pages. If a run does run out of memory, these lines
+show how much was already in use when billing began and whether it grew from
+one subscription to the next. The HTML report's VM billing-coverage check reads
+this CSV one row at a time rather than loading it whole.
 
 ## The columns
 
@@ -174,8 +190,8 @@ See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
 
 `Get-UsageAggregates` above returns **first-party Azure** metered usage only — it
 carries no `PublisherType` and never reports Azure Marketplace / third-party SaaS
-charges (for example an ISV offer sold through Azure Marketplace, such as an
-Anthropic/Claude offer surfaced via Azure AI Foundry). Those charges live behind a
+charges (for example an ISV offer sold through Azure Marketplace, such as a
+model or SaaS offer surfaced via Azure AI Foundry). Those charges live behind a
 **different** endpoint. To close that coverage gap, RDA runs a second, **additive**
 collector that emits a separate `Marketplace_<ReportName>_<timestamp>.csv`. The
 first-party `Consumption_*` schema and code path are untouched.
@@ -202,7 +218,7 @@ envelope as the first-party consumption loop.
 (third-party). The Marketplace endpoint returns **only** Marketplace rows (its
 `PSMarketplace` output type has no `PublisherType` property at all), so **no
 client-side filtering is needed** — every row it returns is a Marketplace row.
-The "is this Anthropic?" question is answered by `PublisherName` / `OfferName`;
+The "which publisher is this?" question is answered by `PublisherName` / `OfferName`;
 RDA does **not** hardcode any publisher/offer literal — the field is the contract.
 
 ### The columns

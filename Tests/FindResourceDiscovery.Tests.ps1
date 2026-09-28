@@ -1,44 +1,49 @@
 #Requires -Version 7.0
 <#
-    Reproduction + regression coverage for fable review findings W1, W2, W4 in
+    Reproduction + regression coverage for discovery and reporting behaviour in
     Functions/FindResource.Functions.ps1.
 
-    W1  The README "File Delivery" step tells operators to rename the per-sub /
+    Renamed deliverables:
+        The README "File Delivery" step tells operators to rename the per-sub /
         bundle ZIP to include a company prefix, e.g.
         CompanyName_ResourcesReport_2024-01-15.zip. Discovery filtered on the
         anchored pattern 'ResourcesReport*.zip', so that file was invisible on a
         recursive scan and Rejected as "not a report artifact" when passed
         explicitly. A folder of renamed deliverables scanned as empty.
 
-    W2  When sources are found but every read fails (UnitsRead == 0), the summary
+    All reads failed:
+        When sources are found but every read fails (UnitsRead == 0), the summary
         blamed "the bundles predate the collector, or the run was scoped with
         -Service" - both wrong. The real story is the read failures.
 
-    W4  A permission-denied scan root was reported as Missing ("path not found")
+    Permission-denied root:
+        A permission-denied scan root was reported as Missing ("path not found")
         rather than Unreadable, sending the operator to check spelling instead of
         ACLs.
 
-    Later findings covered here:
-
-    D1  (875) Discovery de-duplicated on the report stamp but fell back to the
+    Stamp-less duplicates:
+        Discovery de-duplicated on the report stamp but fell back to the
         bare BASE NAME for stamp-less files, so two distinct stamp-less
         inventories sharing a base name in different folders collapsed into one
         Group-Object group and one was silently dropped from Sources - a false
         confirmed zero one layer before the reader. The fallback now keys on the
         FULL PATH so distinct files stay distinct.
 
-    E1  (876/805) When candidates were found but every one was excluded
+    Every candidate excluded:
+        When candidates were found but every one was excluded
         (refused/unreadable/skipped/missing), the empty-source message still said
         "No report bundles found ... Check the path", telling the operator their
         correct path was wrong. It now distinguishes "nothing was there" from
         "everything was excluded".
 
-    P1  (892) The emitted RdaResourceType echoed the OPERATOR's -ResourceType
+    Resource type casing:
+        The emitted RdaResourceType echoed the OPERATOR's -ResourceType
         casing, so 'vmware' and 'VMWare' from one estate split under a
         case-sensitive downstream group. It now stamps the inventory's actual
         (canonical-by-production) key name.
 
-    M1  (865) A consolidated bundle skipped because an extracted report sat
+    Skipped bundle coverage:
+        A consolidated bundle skipped because an extracted report sat
         beside it produced a single advisory line that named the bundle but not
         how much coverage it represented, so a one-line skip of a
         many-subscription bundle read like a trivial loss. The advisory now
@@ -54,7 +59,7 @@ BeforeAll {
     . (Join-Path $Script:RepoRoot 'Functions/Common.Functions.ps1')
     . (Join-Path $Script:RepoRoot 'Functions/FindResource.Functions.ps1')
 
-    $Script:TestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("RdaW1W2W4_{0}" -f ([guid]::NewGuid().ToString('N')))
+    $Script:TestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("RdaFindResource_{0}" -f ([guid]::NewGuid().ToString('N')))
     New-Item -ItemType Directory -Path $Script:TestRoot -Force | Out-Null
 
     # Writes one synthetic per-sub zip carrying an Inventory_*.json whose VMWare
@@ -87,15 +92,16 @@ BeforeAll {
 }
 
 AfterAll {
-    if ($Script:TestRoot -and (Test-Path -LiteralPath $Script:TestRoot)) {
+    if ($Script:TestRoot -and (Test-Path -LiteralPath $Script:TestRoot))
+    {
         Remove-Item -LiteralPath $Script:TestRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-Describe 'W1: renamed delivery filename is still discovered' {
+Describe 'Renamed delivery filename is still discovered' {
 
     It 'discovers a company-prefixed per-sub report on a recursive scan' {
-        $Dir = Join-Path $Script:TestRoot 'w1-recursive'
+        $Dir = Join-Path $Script:TestRoot 'renamed-recursive'
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path $Dir 'CompanyName_ResourcesReport_20260101000000000ab1f.zip') -Force | Out-Null
 
@@ -114,7 +120,7 @@ Describe 'W1: renamed delivery filename is still discovered' {
     }
 
     It 'still classifies an AllSubscriptions bundle as ConsolidatedZip, not PerSubZip' {
-        $Dir = Join-Path $Script:TestRoot 'w1-bundle'
+        $Dir = Join-Path $Script:TestRoot 'renamed-bundle'
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
         New-Item -ItemType File -Path (Join-Path $Dir 'AllSubscriptions_ResourcesReport_20260101000000000ab1f.zip') -Force | Out-Null
 
@@ -125,7 +131,7 @@ Describe 'W1: renamed delivery filename is still discovered' {
     }
 }
 
-Describe 'W4: permission-denied root is Unreadable, not Missing' {
+Describe 'Permission-denied root is Unreadable, not Missing' {
 
     It 'classifies a Get-Item failure as Unreadable rather than Missing' {
         $Fake = Join-Path $Script:TestRoot 'locked-root'
@@ -145,7 +151,7 @@ Describe 'W4: permission-denied root is Unreadable, not Missing' {
     }
 }
 
-Describe 'W2: all-reads-failed is reported as read failure, not wrong causes' {
+Describe 'All-reads-failed is reported as read failure, not wrong causes' {
 
     It 'does not blame collector-absence or -Service scoping when UnitsRead is 0 but sources exist' {
         # A result with sources found but nothing read: coverage is None for the
@@ -170,10 +176,10 @@ Describe 'W2: all-reads-failed is reported as read failure, not wrong causes' {
     }
 }
 
-Describe 'D1 (875): stamp-less discovery de-dup keys on full path, not base name' {
+Describe 'Stamp-less discovery de-dup keys on full path, not base name' {
 
     It 'keeps two same-named stamp-less per-sub zips in different folders as distinct sources' {
-        $Root = Join-Path $Script:TestRoot ('d1-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Root = Join-Path $Script:TestRoot ('dedup-{0}' -f ([guid]::NewGuid().ToString('N')))
         $A = Join-Path $Root 'a'
         $B = Join-Path $Root 'b'
         New-Item -ItemType Directory -Path $A -Force | Out-Null
@@ -189,7 +195,7 @@ Describe 'D1 (875): stamp-less discovery de-dup keys on full path, not base name
     }
 
     It 'still collapses two views of ONE stamped report to a single source' {
-        $Root = Join-Path $Script:TestRoot ('d1s-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Root = Join-Path $Script:TestRoot ('dedup-stamped-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
         $Stamp = '202601010000000000abc'
         # A loose json and the per-sub zip beside it, sharing one stamp.
@@ -201,10 +207,10 @@ Describe 'D1 (875): stamp-less discovery de-dup keys on full path, not base name
     }
 }
 
-Describe 'E1 (876/805): all-excluded is not reported as a wrong path' {
+Describe 'All-excluded is not reported as a wrong path' {
 
     It 'does not tell the operator to check the path when every candidate was refused' {
-        $Root = Join-Path $Script:TestRoot ('e1-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Root = Join-Path $Script:TestRoot ('excluded-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
         # A de-obfuscated report the PII guard refuses; it is a found-but-excluded
         # candidate, so Sources is empty for a reason that is NOT a wrong path.
@@ -220,7 +226,7 @@ Describe 'E1 (876/805): all-excluded is not reported as a wrong path' {
     }
 
     It 'still tells the operator to check the path when nothing at all was found' {
-        $Root = Join-Path $Script:TestRoot ('e1e-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Root = Join-Path $Script:TestRoot ('excluded-empty-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
 
         $Result = Find-RdaResource -Path $Root -ResourceType 'VMWare' -ThrottleLimit 2
@@ -233,10 +239,10 @@ Describe 'E1 (876/805): all-excluded is not reported as a wrong path' {
     }
 }
 
-Describe 'P1 (892): emitted RdaResourceType uses the inventory key casing, not the query' {
+Describe 'Emitted RdaResourceType uses the inventory key casing, not the query' {
 
     It 'stamps the canonical inventory key even when the query differs in case' {
-        $Dir = Join-Path $Script:TestRoot ('p1-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Dir = Join-Path $Script:TestRoot ('casing-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
         $Zip = Join-Path $Dir 'ResourcesReport_202601010000000000d01.zip'
         # Inventory key is 'VMWare'; the operator queries lower-case 'vmware'.
@@ -250,7 +256,7 @@ Describe 'P1 (892): emitted RdaResourceType uses the inventory key casing, not t
     }
 
     It 'still counts coverage correctly when query and key casing differ' {
-        $Dir = Join-Path $Script:TestRoot ('p1c-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Dir = Join-Path $Script:TestRoot ('casing-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
         $Zip = Join-Path $Dir 'ResourcesReport_202601010000000000d02.zip'
         New-CasedPerSubZip -ZipPath $Zip -Stamp '202601010000000000d02' -KeyCasing 'VMWare'
@@ -261,7 +267,7 @@ Describe 'P1 (892): emitted RdaResourceType uses the inventory key casing, not t
     }
 }
 
-Describe 'M1 (865): a skipped bundle reports how much coverage it represents' {
+Describe 'A skipped bundle reports how much coverage it represents' {
 
     It 'includes the per-subscription report count in the skip advisory' {
         # A folder holding BOTH an extracted report (Inventory_*.json) and a
@@ -269,7 +275,7 @@ Describe 'M1 (865): a skipped bundle reports how much coverage it represents' {
         # The advisory must state HOW MANY per-subscription reports the skipped
         # bundle held, so a single skip line for a many-subscription bundle is not
         # mistaken for a trivial loss.
-        $Dir = Join-Path $Script:TestRoot ('m1-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Dir = Join-Path $Script:TestRoot ('coverage-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
         # (a) an extracted report so the bundle is skipped, not read.
         Set-Content -LiteralPath (Join-Path $Dir 'Inventory_ResourcesReport_20260101000000000aa11.json') -Value '{ "Version": "9.9.9" }' -Encoding UTF8

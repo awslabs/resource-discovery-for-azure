@@ -365,3 +365,195 @@ function Test-RdaAuthExpiry
     return [bool]($ErrorMessage -match $AuthExpiryPattern)
 }
 
+function Test-RdaOutOfMemory
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$ErrorMessage)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
+
+    # Matches only the two default .NET out-of-memory messages, case-sensitively: the runtime's
+    # "Exception of type 'System.OutOfMemoryException' was thrown." (Az cmdlets can wrap it in
+    # "One or more errors occurred. (...)"), and the default text of a constructed
+    # OutOfMemoryException or InsufficientMemoryException. A bare type name does not match, so
+    # an echoed resource name such as 'rg-OutOfMemoryException-01' is not mistaken for one.
+    # Text alone cannot tell this process running out of memory from a service error that
+    # echoes the same sentence; such an echo gets one immediate retry instead of the backoff.
+    $OutOfMemoryPattern = '(' + (@(
+            'Exception of type ''System\.OutOfMemoryException'' was thrown'
+            'Insufficient memory to continue the execution of the program'
+        ) -join '|') + ')'
+
+    return [bool]($ErrorMessage -cmatch $OutOfMemoryPattern)
+}
+
+function Write-RdaMemorySnapshot
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [switch]$Compact,
+        [switch]$Record
+    )
+
+    # Writes how much memory this process holds to the local debug log only, so a run that runs out
+    # of memory shows which phase grew. -Compact first runs a full blocking collection that also
+    # compacts the large object heap. A long-lived session such as Cloud Shell otherwise never
+    # compacts that heap, so large strings and arrays freed by earlier subscriptions can leave it
+    # too fragmented for the next large allocation.
+    # -Record also appends the reading to $Global:MemoryReadings, keyed by the subscription being
+    # processed and the run stamp, so the wrapper's RunSummary.log and the shareable Diagnostics
+    # log can show how much memory each phase of each subscription held. A recorded reading is
+    # always taken after the compacting collection, which is what the rendered block's header
+    # states, and its phase must be one of the five the renderer lays out; a misspelled phase would
+    # otherwise render as a silent gap. The figures carry no identifier, so the same rows are safe
+    # in an obfuscated bundle.
+    if ($Record)
+    {
+        $RecordedPhases = @('start', 'discovery', 'collectors', 'released', 'end')
+        if ($Phase -notin $RecordedPhases)
+        {
+            throw [System.ArgumentException]::new(("A recorded memory reading must use one of the phases the summary renders ({0}); got '{1}'." -f ($RecordedPhases -join ', '), $Phase), 'Phase')
+        }
+    }
+    try
+    {
+        if ($Compact -or $Record)
+        {
+            [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+            [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+        }
+        $HeapMB = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+        $WorkingSetMB = [math]::Round([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB, 1)
+        $LimitMB = [math]::Round([System.GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes / 1MB, 0)
+        if ($Record)
+        {
+            $SubId = Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue
+            $ResourceCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
+            if ($null -eq $Global:MemoryReadings) { $Global:MemoryReadings = @() }
+            $Global:MemoryReadings += [pscustomobject]@{
+                Id           = [string]$SubId
+                Stamp        = [string]$Global:CurrentDateTime
+                Phase        = $Phase
+                Resources    = $ResourceCount
+                HeapMB       = $HeapMB
+                WorkingSetMB = $WorkingSetMB
+                LimitMB      = $LimitMB
+            }
+        }
+        $CompactNote = if ($Compact) { ', after a compacting collection' } else { '' }
+        Write-Log -Message ('[Memory] {0}: managed heap {1} MB, process working set {2} MB, memory available to the runtime {3} MB{4}.' -f $Phase, $HeapMB.ToString([cultureinfo]::InvariantCulture), $WorkingSetMB.ToString([cultureinfo]::InvariantCulture), $LimitMB.ToString([cultureinfo]::InvariantCulture), $CompactNote) -Severity 'Info' -NoConsole -ToDebugLog
+    }
+    catch
+    {
+        Write-Log -Message ('[Memory] {0}: snapshot unavailable: {1}' -f $Phase, $_.Exception.Message) -Severity 'Info' -NoConsole -ToDebugLog
+    }
+}
+
+
+function Get-RdaMemoryReadingLines
+{
+    [CmdletBinding()]
+    param(
+        $Readings = @(),
+        [string]$Stamp,
+        [switch]$Obfuscated
+    )
+
+    # Renders the readings Write-RdaMemorySnapshot -Record collected: one row per subscription with
+    # the managed heap and working set at each phase, then the highest working set seen, the memory
+    # the runtime says it may use, and the per-resource cost of the largest subscription. The rows
+    # carry counts and megabytes. Under -Obfuscated a subscription is named by its position;
+    # otherwise by its id, which the diagnostics writer masks like its other sections. -Stamp keeps
+    # a standalone run's log to its own readings when the same prompt has run the script before.
+    $Lines = [System.Collections.Generic.List[string]]::new()
+    $Rows = @(@($Readings) | Where-Object { $null -ne $_ -and -not [string]::IsNullOrEmpty([string]$_.Phase) })
+    if (-not [string]::IsNullOrEmpty($Stamp))
+    {
+        $Rows = @($Rows | Where-Object { [string]$_.Stamp -eq $Stamp })
+    }
+    if ($Rows.Count -eq 0) { return $Lines.ToArray() }
+
+    $Phases = @('start', 'discovery', 'collectors', 'released', 'end')
+    $Groups = [ordered]@{}
+    foreach ($Row in $Rows)
+    {
+        $Key = [string]$Row.Id
+        if ([string]::IsNullOrEmpty($Key)) { $Key = [string]$Row.Stamp }
+        if (-not $Groups.Contains($Key)) { $Groups[$Key] = @() }
+        $Groups[$Key] += $Row
+    }
+
+    $Inv = [cultureinfo]::InvariantCulture
+    $Lines.Add('Memory (MB, managed heap after a full collection / process working set):')
+    $Position = 0
+    $HighestWorkingSet = 0
+    $Limit = 0
+    $Largest = $null
+    foreach ($Key in $Groups.Keys)
+    {
+        $Position++
+        $Group = @($Groups[$Key])
+        $Resources = 0
+        foreach ($Row in $Group)
+        {
+            $RowResources = 0
+            if ([int]::TryParse([string]$Row.Resources, [ref]$RowResources) -and $RowResources -gt $Resources) { $Resources = $RowResources }
+            $RowWs = 0.0
+            if ([double]::TryParse([string]$Row.WorkingSetMB, [System.Globalization.NumberStyles]::Float, $Inv, [ref]$RowWs) -and $RowWs -gt $HighestWorkingSet) { $HighestWorkingSet = $RowWs }
+            $RowLimit = 0.0
+            if ([double]::TryParse([string]$Row.LimitMB, [System.Globalization.NumberStyles]::Float, $Inv, [ref]$RowLimit) -and $RowLimit -gt $Limit) { $Limit = $RowLimit }
+        }
+        $Label = if ($Obfuscated -or [string]::IsNullOrEmpty([string]$Group[0].Id)) { 'sub {0}' -f $Position } else { 'sub {0}' -f [string]$Group[0].Id }
+        $Cells = [System.Collections.Generic.List[string]]::new()
+        $Cells.Add(('resources {0}' -f $Resources.ToString('N0', $Inv)))
+        foreach ($Phase in $Phases)
+        {
+            $Reading = @($Group | Where-Object { [string]$_.Phase -eq $Phase } | Select-Object -Last 1)
+            if ($Reading.Count -eq 0) { $Cells.Add(('{0} -' -f $Phase)); continue }
+            $Heap = 0.0; $Ws = 0.0
+            [void][double]::TryParse([string]$Reading[0].HeapMB, [System.Globalization.NumberStyles]::Float, $Inv, [ref]$Heap)
+            [void][double]::TryParse([string]$Reading[0].WorkingSetMB, [System.Globalization.NumberStyles]::Float, $Inv, [ref]$Ws)
+            $Cells.Add(('{0} {1}/{2}' -f $Phase, [math]::Round($Heap).ToString($Inv), [math]::Round($Ws).ToString($Inv)))
+        }
+        $Lines.Add(('  [{0}]  {1}' -f $Label, ($Cells -join '  ')))
+        if ($null -eq $Largest -or $Resources -gt $Largest.Resources)
+        {
+            $Largest = [pscustomobject]@{ Resources = $Resources; Group = $Group }
+        }
+    }
+
+    $Lines.Add(('  Highest working set sampled : {0} MB' -f [math]::Round($HighestWorkingSet).ToString($Inv)))
+    if ($Limit -gt 0)
+    {
+        $Lines.Add(('  Memory available to runtime : {0} MB' -f [math]::Round($Limit).ToString($Inv)))
+    }
+
+    if ($null -ne $Largest -and $Largest.Resources -gt 0)
+    {
+        $HeapAt = @{}
+        foreach ($Phase in @('start', 'discovery', 'collectors'))
+        {
+            $Reading = @($Largest.Group | Where-Object { [string]$_.Phase -eq $Phase } | Select-Object -Last 1)
+            if ($Reading.Count -gt 0)
+            {
+                $Heap = 0.0
+                if ([double]::TryParse([string]$Reading[0].HeapMB, [System.Globalization.NumberStyles]::Float, $Inv, [ref]$Heap)) { $HeapAt[$Phase] = $Heap }
+            }
+        }
+        if ($HeapAt.ContainsKey('start') -and $HeapAt.ContainsKey('discovery') -and $HeapAt.ContainsKey('collectors'))
+        {
+            $PerResourceKB = {
+                param([double]$FromMB, [double]$ToMB)
+                [math]::Max(0, [math]::Round((($ToMB - $FromMB) * 1024) / $Largest.Resources))
+            }
+            $RawKB = & $PerResourceKB $HeapAt['start'] $HeapAt['discovery']
+            $CollectorKB = & $PerResourceKB $HeapAt['discovery'] $HeapAt['collectors']
+            $TotalKB = & $PerResourceKB $HeapAt['start'] $HeapAt['collectors']
+            $Lines.Add(('  Per resource, largest sub   : raw rows ~{0} KB, collector output ~{1} KB, total ~{2} KB ({3} resources)' -f $RawKB.ToString($Inv), $CollectorKB.ToString($Inv), $TotalKB.ToString($Inv), $Largest.Resources.ToString('N0', $Inv)))
+        }
+    }
+
+    return $Lines.ToArray()
+}

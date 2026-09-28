@@ -2776,6 +2776,17 @@ That is a good general habit for anything that mutates ambient state.
                                 throw
                             }
 
+                            if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                            {
+                                # [comment: backing off cannot free memory. Release the previous
+                                #  page, compact the heap and retry this page once; a second
+                                #  out of memory error on the page re-throws to the outer catch.]
+                                if ($ConsumptionOutOfMemoryRetried) { throw }
+                                $ConsumptionOutOfMemoryRetried = $true
+                                [...]
+                                continue
+                            }
+
                             $ConsumptionAttempt++
                             if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }
 
@@ -2806,9 +2817,10 @@ That is a good general habit for anything that mutates ambient state.
 | 1683-1688 | `$Params = @{ ... }` | A hashtable of parameters, later applied with `@Params`, which is PowerShell **splatting**. `AggregationGranularity = 'Daily'` gives one row per resource per meter per day. `ShowDetails = $true` is what makes `InstanceData` populated, and without it there would be no resource IDs to join on at all. |
 | 1690 | `$Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }` | First page uses `$null`; every later page uses the token from the previous response. |
 | the `Test-RdaConsumptionDenial` check | `if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message) { ...; throw }` | The retry loop's **fast-fail**, and the first thing the catch evaluates. `Test-RdaConsumptionDenial` lives in `Functions/Common.Functions.ps1` and is the *same* verdict the wrapper's up-front access gate uses via `Get-ConsumptionAccessOutcome`, so a denial is treated identically whether it is caught before the run or part-way through it. Ordering matters: it must stay ahead of the throttle test below, which is a loose substring match that a `429` inside an echoed resource id would satisfy. Only an unambiguous denial qualifies - throttling, an expired token, a 5xx and the transient "Error while copying content to a stream" all still retry, because abandoning retrievable billing data is the expensive mistake. |
+| the `Test-RdaOutOfMemory` check | `if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message) { ...; continue }` | Evaluated straight after the denial check. Backing off cannot free memory, so an out of memory failure does not spend the retry budget: the first one releases the previous page's objects, compacts the heap and retries the same page at once, and a second one on the same page re-throws to the outer per subscription `catch`, which logs an Error with how to re-run that subscription. Only a failed fetch is retried, because nothing of that page has been written yet; an out of memory error while a page is being processed goes straight to the outer `catch`, since a retry there could write the same rows twice. `Test-RdaOutOfMemory` (in `Functions/Common.Functions.ps1`) matches only the two default .NET out of memory messages. |
 | `$ConsumptionMaxRetries = 30` | A large budget, deliberately. The reason is in the comment: the Cost Management rate limit is **tenant wide and shared**, not per user, so when another billing pipeline is draining the same bucket the throttle can persist for minutes. A short 3 retry, 14 second budget would be exhausted while contention was still ongoing, and this subscription's consumption would be silently truncated. |
 | 1729 | `$UsageData = Get-UsageAggregates @Params -ErrorAction Stop` | The actual call, splatted. |
-| the budget check | `if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }` | Budget exhausted. This is now the *second* of two exits from the loop, the first being the denial fast-fail above. Re-throws to the outer per subscription `catch`, which records the failure and moves to the next subscription. |
+| the budget check | `if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }` | Budget exhausted. Earlier checks in the `catch`, such as the denial fast-fail and the second out of memory error above, end the loop sooner; this is the exit for everything that stays retryable. Re-throws to the outer per subscription `catch`, which records the failure and moves to the next subscription. |
 | 1737 | `$_.Exception.Message -match 'TooManyRequests\|\b429\b\|throttl\|rate limit'` | Text matching to detect throttling. Fragile in principle, since message text can change between SDK versions and locales, which is exactly why the header based check on the next line is preferred over it. |
 | 1749 | `$ConsumptionRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_` | A project helper that digs the `x-ms-ratelimit-microsoft.consumption-retry-after` or standard `Retry-After` header out of the thrown `CloudException`. This is the **server telling you exactly how long to wait**, which beats any guess. |
 | 1753 | `[math]::Min($ConsumptionRetryAfter, 300)` | Honour the server, but clamp to 5 minutes so a misparsed or pathological header value cannot stall the run indefinitely. Trusting an external input, but bounding it. |
@@ -3099,7 +3111,7 @@ Note also the two different counters at lines 2089 and 2095.
 
 | Counter | Scope | Why both exist |
 |---|---|---|
-| `$Global:ConsumptionRecordCount` | run wide, accumulates across all subscriptions in the process | What the wrapper's final summary reports |
+| `$Global:ConsumptionRecordCount` | run wide: accumulates across the subscriptions of one wrapper run, and `Run-AllSubscriptions.ps1` resets it to 0 when a run starts, because one PowerShell session can host several runs | What the wrapper's final summary reports |
 | `$script:ConsumptionRecordsThisRun` | this invocation only | What the per subscription `Diagnostics_*.log` reports |
 
 Without the script scoped one, a subscription that collected zero records after an earlier one collected millions could not fire its own zero record warning, because the global would be non zero.

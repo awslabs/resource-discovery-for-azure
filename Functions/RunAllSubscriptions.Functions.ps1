@@ -713,6 +713,33 @@ function Invoke-PreFlightChecks
         Exit-Wrapper -Code 1
     }
 
+    # A parallel run writes an Az context snapshot (a token cache) here and removes it itself. One that
+    # is still present before this run has written its own was left by a run that did not reach its
+    # cleanup, or belongs to another wrapper running against this folder right now. Report it; never
+    # delete it from here, because the second case would break that other run. Only the wrapper writes
+    # snapshots, so ResourceInventory.ps1's own pre-flight has no counterpart to this check.
+    $StaleSnapshots = @(Get-StaleAzContextSnapshot -InventoryRoot $InventoryRoot)
+    if ($StaleSnapshots.Count -gt 0)
+    {
+        Write-Host ""
+        Write-Host ("WARNING: {0} Az context snapshot(s) from another parallel-streams run found in {1}." -f $StaleSnapshots.Count, $InventoryRoot) -ForegroundColor Yellow
+        foreach ($Snapshot in $StaleSnapshots)
+        {
+            # UTC on both sides, so a DST change cannot shift the age; a timestamp in the future counts as 0.
+            $Age = [datetime]::UtcNow - $Snapshot.LastWriteTimeUtc
+            if ($Age -lt [timespan]::Zero) { $Age = [timespan]::Zero }
+            $AgeText = if ($Age.TotalHours -lt 1) { '{0} min' -f [math]::Floor($Age.TotalMinutes) } else { '{0} h' -f $Age.TotalHours.ToString('0.0', [cultureinfo]::InvariantCulture) }
+            Write-Host ("  {0}  ({1} KB, written {2} ago)" -f $Snapshot.Name, [math]::Round($Snapshot.Length / 1KB), $AgeText) -ForegroundColor Yellow
+        }
+        Write-Host "  Each one holds an Azure token cache. If no other wrapper is running against this folder, delete them:" -ForegroundColor Yellow
+        foreach ($Snapshot in $StaleSnapshots)
+        {
+            # Escapes every quote character PowerShell treats as closing a single-quoted string, curly ones included.
+            Write-Host ("  Remove-Item -LiteralPath '{0}' -Force" -f [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Snapshot.FullName)) -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+
     Write-Host "Pre-flight checks passed." -ForegroundColor Green
     Write-Host ""
 }
@@ -927,6 +954,52 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$Tenant
     )
     return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+}
+
+function Get-StreamImportMarkerPath
+{
+    # The file a stream worker creates once Import-AzContext has succeeded, next to the snapshot it
+    # imported. The parent removes the snapshot as soon as every stream has left a marker or ended, so
+    # the token cache inside the snapshot is on disk only for the seconds the workers need it.
+    param(
+        [Parameter(Mandatory = $true)][string]$AzContextPath,
+        [Parameter(Mandatory = $true)][string]$StreamId
+    )
+    return ('{0}.imported-{1}' -f $AzContextPath, $StreamId)
+}
+
+function Get-StaleAzContextSnapshot
+{
+    # Az context snapshots in the inventory root. Called before this run writes its own, so anything
+    # found belongs to an earlier run that did not reach its cleanup, or to another wrapper running
+    # against the same folder right now. The caller only reports them; it never deletes them.
+    param(
+        [Parameter(Mandatory = $true)][string]$InventoryRoot
+    )
+    return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter '.rda-stream-azcontext-*.json' -File -Force -ErrorAction SilentlyContinue)
+}
+
+function Test-AzContextSnapshotReleasable
+{
+    # True once no stream can still need the snapshot: each stream has either imported it (its marker
+    # exists) or its job has already ended, so it will never import. A stream that is still running
+    # without a marker keeps the snapshot in place. The two arrays are indexed by stream.
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][bool[]]$MarkerPresent,
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][AllowEmptyString()][string[]]$JobState
+    )
+    # A missing or blank job state keeps the snapshot, like any other state that is not final.
+    if ($null -eq $JobState) { return $false }
+    if ($MarkerPresent.Count -eq 0) { return $false }
+    # The two arrays describe the same streams; a mismatch means a stream is unaccounted for.
+    if ($JobState.Count -ne $MarkerPresent.Count) { return $false }
+    $EndedStates = @('Completed', 'Failed', 'Stopped')
+    for ($i = 0; $i -lt $MarkerPresent.Count; $i++)
+    {
+        if ($MarkerPresent[$i]) { continue }
+        if ([string]$JobState[$i] -notin $EndedStates) { return $false }
+    }
+    return $true
 }
 
 function Merge-FailedAttempts
@@ -1197,6 +1270,7 @@ function Get-RunSummaryLogContent
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
         $MarketplaceFailedSubs = @(),
+        $MemoryReadings = @(),
         [int]$ConsumptionRecordCount = 0,
         [int]$MarketplaceRecordCount = 0,
         [int]$MetricsApiCallCount = 0,
@@ -1369,6 +1443,24 @@ function Get-RunSummaryLogContent
         $Lines.Add('      help - the partner must enable it in Partner Center.')
         $Lines.Add('    - Subscription not transitioned to the Azure plan.')
         $Lines.Add('    - A subscription offer the legacy usage API does not serve.')
+    }
+
+    # Per-subscription memory readings from the inner script: counts and megabytes, labelled by
+    # subscription id, or by position when obfuscated. They show how much the host was holding at
+    # each phase and whether it grew from one subscription to the next, which is what a run that
+    # ran out of memory needs.
+    # An explicit empty state, so a summary with no readings (every subscription failed before its
+    # first reading, or a stream worker died before writing its summary) is not mistaken for one
+    # produced by a build without the block.
+    $MemoryLines = @(Get-RdaMemoryReadingLines -Readings $MemoryReadings -Obfuscated:$Obfuscated)
+    $Lines.Add('')
+    if ($MemoryLines.Count -gt 0)
+    {
+        foreach ($MemoryLine in $MemoryLines) { $Lines.Add($MemoryLine) }
+    }
+    else
+    {
+        $Lines.Add('Memory: no readings recorded (no subscription reached its first reading)')
     }
 
     if (-not $Obfuscated)

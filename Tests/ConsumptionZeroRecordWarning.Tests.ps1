@@ -1,5 +1,6 @@
 # Offline tests pinning the "consumption requested but ZERO records collected" warning: a header-only
 # Consumption CSV once shipped unflagged (the console gate excluded the exact 0/0 case). The warning must fire only when all five guards hold: requested, 0 records, 0 consumption failures, >=1 sub ran, and >=1 ran without recording a failure.
+# The last two Describes pin the warning's inputs: the run-wide totals start from zero on every run (a stale record count would disarm the warning) and every stream's consumption failures reach the parent (a dropped row would mis-gate it).
 
 BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -7,6 +8,17 @@ BeforeAll {
     . (Join-Path $script:RepoRoot 'Functions/Common.Functions.ps1')
     . (Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1')
     . (Join-Path $script:RepoRoot 'Functions/ResourceInventory.Functions.ps1')
+
+    # Write-RdaShareableDiagnosticsLog reads the run-wide failure lists from the session, so a
+    # pwsh that already ran the wrapper would feed that run's failures into every case below.
+    # Clear them for this file and put the caller's values back in AfterAll.
+    $script:SessionFailureLists = @{}
+    foreach ($Name in 'ConsumptionFailedSubs', 'MetricsFailedSubs', 'MarketplaceFailedSubs', 'CollectorFailures')
+    {
+        $Existing = Get-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+        $script:SessionFailureLists[$Name] = if ($Existing) { @{ Value = $Existing.Value } } else { $null }
+        Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+    }
 
     # Fail loudly here rather than with a confusing "command not found" mid-test
     # if a future change renames either builder.
@@ -125,6 +137,11 @@ AfterAll {
     if ($script:DiagDir -and (Test-Path -LiteralPath $script:DiagDir))
     {
         Remove-Item -LiteralPath $script:DiagDir -Recurse -Force
+    }
+    foreach ($Name in @($script:SessionFailureLists.Keys))
+    {
+        if ($null -ne $script:SessionFailureLists[$Name]) { Set-Variable -Name $Name -Scope Global -Value $script:SessionFailureLists[$Name].Value }
+        else { Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue }
     }
 }
 
@@ -549,5 +566,143 @@ Describe 'The two surfaces agree' {
         $Diag = script:GetDiagText -RecordCount 0 -Requested $true -RunTag 'a2'
         $Summary | Should -Not -Match 'midnight UTC'
         $Diag | Should -Not -Match 'midnight UTC'
+    }
+}
+
+Describe 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' {
+
+    # Two writers only ever add to these globals: ResourceInventory.ps1, which runs in the
+    # wrapper's own process on the sequential path, and the wrapper's per-stream summary
+    # aggregation on the parallel path. A PowerShell prompt (Azure Cloud Shell included) keeps
+    # one process across runs, so without a reset at the top of the wrapper a second run in the
+    # same session reported the first run's records and failures as its own. A stale record
+    # total also disarms the zero-record warning pinned above: a run that collected nothing
+    # still reads as non-zero.
+
+    BeforeDiscovery {
+        # Every run-wide total the wrapper summarises, with a value an earlier run can leave behind.
+        $script:RunTotals = @(
+            @{ Name = 'ConsumptionRecordCount'; IsList = $false; Stale = 612 }
+            @{ Name = 'ConsumptionFailedSubs'; IsList = $true; Stale = @([pscustomobject]@{ Name = 'earlier run'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stale' }) }
+            @{ Name = 'MetricsApiCallCount'; IsList = $false; Stale = 34 }
+            @{ Name = 'MetricsFailedSubs'; IsList = $true; Stale = @([pscustomobject]@{ Name = 'earlier run'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stale' }) }
+            @{ Name = 'MarketplaceRecordCount'; IsList = $false; Stale = 7 }
+            @{ Name = 'MarketplaceFailedSubs'; IsList = $true; Stale = @([pscustomobject]@{ Name = 'earlier run'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stale' }) }
+            @{ Name = 'CollectorFailures'; IsList = $true; Stale = @([pscustomobject]@{ Id = '12345678-1234-1234-1234-123456789012'; Module = 'VirtualMachines'; Message = 'stale' }) }
+            @{ Name = 'MemoryReadings'; IsList = $true; Stale = @([pscustomobject]@{ Id = '12345678-1234-1234-1234-123456789012'; Stamp = '20260101000000'; Phase = 'end'; Resources = 1; HeapMB = 1.0; WorkingSetMB = 1.0; LimitMB = 1.0 }) }
+        )
+    }
+
+    BeforeAll {
+        $ParseErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$ParseErrors)
+        if ($ParseErrors) { throw ('Run-AllSubscriptions.ps1 does not parse: ' + (($ParseErrors | ForEach-Object { $_.Message }) -join '; ')) }
+        # Top-level statements only: a reset nested in a function or a branch does not run on every start.
+        $script:WrapperTopLevel = @($WrapperAst.EndBlock.Statements)
+        # The statement that dispatches the subscription loop; the sequential and parallel paths both live under it.
+        $script:DispatchStatement = $script:WrapperTopLevel | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1'
+        } | Select-Object -First 1
+        if (-not $script:DispatchStatement) { throw 'The subscription dispatch (if ($ParallelStreams -le 1)) was not found at the top level of Run-AllSubscriptions.ps1.' }
+        # The value in force when subscriptions start: the LAST plain assignment ahead of the dispatch.
+        $script:GetReset = {
+            param([string]$Name)
+            $script:WrapperTopLevel | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Operator -eq 'Equals' -and
+                $_.Left.Extent.Text -eq ('$Global:' + $Name) -and
+                $_.Extent.EndOffset -le $script:DispatchStatement.Extent.StartOffset
+            } | Select-Object -Last 1
+        }
+    }
+
+    # A single case even when the table is empty, so this Describe can never silently vanish.
+    It 'pins every run-wide total the parallel stream worker resets' -ForEach @(@{ Pinned = @($script:RunTotals | ForEach-Object { $_.Name }) }) {
+        $StreamErrors = $null
+        $StreamAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1'), [ref]$null, [ref]$StreamErrors)
+        $StreamErrors | Should -BeNullOrEmpty
+        $StreamResets = @($StreamAst.EndBlock.Statements | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Operator -eq 'Equals' -and
+                $_.Left.Extent.Text -match '^\$Global:\w+$'
+            } | ForEach-Object { $_.Left.Extent.Text.Substring('$Global:'.Length) } | Sort-Object -Unique)
+        $StreamResets.Count | Should -BeGreaterThan 0 -Because 'the stream worker resets its own run-wide totals'
+        (@($Pinned | Sort-Object -Unique) -join ',') | Should -Be ($StreamResets -join ',') -Because 'every total the stream worker resets must also be reset for the sequential path, and pinned here'
+    }
+
+    It 'pins every run-wide total the wrapper itself resets before the dispatch' -ForEach @(@{ Pinned = @($script:RunTotals | ForEach-Object { $_.Name }) }) {
+        $WrapperResets = @($script:WrapperTopLevel | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Operator -eq 'Equals' -and
+                $_.Left.Extent.Text -match '^\$Global:\w+$' -and
+                $_.Extent.EndOffset -le $script:DispatchStatement.Extent.StartOffset
+            } | ForEach-Object { $_.Left.Extent.Text.Substring('$Global:'.Length) } | Sort-Object -Unique)
+        (@($Pinned | Sort-Object -Unique) -join ',') | Should -Be ($WrapperResets -join ',') -Because 'a total reset only in the wrapper would never be mirrored in the stream worker'
+    }
+
+    It 'resets $Global:<Name> at the top level, before any subscription is processed' -ForEach $script:RunTotals {
+        & $script:GetReset $Name | Should -Not -BeNullOrEmpty -Because "without it a second run in one session inherits the previous run's $Name"
+    }
+
+    It 'clears a $Global:<Name> that an earlier run in the same session left behind' -ForEach $script:RunTotals {
+        $Reset = & $script:GetReset $Name
+        $Reset | Should -Not -BeNullOrEmpty
+        $Existing = Get-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+        # Snapshot the VALUE: the variable object itself changes when the reset runs.
+        $Snapshot = if ($Existing) { @{ Value = $Existing.Value } } else { $null }
+        try
+        {
+            Set-Variable -Name $Name -Scope Global -Value $Stale
+            . ([scriptblock]::Create($Reset.Extent.Text))
+            $After = (Get-Variable -Name $Name -Scope Global).Value
+            if ($IsList)
+            {
+                @($After | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'no earlier entry may survive into this run'
+            }
+            else
+            {
+                $After | Should -Be 0
+            }
+        }
+        finally
+        {
+            if ($null -ne $Snapshot) { Set-Variable -Name $Name -Scope Global -Value $Snapshot.Value }
+            else { Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Describe 'Run-AllSubscriptions.Stream.ps1 passes every consumption failure to the wrapper' {
+
+    # Select-Object -Unique treats any two [pscustomobject] rows as equal, so deduplicating the
+    # stream summary with it kept one consumption failure per stream: with -ParallelStreams the
+    # RunSummary under-counted failed subscriptions and MainSummary read ok for the dropped ones.
+
+    BeforeAll {
+        $ParseErrors = $null
+        $StreamAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1'), [ref]$null, [ref]$ParseErrors)
+        if ($ParseErrors) { throw ('Run-AllSubscriptions.Stream.ps1 does not parse: ' + (($ParseErrors | ForEach-Object { $_.Message }) -join '; ')) }
+        $SummaryAssignment = $StreamAst.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$Summary'
+        } | Select-Object -First 1
+        if (-not $SummaryAssignment) { throw 'The stream summary ($Summary = [pscustomobject]@{ ... }) was not found in Run-AllSubscriptions.Stream.ps1.' }
+        $Table = $SummaryAssignment.Right.Find({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] }, $true)
+        $Entry = @($Table.KeyValuePairs | Where-Object { $_.Item1.Extent.Text -eq 'ConsumptionFailedSubs' }) | Select-Object -First 1
+        if (-not $Entry) { throw 'The stream summary has no ConsumptionFailedSubs entry.' }
+        # The entry's own expression, run against a list the stream built.
+        $script:StreamFailuresEntry = [scriptblock]::Create('param($ConsumptionFailedSubs) ' + $Entry.Item2.Extent.Text)
+    }
+
+    It 'keeps the failures of two different subscriptions from the same stream' {
+        $Failures = @(
+            [pscustomobject]@{ Name = 'first'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stopped'; Complete = $false }
+            [pscustomobject]@{ Name = 'second'; Id = 'second-subscription'; Message = 'stopped'; Complete = $false }
+        )
+
+        $Reported = @(& $script:StreamFailuresEntry $Failures)
+
+        $Reported.Count | Should -Be 2 -Because 'each failed subscription must reach RunSummary and its MainSummary row'
+        (@($Reported | ForEach-Object { $_.Id }) -join ',') | Should -Be '12345678-1234-1234-1234-123456789012,second-subscription'
     }
 }

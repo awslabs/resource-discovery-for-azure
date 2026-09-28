@@ -57,6 +57,9 @@ function Variables
 {
     $Global:ResourceContainers = @()
     $Global:Resources = @()
+    $Global:ResourceCount = 0
+    $Global:ErrorLogFile = $null
+    $Global:DebugLogFile = $null
     $Global:Subscriptions = ''
     $Global:ReportName = $ReportName
     $Global:Version = GetLocalVersion
@@ -563,6 +566,11 @@ function RunInventorySetup()
     CheckCliRequirements
     CheckPowerShell
     GetSubscriptionsData
+    InitializeLogFiles
+
+    # Taken after sign-in and the subscription list, so the difference to the 'discovery' reading is
+    # the Resource Graph rows alone and not the modules and tokens the setup loaded.
+    Write-RdaMemorySnapshot -Phase 'start' -Compact -Record
 
     try
     {
@@ -576,6 +584,11 @@ function RunInventorySetup()
         Write-Log -Message ('  If this is a Resource Graph response-size failure on one specific resource type, exclude that type from the discovery query to let the rest of the subscription complete.') -Severity 'Error'
         exit 1
     }
+
+    # The wrapper reports this count after the run. It reads the count rather than the array, so
+    # the array can be released once the collectors and the placement CSV have finished with it.
+    $Global:ResourceCount = @($Global:Resources).Count
+    Write-RdaMemorySnapshot -Phase 'discovery' -Compact -Record
 
     if ($Obfuscate.IsPresent)
     {
@@ -677,6 +690,34 @@ function RunInventorySetup()
     }
 }
 
+function InitializeLogFiles()
+{
+    # The two local log paths are set as soon as the report folder exists, so this subscription's
+    # sign-in errors and its 'start' and 'discovery' memory readings land in this subscription's
+    # files. Variables clears both paths first, so under the wrapper nothing is appended to the
+    # previous subscription's logs.
+    if ($RunAllSubs.IsPresent)
+    {
+        $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+        $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+        $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
+    }
+    else
+    {
+        $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+    }
+
+    if ($RunAllSubs.IsPresent)
+    {
+        $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+        $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+        $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
+    }
+    else
+    {
+        $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+    }
+}
 function ExecuteInventoryProcessing()
 {
     function InitializeInventoryProcessing()
@@ -688,28 +729,6 @@ function ExecuteInventoryProcessing()
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
         $Global:MarketplaceFileCsv = ($DefaultPath + "Marketplace_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
-
-        if ($RunAllSubs.IsPresent)
-        {
-            $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
-        }
-        else
-        {
-            $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
-        }
-
-        if ($RunAllSubs.IsPresent)
-        {
-            $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
-        }
-        else
-        {
-            $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
-        }
 
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
@@ -1149,6 +1168,10 @@ function ExecuteInventoryProcessing()
                 continue
             }
 
+            # Start each billing pull from a compacted heap, so what earlier phases and subscriptions
+            # freed is actually available to it.
+            Write-RdaMemorySnapshot -Phase 'Before the consumption pull' -Compact
+
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
             $ConsumptionRecordsThisSub = 0
@@ -1171,12 +1194,15 @@ function ExecuteInventoryProcessing()
                     }
 
                     $Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }
+                    # The previous page is written and only its token was still needed, so release its
+                    # response before this page downloads. The loop condition reads the page fetched below.
+                    $UsageData = $null
 
                     $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
                     $ConsumptionAuthRefreshedThisPage = $false
                     # The retry loop can run long: up to $ConsumptionMaxRetries attempts, each
-                    # sleeping a server-directed Retry-After clamped to 300s (~26 min worst case),
+                    # sleeping a server-directed Retry-After clamped to 300s (~150 min worst case),
                     # which can outlive the token this page started with. The per-page guard below
                     # ($ConsumptionAuthRefreshedThisPage) stops a PERMANENT 401 reconnecting on every
                     # attempt, but on its own it also blocks a legitimate SECOND lapse: once a
@@ -1190,6 +1216,7 @@ function ExecuteInventoryProcessing()
                     # keeps "succeeding" then immediately lapsing still terminates.
                     $ConsumptionAuthRefreshMax = 3
                     $ConsumptionAuthRefreshCount = 0
+                    $ConsumptionOutOfMemoryRetried = $false
                     while ($true)
                     {
                         try
@@ -1203,6 +1230,29 @@ function ExecuteInventoryProcessing()
                             {
                                 Write-Log -Message ("Consumption page query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
                                 throw
+                            }
+
+                            if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                            {
+                                # Backing off cannot free memory, and this error carries no Retry-After,
+                                # so the normal budget would only repeat it through ~26 minutes of
+                                # exponential backoff. Drop anything the previous page still holds,
+                                # compact the heap and retry this page once. Nothing has been written for
+                                # this page yet, so the retry cannot duplicate rows. A second out-of-memory
+                                # error ends this subscription's consumption; the outer catch reports it.
+                                if ($ConsumptionOutOfMemoryRetried) { throw }
+                                $ConsumptionOutOfMemoryRetried = $true
+                                Write-Log -Message ("Consumption page query for {0} ran out of memory: {1}. Compacting memory and retrying this page once." -f $sub.Name, $_.Exception.Message.TrimEnd('.')) -Severity 'Warning'
+                                # $Params already holds this page's continuation token, so nothing reads
+                                # the previous page's objects again.
+                                $UsageData = $null
+                                $UsageDataExport = $null
+                                $NewUsageDataExport = $null
+                                [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                                [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+                                [System.GC]::WaitForPendingFinalizers()
+                                [System.GC]::Collect()
+                                continue
                             }
 
                             if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
@@ -1392,6 +1442,15 @@ function ExecuteInventoryProcessing()
 
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
 
+                    # The page is on disk now, so drop its rows before the next page downloads. $UsageData
+                    # stays: the loop condition and the next request read its continuation token.
+                    $UsageDataExport = $null
+                    $NewUsageDataExport = $null
+                    if (($ConsumptionPageIndex % 10) -eq 0)
+                    {
+                        Write-RdaMemorySnapshot -Phase ('Consumption page {0}' -f $ConsumptionPageIndex)
+                    }
+
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
             }
             catch
@@ -1399,6 +1458,26 @@ function ExecuteInventoryProcessing()
                 $ConsumptionFailedThisSub = $true
                 $ConsumptionFailureMessage = ("{0} (stopped at consumption page {1}, after {2} record(s); this subscription's consumption is INCOMPLETE)" -f $_.Exception.Message, $ConsumptionPageIndex, $ConsumptionRecordsThisSub)
                 Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $ConsumptionFailureMessage) -Severity 'Warning'
+                if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                {
+                    if (-not [string]::IsNullOrEmpty($SubscriptionID))
+                    {
+                        # This bundle holds one subscription, so its consumption can be re-collected
+                        # and merged back without touching another subscription's data. An obfuscated
+                        # run is re-run obfuscated and seeded with this report folder's dictionary, so
+                        # the re-collected rows carry no real identifiers and their resource tokens
+                        # still join this run's inventory.
+                        $ConsumptionRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. Re-run it on its own in a fresh PowerShell process, or on a host with more memory (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics -SkipMarketplace{2}), then merge its consumption back in as described in docs/recovery-and-diagnostics.md under: A subscription's consumption pull was interrupted." -f $sub.Name, $sub.Id, $ConsumptionRerunObfuscation) -Severity 'Error'
+                    }
+                    else
+                    {
+                        # Without -SubscriptionID one bundle holds every subscription in scope, and
+                        # merging a single subscription's re-run into it would replace the others'
+                        # consumption.
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. This report covers every subscription in scope, so re-run the whole report in a fresh PowerShell process, or on a host with more memory." -f $sub.Name) -Severity 'Error'
+                    }
+                }
             }
 
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
@@ -1429,7 +1508,7 @@ function ExecuteInventoryProcessing()
         # Get-UsageAggregates (legacy Microsoft.Commerce/UsageAggregates), which
         # returns ONLY first-party Azure metered usage and carries no PublisherType.
         # Azure Marketplace / third-party SaaS charges (e.g. an ISV offer sold via
-        # Azure Marketplace, such as an Anthropic/Claude offer surfaced through Azure
+        # Azure Marketplace, such as a model or SaaS offer surfaced through Azure
         # AI Foundry) live behind a DIFFERENT endpoint that RDA never called, so
         # Marketplace usage was invisible regardless of whether any existed. This
         # closes that endpoint-coverage gap.
@@ -1586,11 +1665,16 @@ function ExecuteInventoryProcessing()
             }
 
             Write-Log -Message ("Gathering Marketplace consumption for: {0}" -f $sub.Name) -Severity 'Info'
+            Write-RdaMemorySnapshot -Phase ('Before the Marketplace pull for {0}' -f $sub.Name)
 
             $MarketplaceRecordsThisSub = 0
             $MarketplaceFailedThisSub = $false
             $MarketplaceFailureMessage = $null
             $MarketplaceData = $null
+            # Reset here, not only after the export: every path that throws skips the release
+            # below, which would otherwise leave the previous subscription's converted rows
+            # alive through this subscription's fetch.
+            $MarketplaceExport = $null
 
             try
             {
@@ -1599,6 +1683,10 @@ function ExecuteInventoryProcessing()
                 $MpAuthRefreshedThisCall = $false
                 $MpAuthRefreshMax = 3
                 $MpAuthRefreshCount = 0
+                # Per SUBSCRIPTION, like the rest of this block: declared outside the foreach the
+                # whole run would share one retry and every later subscription would abandon its
+                # Marketplace data on its first out-of-memory error without compacting at all.
+                $MarketplaceOutOfMemoryRetried = $false
                 while ($true)
                 {
                     try
@@ -1625,7 +1713,41 @@ function ExecuteInventoryProcessing()
                             throw
                         }
 
-                        if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
+                        # Read once into a local: the classifiers below take a string, and the
+                        # out-of-memory branch reports the same text after a collection has run.
+                        $MpErrorText = [string]$_.Exception.Message
+
+                        if (Test-RdaOutOfMemory -ErrorMessage $MpErrorText)
+                        {
+                            # Backing off cannot free memory and this error carries no Retry-After, so
+                            # the transient budget would only repeat it through ~25 minutes of
+                            # exponential backoff. Unlike the first-party page loop, which re-requests
+                            # one 1000-row page, this endpoint returns the whole window in a single
+                            # response: the request size is IDENTICAL on the retry, so compaction is the
+                            # only thing that changed and this recovers a fragmented large object heap,
+                            # not an exhausted one. One attempt only; a second ends this subscription's
+                            # Marketplace pull and the outer catch reports it. Nothing has been written
+                            # yet - the export runs only after this loop breaks - so no row can double.
+                            if ($MarketplaceOutOfMemoryRetried) { throw }
+                            $MarketplaceOutOfMemoryRetried = $true
+                            Write-Log -Message ("Marketplace query for {0} ran out of memory: {1}. Compacting memory and retrying this subscription's Marketplace pull once." -f $sub.Name, $MpErrorText.TrimEnd('.')) -Severity 'Warning'
+                            # The fetched response only. $MarketplaceExport cannot hold anything here -
+                            # it is assigned after this loop breaks - and the run-wide Marketplace token
+                            # maps and caches must SURVIVE: dropping one would mint a different token for
+                            # a real value already written under its first token and break determinism.
+                            $MarketplaceData = $null
+                            # Same sequence as the first-party page loop's out-of-memory branch.
+                            # Write-RdaMemorySnapshot -Compact is NOT a substitute: it omits the
+                            # finalizer wait and the follow-up collection, so Az response objects
+                            # awaiting finalization would not be reclaimed.
+                            [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                            [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+                            [System.GC]::WaitForPendingFinalizers()
+                            [System.GC]::Collect()
+                            continue
+                        }
+
+                        if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText))
                         {
                             $MpAuthRefreshedThisCall = $true
                             $MpAuthRefreshCount++
@@ -1717,6 +1839,11 @@ function ExecuteInventoryProcessing()
                     $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache))
                 }
 
+                # Converted now, so drop the raw response. Both copies unavoidably coexist FOR the
+                # conversion loop above, so this does not lower the peak; it stops the raw response
+                # being retained past its last reader, through the export and the next subscription.
+                $MarketplaceData = $null
+
                 if ($MarketplaceExport.Count -gt 0)
                 {
                     $MarketplaceExport | Select-Object PublisherName, OfferName, PlanName, OrderNumber, ConsumedService, ConsumedQuantity, UnitOfMeasure, PretaxCost, Currency, IsEstimated, MeterId, UsageStart, UsageEnd, SubscriptionGuid, SubscriptionName, ResourceGroup, InstanceId, InstanceName | Export-Csv -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8 -Append -NoTypeInformation
@@ -1724,12 +1851,43 @@ function ExecuteInventoryProcessing()
 
                 $MarketplaceRecordsThisSub = $MarketplaceExport.Count
                 Write-Log -Message ("Marketplace records found for {0}: {1}" -f $sub.Name, $MarketplaceRecordsThisSub) -Severity 'Info'
+                # On disk and counted; the health record carries the count, not the rows.
+                $MarketplaceExport = $null
             }
             catch
             {
                 $MarketplaceFailedThisSub = $true
                 $MarketplaceFailureMessage = ("{0} (this subscription's Marketplace data is INCOMPLETE)" -f $_.Exception.Message)
                 Write-Log -Message ("Marketplace query failed for {0}: {1}" -f $sub.Name, $MarketplaceFailureMessage) -Severity 'Warning'
+                $MpOuterErrorText = [string]$_.Exception.Message
+                # Release on this path too. It is the point of greatest memory pressure, and without
+                # this both structures stay referenced through the health append below and on into the
+                # report render and the packaging step.
+                $MarketplaceData = $null
+                $MarketplaceExport = $null
+                if (Test-RdaOutOfMemory -ErrorMessage $MpOuterErrorText)
+                {
+                    # No merge guidance on purpose: Merge-RecoveryData exposes -RecoverConsumption and
+                    # -RecoverMetrics only, so there is no supported way to splice a re-collected
+                    # Marketplace CSV into this bundle. This endpoint also returns the whole window in
+                    # one response, so there is no page to resume from either. A re-run is therefore a
+                    # REPLACEMENT bundle, and because -SkipConsumption implies -SkipMarketplace it has
+                    # to redo the first-party consumption pull as well - say both, or the advice reads
+                    # as though only the Marketplace phase repeats. The command, the subscription id and
+                    # the dictionary path stay in this log line; the health record's Message reaches
+                    # RunSummary.log unscrubbed.
+                    # An obfuscated run MUST be re-run obfuscated and seeded with this run's dictionary,
+                    # otherwise the replacement bundle carries real names.
+                    $MarketplaceRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
+                    if (-not [string]::IsNullOrEmpty($SubscriptionID))
+                    {
+                        Write-Log -Message ("Marketplace consumption for {0} stopped because this PowerShell process ran out of memory, so its Marketplace cost data is INCOMPLETE. There is no way to merge Marketplace rows back into this bundle, so re-run this subscription in a fresh PowerShell process, or on a host with more memory, and use the report it produces INSTEAD of this one - the re-run repeats the first-party consumption pull too (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics{2})." -f $sub.Name, $sub.Id, $MarketplaceRerunObfuscation) -Severity 'Error'
+                    }
+                    else
+                    {
+                        Write-Log -Message ("Marketplace consumption for {0} stopped because this PowerShell process ran out of memory, so its Marketplace cost data is INCOMPLETE. This report covers every subscription in scope and Marketplace rows cannot be merged back in, so re-run the whole report in a fresh PowerShell process, or on a host with more memory, and use that report INSTEAD of this one." -f $sub.Name) -Severity 'Error'
+                    }
+                }
             }
 
             $Global:MarketplaceRecordCount += $MarketplaceRecordsThisSub
@@ -1752,7 +1910,7 @@ function ExecuteInventoryProcessing()
         # first-party consumption zero-record warning so an empty file reads as "verified
         # none", not "collector never ran". The Marketplace endpoint returns only
         # Marketplace-publisher rows, so zero here means no third-party/Marketplace charges
-        # (e.g. no Anthropic-via-Marketplace usage) landed on the in-scope subscriptions in
+        # (e.g. no ISV SaaS usage) landed on the in-scope subscriptions in
         # the window.
         #
         # Keyed on the $script:-scoped per-invocation values, NOT the $Global: ones: the
@@ -1761,7 +1919,7 @@ function ExecuteInventoryProcessing()
         # subscription's rows and suppress this notice for every later zero-row subscription.
         if ($script:MarketplaceRecordsThisRun -eq 0 -and $script:MarketplaceFailedSubsThisRun -eq 0)
         {
-            Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an Anthropic/Claude Marketplace offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+            Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an ISV SaaS offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
         }
     }
 
@@ -1788,6 +1946,7 @@ function ExecuteInventoryProcessing()
 
     ProcessMetricsResult
     ProcessResourceResult
+    Write-RdaMemorySnapshot -Phase 'collectors' -Compact -Record
 
     if ($CapacityPlan.IsPresent)
     {
@@ -1819,6 +1978,18 @@ function ExecuteInventoryProcessing()
             Write-Log -Message ("VM placement CSV failed: {0}. The rest of the run is unaffected." -f $_.Exception.Message) -Severity 'Error'
         }
     }
+
+    # The placement CSV was the last reader of the raw Resource Graph rows and of the collector
+    # output. The Inventory JSON is on disk, billing reads the subscription list and the
+    # obfuscation dictionaries, and the HTML report reads the JSON file, so nothing after this
+    # point needs either structure. Release them here so the billing pull, and the next
+    # subscription under the wrapper, do not carry this subscription's inventory in memory. The
+    # metrics phase writes its own files and its result object has no reader after it returns, so
+    # it goes with them.
+    $Global:Resources = $null
+    $Global:SmaResources = $null
+    $Global:AzMetrics = $null
+    Write-RdaMemorySnapshot -Phase 'released' -Compact -Record
 
     if (!$SkipMetrics.IsPresent)
     {
@@ -1896,8 +2067,10 @@ function FinalizeOutputs
             # writes SHARDED Metrics_<ReportName>_<stamp>_*.json files; the unsharded path is only
             # created by the empty-metrics fallback in the packaging block, which runs AFTER this.
             # Testing the single path here would report "not written" while real shards sit on disk.
-            $MetricsGlob = if ([string]::IsNullOrWhiteSpace($Global:MetricsJsonFile)) { $null }
-            else { [IO.Path]::Combine((Split-Path -LiteralPath $Global:MetricsJsonFile -Parent), ((Split-Path -LiteralPath $Global:MetricsJsonFile -Leaf) -replace '\.json$', '*.json')) }
+            # Same folder and name pattern as the packaging block's shard check, so the two agree;
+            # $Global:MetricsJsonFile only confirms the output paths were set up.
+            $MetricsShardFilter = if ([string]::IsNullOrWhiteSpace($Global:MetricsJsonFile) -or [string]::IsNullOrWhiteSpace($Global:DefaultPath)) { $null }
+            else { 'Metrics_{0}_{1}*.json' -f $Global:ReportName, $Global:CurrentDateTime }
 
             $WrittenOutputs = @(
                 @{ Label = 'Inventory JSON'; Path = $Global:JsonFile }
@@ -1905,7 +2078,7 @@ function FinalizeOutputs
                 @{ Label = 'Marketplace CSV'; Path = $Global:MarketplaceFileCsv }
             ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Path) -and (Test-Path -LiteralPath $_.Path -PathType Leaf) }
 
-            if ($MetricsGlob -and @(Get-ChildItem -Path $MetricsGlob -File -ErrorAction SilentlyContinue).Count -gt 0)
+            if ($MetricsShardFilter -and @(Get-ChildItem -LiteralPath $Global:DefaultPath -Filter $MetricsShardFilter -File -ErrorAction SilentlyContinue).Count -gt 0)
             {
                 $WrittenOutputs = @($WrittenOutputs) + @{ Label = 'Metrics JSON' }
             }
@@ -2226,9 +2399,11 @@ if ($SkipConsumption.IsPresent -or $SkipMarketplace.IsPresent -or !$MarketplaceC
     "PublisherName,OfferName,PlanName,OrderNumber,ConsumedService,ConsumedQuantity,UnitOfMeasure,PretaxCost,Currency,IsEstimated,MeterId,UsageStart,UsageEnd,SubscriptionGuid,SubscriptionName,ResourceGroup,InstanceId,InstanceName" | Out-File -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8
 }
 
+Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
+
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
@@ -2242,7 +2417,7 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 

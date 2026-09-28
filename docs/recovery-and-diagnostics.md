@@ -209,7 +209,7 @@ consumption pull stopped.
 # 1. Re-run the subscription with consumption on (no -SkipConsumption)
 ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -Obfuscate `
     -ObfuscationDictionary "<original run folder>\ObfuscationDictionary_<stamp>.json" `
-    -SkipMetrics
+    -SkipMetrics -SkipMarketplace
 
 # 2. Merge only the consumption back in
 . ./Functions/RecoveryMerge.Functions.ps1

@@ -459,3 +459,175 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
         $Html | Should -Match 'Adventureworks-Marketplace' -Because 'an identifiable bundle names the affected Marketplace subs too'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummary per-subscription Health cell' {
+
+    It 'does not call a subscription ok when it produced no report' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 5 } -SubName 'Sub A' -NoHtml | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>Sub A</td><td class="num">5</td><td><span class="tag warn">incomplete</span></td>'
+        $Html | Should -Not -Match '<span class="tag ok">ok</span>' -Because 'a subscription that never produced its report did not finish'
+    }
+
+    It 'tags an unreadable inventory incomplete rather than 0 resources' {
+        $Run = New-Run
+        $Dir = New-SubFolder -Root $Run -BadInventory
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Row = '<td>(unreadable inventory: {0})</td><td class="num">0</td><td><span class="tag warn">incomplete</span></td>' -f (Split-Path -Path $Dir -Leaf)
+        $Html | Should -Match ([regex]::Escape($Row)) -Because 'an unreadable inventory is not a finished 0-resource subscription'
+    }
+
+    It 'still tags a finished subscription that returned 0 resources' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{} -SubName 'Empty Sub' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match ([regex]::Escape('<td>(name unavailable - 0 resources)</td><td class="num">0</td><td><span class="tag warn">0 resources</span></td>'))
+    }
+
+    It 'ranks a missing report over a consumption failure, and a consumption failure over 0 resources' {
+        $Run = New-Run
+        $NoReportDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 4 } -SubName 'No Report Sub' -NoHtml
+        $EmptyDir = New-SubFolder -Root $Run -Services @{} -SubName 'Empty Sub'
+        $Processed = @(
+            [pscustomobject]@{ Name = 'No Report Sub'; Id = 'no-report-subscription'; Count = 4; Zip = (Join-Path $NoReportDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Empty Sub'; Id = 'empty-subscription'; Count = 0; Zip = (Join-Path $EmptyDir 'ResourcesReport_b.zip') }
+        )
+        $ConsumptionFailed = @(
+            [pscustomobject]@{ Name = 'No Report Sub'; Id = 'no-report-subscription' }
+            [pscustomobject]@{ Name = 'Empty Sub'; Id = 'empty-subscription' }
+        )
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -ProcessedSubscriptions $Processed -ConsumptionFailedSubs $ConsumptionFailed | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>No Report Sub</td><td class="num">4</td><td><span class="tag warn">incomplete</span></td>' -Because 'a subscription with no report did not finish at all'
+        $Html | Should -Match ([regex]::Escape('<td>(name unavailable - 0 resources)</td><td class="num">0</td><td><span class="tag warn">consumption incomplete</span></td>')) -Because 'a consumption failure matters more than an empty inventory'
+    }
+
+    It 'marks only the subscription whose consumption failed, matched through its report folder rather than display name' {
+        $Run = New-Run
+        $FailedDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Shared Name'
+        $HealthyDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Shared Name'
+        $FailedId = '12345678-1234-1234-1234-123456789012'
+        # The record counts are swapped against the folders' totals, so a join on anything but the
+        # report folder marks the wrong row.
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Shared Name'; Id = $FailedId; Count = 3; Zip = (Join-Path $FailedDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Shared Name'; Id = 'healthy-subscription'; Count = 2; Zip = (Join-Path $HealthyDir 'ResourcesReport_b.zip') }
+        )
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -ProcessedSubscriptions $Processed `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Shared Name'; Id = $FailedId }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>Shared Name</td><td class="num">2</td><td><span class="tag warn">consumption incomplete</span></td>'
+        $Html | Should -Match '<td>Shared Name</td><td class="num">3</td><td><span class="tag ok">ok</span></td>' -Because 'two subscriptions can share a display name, so a failure is tied to a row by id only'
+    }
+
+    It 'marks a <Phase> failure on its own row, ranked below a consumption failure' -ForEach @(
+        @{ Phase = 'metrics'; Parameter = 'MetricsFailedSubs'; Tag = 'metrics incomplete' }
+        @{ Phase = 'marketplace'; Parameter = 'MarketplaceFailedSubs'; Tag = 'marketplace incomplete' }
+    ) {
+        $Run = New-Run
+        $FailedDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Phase Failed'
+        $BothDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Both Failed'
+        $HealthyDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 4 } -SubName 'Healthy'
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Phase Failed'; Id = 'phase-failed-subscription'; Count = 2; Zip = (Join-Path $FailedDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription'; Count = 3; Zip = (Join-Path $BothDir 'ResourcesReport_b.zip') }
+            [pscustomobject]@{ Name = 'Healthy'; Id = 'healthy-subscription'; Count = 4; Zip = (Join-Path $HealthyDir 'ResourcesReport_c.zip') }
+        )
+        $PhaseFailures = @(
+            [pscustomobject]@{ Name = 'Phase Failed'; Id = 'phase-failed-subscription'; Message = 'stopped' }
+            [pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription'; Message = 'stopped' }
+        )
+        $Out = Join-Path $Run 'main.html'
+        $Splat = @{
+            RunOutputDirectory     = $Run
+            HtmlFile               = $Out
+            ProcessedSubscriptions = $Processed
+            $Parameter             = $PhaseFailures
+            ConsumptionFailedSubs  = @([pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription' })
+        }
+
+        New-RdaAllSubHtmlSummary @Splat | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match ('<td>Phase Failed</td><td class="num">2</td><td><span class="tag warn">{0}</span></td>' -f $Tag)
+        $Html | Should -Match '<td>Both Failed</td><td class="num">3</td><td><span class="tag warn">consumption incomplete</span></td>' -Because 'a consumption failure outranks the other phases on one row'
+        $Html | Should -Match '<td>Healthy</td><td class="num">4</td><td><span class="tag ok">ok</span></td>'
+    }
+
+    It 'marks an obfuscated row without printing the real subscription name or id' {
+        $Run = New-Run
+        $Dir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated
+        $FailedId = '12345678-1234-1234-1234-123456789012'
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated `
+            -ProcessedSubscriptions @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = $FailedId; Count = 2; Zip = (Join-Path $Dir 'ResourcesReport_a.zip') }) `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = $FailedId }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<span class="tag warn">consumption incomplete</span>'
+        $Html | Should -Not -Match 'Fabrikam-Billing'
+        $Html | Should -Not -Match ([regex]::Escape($FailedId)) -Because 'the id only joins the row; it is never rendered'
+    }
+
+    It 'does not guess a failure onto a row by name when no per-subscription records are passed' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Fabrikam-Billing' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>Fabrikam-Billing</td><td class="num">2</td><td><span class="tag ok">ok</span></td>' -Because 'without the wrapper records there is no safe row-to-subscription join'
+        $Html | Should -Match 'consumption \(billing\) issues' -Because 'the run-level banner still reports it'
+    }
+
+    It 'is handed the per-subscription records by Run-AllSubscriptions.ps1' {
+        # Without them no failure can be joined to its row, and every finished row reads ok again.
+        $ParseErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$ParseErrors)
+        $ParseErrors | Should -BeNullOrEmpty
+        $Calls = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'New-RdaAllSubHtmlSummary' }, $true))
+        $Calls.Count | Should -BeGreaterThan 0 -Because 'the wrapper builds MainSummary.html on every run'
+        foreach ($Call in $Calls)
+        {
+            $Elements = @($Call.CommandElements)
+            $At = @(0..($Elements.Count - 1) | Where-Object { $Elements[$_] -is [System.Management.Automation.Language.CommandParameterAst] -and $Elements[$_].ParameterName -eq 'ProcessedSubscriptions' })
+            $At.Count | Should -Be 1 -Because 'each MainSummary build needs the records to join a failure to its row'
+            $Records = $Elements[$At[0] + 1]
+            $Records | Should -BeOfType ([System.Management.Automation.Language.VariableExpressionAst]) -Because 'the wrapper hands over the records it built, not a literal'
+            # Every place the wrapper builds one of those records must give it the two keys the join
+            # filters on; a record without them is dropped silently and its row reads ok.
+            $Builds = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Operator -eq 'PlusEquals' -and $N.Left.Extent.Text -eq $Records.Extent.Text }, $true))
+            $Builds.Count | Should -BeGreaterThan 0 -Because 'the sequential, single-subscription and parallel paths each build the records'
+            foreach ($Build in $Builds)
+            {
+                $Table = $Build.Right.Find({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] }, $true)
+                $Table | Should -Not -BeNullOrEmpty -Because ('line {0} builds a record without a hashtable' -f $Build.Extent.StartLineNumber)
+                $Keys = @($Table.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text })
+                $Keys | Should -Contain 'Id' -Because ('line {0} must carry the Id the consumption failure is matched on' -f $Build.Extent.StartLineNumber)
+                $Keys | Should -Contain 'Zip' -Because ('line {0} must carry the Zip whose folder joins the row' -f $Build.Extent.StartLineNumber)
+            }
+        }
+    }
+}

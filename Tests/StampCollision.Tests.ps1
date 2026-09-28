@@ -1,7 +1,6 @@
 #Requires -Version 7.0
 <#
-    Reproduction + regression coverage for the report-stamp collision
-    (fable review finding C1).
+    Reproduction + regression coverage for the report-stamp collision.
 
     The producer (ResourceInventory.ps1) builds a report stamp as
     yyyyMMddHHmmssfff (17 digits) + a 4-char hex per-process discriminator, so two
@@ -9,10 +8,11 @@
     the hex tail, e.g. ResourcesReport_20260101000000000ab1f.zip vs
     ResourcesReport_20260101000000000c02e.zip.
 
-    Get-RdaReportId keys on '(\d{15,})', which captures only the leading digit run
-    and therefore returns the SAME key for both. Get-RdaInventorySource then groups
-    on that key and keeps one member per group, dropping the other WITHOUT recording
-    it in Missing/Unreadable/Rejected/Skipped - a silent loss of one subscription.
+    Get-RdaReportId once keyed on '(\d{15,})', which captured only the leading digit
+    run and so returned the SAME key for both. Get-RdaInventorySource then grouped on
+    that key and kept one member per group, dropping the other WITHOUT recording it
+    in Missing/Unreadable/Rejected/Skipped - a silent loss of one subscription. The
+    key now includes the hex tail.
 
     All fixture data is invented. No real subscription, tenant, resource or
     customer identifier appears anywhere in this file.
@@ -38,12 +38,13 @@ BeforeAll {
 }
 
 AfterAll {
-    if ($Script:TestRoot -and (Test-Path -LiteralPath $Script:TestRoot)) {
+    if ($Script:TestRoot -and (Test-Path -LiteralPath $Script:TestRoot))
+    {
         Remove-Item -LiteralPath $Script:TestRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-Describe 'C1: report-stamp collision on same-millisecond reports' {
+Describe 'Report-stamp collision on same-millisecond reports' {
 
     It 'Get-RdaReportId must give DIFFERENT keys to two reports that differ only in the hex discriminator' {
         $IdA = Get-RdaReportId -Name $Script:NameA
@@ -60,7 +61,8 @@ Describe 'C1: report-stamp collision on same-millisecond reports' {
 
         # Both reports must be reachable: either both survive as sources, or a
         # dropped one is explicitly recorded somewhere. Neither may vanish.
-        foreach ($Name in @($Script:NameA, $Script:NameB)) {
+        foreach ($Name in @($Script:NameA, $Script:NameB))
+        {
             $InSources = $SourceFiles -contains $Name
             $Recorded = @($AccountedElsewhere | Where-Object { $_ -like "*$Name*" }).Count -gt 0
             ($InSources -or $Recorded) | Should -BeTrue -Because "$Name must not disappear without a trace"

@@ -199,3 +199,94 @@ Describe 'Permanent failures are reported diagnosably, not silently' {
         $script:MetricsSrc | Should -Match "Outcome -in @\('Timeout', 'Throttled', 'Error'\)" -Because 'the non-success listing must not include NotFound/BadRequest'
     }
 }
+
+Describe 'Diagnostic seconds figures are culture-invariant' {
+    # A diagnostic that renders 8,6s on a comma-decimal host and 8.6s elsewhere is ambiguous to
+    # whoever reads the log, and the repo already fixed this class for the disk-space and memory
+    # figures. The culture is forced here rather than inherited, so the test still fails on a
+    # dot-decimal CI host where the bug would otherwise be invisible.
+    BeforeAll {
+        $script:ClAst = [System.Management.Automation.Language.Parser]::ParseInput($script:MetricsSrc, [ref]$null, [ref]$null)
+
+        function script:Get-DiagCall([string]$Needle)
+        {
+            $Hit = @($script:ClAst.FindAll({ param($N)
+                        $N -is [System.Management.Automation.Language.CommandAst] -and
+                        $N.GetCommandName() -in @('Write-MetricsDiag', 'Write-Verbose') -and
+                        $N.Extent.Text -match $Needle }, $true))
+            if ($Hit.Count -ne 1) { throw ('expected exactly one diagnostic call matching {0}, found {1}' -f $Needle, $Hit.Count) }
+            # The parenthesised format expression the command is called with.
+            return $Hit[0].CommandElements[1].Extent.Text
+        }
+
+        function script:Invoke-UnderCulture([string]$Expression, [hashtable]$Vars, [string]$Culture)
+        {
+            $Prev = [System.Threading.Thread]::CurrentThread.CurrentCulture
+            try
+            {
+                [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::GetCultureInfo($Culture)
+                $Sb = [scriptblock]::Create(($Vars.Keys | ForEach-Object { '${0} = $Vars[''{0}'']' -f $_ }) -join "`n")
+                . $Sb
+                return [string](& ([scriptblock]::Create($Expression)))
+            }
+            finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $Prev }
+        }
+    }
+
+    It 'renders the phase-summary Elapsed with a dot on a comma-decimal culture (<Culture>)' -ForEach @(
+        @{ Culture = 'de-DE' }, @{ Culture = 'nl-NL' }, @{ Culture = 'en-US' }
+    ) {
+        $Expr = script:Get-DiagCall 'Total calls: \{0\}'
+        $Vars = @{
+            DiagRecords = @(1, 2, 3); OkCount = 3; TimeoutCount = 0; ThrottledCount = 0; ErrorCount = 0
+            NotFoundCount = 0; BadRequestCount = 0; UnauthorizedCount = 0; ForbiddenCount = 0
+            PhaseStopwatch = [pscustomobject]@{ Elapsed = [timespan]::FromSeconds(8.6) }
+        }
+        $Line = script:Invoke-UnderCulture -Expression $Expr -Vars $Vars -Culture $Culture
+        $Line | Should -Match 'Elapsed: 8\.6s'
+        $Line | Should -Not -Match 'Elapsed: 8,6s'
+    }
+
+    It 'renders a per-call seconds figure with a dot on <Culture> (<Needle>)' -ForEach @(
+        foreach ($c in @('de-DE', 'nl-NL', 'en-US'))
+        {
+            # Both per-call listings print ElapsedSec: the non-success one and the slowest-calls one.
+            @{ Culture = $c; Needle = 'attempts=\{6\}' }
+            @{ Culture = $c; Needle = '\{0\}s idx=\{1\}' }
+        }
+    ) {
+        $Expr = script:Get-DiagCall $Needle
+        $Vars = @{
+            rec = [pscustomobject]@{ Outcome = 'Timeout'; MetricIndex = 1; Service = 'vm'; Name = 'n'
+                Metric = 'm'; Interval = 'PT1H'; Attempts = 2; ElapsedSec = 12.34; Error = 'e'
+            }
+            StuckBodyNote = ''
+        }
+        $Line = script:Invoke-UnderCulture -Expression $Expr -Vars $Vars -Culture $Culture
+        $Line | Should -Match '12\.34s'
+        $Line | Should -Not -Match '12,34s'
+    }
+
+    It 'never interpolates a raw seconds value straight into a diagnostic format string' {
+        # The record keeps ElapsedSec as a double on purpose, because the listing sorts on it
+        # numerically. That makes it the easy thing to pass to -f unformatted.
+        $script:MetricsSrc | Should -Not -Match ',\s*\$rec\.ElapsedSec\s*[,)]' -Because 'it has to be formatted invariantly at the point it is printed'
+        $script:MetricsSrc | Should -Not -Match '-f\s*\$rec\.ElapsedSec\s*[,)]'
+        foreach ($Sw in @('PhaseStopwatch', 'BatchStopwatch'))
+        {
+            # Positive form: find every place the figure is produced and require each one to be
+            # formatted invariantly. A 'Should -Not -Match' on the raw shape cannot express this,
+            # because the correct wrapped form '...TotalSeconds, 1)).ToString(' also ends in ')'.
+            # Composed with -f and single-quoted: in a double-quoted string '$$' is the automatic
+            # last-token variable, so an interpolated "\$$Sw" yields a pattern that never matches
+            # and the assertion silently stops being able to fail.
+            $Rx = '\[math\]::Round\(\${0}\.Elapsed\.TotalSeconds[^\r\n]{{0,80}}' -f $Sw
+            $Hits = @([regex]::Matches($script:MetricsSrc, $Rx))
+            $Hits.Count | Should -BeGreaterThan 0 -Because ('{0} must still produce a seconds figure for this to be worth asserting' -f $Sw)
+            foreach ($H in $Hits)
+            {
+                $H.Value | Should -Match 'InvariantCulture' -Because ('{0} seconds must be rendered with a dot on every host culture' -f $Sw)
+            }
+        }
+    }
+}

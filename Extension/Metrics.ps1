@@ -1196,7 +1196,7 @@ if ($Task -eq 'Processing')
                 $Defs.Clear()
 
                 $BatchStopwatch.Stop()
-                Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $RangeIdx, [math]::Round($BatchStopwatch.Elapsed.TotalSeconds, 1), $MetricDiagnostics.Count)
+                Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $RangeIdx, ([math]::Round($BatchStopwatch.Elapsed.TotalSeconds, 1)).ToString('0.0', [cultureinfo]::InvariantCulture), $MetricDiagnostics.Count)
 
                 if ($Obfuscate)
                 {
@@ -1282,7 +1282,7 @@ if ($Task -eq 'Processing')
     $ForbiddenCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Forbidden' }).Count
 
     Write-MetricsDiag ("===== Metrics phase summary =====")
-    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Unauthorized: {8} | Forbidden: {9} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1), $UnauthorizedCount, $ForbiddenCount)
+    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | NotFound: {5} | BadRequest: {6} | Unauthorized: {8} | Forbidden: {9} | Elapsed: {7}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, $NotFoundCount, $BadRequestCount, ([math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1)).ToString('0.0', [cultureinfo]::InvariantCulture), $UnauthorizedCount, $ForbiddenCount)
 
     if ($MetricAbandonedCount -gt 0)
     {
@@ -1302,7 +1302,7 @@ if ($Task -eq 'Processing')
         foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -in @('Timeout', 'Throttled', 'Error') } | Sort-Object ElapsedSec -Descending))
         {
             $StuckBodyNote = if ([string]::IsNullOrWhiteSpace($rec.ErrorBody)) { '' } else { (' | azure: ' + $rec.ErrorBody) }
-            Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}{9}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error, $StuckBodyNote)
+            Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}{9}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, ([double]$rec.ElapsedSec).ToString('0.##', [cultureinfo]::InvariantCulture), $rec.Error, $StuckBodyNote)
         }
     }
 
@@ -1350,7 +1350,7 @@ if ($Task -eq 'Processing')
         Write-MetricsDiag ("Slowest 5 calls:")
         foreach ($rec in $Slowest)
         {
-            Write-MetricsDiag ("  {0}s idx={1} {2}/{3}/{4} interval={5} ({6})" -f $rec.ElapsedSec, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Outcome)
+            Write-MetricsDiag ("  {0}s idx={1} {2}/{3}/{4} interval={5} ({6})" -f ([double]$rec.ElapsedSec).ToString('0.##', [cultureinfo]::InvariantCulture), $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Outcome)
         }
     }
 

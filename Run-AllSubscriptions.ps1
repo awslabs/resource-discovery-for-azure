@@ -1567,11 +1567,13 @@ else
             $Jobs | Receive-Job
             & $ReleaseSnapshotIfImported
 
-            foreach ($j in $Jobs)
+            # $Jobs is in stream order, so the position is the stream number; the job Id is not.
+            for ($StreamIndex = 0; $StreamIndex -lt @($Jobs).Count; $StreamIndex++)
             {
-                if ($j.State -ne 'Completed')
+                $StreamJob = @($Jobs)[$StreamIndex]
+                if ($StreamJob.State -ne 'Completed')
                 {
-                    Write-Host ("[stream-{0}] job ended in state {1}" -f $j.Id, $j.State) -ForegroundColor Yellow
+                    Write-Host ("[stream-{0}] job ended in state {1}" -f $StreamIndex, $StreamJob.State) -ForegroundColor Yellow
                 }
             }
 

@@ -58,7 +58,7 @@ BeforeAll {
         $Guard = $Loop.Body.Statements[0]
         if ($Guard.Extent.Text -notmatch '\$SubscriptionID -ne \$sub\.Id') { throw ('the first statement of the subscription loop in {0} is not the -SubscriptionID guard' -f $FnName) }
 
-        $Before = @($Loop.Parent.Statements | Where-Object { $_.Extent.EndOffset -le $Loop.Extent.StartOffset -and $_.Extent.Text -match '\$SubscriptionID\b' } | ForEach-Object { $_.Extent.Text })
+        $Before = @($Loop.Parent.Statements | Where-Object { $_.Extent.EndOffset -le $Loop.Extent.StartOffset -and $_.Extent.Text -match '\$SubscriptionID\b|\$Global:Subscriptions\b' } | ForEach-Object { $_.Extent.Text })
         $BlockLines = @('param($SubscriptionID, $ResourceGroup, $Reached)') + $Before + @('foreach ($sub in $Global:Subscriptions)', '{', $Guard.Extent.Text, '$Reached.Add($sub.Id)', '}')
         $script:PhaseBlocks[$FnName] = [scriptblock]::Create($BlockLines -join [Environment]::NewLine)
     }
@@ -82,16 +82,22 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
         $Global:DebugLogFile = $script:SkipLog
         $Global:ErrorLogFile = $null
         $script:PriorSubscriptions = $Global:Subscriptions
+        $script:PriorConsumptionFailedSubs = $Global:ConsumptionFailedSubs
+        $script:PriorMarketplaceFailedSubs = $Global:MarketplaceFailedSubs
         $script:StampPattern = '^\[\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\] '
     }
     AfterAll {
         $Global:DebugLogFile = $script:PriorDebugLogFile
         $Global:ErrorLogFile = $script:PriorErrorLogFile
         $Global:Subscriptions = $script:PriorSubscriptions
+        $Global:ConsumptionFailedSubs = $script:PriorConsumptionFailedSubs
+        $Global:MarketplaceFailedSubs = $script:PriorMarketplaceFailedSubs
         Remove-Item -LiteralPath $script:SkipLog -Force -ErrorAction SilentlyContinue
     }
     BeforeEach {
         Remove-Item -LiteralPath $script:SkipLog -Force -ErrorAction SilentlyContinue
+        $Global:ConsumptionFailedSubs = @()
+        $Global:MarketplaceFailedSubs = @()
     }
 
     It '<FnName>: prints nothing, logs one count line naming only the target, and still collects only the target' -ForEach @(
@@ -117,7 +123,7 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
         $Tag = [regex]::Escape('[{0}] ' -f $TargetId.Substring(0, 8))
         $Lines = @(Get-Content -LiteralPath $script:SkipLog)
         $Lines.Count | Should -Be 1 -Because 'one line per phase, not one per subscription passed over'
-        $Lines[0] | Should -Match ($script:StampPattern + $Tag + [regex]::Escape("$Data not collected for 2 other subscription(s) visible to this identity: this run is limited to subscription 'Target subscription' by -SubscriptionID.") + '$')
+        $Lines[0] | Should -Match ($script:StampPattern + $Tag + [regex]::Escape("$Data not collected for 2 other subscription(s) in this run's subscription list: this run is limited to subscription 'Target subscription' by -SubscriptionID.") + '$')
 
         $LogText = Get-Content -LiteralPath $script:SkipLog -Raw
         foreach ($OutOfScope in 'Other subscription A', 'Other subscription B', $OtherA, $OtherB)
@@ -126,9 +132,9 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
         }
     }
 
-    It '<FnName>: names the -SubscriptionID value itself when that subscription is not in the visible list' -ForEach @(
-        @{ FnName = 'GetResourceConsumption'; Data = 'Consumption data' }
-        @{ FnName = 'GetMarketplaceConsumption'; Data = 'Marketplace data' }
+    It '<FnName>: fails loudly and records the failure when the -SubscriptionID target is not in the subscription list' -ForEach @(
+        @{ FnName = 'GetResourceConsumption'; Data = 'Consumption data'; Phase = 'Consumption'; FailedList = 'ConsumptionFailedSubs' }
+        @{ FnName = 'GetMarketplaceConsumption'; Data = 'Marketplace data'; Phase = 'Marketplace'; FailedList = 'MarketplaceFailedSubs' }
     ) {
         $TargetId = [guid]::NewGuid().ToString()
         $OtherA = [guid]::NewGuid().ToString()
@@ -137,13 +143,61 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
         )
         $Reached = [System.Collections.Generic.List[string]]::new()
 
-        $null = & $script:PhaseBlocks[$FnName] -SubscriptionID $TargetId -ResourceGroup '' -Reached $Reached 6>&1
+        $Emitted = @(& $script:PhaseBlocks[$FnName] -SubscriptionID $TargetId -ResourceGroup '' -Reached $Reached 6>&1 | ForEach-Object { $_.ToString() })
 
         @($Reached).Count | Should -Be 0
+        $ErrorLines = @($Emitted | Where-Object { $_ -like ('*{0} SKIPPED: subscription {1} (-SubscriptionID) is not in this run''s subscription list*' -f $Phase, $TargetId) })
+        $ErrorLines.Count | Should -Be 1 -Because 'nothing is collected for the target, so the run must say so where the operator looks'
+        $Failed = @((Get-Variable -Name $FailedList -Scope Global).Value)
+        $Failed.Count | Should -Be 1 -Because 'the failure must reach the run summary, not only the console'
+        $Failed[0].Id | Should -Be $TargetId
+        $Failed[0].Complete | Should -BeFalse
+        $Failed[0].RecordsCollected | Should -Be 0
+
+        $Lines = @(Get-Content -LiteralPath $script:SkipLog | Where-Object { $_ -like '*not collected for*' })
+        $Lines.Count | Should -Be 1
+        $Lines[0] | Should -Match ($script:StampPattern + [regex]::Escape('[{0}] ' -f $TargetId.Substring(0, 8)) + [regex]::Escape("$Data not collected for 1 other subscription(s) in this run's subscription list: this run is limited to subscription $TargetId by -SubscriptionID.") + '$')
+        (Get-Content -LiteralPath $script:SkipLog -Raw) | Should -Not -Match ([regex]::Escape($OtherA))
+    }
+
+    It '<FnName>: counts a subscription listed twice once' -ForEach @(
+        @{ FnName = 'GetResourceConsumption'; Data = 'Consumption data' }
+        @{ FnName = 'GetMarketplaceConsumption'; Data = 'Marketplace data' }
+    ) {
+        $TargetId = [guid]::NewGuid().ToString()
+        $OtherA = [guid]::NewGuid().ToString()
+        $Global:Subscriptions = @(
+            [pscustomobject]@{ Id = $OtherA; Name = 'Other subscription A' }
+            [pscustomobject]@{ Id = $TargetId; Name = 'Target subscription' }
+            [pscustomobject]@{ Id = $OtherA.ToUpperInvariant(); Name = 'Other subscription A' }
+        )
+        $Reached = [System.Collections.Generic.List[string]]::new()
+
+        $null = & $script:PhaseBlocks[$FnName] -SubscriptionID $TargetId -ResourceGroup '' -Reached $Reached 6>&1
+
         $Lines = @(Get-Content -LiteralPath $script:SkipLog)
         $Lines.Count | Should -Be 1
-        $Lines[0] | Should -Match ($script:StampPattern + [regex]::Escape('[{0}] ' -f $TargetId.Substring(0, 8)) + [regex]::Escape("$Data not collected for 1 other subscription(s) visible to this identity: this run is limited to subscription $TargetId by -SubscriptionID.") + '$')
-        $Lines[0] | Should -Not -Match ([regex]::Escape($OtherA))
+        $Lines[0] | Should -Match ([regex]::Escape("$Data not collected for 1 other subscription(s) in this run's subscription list"))
+    }
+
+    It '<FnName>: without -SubscriptionID, passes over nothing, logs nothing and reaches every subscription in order' -ForEach @(
+        @{ FnName = 'GetResourceConsumption' }
+        @{ FnName = 'GetMarketplaceConsumption' }
+    ) {
+        $Ids = @([guid]::NewGuid().ToString(), [guid]::NewGuid().ToString(), [guid]::NewGuid().ToString())
+        $Global:Subscriptions = @(
+            [pscustomobject]@{ Id = $Ids[0]; Name = 'Subscription one' }
+            [pscustomobject]@{ Id = $Ids[1]; Name = 'Subscription two' }
+            [pscustomobject]@{ Id = $Ids[2]; Name = 'Subscription three' }
+        )
+        $Reached = [System.Collections.Generic.List[string]]::new()
+
+        $Emitted = @(& $script:PhaseBlocks[$FnName] -SubscriptionID '' -ResourceGroup '' -Reached $Reached 6>&1)
+
+        @($Emitted).Count | Should -Be 0
+        @($Reached) | Should -Be $Ids
+        Test-Path -LiteralPath $script:SkipLog | Should -BeFalse
+        @($Global:ConsumptionFailedSubs).Count + @($Global:MarketplaceFailedSubs).Count | Should -Be 0
     }
 
     It '<FnName>: logs nothing when the target is the only visible subscription' -ForEach @(
@@ -163,19 +217,28 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
         Test-Path -LiteralPath $script:SkipLog | Should -BeFalse -Because 'there is nothing passed over to count'
     }
 
-    It 'GetResourceConsumption: says once, not once per visible subscription, that -ResourceGroup cannot filter consumption' {
+    It 'GetResourceConsumption: says once that -ResourceGroup narrows consumption, with <Case>' -ForEach @(
+        @{ Case = 'other subscriptions in the list'; WithOthers = $true }
+        @{ Case = 'only the target in the list'; WithOthers = $false }
+    ) {
         $TargetId = [guid]::NewGuid().ToString()
-        $Global:Subscriptions = @(
-            [pscustomobject]@{ Id = [guid]::NewGuid().ToString(); Name = 'Other subscription A' }
-            [pscustomobject]@{ Id = $TargetId; Name = 'Target subscription' }
-            [pscustomobject]@{ Id = [guid]::NewGuid().ToString(); Name = 'Other subscription B' }
-        )
+        $Global:Subscriptions = @([pscustomobject]@{ Id = $TargetId; Name = 'Target subscription' })
+        if ($WithOthers)
+        {
+            $Global:Subscriptions = @(
+                [pscustomobject]@{ Id = [guid]::NewGuid().ToString(); Name = 'Other subscription A' }
+                [pscustomobject]@{ Id = $TargetId; Name = 'Target subscription' }
+                [pscustomobject]@{ Id = [guid]::NewGuid().ToString(); Name = 'Other subscription B' }
+            )
+        }
         $Reached = [System.Collections.Generic.List[string]]::new()
 
         $Emitted = @(& $script:PhaseBlocks['GetResourceConsumption'] -SubscriptionID $TargetId -ResourceGroup 'rg-example' -Reached $Reached 6>&1 | ForEach-Object { $_.ToString() })
 
-        @($Emitted | Where-Object { $_ -like '*Cannot filter consumption by resource group.' }).Count | Should -Be 1
+        @($Emitted | Where-Object { $_ -like "*Consumption for Target subscription will be narrowed to resource group 'rg-example'*" }).Count | Should -Be 1
+        @($Emitted | Where-Object { $_ -like '*Cannot filter consumption*' }).Count | Should -Be 0 -Because 'consumption IS filtered by resource group, so the run must not say it cannot be'
         @($Reached) | Should -Be @($TargetId)
+        Test-Path -LiteralPath $script:SkipLog | Should -Be $WithOthers
     }
 }
 

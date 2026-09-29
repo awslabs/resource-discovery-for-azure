@@ -1161,22 +1161,37 @@ function ExecuteInventoryProcessing()
         }
 
         # One debug-log line for the phase, never one per subscription passed over. The other
-        # subscriptions this identity can see are outside this run's scope (Disabled ones the
-        # wrapper leaves out, other shards, other tenants in Cloud Shell), and the debug log
-        # ships in a default-mode zip, so they are counted here and never named.
+        # subscriptions in this run's list are outside its scope (Disabled ones the wrapper leaves
+        # out, other shards, other tenants in Cloud Shell), and the debug log ships in a
+        # default-mode zip, so they are counted here and never named. The -ResourceGroup notice is
+        # emitted inside the loop, once, for the subscription actually processed.
         if (![string]::IsNullOrEmpty($SubscriptionID))
         {
-            if (![string]::IsNullOrEmpty($ResourceGroup))
-            {
-                Write-Log -Message "Cannot filter consumption by resource group." -Severity 'Info'
-            }
-
-            $PassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID }).Count
+            $TargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $TargetSubLabel = if ($TargetSub) { "'{0}'" -f $TargetSub.Name } else { $SubscriptionID }
+            # Distinct ids: a subscription reachable through two tenants can be listed twice.
+            $PassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
             if ($PassedOverCount -gt 0)
             {
-                $TargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
-                $TargetSubLabel = if ($TargetSub) { "'{0}'" -f $TargetSub.Name } else { $SubscriptionID }
-                Write-Log -Message ("Consumption data not collected for {0} other subscription(s) visible to this identity: this run is limited to subscription {1} by -SubscriptionID." -f $PassedOverCount, $TargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+                Write-Log -Message ("Consumption data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $PassedOverCount, $TargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+
+            # A -SubscriptionID missing from the list is never reached by the loop below, so nothing
+            # would be collected for it and nothing would say so.
+            if (-not $TargetSub)
+            {
+                $MissingTargetMessage = ("Consumption SKIPPED: subscription {0} (-SubscriptionID) is not in this run's subscription list, so no consumption data was collected for it. The signed-in identity cannot see it, or -TenantID names a different tenant." -f $SubscriptionID)
+                Write-Log -Message $MissingTargetMessage -Severity 'Error'
+                if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+                if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+                $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                    Name             = $SubscriptionID
+                    Id               = $SubscriptionID
+                    Message          = $MissingTargetMessage
+                    Complete         = $false
+                    PageAtFailure    = 0
+                    RecordsCollected = 0
+                }
             }
         }
 
@@ -1781,12 +1796,29 @@ function ExecuteInventoryProcessing()
         # same block in GetResourceConsumption): the others are counted, never named.
         if (![string]::IsNullOrEmpty($SubscriptionID))
         {
-            $MpPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID }).Count
+            $MpTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $MpTargetSubLabel = if ($MpTargetSub) { "'{0}'" -f $MpTargetSub.Name } else { $SubscriptionID }
+            $MpPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
             if ($MpPassedOverCount -gt 0)
             {
-                $MpTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
-                $MpTargetSubLabel = if ($MpTargetSub) { "'{0}'" -f $MpTargetSub.Name } else { $SubscriptionID }
-                Write-Log -Message ("Marketplace data not collected for {0} other subscription(s) visible to this identity: this run is limited to subscription {1} by -SubscriptionID." -f $MpPassedOverCount, $MpTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+                Write-Log -Message ("Marketplace data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $MpPassedOverCount, $MpTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+
+            # Same as GetResourceConsumption: a target missing from the list is never reached below.
+            if (-not $MpTargetSub)
+            {
+                $MpMissingTargetMessage = ("Marketplace SKIPPED: subscription {0} (-SubscriptionID) is not in this run's subscription list, so no Marketplace data was collected for it. The signed-in identity cannot see it, or -TenantID names a different tenant." -f $SubscriptionID)
+                Write-Log -Message $MpMissingTargetMessage -Severity 'Error'
+                if ($null -eq $Global:MarketplaceFailedSubs) { $Global:MarketplaceFailedSubs = @() }
+                $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                    Name             = $SubscriptionID
+                    Id               = $SubscriptionID
+                    Message          = $MpMissingTargetMessage
+                    Complete         = $false
+                    RecordsCollected = 0
+                }
+                # Keeps the confirmed-zero notice below from claiming the endpoint was reached.
+                $script:MarketplaceFailedSubsThisRun++
             }
         }
 

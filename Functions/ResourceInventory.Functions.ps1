@@ -1232,8 +1232,14 @@ function Global:Get-RdaFoundryTokenMetrics
     # Monitor, DISCOVERED at runtime via Get-AzMetricDefinition (never hardcoded) because the
     # metric set differs by account kind and evolves. Returns presence + summed token counts,
     # or a Present=$false record. A Marketplace/partner deployment that emits nothing here is
-    # EXPECTED, not an error - this NEVER throws for an absent/empty metric; it only surfaces
-    # genuine call failures to the caller (which records them as absent, not failed).
+    # EXPECTED, not an error - this NEVER throws for an absent/empty metric, and an account that
+    # defines no token metrics is not logged.
+    #
+    # A FAILED call is still recorded as absent (a blank column), because the coverage CSV has no
+    # column for a failed probe. So every failure is logged here, naming the account/deployment
+    # and the error: a Warning for a denial, throttle or other failure, which means the blank is
+    # NOT a real absence of usage; an Info for a permanent "metric not supported for this resource"
+    # error (Test-RdaFoundryMetricPermanentFailure), which is a real absence. Calls are not retried.
     param(
         [Parameter(Mandatory = $true)][string]$AccountId,
         [Parameter(Mandatory = $true)][string]$DeploymentName,
@@ -1243,9 +1249,24 @@ function Global:Get-RdaFoundryTokenMetrics
 
     $Result = [pscustomobject]@{ Present = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = '' }
 
+    # Same "<account>/<deployment>" form the caller uses in its own probe log line.
+    $ProbeLabel = '{0}/{1}' -f ($AccountId -split '/')[-1], $DeploymentName
+
     $Defs = @()
     try { $Defs = @(Get-AzMetricDefinition -ResourceId $AccountId -ErrorAction Stop) }
-    catch { return $Result }  # metrics not authorized / not available -> absent, not failed
+    catch
+    {
+        $DefError = $_.Exception.Message
+        if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $DefError)
+        {
+            Write-Log -Message ("FoundryModelCoverage: metric definitions are not available for {0} ({1}). Its token columns are blank: no token metrics." -f $ProbeLabel, $DefError) -Severity 'Info'
+        }
+        else
+        {
+            Write-Log -Message ("FoundryModelCoverage: the metric definitions lookup FAILED for {0} ({1}). Its token columns are blank because the probe failed, not because the model has no usage." -f $ProbeLabel, $DefError) -Severity 'Warning'
+        }
+        return $Result
+    }
 
     # Discover token metrics by NAME rather than assuming a fixed set. Azure OpenAI exposes
     # ProcessedPromptTokens/GeneratedTokens; newer AIServices adds InputTokens/OutputTokens/
@@ -1266,15 +1287,26 @@ function Global:Get-RdaFoundryTokenMetrics
         try
         {
             $M = Get-AzMetric -ResourceId $AccountId -MetricName $MetricName -AggregationType Total -StartTime $StartTime -EndTime $EndTime -TimeGrain '1.00:00:00' -MetricFilter $DimFilter -WarningAction SilentlyContinue -ErrorAction Stop
+            # Get-RdaFoundryTokenSeriesTotals is the single tested owner of the Az.Monitor result
+            # shape (the Tier 2 path uses it too). $DimFilter already limits the result to this
+            # deployment, so the deployment's total is the sum of every row it returns.
             $Total = 0.0
-            $PointLists = @()
-            $SeriesList = $M.Timeseries
-            if ($null -ne $SeriesList) { $PointLists = @(@($SeriesList) | ForEach-Object { $_.Data }) }
-            else { $PointLists = @($M.Data) }
-            foreach ($Pt in @($PointLists)) { if ($null -ne $Pt -and $null -ne $Pt.Total) { $Total += [double]$Pt.Total } }
+            foreach ($Row in @(Get-RdaFoundryTokenSeriesTotals -MetricResult $M -DimensionName 'ModelDeploymentName')) { $Total += [double]$Row.Total }
             return $Total
         }
-        catch { return $null }
+        catch
+        {
+            $MetricError = $_.Exception.Message
+            if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $MetricError)
+            {
+                Write-Log -Message ("FoundryModelCoverage: token metric '{0}' is not supported for {1} ({2}). Its column is blank: no data for this metric." -f $MetricName, $ProbeLabel, $MetricError) -Severity 'Info'
+            }
+            else
+            {
+                Write-Log -Message ("FoundryModelCoverage: token metric '{0}' probe FAILED for {1} ({2}). Its column is blank because the probe failed, not because the model has no usage. Not retried." -f $MetricName, $ProbeLabel, $MetricError) -Severity 'Warning'
+            }
+            return $null
+        }
     }
 
     $In = & $Sum $InputMetric

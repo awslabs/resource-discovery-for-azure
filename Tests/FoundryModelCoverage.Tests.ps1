@@ -319,3 +319,112 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
         $A.SubscriptionGuid | Should -Not -Be '11111111-1111-1111-1111-111111111111'
     }
 }
+
+Describe 'Get-RdaFoundryTokenMetrics: coverage token probe parsing and failure logging' {
+    BeforeAll {
+        # Write-Log is a real dependency of the probe; it is mocked per test to capture what is logged.
+        . (Join-Path $script:Repo 'Functions/Common.Functions.ps1')
+
+        # Stubs so Mock can resolve the commands on a host without Az.Monitor.
+        # Defined only when absent, never shadowing a real cmdlet.
+        if (-not (Get-Command Get-AzMetricDefinition -ErrorAction SilentlyContinue))
+        {
+            function Get-AzMetricDefinition { [CmdletBinding()] param([string]$ResourceId) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Get-AzMetric -ErrorAction SilentlyContinue))
+        {
+            function Get-AzMetric
+            {
+                [CmdletBinding()]
+                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [timespan]$TimeGrain, [string]$MetricFilter)
+                throw 'stub - should be mocked'
+            }
+        }
+
+        $script:ProbeSubId = [guid]::NewGuid().ToString()
+        $script:ProbeAccountId = '/subscriptions/{0}/resourceGroups/rg-ai-prod/providers/Microsoft.CognitiveServices/accounts/aiservices-prod' -f $script:ProbeSubId
+        $script:ProbeArgs = @{
+            AccountId      = $script:ProbeAccountId
+            DeploymentName = 'phi4-prod'
+            StartTime      = (Get-Date).AddDays(-30)
+            EndTime        = Get-Date
+        }
+
+        # A metric definition shaped like PSMetricDefinition (.Name is a LocalizableString).
+        function script:New-FakeMetricDefinition([string]$Name)
+        {
+            [pscustomobject]@{ Name = [pscustomobject]@{ Value = $Name } }
+        }
+
+        # A Get-AzMetric result shaped like PSMetric: one per-deployment series under .Timeseries.
+        function script:New-FakeTokenMetric([double[]]$PointTotals)
+        {
+            [pscustomobject]@{
+                Timeseries = @([pscustomobject]@{
+                        Metadatavalues = @([pscustomobject]@{ Name = [pscustomobject]@{ Value = 'ModelDeploymentName' }; Value = 'phi4-prod' })
+                        Data           = @($PointTotals | ForEach-Object { [pscustomobject]@{ Total = $_ } })
+                    })
+            }
+        }
+    }
+
+    BeforeEach {
+        Mock Write-Log { }
+        Mock Get-AzMetricDefinition { @((script:New-FakeMetricDefinition 'InputTokens'), (script:New-FakeMetricDefinition 'OutputTokens'), (script:New-FakeMetricDefinition 'TotalTokens')) }
+        Mock Get-AzMetric { script:New-FakeTokenMetric -PointTotals @(10, 20) } -ParameterFilter { $MetricName -eq 'InputTokens' }
+        Mock Get-AzMetric { script:New-FakeTokenMetric -PointTotals @(3, 4) } -ParameterFilter { $MetricName -eq 'OutputTokens' }
+        Mock Get-AzMetric { script:New-FakeTokenMetric -PointTotals @(37) } -ParameterFilter { $MetricName -eq 'TotalTokens' }
+    }
+
+    It 'sums each metric for the deployment and logs nothing when every call succeeds' {
+        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
+        $R.Present | Should -BeTrue
+        $R.InputTokens | Should -Be 30
+        $R.OutputTokens | Should -Be 7
+        $R.TotalTokens | Should -Be 37
+        Should -Invoke Write-Log -Times 0 -Exactly
+    }
+
+    It 'parses every metric result through Get-RdaFoundryTokenSeriesTotals, the single owner of the Az.Monitor shape' {
+        Mock Get-RdaFoundryTokenSeriesTotals { @([pscustomobject]@{ ModelDeploymentName = 'phi4-prod'; Total = 7 }, [pscustomobject]@{ ModelDeploymentName = 'phi4-prod'; Total = 5 }) }
+        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
+        $R.InputTokens | Should -Be 12
+        $R.OutputTokens | Should -Be 12
+        $R.TotalTokens | Should -Be 12
+        Should -Invoke Get-RdaFoundryTokenSeriesTotals -Times 3 -Exactly
+    }
+
+    It 'logs a Warning naming the metric when a call fails, and leaves only that column blank' {
+        Mock Get-AzMetric { throw 'TooManyRequests (429): rate is limited' } -ParameterFilter { $MetricName -eq 'InputTokens' }
+        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
+        $R.Present | Should -BeTrue
+        $R.InputTokens | Should -Be ''
+        $R.OutputTokens | Should -Be 7
+        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Warning' -and $Message -match "'InputTokens'" -and $Message -match 'aiservices-prod/phi4-prod' -and $Message -match '429' }
+        Should -Invoke Write-Log -Times 1 -Exactly
+    }
+
+    It 'logs an unsupported metric (permanent 400) at Info, not Warning' {
+        Mock Get-AzMetric { throw "Operation returned an invalid status code 'BadRequest'" } -ParameterFilter { $MetricName -eq 'TotalTokens' }
+        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
+        $R.TotalTokens | Should -Be ''
+        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Info' -and $Message -match "'TotalTokens'" }
+        Should -Invoke Write-Log -Times 0 -Exactly -ParameterFilter { $Severity -eq 'Warning' }
+    }
+
+    It 'logs a Warning and returns an absent record when the metric definitions lookup fails' {
+        Mock Get-AzMetricDefinition { throw "The client 'x' does not have authorization to perform action 'Microsoft.Insights/metricDefinitions/read'. AuthorizationFailed" }
+        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
+        $R.Present | Should -BeFalse
+        Should -Invoke Get-AzMetric -Times 0 -Exactly
+        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'definitions' -and $Message -match 'AuthorizationFailed' }
+    }
+
+    It 'stays silent when the account defines no token metrics (an expected absence, not a failure)' {
+        Mock Get-AzMetricDefinition { @(script:New-FakeMetricDefinition 'Latency') }
+        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
+        $R.Present | Should -BeFalse
+        Should -Invoke Get-AzMetric -Times 0 -Exactly
+        Should -Invoke Write-Log -Times 0 -Exactly
+    }
+}

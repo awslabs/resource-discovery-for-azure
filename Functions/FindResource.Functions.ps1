@@ -1182,7 +1182,7 @@ function Write-RdaFindSummary
     }
 
     Write-Host ''
-    Write-Host ('  Elapsed: {0}s' -f $Result.ElapsedSeconds) -ForegroundColor Gray
+    Write-Host ('  Elapsed: {0}s' -f ([double]$Result.ElapsedSeconds).ToString('0.##', [cultureinfo]::InvariantCulture)) -ForegroundColor Gray
     Write-Host '========================================' -ForegroundColor Cyan
     Write-Host ''
 }

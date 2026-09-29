@@ -392,7 +392,28 @@ function Test-RdaPermanentRequestError
 {
     [CmdletBinding()]
     [OutputType([bool])]
-    param([string]$ErrorMessage)
+    param(
+        [string]$ErrorMessage,
+
+        # The exception itself, when the caller has it. Pass it: the STATUS is authoritative where the
+        # message is not. A real 400 from the legacy Commerce usage API carries neither "400" nor
+        # "BadRequest" in its text - observed live as "InvalidInput: reportedStartTime has to be before
+        # reportedEndTime." - so a text-only check cannot see it and the caller would spend its whole
+        # retry budget on a request that can never succeed.
+        $Exception
+    )
+
+    if ($null -ne $Exception)
+    {
+        $Status = $null
+        try { $Status = $Exception.Response.StatusCode } catch { $Status = $null }
+        if ($null -ne $Status)
+        {
+            $Code = 0
+            try { $Code = [int]$Status } catch { $Code = 0 }
+            if ($Code -eq 400 -or ([string]$Status) -eq 'BadRequest') { return $true }
+        }
+    }
 
     if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
 

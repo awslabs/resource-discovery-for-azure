@@ -20,6 +20,15 @@ param(
 
     $ConsumptionFile,
 
+    # Resource types whose collector THREW. A type that failed serialises as an empty array, exactly
+    # like a type the subscription genuinely does not have, and the section is then dropped from this
+    # report - so without this the page cannot tell "collection failed" from "you own none of these".
+    $CollectorFailures = @(),
+
+    # Collection stopped early because the circuit breaker tripped: every type after the abort was
+    # never attempted, so this report is a partial view of the subscription, not a complete one.
+    [switch]$CollectorsAborted,
+
     [int]$VmBillingGapThreshold = 0
 )
 
@@ -659,6 +668,23 @@ else
     $PrivacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
 }
 
+# A failed collector is INVISIBLE in the tables: its type serialises as an empty array and the
+# section is dropped, which reads identically to a subscription that owns none of that type. Naming
+# the types here is the only thing on this page that distinguishes the two.
+$CollectorBanner = ''
+$FailedCollectors = @(@($CollectorFailures) | Where-Object { $_ -and $_.Module })
+if ($FailedCollectors.Count -gt 0 -or $CollectorsAborted)
+{
+    $Names = @($FailedCollectors | ForEach-Object { [string]$_.Module } | Sort-Object -Unique)
+    $NameList = if ($Names.Count -gt 0) { (($Names | ForEach-Object { '<code>' + (ConvertTo-HtmlSafe $_) + '</code>' }) -join ', ') } else { '(none individually recorded)' }
+    $AbortNote = if ($CollectorsAborted)
+    {
+        ' Collection was then STOPPED by the circuit breaker, so every resource type after that point was never attempted and is absent from this report entirely. Treat this report as a PARTIAL view of the subscription.'
+    }
+    else { '' }
+    $CollectorBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>Incomplete collection:</b> {0} resource type(s) could not be collected and are MISSING from this report - not empty because there are none, but because the collector errored: {1}.{2} See the Diagnostics log in this bundle for the underlying error, then re-run.</div></div>' -f $Names.Count, $NameList, $AbortNote)
+}
+
 $CoverageBanner = ''
 if ($null -ne $VmBilling)
 {
@@ -705,6 +731,8 @@ $PlatBlock
 </header>
 
 $PrivacyBanner
+
+$CollectorBanner
 
 $CoverageBanner
 

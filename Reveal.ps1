@@ -361,7 +361,7 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
             Remove-Job -Job $R.Job -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $R.Item.OutPath -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (($R.Item.OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
-            $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = ("timed out after {0:0.##} minutes" -f ($RevealTimeoutSeconds / 60)) }
+            $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = ("timed out after {0} minutes" -f ([double]($RevealTimeoutSeconds / 60)).ToString('0.##', [cultureinfo]::InvariantCulture)) }
             $DoneCount++
         }
         else

@@ -969,13 +969,38 @@ function ExecuteInventoryProcessing()
                     Module  = $ModName
                     Message = $_.Exception.Message
                 }
+                # The global accumulates across every subscription in this process (the wrapper invokes
+                # this script once per subscription), so the report reads this per-invocation copy
+                # instead - otherwise one subscription's report would name another's failures.
+                $script:CollectorFailuresThisRun += [pscustomobject]@{
+                    Module  = $ModName
+                    Message = $_.Exception.Message
+                }
 
                 Write-Log -Message ("Collector FAILED: {0}: {1}" -f $ModName, $_.Exception.Message) -Severity 'Error'
                 Write-Log -Message ("The rest of the inventory will continue, but the '{0}' resource type is MISSING from this report - not empty because there are none, but because the collector errored. Re-run to retry, or investigate the error above if it repeats." -f $ModName) -Severity 'Error'
 
                 if ($ConsecutiveCollectorFailures -ge $CollectorFailureCircuitBreakerThreshold)
                 {
-                    throw ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Total collector failures across the whole run so far (all subscriptions processed to this point): {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
+                    # Recorded and BROKEN out of, not thrown. A bare throw here did not stop the run and
+                    # did not even leave this foreach: the global $ErrorActionPreference is
+                    # SilentlyContinue outside -Debug, which makes a throw from inside a catch continue
+                    # with the next iteration. The breaker was therefore inert in exactly the systemic
+                    # case it exists for, and every remaining collector went on to record @() - the
+                    # "incomplete report that looks like an empty environment" its own message warns of.
+                    #
+                    # break leaves the loop, so the remaining collectors are never attempted and their
+                    # keys are ABSENT from the inventory rather than present and empty. That is the
+                    # honest shape: absent means not attempted, [] means attempted and none found.
+                    # The failure gate at the end of the script owns reporting this subscription FAILED,
+                    # for the reason given there: halting here directly would skip the obfuscation
+                    # dictionary, which is the de-obfuscation key for whatever this run did write.
+                    $script:CollectorBreakerError = ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Total collector failures across the whole run so far (all subscriptions processed to this point): {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
+                    Write-Log -Message $script:CollectorBreakerError -Severity 'Error'
+                    # No $Result assignment: break skips the write below, so this collector's key is
+                    # absent like the ones after it. Attempted-and-failed is recorded in the failure
+                    # list, the banner and the logs, which is where it belongs.
+                    break
                 }
 
                 $Result = @()
@@ -1232,6 +1257,21 @@ function ExecuteInventoryProcessing()
                                 throw
                             }
 
+                            if ((Test-RdaPermanentRequestError -ErrorMessage $_.Exception.Message -Exception $_.Exception) -and -not ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message)))
+                            {
+                                # A 400 rejects the REQUEST, and this page is re-sent unchanged on every
+                                # retry (the same window, the same continuation token), so it can never
+                                # succeed. Reproduced live against this API: it answers a malformed window
+                                # with HTTP BadRequest whose message says only "InvalidInput: ...", which
+                                # is why the STATUS and not the text is what decides here. Without this
+                                # the page spent the full 30-attempt budget, about 26 minutes, on it.
+                                #
+                                # Yields to the auth branch below while a refresh is still available, for
+                                # the same reason the Marketplace gate does.
+                                Write-Log -Message ("Consumption page query REJECTED for {0} after {1} attempt(s): {2}. A 400 rejects the request itself and this page is re-sent unchanged on every retry, so it will not be retried. This indicates a malformed request window rather than a transient fault; re-run, and pass -SkipConsumption to leave billing out of the run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                                throw
+                            }
+
                             if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
                             {
                                 # Backing off cannot free memory, and this error carries no Retry-After,
@@ -1330,7 +1370,7 @@ function ExecuteInventoryProcessing()
                             $ConsumptionBackoffSeconds = [math]::Round($ConsumptionBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
 
                             $ConsumptionRetryMarker = if ($ConsumptionRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($ConsumptionThrottled) { ', throttled' } else { '' }
-                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $ConsumptionRetryMarker, $_.Exception.Message, $ConsumptionBackoffSeconds) -Severity 'Warning'
+                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $ConsumptionRetryMarker, $_.Exception.Message, ([double]$ConsumptionBackoffSeconds).ToString('0.##', [cultureinfo]::InvariantCulture)) -Severity 'Warning'
                             Start-Sleep -Seconds $ConsumptionBackoffSeconds
                         }
                     }
@@ -1717,7 +1757,7 @@ function ExecuteInventoryProcessing()
                         # out-of-memory branch reports the same text after a collection has run.
                         $MpErrorText = [string]$_.Exception.Message
 
-                        if ((Test-RdaPermanentRequestError -ErrorMessage $MpErrorText) -and -not ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText)))
+                        if ((Test-RdaPermanentRequestError -ErrorMessage $MpErrorText -Exception $_.Exception) -and -not ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText)))
                         {
                             # A 400 rejects the request, and this endpoint is sent an identical request on
                             # every retry, so the transient budget would spend ~25 minutes of escalating
@@ -1830,7 +1870,7 @@ function ExecuteInventoryProcessing()
                         $MpBackoffSeconds = [math]::Round($MpBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
 
                         $MpRetryMarker = if ($MpRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($MpThrottled) { ', throttled' } else { '' }
-                        Write-Log -Message ("Marketplace query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $MpAttempt, $MpMaxRetries, $MpRetryMarker, $_.Exception.Message, $MpBackoffSeconds) -Severity 'Warning'
+                        Write-Log -Message ("Marketplace query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $MpAttempt, $MpMaxRetries, $MpRetryMarker, $_.Exception.Message, ([double]$MpBackoffSeconds).ToString('0.##', [cultureinfo]::InvariantCulture)) -Severity 'Warning'
                         Start-Sleep -Seconds $MpBackoffSeconds
                     }
                 }
@@ -1949,6 +1989,8 @@ function ExecuteInventoryProcessing()
     # Explicitly nil for this invocation. Read unguarded by the failure gate near the end of the
     # script, which is safe today only because no Set-StrictMode is in effect.
     $script:HtmlWriteError = $null
+    $script:CollectorBreakerError = $null
+    $script:CollectorFailuresThisRun = @()
 
     $script:PhaseTimings = [ordered]@{}
 
@@ -2068,7 +2110,7 @@ function FinalizeOutputs
 
         try
         {
-            $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+            $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv -CollectorFailures $script:CollectorFailuresThisRun -CollectorsAborted:([bool]$script:CollectorBreakerError)
         }
         catch
         {
@@ -2495,6 +2537,17 @@ Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Succe
 # failure gate below rather than exiting directly: that gate owns removing an unusable archive so
 # the wrapper cannot consolidate a corrupt member, and duplicating that cleanup here would give
 # it two owners.
+if (-not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+{
+    Write-Log -Message ('ABORTED collection: the collector circuit breaker tripped, so this inventory is INCOMPLETE.') -Severity 'Error'
+    Write-Log -Message ("  Cause: {0}" -f $script:CollectorBreakerError) -Severity 'Error'
+    Write-Log -Message ('  The resource types after the abort were never attempted, so they are ABSENT from the inventory rather than empty. Reporting this subscription as FAILED so the wrapper does not consolidate a report that would read as an empty environment. Re-run with -Resume to retry.') -Severity 'Error'
+    $BreakerReason = ("collection was aborted by the circuit breaker ({0})" -f $script:CollectorBreakerError)
+    $ZipWriteError = if ([string]::IsNullOrWhiteSpace($ZipWriteError)) { $BreakerReason }
+    else { ("{0}; the archive write also reported: {1}" -f $BreakerReason, $ZipWriteError) }
+    $ZipVerified = $false
+}
+
 if (-not [string]::IsNullOrWhiteSpace($script:HtmlWriteError))
 {
     Write-Log -Message ('FAILED to produce the HTML report, so this run has no usable report bundle.') -Severity 'Error'

@@ -237,7 +237,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         {
             if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $SubName, $SubId) }
             elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $SubName, $SubId) }
-            throw "Script exited with code $LASTEXITCODE"
+            throw ("ResourceInventory.ps1 exited with code {0} ({1})" -f $LASTEXITCODE, (Get-InventoryExitCodeMeaning -Code $LASTEXITCODE))
         }
 
         $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }

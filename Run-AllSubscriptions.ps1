@@ -1198,7 +1198,7 @@ if ($ParallelStreams -le 1)
             {
                 if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
                 elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
-                throw "Script exited with code $LASTEXITCODE"
+                throw ("ResourceInventory.ps1 exited with code {0} ({1})" -f $LASTEXITCODE, (Get-InventoryExitCodeMeaning -Code $LASTEXITCODE))
             }
 
             $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
@@ -1355,7 +1355,7 @@ else
                 {
                     if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
                     elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
-                    throw "Script exited with code $LASTEXITCODE"
+                    throw ("ResourceInventory.ps1 exited with code {0} ({1})" -f $LASTEXITCODE, (Get-InventoryExitCodeMeaning -Code $LASTEXITCODE))
                 }
                 $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
                 $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount; Zip = $Global:ZipOutputFile }
@@ -1450,6 +1450,17 @@ else
                 $SliceNames = @($SliceList | ForEach-Object { $_.Name })
 
                 $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+                # A summary left by an earlier run that died before reading it would otherwise be ingested
+                # as this run's if this stream then dies before writing its own.
+                if (Test-Path -LiteralPath $SummaryPath)
+                {
+                    try { Remove-Item -LiteralPath $SummaryPath -Force -ErrorAction Stop }
+                    catch
+                    {
+                        Write-Host ("ERROR: a stale stream summary from an earlier run could not be removed: {0} ({1}). It could be read as this run's result. Remove it and re-run." -f $SummaryPath, $_.Exception.Message) -ForegroundColor Red
+                        Exit-Wrapper -Code 1
+                    }
+                }
                 $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
 
                 $StreamSummaries += [pscustomobject]@{
@@ -1854,6 +1865,41 @@ if ($StartIds.Count -gt 0)
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green
 
+# Why a subscription's report is absent from the bundle, by class. One owner, because it is printed
+# both at the normal end of the run and before the per-subscription verification hard-stop, which
+# exits first and would otherwise drop it.
+$WriteMissingReportBanners = {
+    if (@($CollectionAbortedSubs).Count -gt 0)
+    {
+        Write-Host ""
+        Write-Host "================= FAILED (collection aborted) =================" -ForegroundColor Red
+        Write-Host ("{0} subscription(s) had collection STOPPED by the collector circuit breaker:" -f @($CollectionAbortedSubs).Count) -ForegroundColor Red
+        foreach ($A in @($CollectionAbortedSubs))
+        {
+            Write-Host ("  - {0}" -f $A) -ForegroundColor Red
+        }
+        Write-Host "Several collectors failed in a row, which points at a systemic problem (authentication dropping" -ForegroundColor Red
+        Write-Host "mid-run, network loss, a broken Az module) rather than one resource type. Their inventories are" -ForegroundColor Red
+        Write-Host "PARTIAL, so their reports are NOT in the bundle. Fix the cause named in the per-subscription log" -ForegroundColor Red
+        Write-Host "above, then re-run with -Resume. Do not zip their report folders by hand: they are incomplete." -ForegroundColor Red
+        Write-Host "==============================================================" -ForegroundColor Red
+    }
+    if (@($ArchiveWriteFailures).Count -gt 0)
+    {
+        Write-Host ""
+        Write-Host "=================== FAILED (report archive) ===================" -ForegroundColor Red
+        Write-Host ("{0} subscription(s) completed collection but could NOT write a report archive:" -f @($ArchiveWriteFailures).Count) -ForegroundColor Red
+        foreach ($A in @($ArchiveWriteFailures))
+        {
+            Write-Host ("  - {0}" -f $A) -ForegroundColor Red
+        }
+        Write-Host "Their reports are NOT in the consolidated bundle. The per-subscription log above gives the reason" -ForegroundColor Red
+        Write-Host "(free disk space is the usual one). The uncompressed report files are still in each subscription's" -ForegroundColor Red
+        Write-Host "report folder under the inventory root and can be zipped by hand instead of re-collecting." -ForegroundColor Red
+        Write-Host "==============================================================" -ForegroundColor Red
+    }
+}
+
 # === Per-subscription output verification (hard-stop): fail with exit code 2 (distinct from auth/runtime exit code 1) if any sub that ran to completion this invocation left no report archive on disk. Checks IDENTITY first (every successful sub records the exact $Global:ZipOutputFile it wrote, so a missing report is reported BY SUBSCRIPTION) and count second (catches an absent recorded path or a replaced archive).
 $ExpectedZipCount = @($SubResourceCounts).Count
 if ($ExpectedZipCount -gt 0 -and (Test-Path -LiteralPath $InventoryRoot -PathType Container))
@@ -1941,6 +1987,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -LiteralPath $InventoryRoot -PathTyp
         {
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
         }
+        & $WriteMissingReportBanners
         Exit-Wrapper -Code 2
     }
     $VerifiedByPathCount = $ExpectedZipCount - $UnverifiableSubs.Count
@@ -1974,6 +2021,17 @@ else
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
 }
 
+# Report folders whose collection was aborted hold a PARTIAL inventory. They are reported as failed
+# subscriptions, and are left out of MainSummary.html and of the HTML folded into the bundle, so a
+# partial report can never read as a complete one.
+$AbortedReportFolders = @()
+if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
+{
+    $AbortedReportFolders = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $RunStartTime -and (Test-RdaCollectionAborted -Folder $_.FullName) } |
+            ForEach-Object { $_.FullName })
+}
+
 $MainSummaryFile = $null
 if ($null -ne $OuterZipFile)
 {
@@ -2000,6 +2058,7 @@ if ($null -ne $OuterZipFile)
             -MarketplaceFailedSubs $Global:MarketplaceFailedSubs `
             -CollectorFailures $Global:CollectorFailures `
             -ProcessedSubscriptions $SubResourceCounts `
+            -ExcludeFolders $AbortedReportFolders `
             -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
             -Detailed:$Detailed -Obfuscated:$Obfuscate
     }
@@ -2286,6 +2345,10 @@ if ($CollectorFailuresList.Count -gt 0)
         }
     }
     Write-Host "  These resource types are missing (not empty) from the affected subscription's report." -ForegroundColor Yellow
+    if (@($CollectionAbortedSubs).Count -gt 0)
+    {
+        Write-Host "  A subscription whose collection was aborted has no report at all - see FAILED (collection aborted)." -ForegroundColor Yellow
+    }
     Write-Host "  Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Yellow
     Write-Host ""
 }
@@ -2343,6 +2406,8 @@ try
         -Eligible $EligibleCount -Processed ($EligibleCount - $SkippedCount) -Skipped $SkippedCount `
         -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
         -FailedSubscriptions $FailedSubscriptions `
+        -CollectionAbortedSubs $CollectionAbortedSubs `
+        -ArchiveWriteFailures $ArchiveWriteFailures `
         -CollectorFailures $Global:CollectorFailures `
         -MetricsFailedSubs $Global:MetricsFailedSubs `
         -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
@@ -2416,6 +2481,8 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 
         foreach ($SubDir in @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
         {
+            # A partial inventory is never shipped as though it were a report.
+            if ($SubDir.FullName -in $AbortedReportFolders) { continue }
             $SubHtml = Get-ChildItem -LiteralPath $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
             if ($null -eq $SubHtml) { continue }
             $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
@@ -2576,39 +2643,19 @@ if (@($Global:CollectorFailures).Count -gt 0)
     Write-Host ("{0} collector failure(s) across {1} subscription(s) - see 'Collector Failures' above for detail." -f @($Global:CollectorFailures).Count, (@($Global:CollectorFailures | Select-Object -ExpandProperty Id -Unique)).Count) -ForegroundColor Red
     Write-Host "One or more resource types are MISSING (not empty) from the affected subscription(s)' reports." -ForegroundColor Red
     Write-Host "Re-run to retry, or investigate the error(s) above if they repeat." -ForegroundColor Red
-    Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    if (@($CollectionAbortedSubs).Count -gt 0)
+    {
+        Write-Host "For subscriptions under FAILED (collection aborted) below, collection stopped and NO report was produced." -ForegroundColor Red
+        Write-Host "For the others, the rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    }
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
-if (@($CollectionAbortedSubs).Count -gt 0)
-{
-    Write-Host ""
-    Write-Host "================= FAILED (collection aborted) =================" -ForegroundColor Red
-    Write-Host ("{0} subscription(s) had collection STOPPED by the collector circuit breaker:" -f @($CollectionAbortedSubs).Count) -ForegroundColor Red
-    foreach ($A in @($CollectionAbortedSubs))
-    {
-        Write-Host ("  - {0}" -f $A) -ForegroundColor Red
-    }
-    Write-Host "Several collectors failed in a row, which points at a systemic problem (authentication dropping" -ForegroundColor Red
-    Write-Host "mid-run, network loss, a broken Az module) rather than one resource type. Their inventories are" -ForegroundColor Red
-    Write-Host "PARTIAL, so their reports are NOT in the bundle. Fix the cause named in the per-subscription log" -ForegroundColor Red
-    Write-Host "above, then re-run with -Resume. Do not zip their report folders by hand: they are incomplete." -ForegroundColor Red
-    Write-Host "==============================================================" -ForegroundColor Red
-}
-if (@($ArchiveWriteFailures).Count -gt 0)
-{
-    Write-Host ""
-    Write-Host "=================== FAILED (report archive) ===================" -ForegroundColor Red
-    Write-Host ("{0} subscription(s) completed collection but could NOT write a report archive:" -f @($ArchiveWriteFailures).Count) -ForegroundColor Red
-    foreach ($A in @($ArchiveWriteFailures))
-    {
-        Write-Host ("  - {0}" -f $A) -ForegroundColor Red
-    }
-    Write-Host "Their reports are NOT in the consolidated bundle. The per-subscription log above gives the reason" -ForegroundColor Red
-    Write-Host "(free disk space is the usual one). The uncompressed report files are still in each subscription's" -ForegroundColor Red
-    Write-Host "report folder under the inventory root and can be zipped by hand instead of re-collecting." -ForegroundColor Red
-    Write-Host "==============================================================" -ForegroundColor Red
-}
+& $WriteMissingReportBanners
 
 if ($WrapperTranscriptStarted)
 {
@@ -2642,6 +2689,12 @@ if (@($ArchiveWriteFailures).Count -gt 0)
 }
 # An aborted subscription's report is also absent from the bundle, which is what 2 means.
 if (@($CollectionAbortedSubs).Count -gt 0)
+{
+    $WrapperExitCode = 2
+}
+# So is any other subscription that failed outright: an inner exit 1, or a stream worker that died
+# before writing its summary. Exiting 0 over that contradicts "0 = no failures of any kind".
+if (@($FailedSubscriptions).Count -gt 0)
 {
     $WrapperExitCode = 2
 }

@@ -134,6 +134,10 @@ function New-RdaAllSubHtmlSummary
         $MarketplaceFailedSubs = @(),
         $CollectorFailures = @(),
         $ProcessedSubscriptions = @(),
+        # Report folders to leave out entirely: a subscription whose collection was aborted holds a
+        # PARTIAL inventory, and listing it as a normal row would present it as a complete one. It is
+        # still reported, as a failure, through -FailedSubscriptions.
+        $ExcludeFolders = @(),
 
         $TenantId,
         $Version,
@@ -159,6 +163,11 @@ function New-RdaAllSubHtmlSummary
     if ($null -ne $SinceTime)
     {
         $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
+    }
+    $Excluded = @(@($ExcludeFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+    if ($Excluded.Count -gt 0)
+    {
+        $Folders = @($Folders | Where-Object { $_.FullName -notin $Excluded })
     }
 
     $ObfPattern = '^(prod_|nonprod_)(databricks_|aks_|vmss_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'

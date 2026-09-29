@@ -388,6 +388,29 @@ function Test-RdaOutOfMemory
     return [bool]($ErrorMessage -cmatch $OutOfMemoryPattern)
 }
 
+function Get-RdaCollectionAbortedMarkerPath
+{
+    # The one owner of the marker ResourceInventory.ps1 leaves in a report folder when the collector
+    # circuit breaker aborts collection. Its inventory is PARTIAL, so the wrapper must neither fold
+    # its HTML into the consolidated bundle nor list it as a normal row in MainSummary.html; this is
+    # how the wrapper tells, without reparsing any log.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][string]$Folder)
+
+    return (Join-Path $Folder 'COLLECTION_ABORTED.txt')
+}
+
+function Test-RdaCollectionAborted
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$Folder)
+
+    if ([string]::IsNullOrWhiteSpace($Folder)) { return $false }
+    return (Test-Path -LiteralPath (Get-RdaCollectionAbortedMarkerPath -Folder $Folder) -PathType Leaf)
+}
+
 function Test-RdaPermanentRequestError
 {
     [CmdletBinding()]

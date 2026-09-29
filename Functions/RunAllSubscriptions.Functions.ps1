@@ -1250,6 +1250,23 @@ function Format-PreflightMatrix
     return [pscustomobject]@{ Lines = @($Lines); Blocking = $Blocking }
 }
 
+function Get-InventoryExitCodeMeaning
+{
+    # ResourceInventory.ps1's own exit codes, named, so a failure line cannot be misread as one of the
+    # WRAPPER's codes (its 3 means an auth-skipped phase; the inner 3 means an aborted collection).
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([int]$Code)
+
+    switch ($Code)
+    {
+        1 { return 'a hard pre-flight or setup failure' }
+        2 { return 'collection finished but the report archive could not be written' }
+        3 { return 'collection was aborted by the collector circuit breaker; the inventory is partial' }
+        default { return 'an unexpected failure' }
+    }
+}
+
 function Get-RunSummaryLogContent
 {
     param(
@@ -1266,6 +1283,10 @@ function Get-RunSummaryLogContent
         $EmptyGenuinelyEmpty = @(),
         $EmptyUndetermined = @(),
         $FailedSubscriptions = @(),
+        # Why a report is missing, by class. Counts only, so they are safe in an obfuscated bundle; the
+        # names are already in the failed-subscription detail of a non-obfuscated one.
+        $CollectionAbortedSubs = @(),
+        $ArchiveWriteFailures = @(),
         $CollectorFailures = @(),
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
@@ -1424,6 +1445,8 @@ function Get-RunSummaryLogContent
         $Lines.Add(('  Metric-query API calls issued : {0}' -f $MetricsApiCallCount.ToString('N0', [cultureinfo]::InvariantCulture)))
     }
     $Lines.Add(('  Failed subscriptions          : {0}' -f $Failed.Count))
+    $Lines.Add(('    of which collection aborted : {0}' -f @(@($CollectionAbortedSubs) | Where-Object { $null -ne $_ }).Count))
+    $Lines.Add(('    of which archive not written: {0}' -f @(@($ArchiveWriteFailures) | Where-Object { $null -ne $_ }).Count))
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
     $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))

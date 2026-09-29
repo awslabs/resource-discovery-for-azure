@@ -712,6 +712,10 @@ function Write-RdaShareableDiagnosticsLog
         [bool]$MarketplaceRequested = $true,
         [int]$MetricsApiCallCount = 0,
         [bool]$MetricsRequested = $true,
+        # Why a requested billing phase did not run, when it was not the operator's -Skip switch. The
+        # n/a line otherwise says "-SkipConsumption was passed", which is false for an aborted run.
+        [string]$ConsumptionSkipReason,
+        [string]$MarketplaceSkipReason,
         [switch]$Obfuscated
     )
 
@@ -825,7 +829,8 @@ function Write-RdaShareableDiagnosticsLog
         }
         else
         {
-            $DiagLines.Add('Consumption records collected: n/a (-SkipConsumption was passed)')
+            $ConsumptionNaReason = if ([string]::IsNullOrWhiteSpace($ConsumptionSkipReason)) { '-SkipConsumption was passed' } else { $ConsumptionSkipReason }
+            $DiagLines.Add(('Consumption records collected: n/a ({0})' -f $ConsumptionNaReason))
         }
 
         if ($ConsumptionRequested -and $ConsumptionRecordCount -eq 0 -and $ConsumpSkips.Count -eq 0)
@@ -868,7 +873,8 @@ function Write-RdaShareableDiagnosticsLog
         }
         else
         {
-            $DiagLines.Add('Marketplace consumption records collected: n/a (-SkipMarketplace or -SkipConsumption was passed)')
+            $MarketplaceNaReason = if ([string]::IsNullOrWhiteSpace($MarketplaceSkipReason)) { '-SkipMarketplace or -SkipConsumption was passed' } else { $MarketplaceSkipReason }
+            $DiagLines.Add(('Marketplace consumption records collected: n/a ({0})' -f $MarketplaceNaReason))
         }
 
         if ($MarketplaceRequested -and $MarketplaceRecordCount -eq 0 -and $MarketplaceSkips.Count -eq 0)

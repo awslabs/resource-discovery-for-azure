@@ -4103,10 +4103,13 @@ Deleting it is best effort: if the removal fails, the message tells the operator
 |---|---|---|
 | 0 | Success | falling off the end of the script, or `exit 0` after help |
 | 1 | Generic hard fail | unrecognised args, missing functions file, pre flight gates, discovery failure |
-| 2 | The report archive is missing | line 2851 only |
+| 2 | The report archive is missing | the archive gate, when the archive could not be written |
+| 3 | Collection was aborted | the archive gate, when the collector circuit breaker tripped; the inventory is partial and a `COLLECTION_ABORTED.txt` marker is left in the report folder |
 
 The wrapper treats **any** non zero code as "this subscription failed", so exit 2 is not needed for that.
 It exists so the wrapper can read the 2 and set its **own** exit code 2, which already means "per subscription output gap".
+Exit 3 exists for the same reason, and is kept apart from 2 because the remedy differs: an unwritten archive may be zipped by hand, a partial inventory must be re-collected.
+The wrapper reports each under its own banner and maps both to its own 2, since in both cases the report is not in the bundle.
 That way a lost report is visible to automation and not only in a console summary a human has to read.
 
 The final line, 2910, is the success message.

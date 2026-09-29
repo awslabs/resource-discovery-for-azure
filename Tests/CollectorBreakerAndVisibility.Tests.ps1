@@ -30,8 +30,9 @@
 
     Verified end to end before the fix was called done, by planting deliberately failing collectors
     in Services/: one failure now names the type in the report, and five consecutive failures stop
-    collection at the fifth (the sixth is never attempted), report the subscription FAILED, exit 2,
-    and remove the archive so the wrapper cannot consolidate it.
+    collection at the fifth (the sixth is never attempted), report the subscription FAILED, exit 3,
+    and remove the archive so the wrapper cannot consolidate it. Through the real wrapper, the
+    subscription is then reported under its own FAILED (collection aborted) banner.
 #>
 
 BeforeAll {
@@ -417,5 +418,187 @@ Describe 'The console summary does not read clean over an incomplete report' {
     It 'never prints the exception message to the console either' {
         $Lines = script:Get-ConsoleLines -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'secret-vm-name-12345 blew up' })
         ($Lines -join "`n") | Should -Not -Match 'secret-vm-name-12345'
+    }
+}
+
+Describe 'A partial inventory is never presented as a report' {
+    # Behavioural: the helpers are called directly, and the aggregate summary is rendered for real.
+    BeforeAll {
+        . (Join-Path $script:Repo 'Functions/Common.Functions.ps1')
+        . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
+        . (Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1')
+        . (Join-Path $script:Repo 'Functions/AllSubHtmlSummary.Functions.ps1')
+
+        # The diagnostics writer reads the run-wide failure lists from the session; isolate from them.
+        $script:SavedLists = @{}
+        foreach ($Name in 'ConsumptionFailedSubs', 'MetricsFailedSubs', 'MarketplaceFailedSubs', 'CollectorFailures')
+        {
+            $Existing = Get-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+            $script:SavedLists[$Name] = if ($Existing) { @{ Value = $Existing.Value } } else { $null }
+            Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+        }
+
+        $script:PartialDir = Join-Path ([System.IO.Path]::GetTempPath()) ("PartialInv_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:PartialDir -Force | Out-Null
+
+        function script:New-ReportFolder
+        {
+            param([string]$Name, [string]$Sub)
+            $Dir = Join-Path $script:PartialDir $Name
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            [pscustomobject]@{
+                Version    = '9.9.9'
+                StorageAcc = @([pscustomobject]@{ Subscription = $Sub; ResourceGroup = 'rg'; Name = 'sa'; Location = 'westeurope' })
+            } | ConvertTo-Json -Depth 6 | Out-File -LiteralPath (Join-Path $Dir 'Inventory_x.json') -Encoding utf8
+            return $Dir
+        }
+    }
+
+    AfterAll {
+        foreach ($Name in $script:SavedLists.Keys)
+        {
+            if ($null -ne $script:SavedLists[$Name]) { Set-Variable -Name $Name -Scope Global -Value $script:SavedLists[$Name].Value }
+        }
+        if ($script:PartialDir -and (Test-Path -LiteralPath $script:PartialDir)) { Remove-Item -LiteralPath $script:PartialDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'the marker is detected, and only where it was written' {
+        $Aborted = script:New-ReportFolder -Name 'ResourcesReportAborted' -Sub 'Sub Partial'
+        $Complete = script:New-ReportFolder -Name 'ResourcesReportComplete' -Sub 'Sub Whole'
+        Set-Content -LiteralPath (Get-RdaCollectionAbortedMarkerPath -Folder $Aborted) -Value 'x'
+
+        Test-RdaCollectionAborted -Folder $Aborted | Should -BeTrue
+        Test-RdaCollectionAborted -Folder $Complete | Should -BeFalse
+        Test-RdaCollectionAborted -Folder '' | Should -BeFalse
+        Test-RdaCollectionAborted -Folder (Join-Path $script:PartialDir 'does-not-exist') | Should -BeFalse
+    }
+
+    It 'MainSummary leaves an excluded partial folder out, and keeps the complete one' {
+        $Aborted = Join-Path $script:PartialDir 'ResourcesReportAborted'
+        $Html = Join-Path $script:PartialDir 'main.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $script:PartialDir -HtmlFile $Html -ExcludeFolders @($Aborted) -Version '9.9.9' | Out-Null
+        $Text = Get-Content -LiteralPath $Html -Raw
+        $Text | Should -Match 'Sub Whole'
+        $Text | Should -Not -Match 'Sub Partial' -Because 'a partial inventory must not appear as a normal processed row'
+    }
+
+    It 'MainSummary is unchanged when nothing is excluded' {
+        $Html = Join-Path $script:PartialDir 'main-all.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $script:PartialDir -HtmlFile $Html -Version '9.9.9' | Out-Null
+        $Text = Get-Content -LiteralPath $Html -Raw
+        $Text | Should -Match 'Sub Whole'
+        $Text | Should -Match 'Sub Partial'
+    }
+
+    It 'names each inner exit code so it cannot be misread as the wrapper''s own' {
+        Get-InventoryExitCodeMeaning -Code 3 | Should -Match 'aborted'
+        Get-InventoryExitCodeMeaning -Code 2 | Should -Match 'archive could not be written'
+        Get-InventoryExitCodeMeaning -Code 1 | Should -Match 'pre-flight'
+        Get-InventoryExitCodeMeaning -Code 42 | Should -Match 'unexpected'
+    }
+
+    It 'RunSummary.log counts aborted and archive-failed subscriptions separately' {
+        $Lines = @(Get-RunSummaryLogContent -Version '9.9.9' -StartTime (Get-Date) -EndTime (Get-Date) -Eligible 3 -Processed 3 `
+                -FailedSubscriptions @('a', 'b', 'c') -CollectionAbortedSubs @('a (id-a)', 'b (id-b)') -ArchiveWriteFailures @('c (id-c)'))
+        $Text = $Lines -join "`n"
+        $Text | Should -Match 'of which collection aborted : 2'
+        $Text | Should -Match 'of which archive not written: 1'
+    }
+
+    It 'RunSummary.log reports zero for both when nothing failed' {
+        $Text = @(Get-RunSummaryLogContent -Version '9.9.9' -StartTime (Get-Date) -EndTime (Get-Date) -Eligible 1 -Processed 1) -join "`n"
+        $Text | Should -Match 'of which collection aborted : 0'
+        $Text | Should -Match 'of which archive not written: 0'
+    }
+
+    It 'the Diagnostics log names an abort as the reason billing did not run, not a -Skip switch' {
+        $File = Write-RdaShareableDiagnosticsLog -DefaultPath ($script:PartialDir + [IO.Path]::DirectorySeparatorChar) -ReportName 'R' -RunDateTime 'abort1' -Version '9.9.9' -PhaseTimings $null `
+            -ConsumptionRecordCount 0 -ConsumptionRequested $false -MarketplaceRecordCount 0 -MarketplaceRequested $false `
+            -ConsumptionSkipReason 'not pulled because collection was aborted by the circuit breaker' `
+            -MarketplaceSkipReason 'not pulled because collection was aborted by the circuit breaker'
+        $Text = Get-Content -LiteralPath $File -Raw
+        $Text | Should -Match 'Consumption records collected: n/a \(not pulled because collection was aborted by the circuit breaker\)'
+        $Text | Should -Match 'Marketplace consumption records collected: n/a \(not pulled because collection was aborted by the circuit breaker\)'
+        $Text | Should -Not -Match 'SkipConsumption was passed' -Because 'the operator passed no such switch'
+        $Text | Should -Not -Match 'ZERO usage records were collected' -Because 'no pull ran, so a zero-rows warning would be false'
+    }
+
+    It 'the Diagnostics log still names the -Skip switch when that was the reason' {
+        $File = Write-RdaShareableDiagnosticsLog -DefaultPath ($script:PartialDir + [IO.Path]::DirectorySeparatorChar) -ReportName 'R' -RunDateTime 'skip1' -Version '9.9.9' -PhaseTimings $null `
+            -ConsumptionRecordCount 0 -ConsumptionRequested $false -MarketplaceRequested $false
+        (Get-Content -LiteralPath $File -Raw) | Should -Match 'Consumption records collected: n/a \(-SkipConsumption was passed\)'
+    }
+}
+
+Describe 'The wrapper reports every missing report, and never exits 0 over one' {
+    BeforeAll {
+        $script:WrapSrc = Get-Content -LiteralPath (Join-Path $script:Repo 'Run-AllSubscriptions.ps1') -Raw
+        $WrapErrors = $null
+        $script:WrapAst = [System.Management.Automation.Language.Parser]::ParseInput($script:WrapSrc, [ref]$null, [ref]$WrapErrors)
+        if ($null -ne $WrapErrors -and $WrapErrors.Count -gt 0) { throw ('Run-AllSubscriptions.ps1 does not parse: {0}' -f $WrapErrors[0].Message) }
+    }
+
+    It 'any failed subscription forces exit 2, including a stream worker that died' {
+        $script:WrapSrc | Should -Match '(?s)if \(@\(\$FailedSubscriptions\)\.Count -gt 0\)\s*\{\s*\$WrapperExitCode = 2\s*\}'
+        # Placed AFTER Get-WrapperExitCode, so it overrides 3-5 as the README says 2 does.
+        $Derive = $script:WrapSrc.IndexOf('$WrapperExitCode = Get-WrapperExitCode', [System.StringComparison]::Ordinal)
+        $Override = $script:WrapSrc.IndexOf('if (@($FailedSubscriptions).Count -gt 0)', $Derive, [System.StringComparison]::Ordinal)
+        $Derive | Should -BeGreaterThan -1
+        $Override | Should -BeGreaterThan $Derive
+    }
+
+    It 'the missing-report banners have one owner, printed at the normal end AND before the hard stop' {
+        $Defs = @($script:WrapAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$WriteMissingReportBanners' }, $true))
+        $Defs.Count | Should -Be 1
+        $Defs[0].Right.Extent.Text | Should -Match 'FAILED \(collection aborted\)'
+        $Defs[0].Right.Extent.Text | Should -Match 'FAILED \(report archive\)'
+        @([regex]::Matches($script:WrapSrc, '(?m)^\s*& \$WriteMissingReportBanners\s*$')).Count | Should -Be 2 -Because 'the verification hard stop exits first and used to drop both banners'
+        # The hard-stop call sits immediately before its Exit-Wrapper -Code 2.
+        $script:WrapSrc | Should -Match '(?s)& \$WriteMissingReportBanners\s*\r?\n\s*Exit-Wrapper -Code 2'
+        # And the banners are not duplicated as loose text elsewhere.
+        @([regex]::Matches($script:WrapSrc, '"=+ FAILED \(collection aborted\) =+"')).Count | Should -Be 1
+    }
+
+    It 'an aborted folder is excluded from both MainSummary and the HTML fold' {
+        $script:WrapSrc | Should -Match 'Test-RdaCollectionAborted -Folder \$_\.FullName'
+        $script:WrapSrc | Should -Match '-ExcludeFolders \$AbortedReportFolders'
+        $script:WrapSrc | Should -Match 'if \(\$SubDir\.FullName -in \$AbortedReportFolders\) \{ continue \}'
+        # Computed before MainSummary is built, since both consumers read it.
+        $script:WrapSrc.IndexOf('$AbortedReportFolders = @()', [System.StringComparison]::Ordinal) |
+            Should -BeLessThan $script:WrapSrc.IndexOf('New-RdaAllSubHtmlSummary -RunOutputDirectory', [System.StringComparison]::Ordinal)
+    }
+
+    It 'a stale stream summary is removed before the stream is launched' {
+        $script:WrapSrc | Should -Match '(?s)\$SummaryPath = Join-Path \$InventoryRoot \("\.rda-stream-\{0\}-summary\.json" -f \$S\)\s*\r?\n(\s*#[^\r\n]*\r?\n)*\s*if \(Test-Path -LiteralPath \$SummaryPath\)'
+    }
+
+    It 'the collector banner no longer claims a report was produced for an aborted subscription' {
+        $script:WrapSrc | Should -Match 'collection stopped and NO report was produced'
+    }
+
+    It 'no failure line says "Script exited with code" any more' {
+        foreach ($F in 'Run-AllSubscriptions.ps1', 'Run-AllSubscriptions.Stream.ps1')
+        {
+            $Src = Get-Content -LiteralPath (Join-Path $script:Repo $F) -Raw
+            $Src | Should -Not -Match 'Script exited with code' -Because ('{0}: the inner 3 read as the wrapper''s own 3' -f $F)
+            $Src | Should -Match 'ResourceInventory\.ps1 exited with code \{0\} \(\{1\}\)'
+        }
+    }
+}
+
+Describe 'The inner script marks an aborted report folder' {
+    It 'writes the marker only in the abort branch, and warns if it cannot' {
+        $Branch = [regex]::Match($script:InvSrc, '(?s)if \(\$CollectionAborted\)\s*\{.*?\n    \}\s*\r?\n    else').Value
+        $Branch | Should -Not -BeNullOrEmpty
+        # The marker must actually be WRITTEN there, not merely computed: resolving the path and doing
+        # nothing with it would leave the wrapper folding a partial report into the bundle.
+        $BranchAst = [System.Management.Automation.Language.Parser]::ParseInput($Branch.Substring(0, $Branch.LastIndexOf('else')), [ref]$null, [ref]$null)
+        $Writes = @($BranchAst.FindAll({ param($N)
+                    $N -is [System.Management.Automation.Language.CommandAst] -and
+                    $N.GetCommandName() -eq 'Set-Content' -and
+                    $N.Extent.Text -match '-LiteralPath \(Get-RdaCollectionAbortedMarkerPath -Folder \$DefaultPath\)' }, $true))
+        $Writes.Count | Should -Be 1 -Because 'the abort branch writes the marker into the report folder'
+        $Branch | Should -Match 'could not write the aborted-collection marker'
+        @([regex]::Matches($script:InvSrc, 'Get-RdaCollectionAbortedMarkerPath')).Count | Should -Be 1 -Because 'nowhere else writes it'
     }
 }

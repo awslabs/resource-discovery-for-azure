@@ -158,7 +158,7 @@ jobs:
         # the up-front subscription access gate) would otherwise show GREEN. RDA now
         # always exits with a deterministic code, so re-raise it as a terminating
         # error (which the task honors) to surface the failure and force a fix + retry.
-        if ($LASTEXITCODE -ne 0) { throw "Run-AllSubscriptions.ps1 exited $LASTEXITCODE - see the log above (subscription access gate / auth skip / collector failures). Fix the cause and re-run." }
+        if ($LASTEXITCODE -ne 0) { throw "Run-AllSubscriptions.ps1 exited $LASTEXITCODE - see the log above and the exit-code table in README.md (1 = pre-flight/setup, 2 = a subscription report is missing from the bundle, 3 = auth-skipped phase, 4 = collector failures, 5 = both 3 and 4). Fix the cause and re-run." }
 
   - task: CopyFiles@2
     displayName: 'Stage report zip'

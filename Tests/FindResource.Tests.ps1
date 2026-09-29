@@ -222,7 +222,7 @@ Describe 'Write-RdaFindSummary - only a complete scan earns "confirmed zero"' {
         $Rows = @(
             [pscustomobject]@{ Subscription = 'invented_sub_alpha'; RdaReportId = '202601010000000000101' }
             [pscustomobject]@{ Subscription = 'invented_sub_alpha'; RdaReportId = '202601010000000000101' }
-            [pscustomobject]@{ Subscription = 'invented_sub_beta';  RdaReportId = '202601010000000000102' }
+            [pscustomobject]@{ Subscription = 'invented_sub_beta'; RdaReportId = '202601010000000000102' }
         )
         $R = New-RdaFindResult -Rows $Rows -UnitsRead 2 -ReadCount 2 -SourceCount 2 `
             -TypePresence @{ 'VMWare' = 2 } -ResourceType @('VMWare')

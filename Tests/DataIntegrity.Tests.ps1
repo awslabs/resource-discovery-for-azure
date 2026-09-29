@@ -297,9 +297,9 @@ Describe "Non-Sensitive Fields Preserved" {
 Describe "No Null Obfuscated Fields" {
     It "No resource should have a null ID" {
         $Examined = @($script:Inventory.PSObject.Properties |
-            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
-            ForEach-Object { @($_.Value) } |
-            Where-Object { $null -ne $_ })
+                Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+                ForEach-Object { @($_.Value) } |
+                Where-Object { $null -ne $_ })
         if ($Examined.Count -eq 0)
         {
             Set-ItResult -Skipped -Because "this bundle contains no resources, so there is no ID to check"
@@ -313,9 +313,9 @@ Describe "No Null Obfuscated Fields" {
 
     It "No resource should have a null Name" {
         $Examined = @($script:Inventory.PSObject.Properties |
-            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
-            ForEach-Object { @($_.Value) } |
-            Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'Name' })
+                Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+                ForEach-Object { @($_.Value) } |
+                Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'Name' })
         if ($Examined.Count -eq 0)
         {
             Set-ItResult -Skipped -Because "this bundle contains no resources with a Name property, so there is nothing to check"
@@ -329,9 +329,9 @@ Describe "No Null Obfuscated Fields" {
 
     It "No resource should have a null Subscription" {
         $Examined = @($script:Inventory.PSObject.Properties |
-            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
-            ForEach-Object { @($_.Value) } |
-            Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'Subscription' })
+                Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+                ForEach-Object { @($_.Value) } |
+                Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'Subscription' })
         if ($Examined.Count -eq 0)
         {
             Set-ItResult -Skipped -Because "this bundle contains no resources with a Subscription property, so there is nothing to check"
@@ -345,9 +345,9 @@ Describe "No Null Obfuscated Fields" {
 
     It "No resource should have a null ResourceGroup" {
         $Examined = @($script:Inventory.PSObject.Properties |
-            Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
-            ForEach-Object { @($_.Value) } |
-            Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'ResourceGroup' })
+                Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+                ForEach-Object { @($_.Value) } |
+                Where-Object { $null -ne $_ -and $_.PSObject.Properties.Name -contains 'ResourceGroup' })
         if ($Examined.Count -eq 0)
         {
             Set-ItResult -Skipped -Because "this bundle contains no resources with a ResourceGroup property, so there is nothing to check"

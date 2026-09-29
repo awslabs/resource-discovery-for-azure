@@ -138,7 +138,7 @@ catch
     Write-Stream ("WARNING: could not record the Az context import at {0}: {1}. The parent keeps the snapshot until this stream ends." -f $ImportMarkerPath, $_.Exception.Message) 'Yellow'
 }
 
-$StreamStateFile = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId)
+$StreamStateFile = Get-StreamStateFilePath -InventoryRoot $InventoryRoot -Tenant $TenantID -StreamId $StreamId
 
 $StreamBlobArgs = @{}
 if (-not [string]::IsNullOrWhiteSpace($StateBlobContainerUri))
@@ -255,9 +255,11 @@ for ($i = 0; $i -lt $PairCount; $i++)
         if (-not ($Completed -contains $SubId))
         {
             $Completed += $SubId
-            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
-            Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts @StreamBlobArgs
         }
+        # A success clears the subscription's failure record, and the state is written after every
+        # success, so the parent can ship this report even if this worker dies before its summary.
+        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
+        Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $ResourceCounts @StreamBlobArgs
     }
     catch
     {
@@ -299,7 +301,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         $FailedSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $ErrRecord.Exception.Message }
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
             -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
-        Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts @StreamBlobArgs
+        Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $ResourceCounts @StreamBlobArgs
     }
 }
 

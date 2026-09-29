@@ -259,9 +259,6 @@ $FailedSubscriptions = @()
 # The id behind each entry above, or the stream it came from when no id is known. Kept so a
 # subscription deleted while the run was going can be told apart from one that genuinely failed.
 $FailedSubscriptionIds = @()
-# Set when a stream worker died before writing its summary: it may have completed subscriptions the
-# parent never heard about, so the bundle cannot be built from the completed subscriptions' record.
-$StreamRecordIncomplete = $false
 
 $ArchiveWriteFailures = @()
 # Inner exit code 3: the collector circuit breaker aborted collection, so that subscription's
@@ -790,28 +787,36 @@ if ($null -eq $StartSnapshot)
 }
 $StateSaveArgs = @{ StartSnapshot = $StartSnapshot } + $StateBlobArgs
 
-if ($Resume -or $ResumeFailedOnly)
+# Per-stream state an interrupted parallel run left behind is merged into the resume state on every
+# start, not only under -Resume: the next run's worker with the same stream id rewrites that file from
+# scratch, so leaving it unmerged would lose what the interrupted run finished. The copies that were
+# read are removed only once the saved resume state is confirmed to hold them. -Preflight collects
+# nothing, so it changes no state either.
+if (-not $Preflight)
 {
     $StrandedCompleted = @()
     $StrandedFailed = @()
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
+    $StrandedReadFiles = @()
     foreach ($StreamFile in $StrandedStreamFiles)
     {
         try
         {
-            $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw | ConvertFrom-Json
+            $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
             if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+            $StrandedReadFiles += $StreamFile
         }
         catch
         {
-            Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
+            Write-Host ("WARNING: could not read the per-stream state file {0} left by an interrupted run: {1}. It is left in place, and what it recorded is not in the resume state." -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Yellow
         }
     }
     # With blob-backed state each stream's progress lives in its own blob, which a node that is killed
     # mid-run leaves behind just as a local run leaves its stream file. The end-of-run merge reads
     # both, so recovery does too: otherwise a parallel -Resume after an eviction collects again every
-    # subscription the killed run had completed.
+    # subscription the killed run had completed. Read-StateBlob warns about a blob it cannot read.
+    $StrandedReadBlobs = @()
     if ($null -ne $StateBlobParts)
     {
         foreach ($StrandedBlobName in @(Get-StateBlobNames -Context $StateBlobCtx -Container $StateBlobParts.Container -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount))
@@ -821,6 +826,7 @@ if ($Resume -or $ResumeFailedOnly)
             {
                 if ($null -ne $StrandedBlob.Completed) { $StrandedCompleted += @($StrandedBlob.Completed) }
                 if ($null -ne $StrandedBlob.FailedAttempts) { $StrandedFailed += @($StrandedBlob.FailedAttempts) }
+                $StrandedReadBlobs += $StrandedBlobName
             }
         }
     }
@@ -831,8 +837,16 @@ if ($Resume -or $ResumeFailedOnly)
             $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)
         }
         $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
-        Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
+        # A stream leaves a local file and, with blob-backed state, a blob too: count subscriptions, not copies.
+        Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f @($StrandedCompleted | Sort-Object -Unique).Count, @($StrandedFailed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } | Sort-Object -Unique).Count) -ForegroundColor Cyan
         Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
+    }
+    if ($StrandedReadFiles.Count -gt 0 -or $StrandedReadBlobs.Count -gt 0)
+    {
+        Remove-RdaMergedStreamState -ResumeStateFile $ResumeStateFile -Tenant $TenantID `
+            -CompletedIds @($StrandedCompleted) -FailedIds @($StrandedFailed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id }) `
+            -StreamFiles $StrandedReadFiles -StreamBlobNames $StrandedReadBlobs @StateBlobArgs `
+            -KeptNote ("This run keeps their records and saves them again with its own progress; check that {0} is writable." -f $ResumeStateFile)
     }
 }
 
@@ -1336,6 +1350,8 @@ if ($ParallelStreams -le 1)
             $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
                 -Id $Sub.Id -Name $Sub.Name `
                 -Reason $ErrRecord.Exception.Message
+            # This run collected it again and failed, which outranks a completion an earlier run recorded.
+            $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
             Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
         }
 
@@ -1350,8 +1366,8 @@ else
     # === PARALLEL-STREAMS PATH: each "stream" is a separate `pwsh` background job (Start-Job runs the ScriptBlock in a fresh process). Process-level isolation is what makes this safe - the inner script's Set-AzContext -Subscription (consumption phase) mutates PROCESS-GLOBAL Az state, so two streams in one process would race contexts and silently cross-contaminate consumption data.
 
     # Drop what an earlier run completed BEFORE slicing, as the sequential loop does. A stream worker
-    # only knows its own per-stream state, which is merged and removed at the end of every run, so
-    # left to the workers a -Resume run would collect every completed subscription again.
+    # only knows its own per-stream state, which is merged into the resume state when a run starts and
+    # when it ends, so left to the workers a -Resume run would collect every completed subscription again.
     $ParallelSubscriptions = @()
     foreach ($Sub in $Subscriptions)
     {
@@ -1442,6 +1458,8 @@ else
                 $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
                     -Id $Sub.Id -Name $Sub.Name `
                     -Reason $ErrRecord.Exception.Message
+                # This run collected it again and failed, which outranks a completion an earlier run recorded.
+                $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }
         }
@@ -1519,6 +1537,7 @@ else
                     SummaryPath  = $SummaryPath
                     FailuresPath = $FailuresPath
                     SubCount     = $SliceList.Count
+                    SliceIds     = $SliceIds
                 }
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
@@ -1645,6 +1664,7 @@ else
                 }
             }
 
+            $UnreportedStreams = @()
             foreach ($S in $StreamSummaries)
             {
                 if (-not (Test-Path -LiteralPath $S.SummaryPath -PathType Leaf))
@@ -1652,7 +1672,7 @@ else
                     Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
                     $FailedSubscriptions += ("stream-{0} (no summary)" -f $S.StreamId)
                     $FailedSubscriptionIds += ("stream-{0}" -f $S.StreamId)
-                    $StreamRecordIncomplete = $true
+                    $UnreportedStreams += $S
                     continue
                 }
                 try
@@ -1664,7 +1684,7 @@ else
                     Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
                     $FailedSubscriptionIds += ("stream-{0}" -f $S.StreamId)
-                    $StreamRecordIncomplete = $true
+                    $UnreportedStreams += $S
                     continue
                 }
 
@@ -1768,6 +1788,21 @@ else
                 }
             }
 
+            # A stream that died before its summary recorded each report it finished in its state file,
+            # so those reports still ship and the verification counts them.
+            foreach ($Unreported in $UnreportedStreams)
+            {
+                $UnreportedStatePath = Get-StreamStateFilePath -InventoryRoot $InventoryRoot -Tenant $TenantID -StreamId ([string]$Unreported.StreamId)
+                foreach ($Recovered in @(Get-RdaDeadStreamReports -StatePath $UnreportedStatePath -SliceIds @($Unreported.SliceIds) -SinceTime $RunStartTime -StreamLabel ("stream-{0}" -f $Unreported.StreamId)))
+                {
+                    $SubResourceCounts += [pscustomobject]@{
+                        Name  = $Recovered.Name
+                        Id    = $Recovered.Id
+                        Count = [int]$Recovered.Count
+                        Zip   = $Recovered.Zip
+                    }
+                }
+            }
             foreach ($S in $StreamSummaries)
             {
                 if (Test-Path -LiteralPath $S.SummaryPath)
@@ -1779,12 +1814,13 @@ else
             $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
+            $ReadStreamFiles = @()
             foreach ($StreamFile in $AllStreamFiles)
             {
                 $PerStreamFile = $StreamFile.FullName
                 try
                 {
-                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw | ConvertFrom-Json
+                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     if ($null -ne $Obj.Completed)
                     {
                         $AllCompletedFromStreams += @($Obj.Completed)
@@ -1793,22 +1829,24 @@ else
                     {
                         $AllFailedFromStreams += @($Obj.FailedAttempts)
                     }
+                    $ReadStreamFiles += $StreamFile
                 }
                 catch
                 {
-                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
+                    Write-Host ("WARNING: could not read the per-stream state file {0}: {1}. It is left in place, and what it recorded is not in the resume state." -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow
                 }
             }
+            $ReadStreamBlobs = @()
             if ($null -ne $StateBlobParts)
             {
-                $StreamBlobNames = @(Get-StateBlobNames -Context $StateBlobCtx -Container $StateBlobParts.Container -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount)
-                foreach ($StreamBlobName in $StreamBlobNames)
+                foreach ($StreamBlobName in @(Get-StateBlobNames -Context $StateBlobCtx -Container $StateBlobParts.Container -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount))
                 {
                     $BlobObj = Read-StateBlob -Context $StateBlobCtx -Container $StateBlobParts.Container -BlobName $StreamBlobName
                     if ($null -ne $BlobObj)
                     {
                         if ($null -ne $BlobObj.Completed) { $AllCompletedFromStreams += @($BlobObj.Completed) }
                         if ($null -ne $BlobObj.FailedAttempts) { $AllFailedFromStreams += @($BlobObj.FailedAttempts) }
+                        $ReadStreamBlobs += $StreamBlobName
                     }
                 }
             }
@@ -1816,24 +1854,20 @@ else
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
             }
+            # A subscription this run collected again and failed outranks a completion an earlier run
+            # recorded, so -Resume and -ResumeFailedOnly retry it instead of skipping it.
+            $CompletedThisRun = @($SubResourceCounts | ForEach-Object { [string]$_.Id })
+            $FailedThisRun = @(@($FailedSubscriptionIds) + @(Get-RdaFailedSinceIds -FailedAttempts $AllFailedFromStreams -SinceTime $RunStartTime) |
+                    Where-Object { $CompletedThisRun -notcontains $_ })
+            $CompletedIds = @($CompletedIds | Where-Object { $FailedThisRun -notcontains $_ })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }
-            foreach ($StreamFile in $AllStreamFiles)
-            {
-                $PerStreamFile = $StreamFile.FullName
-                try { Remove-Item -LiteralPath $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
-            }
-            if ($null -ne $StateBlobParts)
-            {
-                foreach ($MergedStreamBlob in $StreamBlobNames)
-                {
-                    try { Remove-AzStorageBlob -Container $StateBlobParts.Container -Blob $MergedStreamBlob -Context $StateBlobCtx -Force -ErrorAction Stop }
-                    catch { Write-Verbose ("Could not remove per-stream state blob {0}: {1}" -f $MergedStreamBlob, $_.Exception.Message) }
-                }
-            }
+            Remove-RdaMergedStreamState -ResumeStateFile $ResumeStateFile -Tenant $TenantID `
+                -CompletedIds @($AllCompletedFromStreams | Where-Object { $FailedThisRun -notcontains $_ }) -FailedIds @($AllFailedFromStreams | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id }) `
+                -StreamFiles $ReadStreamFiles -StreamBlobNames $ReadStreamBlobs @StateBlobArgs
         }
         finally
         {
@@ -1917,6 +1951,19 @@ if ($StartIds.Count -gt 0)
             $IsVanishedEntry = { param($Entry) $Entry -match '\(([^()]+)\)$' -and $VanishedSet.ContainsKey($Matches[1].ToLowerInvariant()) }
             $CollectionAbortedSubs = @($CollectionAbortedSubs | Where-Object { -not (& $IsVanishedEntry $_) })
             $ArchiveWriteFailures = @($ArchiveWriteFailures | Where-Object { -not (& $IsVanishedEntry $_) })
+            # A subscription that completed before it was deleted keeps its health rows: its report ships.
+            $ShippedSet = @{}
+            foreach ($ShippedRecord in @($SubResourceCounts)) { if ($null -ne $ShippedRecord) { $ShippedSet[([string]$ShippedRecord.Id).ToLowerInvariant()] = $true } }
+            $IsVanishedRecord = {
+                param($Record)
+                if ($null -eq $Record) { return $true }
+                $RecordKey = ([string]$Record.Id).ToLowerInvariant()
+                $VanishedSet.ContainsKey($RecordKey) -and -not $ShippedSet.ContainsKey($RecordKey)
+            }
+            $Global:CollectorFailures = @($Global:CollectorFailures | Where-Object { -not (& $IsVanishedRecord $_) })
+            $Global:MetricsFailedSubs = @($Global:MetricsFailedSubs | Where-Object { -not (& $IsVanishedRecord $_) })
+            $Global:ConsumptionFailedSubs = @($Global:ConsumptionFailedSubs | Where-Object { -not (& $IsVanishedRecord $_) })
+            $Global:MarketplaceFailedSubs = @($Global:MarketplaceFailedSubs | Where-Object { -not (& $IsVanishedRecord $_) })
             Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
         }
         if ($Delta.New.Count -gt 0)
@@ -1975,10 +2022,10 @@ $WriteMissingReportBanners = {
 
 # What the bundle may carry, decided once. The verification below, the consolidation, MainSummary.html
 # and the HTML fold all read it, so a partial or stray report cannot reach one of them and not another.
-$Shippable = [pscustomobject]@{ RecordedOnly = $true; Archives = @(); Folders = @(); LeftOut = @() }
+$Shippable = [pscustomobject]@{ Archives = @(); Folders = @(); LeftOut = @() }
 if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
 {
-    $Shippable = Select-RdaShippableReports -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ProcessedSubscriptions $SubResourceCounts -RecordIncomplete:$StreamRecordIncomplete
+    $Shippable = Select-RdaShippableReports -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ProcessedSubscriptions $SubResourceCounts
 }
 $AbortedReportFolders = @($Shippable.LeftOut | Where-Object { $_.Reason -eq 'Aborted' } | ForEach-Object { $_.Path })
 $UnrecordedReportFolders = @($Shippable.LeftOut | Where-Object { $_.Reason -eq 'NotRecorded' })
@@ -1990,31 +2037,23 @@ if ($UnrecordedReportFolders.Count -gt 0)
     {
         Write-Host ("  - {0}" -f $Unrecorded.Name) -ForegroundColor Yellow
     }
-    Write-Host "  Each belongs to a subscription reported as failed below or deleted during the run, or was written by another run in the same inventory root." -ForegroundColor Yellow
+    Write-Host "  Each belongs to a subscription reported as failed below, one a stream was still working on when it ended without a summary, or one deleted during the run, or was written by another run in the same inventory root." -ForegroundColor Yellow
 }
 # The inner script warns when it cannot write the marker. Without it the folder cannot be recognised
-# as partial, so say whether it was kept out anyway.
+# as partial, so say that it was kept out anyway.
 if (@($CollectionAbortedSubs).Count -gt $AbortedReportFolders.Count)
 {
     $UnmarkedCount = @($CollectionAbortedSubs).Count - $AbortedReportFolders.Count
-    if ($Shippable.RecordedOnly)
-    {
-        Write-Host ("WARNING: {0} aborted subscription(s) left no aborted-collection marker. Their partial report folders are left out anyway: the bundle carries only the archives the completed subscriptions recorded." -f $UnmarkedCount) -ForegroundColor Yellow
-    }
-    else
-    {
-        Write-Host ("WARNING: {0} aborted subscription(s) left no aborted-collection marker, and not every completed subscription recorded its archive, so their PARTIAL report files cannot be told apart and may be in the bundle. Check the bundle before sending it." -f $UnmarkedCount) -ForegroundColor Red
-    }
+    Write-Host ("WARNING: {0} aborted subscription(s) left no aborted-collection marker. Their partial report folders are left out anyway: the bundle carries only the archives the completed subscriptions recorded." -f $UnmarkedCount) -ForegroundColor Yellow
 }
 
-# === Per-subscription output verification (hard-stop): fail with exit code 2 (distinct from auth/runtime exit code 1) if any sub that ran to completion this invocation left no report archive on disk. Checks IDENTITY first (every successful sub records the exact $Global:ZipOutputFile it wrote, so a missing report is reported BY SUBSCRIPTION) and count second (catches an absent recorded path or a replaced archive; when the record is whole the count reads the same record, and trips only for a recorded archive whose folder carries an aborted marker, which the selection withholds).
+# === Per-subscription output verification (hard-stop): fail with exit code 2 (distinct from auth/runtime exit code 1) if any sub that ran to completion this invocation left no report archive on disk. Checks IDENTITY first (every successful sub records the exact $Global:ZipOutputFile it wrote, so a missing report is reported BY SUBSCRIPTION) and count second (the count reads the same record, so it trips for a completed subscription that recorded no usable archive path, and for a recorded archive whose folder carries an aborted marker, which the selection withholds).
 $ExpectedZipCount = @($SubResourceCounts).Count
 if ($ExpectedZipCount -gt 0 -and (Test-Path -LiteralPath $InventoryRoot -PathType Container))
 {
     $ActualSubZips = @($Shippable.Archives)
     $ActualZipCount = $ActualSubZips.Count
-    $FoundScope = if ($Shippable.RecordedOnly) { 'the archives the completed subscriptions recorded, present on disk' }
-    else { 'filter: under {0}, LastWriteTime >= {1:o}, less aborted folders' -f $InventoryRoot, $RunStartTime }
+    $FoundScope = 'the archives the completed subscriptions recorded, present on disk'
 
     $MissingSubs = @($SubResourceCounts | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Zip) -and -not (Test-ReportArchiveUsable -Path $_.Zip) })
     $UnverifiableSubs = @($SubResourceCounts | Where-Object { [string]::IsNullOrWhiteSpace($_.Zip) })
@@ -2109,12 +2148,8 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -LiteralPath $InventoryRoot -PathTyp
         & $WriteMissingReportBanners
         Exit-Wrapper -Code 2
     }
-    $VerifiedByPathCount = $ExpectedZipCount - $UnverifiableSubs.Count
-    Write-Host ("Per-subscription output verification: OK ({0} archive(s) on disk for {1} successful sub(s); {2} verified by exact path)" -f $ActualZipCount, $ExpectedZipCount, $VerifiedByPathCount) -ForegroundColor Green
-    if ($UnverifiableSubs.Count -gt 0)
-    {
-        Write-Host ("  Note: {0} sub(s) recorded no archive path and were covered by the count check only." -f $UnverifiableSubs.Count) -ForegroundColor Yellow
-    }
+    # Reached only when every entry recorded a path: an entry without one ships nothing and opens a gap.
+    Write-Host ("Per-subscription output verification: OK ({0} archive(s) on disk for {1} successful sub(s), each verified by exact path)" -f $ActualZipCount, $ExpectedZipCount) -ForegroundColor Green
 }
 
 $OuterZipFile = $null
@@ -2369,7 +2404,9 @@ elseif ($MarketplaceRecords -gt 0 -or $MarketplaceFailures.Count -gt 0)
     Write-Host ("Marketplace Records:     {0:N0} record(s) collected" -f $MarketplaceRecords) -ForegroundColor Green
 }
 
-if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
+# A stream that did not report back took its record counts with it, so a zero here is not proven.
+$UnreportedStreamCount = @($UnreportedStreams | Where-Object { $null -ne $_ }).Count
+if (-not $SkipConsumption -and $ConsumptionRecords -eq 0 -and $ConsumptionFailures.Count -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0 -and $UnreportedStreamCount -eq 0)
 {
     Write-Host ""
     Write-Host "WARNING: Consumption data was requested (no -SkipConsumption) but ZERO usage records were collected," -ForegroundColor Yellow
@@ -2426,7 +2463,7 @@ if ($MarketplaceFailures.Count -gt 0)
     Write-Host "  Note: the Marketplace CSV in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
     Write-Host ""
 }
-elseif ($MarketplaceRequested -and $MarketplaceRecords -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0)
+elseif ($MarketplaceRequested -and $MarketplaceRecords -eq 0 -and @($SubResourceCounts).Count -gt 0 -and ($EligibleCount - $SkippedCount) -gt 0 -and $UnreportedStreamCount -eq 0)
 {
     Write-Host ""
     Write-Host "Marketplace Records:     0 collected. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces" -ForegroundColor Yellow
@@ -2540,6 +2577,7 @@ try
         -ConsumptionRecordCount $ConsumptionRecordTotal `
         -MarketplaceRecordCount $MarketplaceRecordTotal `
         -MetricsApiCallCount $MetricsApiCallTotal `
+        -UnreportedStreamCount $UnreportedStreamCount `
         -ConsumptionRequested:(-not $SkipConsumption.IsPresent) `
         -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) `
         -MetricsRequested:(-not $SkipMetrics.IsPresent) `

@@ -345,6 +345,24 @@ Describe 'RunSummary.log consumption zero-record warning' {
         $Text | Should -Match $script:WarnMarker
     }
 
+    It 'Stays silent, and says why, when a parallel stream did not report back' {
+        # Its record counts were only in the summary it never wrote, so a zero total proves nothing.
+        $Lines = Get-RunSummaryLogContent -Version '0.0.0-test' -Processed 2 `
+            -ConsumptionRecordCount 0 -ConsumptionRequested $true -UnreportedStreamCount 1
+        $Text = $Lines -join [Environment]::NewLine
+        $Text | Should -Not -Match $script:WarnMarker
+        $Text | Should -Match 'Streams that did not report\s*:\s*1 \(their record counts and health are not in the figures above\)'
+        $Text | Should -Match 'Consumption records collected\s*:\s*0\b' -Because 'the absence above is a gate decision, not a document that failed to render'
+        $Clean = (Get-RunSummaryLogContent -Version '0.0.0-test' -Processed 2 -ConsumptionRecordCount 0 -ConsumptionRequested $true) -join [Environment]::NewLine
+        $Clean | Should -Match $script:WarnMarker -Because 'with every stream reported, the warning still fires'
+        $Clean | Should -Not -Match 'Streams that did not report'
+    }
+    It 'The wrapper hands it the number of streams that did not report, and gates its own console claims on it (source guard)' {
+        $WrapSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
+        $WrapSrc | Should -Match '-UnreportedStreamCount \$UnreportedStreamCount `'
+        $WrapSrc | Should -Match '(?m)^if \(-not \$SkipConsumption -and \$ConsumptionRecords -eq 0 [^\r\n]*-and \$UnreportedStreamCount -eq 0\)\s*$'
+        $WrapSrc | Should -Match '(?m)^elseif \(\$MarketplaceRequested -and \$MarketplaceRecords -eq 0 [^\r\n]*-and \$UnreportedStreamCount -eq 0\)\s*$'
+    }
     It 'Stays silent when a consumption failure was already reported' {
         # A reported failure is surfaced by its own block; warning too would
         # double-report and misattribute the cause.

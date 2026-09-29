@@ -237,9 +237,11 @@ id is recorded in a resume-state JSON file
 `Run-AllSubscriptions.ps1` line ~339–343). `-Resume` reads that file, reports how
 many will be skipped (line ~836–848), and processes the rest. Without `-Resume`
 the file is left untouched and every subscription is processed; the wrapper still
-notes the file exists so you know the option is available (line ~850–855). When
-resuming a previously *parallel* run, it also folds in any stranded per-stream
-state files so the skip set is complete (line ~767–796).
+notes the file exists so you know the option is available (line ~850–855). On
+every start, with or without `-Resume`, it also folds any per-stream state files
+left by an interrupted *parallel* run into the resume-state file, and removes
+them once that file is confirmed to hold them, so a later `-Resume` skips what
+the interrupted run finished.
 
 **Why it exists.** On large tenants a run can be cut short by an
 environment-level limit — most commonly a Cloud Shell session that ends at a

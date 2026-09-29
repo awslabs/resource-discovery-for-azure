@@ -947,6 +947,18 @@ function Remove-FailedAttempt
     return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
 }
 
+function Get-StreamStateFilePath
+{
+    # The one spelling of a stream worker's local state file. Get-StreamResumeStateFiles lists the
+    # same names by pattern.
+    param(
+        [Parameter(Mandatory = $true)][string]$InventoryRoot,
+        [Parameter(Mandatory = $true)][string]$Tenant,
+        [Parameter(Mandatory = $true)][string]$StreamId
+    )
+    return (Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $Tenant, $StreamId))
+}
+
 function Get-StreamResumeStateFiles
 {
     param(
@@ -1104,7 +1116,9 @@ function Read-StreamState
 
 function Write-StreamState
 {
-    param([string]$Path, [string[]]$Completed, $FailedAttempts = @(),
+    # -Reports is this run's finished subscriptions as { Name, Id, Count, Zip }: written with each
+    # completion, so a parent whose worker died before its summary can still ship what it finished.
+    param([string]$Path, [string[]]$Completed, $FailedAttempts = @(), $Reports = @(),
         $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
     $Tmp = "$Path.tmp"
     try
@@ -1114,6 +1128,7 @@ function Write-StreamState
             StreamId       = $StreamId
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ })
+            Reports        = @($Reports | Where-Object { $null -ne $_ })
         } | ConvertTo-Json -Depth 4
         Set-Content -LiteralPath $Tmp -Value $Json -Encoding utf8 -ErrorAction Stop
         [System.IO.File]::Move($Tmp, $Path, $true)
@@ -1267,88 +1282,232 @@ function Get-InventoryExitCodeMeaning
     }
 }
 
+function Get-RdaDeadStreamReports
+{
+    # What a stream worker that died before writing its summary had finished, read from the reports
+    # it recorded in its state file with each completion. A worker starts its list empty, so a state
+    # file written during this run holds only this run's reports; one last written before the run
+    # started is a leftover and holds none. Only the stream's own slice counts, and an archive written
+    # before the run started is not this run's report. A recorded archive that is gone is still
+    # returned: the verification step then names it as missing instead of the bundle going without it.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)][string]$StatePath,
+        [string[]]$SliceIds = @(),
+        [Parameter(Mandatory = $true)][datetime]$SinceTime,
+        [string]$StreamLabel = 'stream'
+    )
+    $NoneText = "[{0}] its state file records no subscription it finished in this run, so none of its reports is in the bundle." -f $StreamLabel
+    # Compared in UTC, so a run that spans a clock change does not take this run's files for older ones.
+    $SinceUtc = $SinceTime.ToUniversalTime()
+    if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf))
+    {
+        Write-Host ("[{0}] left no state file at {1}, so none of its reports is in the bundle." -f $StreamLabel, $StatePath) -ForegroundColor Yellow
+        return @()
+    }
+    # -Force: the state file is a dotfile, which Get-Item does not see without it on Linux and macOS.
+    if ((Get-Item -LiteralPath $StatePath -Force).LastWriteTimeUtc -lt $SinceUtc)
+    {
+        Write-Host $NoneText -ForegroundColor Yellow
+        return @()
+    }
+    try
+    {
+        $State = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Warning ("[{0}] could not read its state file {1}: {2}. Whatever that stream finished is not in the bundle." -f $StreamLabel, $StatePath, $_.Exception.Message)
+        return @()
+    }
+    $Recovered = @()
+    foreach ($Report in @($State.Reports | Where-Object { $null -ne $_ }))
+    {
+        $ReportId = [string]$Report.Id
+        if ([string]::IsNullOrWhiteSpace($ReportId) -or $SliceIds -notcontains $ReportId) { continue }
+        $ReportZip = [string]$Report.Zip
+        if (-not [string]::IsNullOrWhiteSpace($ReportZip) -and (Test-Path -LiteralPath $ReportZip -PathType Leaf))
+        {
+            if ((Get-Item -LiteralPath $ReportZip).LastWriteTimeUtc -lt $SinceUtc)
+            {
+                Write-Warning ("[{0}] recorded subscription {1} with an archive written before this run started ({2}), so it is not taken as this run's report and is not in the bundle." -f $StreamLabel, $ReportId, $ReportZip)
+                continue
+            }
+        }
+        $Recovered += [pscustomobject]@{ Name = [string]$Report.Name; Id = $ReportId; Count = [int]$Report.Count; Zip = $ReportZip }
+    }
+    if ($Recovered.Count -eq 0) { Write-Host $NoneText -ForegroundColor Yellow }
+    else
+    {
+        Write-Host ("[{0}] recovered {1} finished subscription report(s) from its state file: {2}" -f $StreamLabel, $Recovered.Count, (@($Recovered | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
+        Write-Host ("[{0}]   Their billing record counts and per-phase health were in the summary this stream did not write, so the run totals and health below leave them out." -f $StreamLabel) -ForegroundColor Yellow
+    }
+    return $Recovered
+}
+
+function Get-RdaFailedSinceIds
+{
+    # The ids of failure records written at or after -SinceTime, that is, failures from this run. A
+    # failure in this run outranks an older completion of the same subscription, which this run
+    # collected again. A record whose time cannot be read is not counted.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([object[]]$FailedAttempts = @(), [Parameter(Mandatory = $true)][datetime]$SinceTime)
+    $SinceUtc = $SinceTime.ToUniversalTime()
+    $Ids = @()
+    foreach ($Attempt in @($FailedAttempts | Where-Object { $null -ne $_ }))
+    {
+        $At = [datetimeoffset]::MinValue
+        $Raw = $Attempt.LastFailedAt
+        $Parsed = if ($Raw -is [datetime]) { $At = [datetimeoffset]$Raw.ToUniversalTime(); $true }
+        else { [datetimeoffset]::TryParse([string]$Raw, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$At) }
+        if ($Parsed -and $At.UtcDateTime -ge $SinceUtc -and -not [string]::IsNullOrWhiteSpace([string]$Attempt.Id)) { $Ids += [string]$Attempt.Id }
+    }
+    return @($Ids | Select-Object -Unique)
+}
+
+function Test-RdaResumeStateHolds
+{
+    # Whether a saved resume state carries every record recovered from stranded stream state: each
+    # completed id as completed, and each failed id as failed or completed (a completion elsewhere
+    # supersedes a failure). The stranded copies are removed only when this holds.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param($State, [string[]]$CompletedIds = @(), [string[]]$FailedIds = @())
+    $SavedCompleted = if ($null -ne $State) { @($State.CompletedSubscriptionIds | ForEach-Object { [string]$_ }) } else { @() }
+    $SavedFailed = if ($null -ne $State) { @($State.FailedAttempts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id }) } else { @() }
+    foreach ($Id in @($CompletedIds)) { if ($SavedCompleted -notcontains $Id) { return $false } }
+    foreach ($Id in @($FailedIds)) { if ($SavedCompleted -notcontains $Id -and $SavedFailed -notcontains $Id) { return $false } }
+    return $true
+}
+
+function Remove-RdaMergedStreamState
+{
+    # Removes per-stream state copies, local files and blobs, once the saved resume state is confirmed
+    # to hold what was read from them. Pass only the copies that were read: one that could not be read
+    # added nothing to the ids checked here, so removing it would lose what it recorded. Saving the
+    # resume state only warns when it fails, which is why the saved copy is read back rather than
+    # trusted. The blob is checked on its own because its mirror can fail after the local file saved.
+    # -KeptNote finishes the warning printed when copies are kept, since what happens to them next
+    # differs between the start and the end of a run.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ResumeStateFile,
+        [Parameter(Mandatory = $true)][string]$Tenant,
+        [string[]]$CompletedIds = @(),
+        [string[]]$FailedIds = @(),
+        [object[]]$StreamFiles = @(),
+        [string[]]$StreamBlobNames = @(),
+        [string]$KeptNote = 'They are merged again on the next start.',
+        $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null
+    )
+    $Files = @($StreamFiles | Where-Object { $null -ne $_ })
+    if ($Files.Count -gt 0)
+    {
+        # Read directly: Get-ResumeStateObject would report an unreadable file as "starting fresh".
+        $LocalState = $null
+        try
+        {
+            $LocalState = Get-Content -LiteralPath $ResumeStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($LocalState.TenantID -ne $Tenant) { $LocalState = $null }
+        }
+        catch { Write-Verbose ("Could not read back the resume state at {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) }
+        if (Test-RdaResumeStateHolds -State $LocalState -CompletedIds $CompletedIds -FailedIds $FailedIds)
+        {
+            foreach ($File in $Files)
+            {
+                try { Remove-Item -LiteralPath $File.FullName -Force -ErrorAction Stop }
+                catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $File.FullName, $_.Exception.Message) }
+            }
+        }
+        else
+        {
+            Write-Warning ("The resume state at {0} does not hold everything {1} per-stream state file(s) recorded, so they are kept. {2}" -f $ResumeStateFile, $Files.Count, $KeptNote)
+        }
+    }
+    $Blobs = @($StreamBlobNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($Blobs.Count -gt 0 -and $BlobContext -and $BlobContainer -and $BlobName)
+    {
+        $BlobState = Read-StateBlob -Context $BlobContext -Container $BlobContainer -BlobName $BlobName
+        if (Test-RdaResumeStateHolds -State $BlobState -CompletedIds $CompletedIds -FailedIds $FailedIds)
+        {
+            foreach ($Blob in $Blobs)
+            {
+                try { Remove-AzStorageBlob -Container $BlobContainer -Blob $Blob -Context $BlobContext -Force -ErrorAction Stop }
+                catch { Write-Verbose ("Could not remove per-stream state blob {0}: {1}" -f $Blob, $_.Exception.Message) }
+            }
+        }
+        else
+        {
+            Write-Warning ("The resume state blob {0} does not hold everything {1} per-stream state blob(s) recorded, so they are kept. {2}" -f $BlobName, $Blobs.Count, $KeptNote)
+        }
+    }
+}
+
 function Select-RdaShippableReports
 {
-    # What a run may put in its consolidated bundle. Every subscription that completes records the
-    # exact archive it wrote, so when the record is whole the bundle is exactly those archives and
-    # their report folders, both taken from the record so neither can ship without the other.
-    # Every other report folder the run left under the inventory root stays out and is named: a
-    # partial inventory whose aborted marker could not be written or whose archive could not be
-    # removed, a subscription that failed, or another run's output. When the record is short (an
-    # archive path is missing, or a stream worker died before reporting what it completed) the
-    # report folders are swept instead, less the ones marked aborted. Only ResourcesReport* folders
-    # hold per-subscription reports, in either mode. Test-RdaCollectionAborted comes from
+    # What a run may put in its consolidated bundle: exactly the archives the completed subscriptions
+    # recorded, and their report folders, both taken from the record so neither can ship without the
+    # other. Every other report folder the run left under the inventory root stays out and is named:
+    # a partial inventory whose aborted marker could not be written or whose archive could not be
+    # removed, a subscription that failed, or another run's output. A stream worker that dies before
+    # its summary has recorded each report it finished in its state file, which the wrapper reads
+    # back; a report whose record never landed stays out and its folder is named. An entry with no
+    # usable path ships nothing; one whose archive is gone keeps its folder here, and the wrapper's
+    # verification stops the run naming it. Test-RdaCollectionAborted comes from
     # Functions/Common.Functions.ps1.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$InventoryRoot,
         [Parameter(Mandatory = $true)][datetime]$SinceTime,
-        [object[]]$ProcessedSubscriptions = @(),
-        # The caller knows the record is short: a stream worker died before writing its summary, so it
-        # may have completed subscriptions that are not in -ProcessedSubscriptions.
-        [switch]$RecordIncomplete
+        [object[]]$ProcessedSubscriptions = @()
     )
 
     $Processed = @(@($ProcessedSubscriptions) | Where-Object { $null -ne $_ })
-    $RecordedOnly = (-not $RecordIncomplete) -and @($Processed | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Zip) }).Count -eq 0
 
     $ListErrors = $null
     $RunFolders = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue -ErrorVariable ListErrors |
             Where-Object { $_.LastWriteTime -ge $SinceTime })
     if (@($ListErrors).Count -gt 0)
     {
-        $Lost = if ($RecordedOnly) { 'the list of report folders left out of the bundle may be incomplete' } else { 'report folders written by this run may be missing from the bundle' }
-        Write-Warning ("Could not list the report folders under {0}: {1}. {2}." -f $InventoryRoot, $ListErrors[0].Exception.Message, $Lost)
+        Write-Warning ("Could not list the report folders under {0}: {1}. The list of report folders left out of the bundle may be incomplete." -f $InventoryRoot, $ListErrors[0].Exception.Message)
     }
 
     $Folders = @()
     $Archives = @()
     $LeftOut = @()
-    if ($RecordedOnly)
+    $RecordedNames = @{}
+    foreach ($Entry in $Processed)
     {
-        $RecordedNames = @{}
-        foreach ($Entry in $Processed)
+        $Dir = [System.IO.Path]::GetDirectoryName([string]$Entry.Zip)
+        $Name = [System.IO.Path]::GetFileName($Dir)
+        if ([string]::IsNullOrWhiteSpace($Name))
         {
-            $Dir = [System.IO.Path]::GetDirectoryName([string]$Entry.Zip)
-            $Name = [System.IO.Path]::GetFileName($Dir)
-            if ([string]::IsNullOrWhiteSpace($Name)) { continue }
-            $FirstForFolder = -not $RecordedNames.ContainsKey($Name)
-            $RecordedNames[$Name] = $true
-            if (Test-RdaCollectionAborted -Folder $Dir)
-            {
-                if ($FirstForFolder) { $LeftOut += [pscustomobject]@{ Path = $Dir; Name = $Name; Reason = 'Aborted' } }
-                continue
-            }
-            if ($FirstForFolder -and (Test-Path -LiteralPath $Dir -PathType Container)) { $Folders += Get-Item -LiteralPath $Dir }
-            if (Test-Path -LiteralPath ([string]$Entry.Zip) -PathType Leaf) { $Archives += [string]$Entry.Zip }
+            Write-Warning ("Subscription {0} completed but recorded no usable report path ('{1}'), so its report is not in the bundle." -f $Entry.Id, $Entry.Zip)
+            continue
         }
-        foreach ($Folder in $RunFolders)
+        $FirstForFolder = -not $RecordedNames.ContainsKey($Name)
+        $RecordedNames[$Name] = $true
+        if (Test-RdaCollectionAborted -Folder $Dir)
         {
-            if ($RecordedNames.ContainsKey($Folder.Name)) { continue }
-            $Reason = if (Test-RdaCollectionAborted -Folder $Folder.FullName) { 'Aborted' } else { 'NotRecorded' }
-            $LeftOut += [pscustomobject]@{ Path = $Folder.FullName; Name = $Folder.Name; Reason = $Reason }
+            if ($FirstForFolder) { $LeftOut += [pscustomobject]@{ Path = $Dir; Name = $Name; Reason = 'Aborted' } }
+            continue
         }
+        if ($FirstForFolder -and (Test-Path -LiteralPath $Dir -PathType Container)) { $Folders += Get-Item -LiteralPath $Dir }
+        if (Test-Path -LiteralPath ([string]$Entry.Zip) -PathType Leaf) { $Archives += [string]$Entry.Zip }
     }
-    else
+    foreach ($Folder in $RunFolders)
     {
-        foreach ($Folder in $RunFolders)
-        {
-            if (Test-RdaCollectionAborted -Folder $Folder.FullName)
-            {
-                $LeftOut += [pscustomobject]@{ Path = $Folder.FullName; Name = $Folder.Name; Reason = 'Aborted' }
-                continue
-            }
-            $Folders += $Folder
-            $Archives += @(Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.zip' -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.LastWriteTime -ge $SinceTime } | ForEach-Object { $_.FullName })
-        }
+        if ($RecordedNames.ContainsKey($Folder.Name)) { continue }
+        $Reason = if (Test-RdaCollectionAborted -Folder $Folder.FullName) { 'Aborted' } else { 'NotRecorded' }
+        $LeftOut += [pscustomobject]@{ Path = $Folder.FullName; Name = $Folder.Name; Reason = $Reason }
     }
 
     return [pscustomobject]@{
-        RecordedOnly = $RecordedOnly
-        Archives     = $Archives
-        Folders      = $Folders
-        LeftOut      = $LeftOut
+        Archives = $Archives
+        Folders  = $Folders
+        LeftOut  = $LeftOut
     }
 }
 
@@ -1380,6 +1539,9 @@ function Get-RunSummaryLogContent
         [int]$ConsumptionRecordCount = 0,
         [int]$MarketplaceRecordCount = 0,
         [int]$MetricsApiCallCount = 0,
+        # Parallel streams that ended without a summary: their record counts and health are not in
+        # the totals, so a zero-record total proves nothing.
+        [int]$UnreportedStreamCount = 0,
         [bool]$ConsumptionRequested = $true,
         [bool]$MarketplaceRequested = $true,
         [bool]$MetricsRequested = $true,
@@ -1536,8 +1698,12 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
     $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))
     $Lines.Add(('  Marketplace failed subs       : {0}' -f $Marketplace.Count))
+    if ($UnreportedStreamCount -gt 0)
+    {
+        $Lines.Add(('  Streams that did not report   : {0} (their record counts and health are not in the figures above)' -f $UnreportedStreamCount))
+    }
 
-    if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0))
+    if ($ConsumptionRequested -and ($ConsumptionRecordCount -eq 0) -and ($Consumption.Count -eq 0) -and ($Processed -gt 0) -and (($Processed - $Failed.Count) -gt 0) -and ($UnreportedStreamCount -eq 0))
     {
         $Lines.Add('')
         $Lines.Add('  WARNING - consumption was requested but ZERO usage records were collected,')

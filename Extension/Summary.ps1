@@ -137,20 +137,38 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Literal
 
 if ([string]::IsNullOrWhiteSpace($SubscriptionName))
 {
+    # Every subscription present in the records, not the first one found. This script's documented
+    # default - no -SubscriptionID - runs an UNSCOPED Resource Graph query and consolidates every
+    # readable subscription into one report, and the caller never passes -SubscriptionName, so this
+    # branch always decides the header. Naming a single subscription there was both wrong and
+    # unstable: it was whichever subscription happened to own the first record of whichever service
+    # happened to be largest, so adding one resource elsewhere could relabel the whole report.
+    $SubNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($svc in $ServiceSummary)
     {
-        $Records = $Inventory.($svc.Service)
-        if ($Records -and @($Records).Count -gt 0)
+        foreach ($Rec in @($Inventory.($svc.Service)))
         {
-            $First = @($Records)[0]
-            if ($First.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace($First.Subscription))
+            if ($null -eq $Rec) { continue }
+            if ($Rec.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace([string]$Rec.Subscription))
             {
-                $SubscriptionName = [string]$First.Subscription
-                break
+                [void]$SubNames.Add([string]$Rec.Subscription)
             }
         }
     }
-    if ([string]::IsNullOrWhiteSpace($SubscriptionName)) { $SubscriptionName = '(unknown)' }
+    if ($SubNames.Count -eq 1)
+    {
+        $SubscriptionName = @($SubNames)[0]
+    }
+    elseif ($SubNames.Count -gt 1)
+    {
+        # A count, not a list: the list can be long, and under -Obfuscate the names are tokens that
+        # tell the reader nothing. The per-resource Subscription column still carries which is which.
+        $SubscriptionName = '{0} subscriptions (consolidated)' -f $SubNames.Count
+    }
+    else
+    {
+        $SubscriptionName = '(unknown)'
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Version)

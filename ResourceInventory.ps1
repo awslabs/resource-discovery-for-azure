@@ -1157,6 +1157,10 @@ function ExecuteInventoryProcessing()
             return
         }
 
+        # Named in the line logged for every other subscription this run passes over.
+        $TargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+        $TargetSubLabel = if ($TargetSub) { "'{0}'" -f $TargetSub.Name } else { $SubscriptionID }
+
         foreach ($sub in $Global:Subscriptions)
         {
             if (![string]::IsNullOrEmpty($SubscriptionID))
@@ -1168,7 +1172,7 @@ function ExecuteInventoryProcessing()
 
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Skipping: {0}" -f $sub.Name) -Severity 'Info'
+                    Write-Log -Message ("Consumption data not collected for '{0}' ({1}): this run is limited to subscription {2} by -SubscriptionID." -f $sub.Name, $sub.Id, $TargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
                     continue
                 }
             }
@@ -1673,13 +1677,17 @@ function ExecuteInventoryProcessing()
             }
         }
 
+        # Named in the line logged for every other subscription this run passes over.
+        $MpTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+        $MpTargetSubLabel = if ($MpTargetSub) { "'{0}'" -f $MpTargetSub.Name } else { $SubscriptionID }
+
         foreach ($sub in $Global:Subscriptions)
         {
             if (![string]::IsNullOrEmpty($SubscriptionID))
             {
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Skipping (Marketplace): {0}" -f $sub.Name) -Severity 'Info'
+                    Write-Log -Message ("Marketplace data not collected for '{0}' ({1}): this run is limited to subscription {2} by -SubscriptionID." -f $sub.Name, $sub.Id, $MpTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
                     continue
                 }
             }

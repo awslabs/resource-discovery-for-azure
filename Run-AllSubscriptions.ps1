@@ -516,6 +516,10 @@ if ($Excluded.Count -gt 0)
 {
     $ByState = $Excluded | Group-Object -Property State | ForEach-Object { ('{0}: {1}' -f $_.Name, $_.Count) }
     Write-Host ("Excluded {0} non-Enabled subscription(s) [{1}]. Use -IncludeDisabled to inventory them anyway." -f $Excluded.Count, ($ByState -join ', ')) -ForegroundColor Yellow
+    foreach ($ExcludedSub in ($Excluded | Sort-Object -Property State, Name))
+    {
+        Write-Host ("  - {0} ({1}): {2}" -f $ExcludedSub.Name, $ExcludedSub.Id, $ExcludedSub.State) -ForegroundColor Yellow
+    }
 }
 
 if ($Plan)

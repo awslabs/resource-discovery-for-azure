@@ -281,8 +281,9 @@ one.
 | **Default** | off |
 
 **What it does.** By default the wrapper inventories only subscriptions whose
-`State` is `Enabled`, filtering everything else out and printing a per-state
-breakdown of what it excluded (`Run-AllSubscriptions.ps1` line ~480–496).
+`State` is `Enabled`, filtering everything else out, printing a per-state
+breakdown of what it excluded, and then listing each excluded subscription by
+name, id and state (`Run-AllSubscriptions.ps1` line ~503–523).
 `-IncludeDisabled` turns that filter off and processes every subscription
 `Get-AzSubscription` returned, whatever its state.
 

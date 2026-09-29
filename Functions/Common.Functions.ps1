@@ -396,16 +396,29 @@ function Test-RdaPermanentRequestError
 
     if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
 
-    # A 400 rejects the REQUEST. The billing calls that use this send an identical request on every
-    # retry - a fixed window, no page token that changes - so a 400 cannot become a 200 and the
-    # transient budget only spends backoff. Observed live against a subscription whose offer does not
-    # serve the Marketplace endpoint: 30 attempts, escalating to a 60s+ wait each, roughly 25 minutes
-    # per subscription to arrive at the failure it already knew about on the first call.
+    # A 400 ONLY, not every non-retryable status. A 404 is deliberately NOT matched here: the sibling
+    # classifier in Extension/Metrics.ps1 does treat NotFound as permanent, because a metric that does
+    # not exist for a resource never will, whereas a billing window can legitimately return 404 from a
+    # transient routing fault. Keep that divergence in mind before reusing this on another endpoint.
+    #
+    # A 400 rejects the REQUEST rather than the transport, so re-sending it unchanged cannot turn it
+    # into a 200. Observed live against a subscription whose offer does not serve the Marketplace
+    # endpoint: 30 attempts escalating to a 60s+ wait each, roughly 25 minutes per subscription.
+    #
+    # The one caller today is the Marketplace fetch loop, whose request is byte-identical on every
+    # retry (a fixed window, no page token). The first-party consumption page loop is deliberately NOT
+    # wired to this: its 400 was never reproduced, and it advances a ContinuationToken per attempt, so
+    # "the request is identical" is not the argument there and would need its own evidence.
     #
     # Deliberately narrower than "the text contains 400": the lookarounds keep a resource name or id
-    # that happens to contain the word (rg-BadRequest-01) or the digits out of it, the same discipline
-    # Test-RdaConsumptionDenial uses for 403. Extension/Metrics.ps1 already classifies BadRequest as
-    # permanent for metric calls; this is the billing-side counterpart.
+    # that happens to contain the word (rg-BadRequest-01) or the digits (400123 bytes) out of it, the
+    # same discipline Test-RdaConsumptionDenial uses for 403. It is case-insensitive because the
+    # discriminating token's casing genuinely varies by layer ("invalid status code 'BadRequest'",
+    # "(400) Bad Request", "400 (BadRequest)"), unlike Test-RdaOutOfMemory which anchors on two fixed
+    # full sentences and is case-sensitive for that reason.
+    #
+    # Callers must let an expired-token 400 reach their auth-refresh branch instead of abandoning on
+    # this alone; a token-acquisition failure can render as a 400 that also says the token expired.
     $PermanentPattern = '(?i)(' + (@(
             '(?<![\w-])BadRequest(?![\w-])'
             '\(400\)'

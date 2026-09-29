@@ -7,6 +7,15 @@
     single owner of the denial signatures, Test-RdaConsumptionDenial
     (Functions/Common.Functions.ps1).
 
+    It also guards the 400 fast-fail on the Marketplace pull. A rejected request
+    was classified as transient, so it spent the same escalating budget: observed
+    live at 30 attempts, roughly 25 minutes per subscription, against an offer
+    type that does not serve the endpoint at all. Test-RdaPermanentRequestError
+    (Functions/Common.Functions.ps1) owns that signature, and the gate yields to
+    the auth-refresh branch when the same text is also an expired token.
+    Per the SCOPING rule below, its structural assertions are scoped to
+    $script:MpFn rather than to the whole file.
+
     THE DEFECT THIS GUARDS. The retry catch is untyped and retries everything up
     to $ConsumptionMaxRetries = 30. With backoff of min(2^attempt, 60) seconds
     that is roughly 26 MINUTES of escalating waiting PER SUBSCRIPTION on a 403,
@@ -692,6 +701,48 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'ran out of memory' }
     }
 
+    It 'abandons a 400 after ONE fetch, with no backoff and no retry' {
+        # The structural assertions elsewhere prove the gate is wired; this proves the behaviour. The
+        # shadow SUCCEEDS from the second call on, so a regression that retries would complete the
+        # pull and fail these assertions loudly rather than passing quietly.
+        function Get-AzConsumptionMarketplace
+        {
+            [CmdletBinding()]
+            param($StartDate, $EndDate)
+            $script:MpFetches++
+            if ($script:MpFetches -eq 1) { throw "Operation returned an invalid status code 'BadRequest'" }
+            [pscustomobject]@{ InstanceName = 'offer-row' }
+        }
+
+        (Get-Command Get-AzConsumptionMarketplace).CommandType | Should -Be 'Function'
+
+        { . $script:MpFetchLoop } | Should -Throw -Because 'it rethrows so the outer catch records the subscription INCOMPLETE'
+
+        $script:MpFetches | Should -Be 1 -Because 'the request is identical on every retry, so one rejection settles it'
+        Should -Invoke Start-Sleep -Exactly -Times 0 -Because 'a rejected request must not spend the escalating backoff'
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'REJECTED' }
+    }
+
+    It 'lets a 400 that is ALSO an expired token reach the auth refresh instead of abandoning it' {
+        # A token-acquisition failure can render as a 400 whose text also says the token expired. A
+        # refresh is the only thing that recovers it, so the permanent gate must yield here.
+        function Get-AzConsumptionMarketplace
+        {
+            [CmdletBinding()]
+            param($StartDate, $EndDate)
+            $script:MpFetches++
+            if ($script:MpFetches -eq 1) { throw 'AADSTS700082: The refresh token has expired due to inactivity. Response status code does not indicate success: 400 (BadRequest).' }
+            [pscustomobject]@{ InstanceName = 'offer-row' }
+        }
+
+        (Get-Command Get-AzConsumptionMarketplace).CommandType | Should -Be 'Function'
+
+        # Test-DataPlaneAuthReady is stubbed to throw in this Describe, which is how we detect that the
+        # AUTH branch was entered rather than the abandon-now branch.
+        { . $script:MpFetchLoop } | Should -Throw -ExpectedMessage '*re-authentication branch ran*' -Because 'the auth path owns this error, not the permanent gate'
+        Should -Invoke Write-Log -Exactly -Times 0 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'REJECTED' }
+    }
+
     It 'stops after a second out-of-memory error instead of spending the retry budget' {
         # The shadow SUCCEEDS from the third call on, so a regression that spends $MpMaxRetries
         # would complete the pull and fail these assertions loudly rather than passing quietly.
@@ -716,13 +767,23 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         $Text = $script:MpFetchLoop.ToString()
         $Denial = $Text.IndexOf('Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message', [System.StringComparison]::Ordinal)
         $Oom = $Text.IndexOf('Test-RdaOutOfMemory -ErrorMessage $MpErrorText', [System.StringComparison]::Ordinal)
-        $Auth = $Text.IndexOf('Test-RdaAuthExpiry -ErrorMessage $MpErrorText', [System.StringComparison]::Ordinal)
+        # The auth BRANCH, anchored on its own condition rather than on any mention of the classifier.
+        # The permanent-request gate also consults Test-RdaAuthExpiry, deliberately and earlier, so that
+        # a 400 which is ALSO an expired token yields to this branch instead of being abandoned. The
+        # invariant here is which BRANCH an out-of-memory error can reach, so a bare classifier name
+        # would now measure that guard instead of the branch.
+        $Auth = $Text.IndexOf('(-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText)', [System.StringComparison]::Ordinal)
+        $Perm = $Text.IndexOf('Test-RdaPermanentRequestError -ErrorMessage $MpErrorText', [System.StringComparison]::Ordinal)
         $Budget = $Text.IndexOf('$MpAttempt++', [System.StringComparison]::Ordinal)
 
         $Denial | Should -BeGreaterThan -1
+        $Auth | Should -BeGreaterThan -1 -Because 'the auth branch condition must still have the shape this assertion anchors on'
+        $Perm | Should -BeGreaterThan -1
         $Oom | Should -BeGreaterThan $Denial -Because 'a denial is abandoned outright; only a non-denial gets the compacted retry'
         $Auth | Should -BeGreaterThan $Oom -Because 'an out-of-memory error is not an auth error, so it must not trigger a re-authentication'
+        $Perm | Should -BeLessThan $Oom -Because 'a rejected request is settled before anything spends a retry'
         $Budget | Should -BeGreaterThan $Oom -Because 'the compacted retry must not consume an attempt from the transient budget'
+        $Budget | Should -BeGreaterThan $Perm -Because 'a rejected request must not consume an attempt either'
     }
 
     It 'retries the fetch rather than skipping the subscription' {
@@ -857,25 +918,25 @@ Describe 'Test-RdaPermanentRequestError: a 400 is abandoned, not retried for 25 
     # returns BadRequest, and the Marketplace loop retried it 30 times with escalating backoff.
     # The request is identical on every retry, so it can never succeed.
     It 'classifies <Label> as permanent' -ForEach @(
-        @{ Label = "the Az cmdlet form"; Message = "Operation returned an invalid status code 'BadRequest'" }
-        @{ Label = "the WebException form"; Message = 'The remote server returned an error: (400) Bad Request.' }
-        @{ Label = "the HttpClient form"; Message = 'Response status code does not indicate success: 400 (BadRequest).' }
-        @{ Label = "a lower-case rendering"; Message = 'operation failed: bad request' }
+        @{ Label = 'the Az cmdlet form'; Msg = "Operation returned an invalid status code 'BadRequest'" }
+        @{ Label = 'the WebException form'; Msg = 'The remote server returned an error: (400) Bad Request.' }
+        @{ Label = 'the HttpClient form'; Msg = 'Response status code does not indicate success: 400 (BadRequest).' }
+        @{ Label = 'a lower-case rendering'; Msg = 'operation failed: bad request' }
     ) {
-        Test-RdaPermanentRequestError -ErrorMessage $Message | Should -BeTrue
+        Test-RdaPermanentRequestError -ErrorMessage $Msg | Should -BeTrue
     }
 
     It 'does NOT classify <Label> as permanent' -ForEach @(
-        @{ Label = "a resource group whose NAME contains the word"; Message = 'Resource /subscriptions/s/resourceGroups/rg-BadRequest-01/providers/x not found' }
-        @{ Label = "a resource name ending in the word"; Message = 'The resource prod-BadRequest could not be read' }
-        @{ Label = "a different permanent status"; Message = "Operation returned an invalid status code 'NotFound'" }
-        @{ Label = "an authorization denial"; Message = 'AuthorizationFailed: does not have authorization to perform action' }
-        @{ Label = "a byte count containing 400"; Message = 'Transferred 400123 bytes before the connection closed' }
-        @{ Label = "a throttle"; Message = 'Too many requests (429). Retry after 30 seconds.' }
-        @{ Label = "an empty message"; Message = '' }
-        @{ Label = "a null message"; Message = $null }
+        @{ Label = 'a resource group whose NAME contains the word'; Msg = 'Resource /subscriptions/s/resourceGroups/rg-BadRequest-01/providers/x not found' }
+        @{ Label = 'a resource name ending in the word'; Msg = 'The resource prod-BadRequest could not be read' }
+        @{ Label = 'a different permanent status'; Msg = "Operation returned an invalid status code 'NotFound'" }
+        @{ Label = 'an authorization denial'; Msg = 'AuthorizationFailed: does not have authorization to perform action' }
+        @{ Label = 'a byte count containing 400'; Msg = 'Transferred 400123 bytes before the connection closed' }
+        @{ Label = 'a throttle'; Msg = 'Too many requests (429). Retry after 30 seconds.' }
+        @{ Label = 'an empty message'; Msg = '' }
+        @{ Label = 'a null message'; Msg = $null }
     ) {
-        Test-RdaPermanentRequestError -ErrorMessage $Message | Should -BeFalse
+        Test-RdaPermanentRequestError -ErrorMessage $Msg | Should -BeFalse
     }
 
     It 'is disjoint from the denial and auth-expiry classifiers on their own messages' {
@@ -890,22 +951,28 @@ Describe 'Test-RdaPermanentRequestError: a 400 is abandoned, not retried for 25 
     It 'the Marketplace retry classifies the 400 BEFORE it can reach the transient budget' {
         # Ordering is the whole fix: below the out-of-memory and auth branches the 400 would fall
         # through to $MpAttempt++ and the backoff, which is the behaviour being removed.
-        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1') -Raw
-        $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Src, [ref]$null, [ref]$null)
+        # Scoped to GetMarketplaceConsumption via the parse this file already validated, not a fourth
+        # pass over the whole script. File-global offsets would also let a gate placed in the EARLIER
+        # consumption function satisfy the ordering check while leaving THIS path ungated, and would
+        # turn red on the deferred follow-up of wiring the same gate into the consumption loop.
+        $Perm = @($script:MpFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Test-RdaPermanentRequestError' }, $true))
+        $Perm.Count | Should -Be 1 -Because 'one owner of the permanent-request gate in the Marketplace pull'
 
-        $Perm = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Test-RdaPermanentRequestError' }, $true))
-        $Perm.Count | Should -Be 1 -Because 'one owner of the permanent-request gate in this script'
-
-        $Oom = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Test-RdaOutOfMemory' }, $true))
-        $Oom.Count | Should -BeGreaterThan 0
-        $MpOom = @($Oom | Where-Object { $_.Extent.Text -match 'MpErrorText' })
-        $MpOom.Count | Should -Be 1
+        # Filtered on the ARGUMENT: this function classifies out-of-memory twice, once in the fetch loop
+        # on $MpErrorText and once in the outer catch on $MpOuterErrorText. The two names do not share
+        # the substring, so this selects the fetch-loop call, and a rename that DID collide would make
+        # the count 2 and fail loudly rather than silently measuring the wrong one.
+        $MpOom = @($script:MpFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Test-RdaOutOfMemory' -and $N.Extent.Text -match '\$MpErrorText\b' }, $true))
+        $MpOom.Count | Should -Be 1 -Because 'one out-of-memory classification on the fetch-loop path'
         $Perm[0].Extent.StartOffset | Should -BeLessThan $MpOom[0].Extent.StartOffset -Because 'the permanent check has to run first'
 
         # It abandons rather than continuing the loop: a throw, no $MpAttempt++ on this path.
         $Clause = $Perm[0].Parent
         while ($null -ne $Clause -and -not ($Clause -is [System.Management.Automation.Language.IfStatementAst])) { $Clause = $Clause.Parent }
         $Clause | Should -Not -BeNullOrEmpty
+        # Confirm the walk landed on the gate's OWN clause: a refactor to an elseif, or to a hoisted
+        # boolean, would otherwise silently point the assertions below at an unrelated branch body.
+        $Clause.Clauses[0].Item1.Extent.Text | Should -Match 'Test-RdaPermanentRequestError' -Because 'the assertions below describe the gate clause, not whatever if encloses it'
         $Body = $Clause.Clauses[0].Item2
         @($Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ThrowStatementAst] }, $true)).Count | Should -Be 1 -Because 'it abandons this subscription rather than retrying'
         $Body.Extent.Text | Should -Not -Match 'MpAttempt\+\+' -Because 'it must not consume a transient attempt'

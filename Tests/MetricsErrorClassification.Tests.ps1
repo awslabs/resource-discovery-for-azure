@@ -2,7 +2,8 @@
 <#
     MetricsErrorClassification.Tests.ps1
 
-    Locks two properties of Extension/Metrics.ps1's per-call failure handling.
+    Locks three properties of Extension/Metrics.ps1's diagnostic output: two of
+    its per-call failure handling, plus culture-invariant seconds rendering.
 
     1. CLASSIFICATION ORDER.
        The permanent check is anchored on the status phrase, "invalid status code"
@@ -215,8 +216,15 @@ Describe 'Diagnostic seconds figures are culture-invariant' {
                         $N.GetCommandName() -in @('Write-MetricsDiag', 'Write-Verbose') -and
                         $N.Extent.Text -match $Needle }, $true))
             if ($Hit.Count -ne 1) { throw ('expected exactly one diagnostic call matching {0}, found {1}' -f $Needle, $Hit.Count) }
-            # The parenthesised format expression the command is called with.
-            return $Hit[0].CommandElements[1].Extent.Text
+            # The parenthesised format expression the command is called with. Asserted rather than
+            # assumed: called as 'Write-MetricsDiag -Line (...)' the second element would be the
+            # parameter name, and [scriptblock]::Create would then fail with an opaque error.
+            $Arg = $Hit[0].CommandElements[1]
+            if (-not ($Arg -is [System.Management.Automation.Language.ParenExpressionAst]))
+            {
+                throw ('the diagnostic matching {0} is no longer called with a single parenthesised expression' -f $Needle)
+            }
+            return $Arg.Extent.Text
         }
 
         function script:Invoke-UnderCulture([string]$Expression, [hashtable]$Vars, [string]$Culture)
@@ -248,11 +256,11 @@ Describe 'Diagnostic seconds figures are culture-invariant' {
     }
 
     It 'renders a per-call seconds figure with a dot on <Culture> (<Needle>)' -ForEach @(
-        foreach ($c in @('de-DE', 'nl-NL', 'en-US'))
+        foreach ($CultureName in @('de-DE', 'nl-NL', 'en-US'))
         {
             # Both per-call listings print ElapsedSec: the non-success one and the slowest-calls one.
-            @{ Culture = $c; Needle = 'attempts=\{6\}' }
-            @{ Culture = $c; Needle = '\{0\}s idx=\{1\}' }
+            @{ Culture = $CultureName; Needle = 'attempts=\{6\}' }
+            @{ Culture = $CultureName; Needle = '\{0\}s idx=\{1\}' }
         }
     ) {
         $Expr = script:Get-DiagCall $Needle
@@ -277,10 +285,10 @@ Describe 'Diagnostic seconds figures are culture-invariant' {
             # Positive form: find every place the figure is produced and require each one to be
             # formatted invariantly. A 'Should -Not -Match' on the raw shape cannot express this,
             # because the correct wrapped form '...TotalSeconds, 1)).ToString(' also ends in ')'.
-            # Composed with -f and single-quoted: in a double-quoted string '$$' is the automatic
-            # last-token variable, so an interpolated "\$$Sw" yields a pattern that never matches
-            # and the assertion silently stops being able to fail.
-            $Rx = '\[math\]::Round\(\${0}\.Elapsed\.TotalSeconds[^\r\n]{{0,80}}' -f $Sw
+            # The pattern must be single-quoted and composed with -f: in a DOUBLE-quoted string '$$'
+            # parses as the automatic last-token variable, which yields a pattern that cannot match
+            # and an assertion that cannot fail.
+            $Rx = '\[math\]::Round\(\${0}\.Elapsed\.TotalSeconds[^\r\n]{{0,24}}\)\)\.ToString\([^)]*\)' -f $Sw
             $Hits = @([regex]::Matches($script:MetricsSrc, $Rx))
             $Hits.Count | Should -BeGreaterThan 0 -Because ('{0} must still produce a seconds figure for this to be worth asserting' -f $Sw)
             foreach ($H in $Hits)

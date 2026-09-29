@@ -107,7 +107,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
-- **Az PowerShell module** — only five submodules are needed (install before running — see below)
+- **Az PowerShell module** — only six submodules are needed (install before running — see below)
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
@@ -118,19 +118,19 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the five Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`, `Az.ResourceGraph`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those five submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the five it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
+**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the six Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`, `Az.ResourceGraph`, `Az.CognitiveServices`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those six submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the ones it needs). `Az.CognitiveServices` is what lets the Azure AI Foundry per-model token collector discover Cognitive Services accounts and deployments; without it that collector would find nothing on a hand-picked local install. The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
 
 **Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
 ```powershell
 Get-Module Az* -ListAvailable | Uninstall-Module -Force
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
   
 
@@ -460,6 +460,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 |------|-------------|
 | `Consumption_ResourcesReport_(date).csv` | Cost and billing data (first-party Azure usage) |
 | `Marketplace_ResourcesReport_(date).csv` | Azure Marketplace / third-party SaaS usage (additive; see [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas)). Empty header-only file when there are no Marketplace charges (a confirmed zero) |
+| `FoundryModelCoverage_ResourcesReport_(date).csv` | Azure AI Foundry per-deployed-model billing-plane coverage (additive). One row per deployed model with its detected billing plane(s) and a `CoverageStatus` of `AzureMetered` / `AzureMetered+Marketplace` / `MarketplaceOnly` / `UNPRICED` (plus `Unknown-*` when a plane could not be probed), so a Marketplace-only model (e.g. Claude via CCU) is flagged, never silently dropped. Its token columns come from the per-model token collector (`-SkipFoundryTokens`), and `TokenProbeStatus` (`Collected` / `Partial` / `NoTokenMetrics` / `Failed` / `NotRun`, or `NotApplicable` on a row that is not a deployment) says whether a blank or a 0 is real. Empty header-only file when no Foundry model deployments exist (a confirmed zero) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
@@ -581,6 +582,8 @@ Everything untagged is accepted by both, and the wrapper forwards it to the inne
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
 | `SkipMarketplace` | Switch | Skip **only** the additive Azure Marketplace / third-party SaaS consumption collector (`Get-AzConsumptionMarketplace` → `Marketplace_*.csv`); first-party consumption is unaffected. Implied by `-SkipConsumption`. Reuses the same Cost Management Reader / Billing Reader access — no new role. See [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas). | False | `-SkipMarketplace` |
+| `SkipFoundryCoverage` | Switch | Skip **only** the additive Azure AI Foundry model billing-plane coverage collector (`FoundryModelCoverage_*.csv`); first-party consumption and Marketplace are unaffected. Implied by `-SkipConsumption` (it needs the same Cost Management Reader / Billing Reader access to probe the Marketplace plane — no new role). The phase probes both billing planes per deployed Foundry model and flags Marketplace-only (e.g. Claude/CCU) and coverage-gap (`UNPRICED`) models so none is silently dropped. | False | `-SkipFoundryCoverage` |
+| `SkipFoundryTokens` | Switch | Skip **only** the additive Tier 2 Azure AI Foundry per-model **token** collector; first-party consumption, Marketplace, the Tier 1 Claude/CCU fold, and Foundry coverage are unaffected, except that the coverage CSV's token columns come from this collector and are left blank (`TokenProbeStatus` `NotRun`). Discovers Cognitive Services accounts + model deployments via ARM and reads per-model token metrics (`Get-AzMetric`, split by `ModelDeploymentName`), folding role-encoded `Foundry Models` token rows (e.g. `Phi-4 Inp Tkns`, `Phi-4 Outp Tkns`, `Unit=Tokens`) into the same `Consumption_*.csv` so a downstream pipeline can price Azure-hosted model tokens against AWS Bedrock. It reads the metrics data plane, so it is implied-skipped by **both** `-SkipConsumption` and `-SkipMetrics` (reuses the existing Monitoring Reader access - no new role). | False | `-SkipFoundryTokens` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
 | `IncludeStorageMetrics` | Switch | **Opt in** to the Storage Account `UsedCapacity` metric. It is **not collected by default**, because it costs one metric-query call per storage account and on a tenant with a very large storage estate that single capacity figure can dominate the metrics phase. Pass this when storage capacity is actually wanted. | False | `-IncludeStorageMetrics` |
 | `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
@@ -660,7 +663,7 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 ### Run-AllSubscriptions Wrapper Parameters
 
 These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`,
-`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipMarketplace`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipMarketplace`, `-SkipFoundryCoverage`, `-SkipFoundryTokens`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
 `-MetricsIntervalMinutes`, `-MetricsLookbackDays`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
 `ResourceInventory.ps1`, so they behave the same in both contexts (see
 [Performance Parameters](#performance-parameters) for the metric-volume controls).
@@ -680,6 +683,8 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
 | `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
 | `SkipMarketplace` | Switch | Forwarded. Skip **only** the additive Marketplace consumption collector (`Marketplace_*.csv`); first-party consumption still runs. Implied by `-SkipConsumption`. | False | `-SkipMarketplace` |
+| `SkipFoundryCoverage` | Switch | Forwarded. Skip **only** the additive Foundry model billing-plane coverage collector (`FoundryModelCoverage_*.csv`); first-party consumption and Marketplace still run. Implied by `-SkipConsumption`. | False | `-SkipFoundryCoverage` |
+| `SkipFoundryTokens` | Switch | Forwarded. Skip **only** the additive Tier 2 Foundry per-model **token** collector; first-party consumption, Marketplace, the Tier 1 Claude/CCU fold, and Foundry coverage still run (the coverage CSV's token columns are then left blank, `TokenProbeStatus` `NotRun`). Reads the metrics data plane, so implied-skipped by **both** `-SkipConsumption` and `-SkipMetrics`. | False | `-SkipFoundryTokens` |
 | `CapacityPlan` | Switch | Forwarded. **Opt in** to the tenant-wide `VMPlacement.csv` capacity-planning CSV. Off by default, so no `VMPlacement*.csv` is produced, aggregated, or folded into the bundle unless this is passed. See [Performance Parameters](#performance-parameters). | False | `-CapacityPlan` |
 | `Service` | String[] | Forwarded. Scope collection to ONLY these service collectors (by their `Services/*.ps1` base name, e.g. `VirtualMachines`, `Streamanalytics`), across every in-scope subscription — the rest are not collected. Useful for a migration that only cares about certain workloads. Accepts a comma list as one token or a PowerShell array; unknown names fail fast up front with the valid list. Omit to collect all services. | *(all)* | `-Service VirtualMachines,Streamanalytics` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
@@ -714,7 +719,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
 - The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
-- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
 
 **Cloud Shell session ended mid-run:**
 - Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.

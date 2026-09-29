@@ -17,7 +17,7 @@ BeforeAll {
     New-Item -ItemType Directory -Path $script:TmpRoot -Force | Out-Null
 
     # Canonical empty-consumption header the function writes when no CSV exists.
-    $script:CsvHeader = 'InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId'
+    $script:CsvHeader = 'AdditionalInfo,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId'
     $script:DocsGuid = '12345678-1234-1234-1234-123456789012'
 
     # Fresh, isolated gap/recovery/output folders per test case.

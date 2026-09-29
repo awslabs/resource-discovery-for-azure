@@ -80,7 +80,7 @@ PowerShell reads the whole file, registers the functions, and only then executes
 | 115 | `Variables` | (top level) | Creates every `$Global:` variable the rest of the run reads |
 | 156 | `RunInventorySetup` | (top level) | Everything that has to happen before resources can be collected |
 | 158 | `CheckVersion` | `RunInventorySetup` | Compare local version against GitHub, warn only |
-| 227 | `CheckCliRequirements` | `RunInventorySetup` | Verify and import the five Az submodules |
+| 227 | `CheckCliRequirements` | `RunInventorySetup` | Verify and import the six Az submodules |
 | 341 | `CheckPowerShell` | `RunInventorySetup` | Detect platform, build the output folder path |
 | 436 | `LoginSession` | `RunInventorySetup` | All authentication paths |
 | 619 | `GetSubscriptionsData` | `RunInventorySetup` | Create the report folder, mark session initialised |
@@ -608,11 +608,11 @@ A version check must never gate the inventory.
         #  the Azure CLI and its resource-graph extension are no longer prerequisites]
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        # [long comment: this tool calls cmdlets from only five Az submodules, so it
+        # [long comment: this tool calls cmdlets from only six Az submodules, so it
         #  validates exactly those and does NOT require the ~80-submodule Az rollup.
         #  Checking the submodules rather than the Az umbrella is what lets a slim
         #  install pass - a slim install has no Az meta-module at all.]
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph', 'Az.CognitiveServices')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
@@ -635,7 +635,7 @@ A version check must never gate the inventory.
             throw ('Required Azure PowerShell submodule(s) not found: {0}. See log above for installation instructions.' -f ($MissingAzSubModules -join ', '))
         }
 
-        # [long comment: import ONLY the five submodules, not the Az rollup. Importing
+        # [long comment: import ONLY the six submodules, not the Az rollup. Importing
         #  Az pulls ~80 submodules and stalls 20-40s with no output, which looks like a
         #  hang. This import also doubles as the broken-install probe: -ListAvailable
         #  only checks the manifest, importing actually loads the assemblies.]
@@ -2610,7 +2610,7 @@ It pulls billing and usage data per subscription, and it contains more defensive
   │  │  for each usage record:                               │   │
   │  │     parse InstanceData JSON                           │   │
   │  │     flatten 5 fields onto the row                     │   │
-  │  │     rebuild a rich InstanceData object                │   │
+  │  │     rebuild a rich AdditionalInfo object              │   │
   │  │     if -Obfuscate: mask the ARM path, keep structure  │   │
   │  │  append the page to the CSV                           │   │
   │  └───────────────────────────────────────────────────────┘   │
@@ -2853,7 +2853,7 @@ Between subscriptions, clearing it is the fix.
 ### Flattening each usage record (lines 1769-1814)
 
 ```powershell
-                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
                     $ConsumptionRecordsThisSub += $UsageDataExport.Count
@@ -2868,7 +2868,7 @@ Between subscriptions, clearing it is the fix.
                         #  loop sits inside the per-subscription try/catch that throw would
                         #  abort the WHOLE subscription's consumption. Such a record has no
                         #  resourceUri to attribute or join anyway, so skip just that one.]
-                        $RawInstanceData = $UsageDataExport[$Item].InstanceData
+                        $RawInstanceData = $UsageDataExport[$Item].AdditionalInfo
                         if ([string]::IsNullOrEmpty($RawInstanceData))
                         {
                             continue
@@ -2886,7 +2886,7 @@ Between subscriptions, clearing it is the fix.
 
 | Line | Code | What it does |
 |---|---|---|
-| 1769 | `$UsageData.UsageAggregations.Properties \| Select-Object ...` | Digs down two levels into the response and projects ten fields. `InstanceData` is a **JSON string inside a JSON response**, which is why it has to be parsed separately. |
+| 1769 | `$UsageData.UsageAggregations.Properties \| Select-Object ...` | Digs down two levels into the response and projects ten fields. The raw Azure field is `InstanceData`; it is aliased here to the emitted column name `AdditionalInfo` (a calculated `Select-Object` property `@{Name='AdditionalInfo';Expression={$_.InstanceData}}`) so it binds to the server field of the same name. It is a **JSON string inside a JSON response**, which is why it has to be parsed separately. |
 | 1774 | `[System.Collections.ArrayList]::new()` | An `ArrayList` rather than `@()` because this loop appends thousands of items per page, and `+=` on a PowerShell array copies the whole array every time, which is quadratic. `ArrayList.Add` is constant time. |
 | 1776 | `for ($Item = 0; ...)` | An index based `for` rather than `foreach`, because the loop **mutates** `$UsageDataExport[$Item]` in place. |
 | 1786-1790 | the null `InstanceData` guard | A real bug fix. Some meters, marketplace purchases and certain reservations and tenant level charges, have no `InstanceData` at all. `.tolower()` on null throws, and because this loop sits inside the per subscription `try`, that single record would abort the **entire** subscription's consumption. Such a record has no resource URI to attribute anyway, so skipping just that one record is exactly right. |
@@ -3066,7 +3066,7 @@ Nothing downstream needs to join on them, so they are simply destroyed rather th
 ### Writing the page and looping (lines 2054-2062)
 
 ```powershell
-                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, ..., ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, ..., ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
 ```
@@ -3851,7 +3851,7 @@ if ($ConsumptionCreated)
 
 if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 {
-    "InstanceData,MeterCategory,MeterId,...,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
+    "AdditionalInfo,MeterCategory,MeterId,...,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
 }
 ```
 

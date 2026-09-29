@@ -7,6 +7,8 @@ param (
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$SkipMarketplace,
+    [switch]$SkipFoundryCoverage,
+    [switch]$SkipFoundryTokens,
 
     [switch]$UseMetricsBatch,
 
@@ -175,7 +177,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
     exit $LASTEXITCODE
 }
 
-$RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
+$RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph', 'Az.CognitiveServices')
 $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 if ($MissingAzSubModules.Count -gt 0)
 {
@@ -224,7 +226,7 @@ catch
     Write-Host "This usually indicates a broken/partial install (manifest present but bundled assemblies missing or unloadable)." -ForegroundColor Yellow
     Write-Host "Repair it, then re-run:" -ForegroundColor Yellow
     Write-Host "  Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
-    Write-Host "  Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
+    Write-Host "  Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
     exit 1
 }
 
@@ -551,6 +553,8 @@ if ($Plan)
     if ($SkipMetrics) { $ExtraFlags += '-SkipMetrics' }
     if ($SkipConsumption) { $ExtraFlags += '-SkipConsumption' }
     if ($SkipMarketplace) { $ExtraFlags += '-SkipMarketplace' }
+    if ($SkipFoundryCoverage) { $ExtraFlags += '-SkipFoundryCoverage' }
+    if ($SkipFoundryTokens) { $ExtraFlags += '-SkipFoundryTokens' }
     if ($UseMetricsBatch) { $ExtraFlags += '-UseMetricsBatch' }
     if ($IncludeStorageMetrics) { $ExtraFlags += '-IncludeStorageMetrics' }
     if ($SkipDiskMetrics) { $ExtraFlags += '-SkipDiskMetrics' }
@@ -1215,6 +1219,8 @@ if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($SkipMarketplace) { $InventoryPassthrough['SkipMarketplace'] = $true }
+if ($SkipFoundryCoverage) { $InventoryPassthrough['SkipFoundryCoverage'] = $true }
+if ($SkipFoundryTokens) { $InventoryPassthrough['SkipFoundryTokens'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }
@@ -1589,6 +1595,8 @@ else
                 if ($SkipMetrics) { $WorkerArgs.SkipMetrics = $true }
                 if ($SkipConsumption) { $WorkerArgs.SkipConsumption = $true }
                 if ($SkipMarketplace) { $WorkerArgs.SkipMarketplace = $true }
+                if ($SkipFoundryCoverage) { $WorkerArgs.SkipFoundryCoverage = $true }
+                if ($SkipFoundryTokens) { $WorkerArgs.SkipFoundryTokens = $true }
                 if ($UseMetricsBatch) { $WorkerArgs.UseMetricsBatch = $true }
                 if ($IncludeStorageMetrics) { $WorkerArgs.IncludeStorageMetrics = $true }
                 if ($SkipDiskMetrics) { $WorkerArgs.SkipDiskMetrics = $true }
@@ -2469,7 +2477,7 @@ if ($ConsumptionFailures.Count -gt 0)
         Write-Host "  This message strongly suggests the Az PowerShell module is broken on disk." -ForegroundColor Yellow
         Write-Host "  Reinstall with:" -ForegroundColor Yellow
         Write-Host "    Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
-        Write-Host "    Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
+        Write-Host "    Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph,Az.CognitiveServices -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
     }
     Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
     Write-Host ""

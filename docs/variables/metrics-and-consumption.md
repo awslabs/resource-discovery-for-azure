@@ -36,6 +36,8 @@ Related reading:
 | `-SkipMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip) |
 | `-SkipConsumption` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip) |
 | `-SkipMarketplace` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip Marketplace collector only) |
+| `-SkipFoundryCoverage` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip Foundry coverage collector only) |
+| `-SkipFoundryTokens` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip Foundry per-model token collector only) |
 | `-SkipDiskMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = skip disk I/O metrics) |
 | `-IncludeStorageMetrics` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (opt-in) |
 | `-MetricsDetailed` | `[switch]` | `ResourceInventory.ps1`, `Run-AllSubscriptions.ps1` | off (present = native cadences) |
@@ -240,6 +242,139 @@ but not the Marketplace one — for example when you already know the tenant has
 Marketplace purchases and want to shave the extra call. Leave it **on** (the
 default) for any run where third-party/Marketplace spend could matter (e.g. an ISV
 offer purchased through Azure Marketplace / Azure AI Foundry).
+
+---
+
+## `-SkipFoundryCoverage`
+
+- **Type:** `[switch]`
+- **Declared on:** `ResourceInventory.ps1` (param block) and
+  `Run-AllSubscriptions.ps1` (param block).
+- **Default:** off. When absent, the **additive Azure AI Foundry model
+  billing-plane coverage collector** runs (as part of the consumption phase).
+  When present, only that collector is skipped; the first-party consumption
+  phase and the Marketplace collector are unaffected.
+
+### What it does
+
+The Foundry coverage collector probes every deployed Azure AI Foundry /
+CognitiveServices model against **both** billing planes — the Azure Retail
+Prices catalog (Azure-metered) and the Azure Marketplace / CCU plane (via a
+per-subscription `Get-AzConsumptionMarketplace` read) — and emits one row per
+deployed model into a separate `FoundryModelCoverage_<ReportName>_<timestamp>.csv`
+with a `CoverageStatus` (`AzureMetered`, `AzureMetered+Marketplace`,
+`MarketplaceOnly`, `UNPRICED`, or `Unknown-<reason>` when a plane could not be
+probed) so a Marketplace-only model (e.g. Claude via CCU) or an entirely
+uncovered model is flagged loudly rather than silently dropped by a downstream
+pricing pipeline. `UNPRICED` is emitted only when **both** planes were
+successfully probed and both came back negative; any probe gap yields
+`Unknown-<reason>`, never a false `UNPRICED`.
+
+- The phase is gated on
+  `!$SkipConsumption.IsPresent -and !$SkipFoundryCoverage.IsPresent` — it needs
+  the same billing / Cost Management Reader access and Azure context as the
+  first-party phase to probe the Marketplace plane, so `-SkipConsumption`
+  implies it is skipped too, and `-SkipFoundryCoverage` turns off **only** this
+  collector while leaving first-party consumption and the Marketplace collector
+  on. It performs its own per-subscription Marketplace read, independent of and
+  idempotent with the Marketplace collector's.
+- The token columns (`TokenMetricsPresent`, `InputTokens`, `OutputTokens`,
+  `TotalTokens`) come from the Tier 2 token collector
+  ([`-SkipFoundryTokens`](#-skipfoundrytokens)); this collector makes no Azure
+  Monitor calls. The last column, `TokenProbeStatus`, says what they mean:
+  `Collected` (a blank is a metric the account does not support, a 0 is a real
+  zero), `Partial` (only the failed metrics are blank), `NoTokenMetrics` (the
+  account supports none), `Failed` (the blanks are not a zero), `NotRun` (the
+  token collector did not run, for example under `-SkipMetrics` or
+  `-SkipFoundryTokens`), or `NotApplicable` on a row that is not a deployment.
+- As with the other phases, finalization guarantees a well-formed output: when
+  the phase is skipped (or produced no rows) RDA writes a **header-only**
+  `FoundryModelCoverage_*.csv` so downstream tooling always finds a schema-valid
+  file.
+
+In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
+like `-SkipMarketplace` (`$InventoryPassthrough['SkipFoundryCoverage'] = $true`),
+on both the sequential and parallel-stream paths.
+
+### Why it exists / when to use it
+
+The collector reuses the existing Cost Management Reader / Billing Reader
+requirement, so it needs no extra role, and it makes one additional Marketplace
+read per subscription. Use `-SkipFoundryCoverage` when you want first-party (and
+Marketplace) consumption but not the per-model coverage reconciliation — for
+example when the tenant deploys no Azure AI Foundry models. Leave it **on** (the
+default) for any run where a Marketplace-only or uncovered Foundry model could
+otherwise be silently dropped from downstream pricing.
+
+---
+
+## `-SkipFoundryTokens`
+
+- **Type:** `[switch]`
+- **Declared on:** `ResourceInventory.ps1` (param block) and
+  `Run-AllSubscriptions.ps1` (param block).
+- **Default:** off. When absent, the **additive Tier 2 Azure AI Foundry
+  per-model token collector** runs. When present, only that collector is
+  skipped; the first-party consumption phase, the Marketplace collector, the
+  Tier 1 Claude/CCU fold, and the Foundry coverage collector are unaffected,
+  except that the coverage CSV's token columns come from this collector and are
+  left blank with `TokenProbeStatus` `NotRun`.
+
+### What it does
+
+The Foundry token collector discovers every Azure AI / Cognitive Services
+account in each subscription via **ARM** (`Get-AzCognitiveServicesAccount`, then
+`Get-AzCognitiveServicesAccountDeployment` per account — **not** Resource Graph,
+which does not index Cognitive Services model deployments), then reads the
+per-model token metrics from Azure Monitor (`Get-AzMetric` on the account, split
+by the `ModelDeploymentName` dimension via `-MetricFilter "ModelDeploymentName eq
+'*'"`, `AggregationType Total` over the collection window). It folds the result
+into the **same** first-party `Consumption_<ReportName>_<timestamp>.csv` as
+per-`(model, role)` rows carrying `MeterCategory = "Foundry Models"`, a
+role-encoded `MeterName` (e.g. `Phi-4 Inp Tkns`, `Phi-4 Outp Tkns`,
+`Phi-4 Cd Inp Tkns`, `Phi-4 Cd Wr Tkns`), the raw token count as `Quantity`, and
+`Unit = "Tokens"`, so a downstream pricing pipeline that reads only the
+Consumption CSV can price the Azure-hosted model's token usage. This is the
+**Tier 2** counterpart to the Tier 1 Claude/CCU fold (`-SkipMarketplace`
+governs Tier 1): Tier 1 folds Marketplace **cost** rows (Claude via CCU, no
+token telemetry); Tier 2 folds the per-role **token counts** for the
+Azure-hosted models that DO expose token metrics (Phi / OpenAI / DeepSeek / …).
+
+- The phase is gated on
+  `!$SkipConsumption.IsPresent -and !$SkipMetrics.IsPresent -and !$SkipFoundryTokens.IsPresent`
+  — it writes into the Consumption CSV (so it lives inside the consumption
+  phase and `-SkipConsumption` implies it is skipped) **and** it reads the Azure
+  Monitor metrics data plane (so `-SkipMetrics` implies it is skipped too, and a
+  `-SkipMetrics` run logs that the Foundry token phase was skipped for that
+  reason). `-SkipFoundryTokens` turns off **only** this collector.
+- Only the per-role token metrics become priced rows (`InputTokens`,
+  `OutputTokens`, `cacheReadInputTokens`, `ephemeral5mInputTokens`,
+  `ephemeral1hInputTokens`). `TotalTokens` (a sum of input+output),
+  `ModelRequests`, and `TotalCalls` are **not** emitted as their own rows — that
+  would double-count — but are preserved for fidelity inside the priced rows'
+  `AdditionalInfo`.
+- A confirmed zero (no Foundry accounts found, or accounts exist but reported no
+  token usage in the window — e.g. metrics lag) is logged distinctly from a
+  failure, so an empty result is never mistaken for a skipped or broken phase.
+- Each metric query asks for one series per deployment when an account has more
+  than 10, because Azure Monitor returns at most 10 dimension series by default.
+- The Foundry coverage collector, which runs next, fills its token columns from
+  this collector's results rather than querying Azure Monitor again (see
+  `TokenProbeStatus` under [`-SkipFoundryCoverage`](#-skipfoundrycoverage)).
+
+In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
+like `-SkipMarketplace` (`$InventoryPassthrough['SkipFoundryTokens'] = $true`),
+on both the sequential and parallel-stream paths.
+
+### Why it exists / when to use it
+
+The collector reuses the existing Monitoring Reader / metrics access — no extra
+role — and adds a small number of `Get-AzMetric` calls per Foundry account. Use
+`-SkipFoundryTokens` when you want the rest of the consumption/metrics data but
+not the per-model token fold — for example when the tenant deploys no
+token-metered Azure AI Foundry models, or when a shorter run is wanted. Leave it
+**on** (the default) for any run where Azure-hosted model token usage should be
+priced downstream against AWS Bedrock.
 
 ---
 

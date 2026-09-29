@@ -16,6 +16,8 @@ param ($TenantID,
     [switch]$UseMetricsBatch,
     [switch]$SkipConsumption,
     [switch]$SkipMarketplace,
+    [switch]$SkipFoundryCoverage,
+    [switch]$SkipFoundryTokens,
     [switch]$Obfuscate,
     [string]$ObfuscationDictionary,
     [switch]$RunAllSubs,
@@ -141,7 +143,7 @@ function RunInventorySetup()
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph', 'Az.CognitiveServices')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
@@ -729,6 +731,7 @@ function ExecuteInventoryProcessing()
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
         $Global:MarketplaceFileCsv = ($DefaultPath + "Marketplace_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+        $Global:FoundryCoverageFileCsv = ($DefaultPath + "FoundryModelCoverage_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
 
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
@@ -1399,7 +1402,14 @@ function ExecuteInventoryProcessing()
                             Start-Sleep -Seconds $ConsumptionBackoffSeconds
                         }
                     }
-                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+                    # The Get-UsageAggregates payload names the per-resource licensing/instance JSON
+                    # blob "InstanceData". The deployed ingestion server reads that same blob
+                    # from a Consumption CSV column named "AdditionalInfo" (VM Windows/AHB + SQL vCore
+                    # detection bind to AdditionalInfo, not InstanceData), so a column literally named
+                    # InstanceData arrives empty server-side and that detection silently degrades. Map
+                    # the source property to a column named AdditionalInfo here at the point of ingest,
+                    # so every downstream read (below) and the emitted CSV header both use AdditionalInfo.
+                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
 
@@ -1407,7 +1417,7 @@ function ExecuteInventoryProcessing()
 
                     for ($Item = 0; $Item -lt $UsageDataExport.Count; $Item++)
                     {
-                        $RawInstanceData = $UsageDataExport[$Item].InstanceData
+                        $RawInstanceData = $UsageDataExport[$Item].AdditionalInfo
                         if ([string]::IsNullOrEmpty($RawInstanceData))
                         {
                             continue
@@ -1498,12 +1508,12 @@ function ExecuteInventoryProcessing()
                             }
                         }
 
-                        $UsageDataExport[$Item].InstanceData = $InstanceObject | ConvertTo-Json -Compress
+                        $UsageDataExport[$Item].AdditionalInfo = $InstanceObject | ConvertTo-Json -Compress
 
                         $NewUsageDataExport.Add($UsageDataExport[$Item]) | Out-Null
                     }
 
-                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
 
                     $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
 
@@ -1917,6 +1927,21 @@ function ExecuteInventoryProcessing()
                 {
                     if ($null -eq $Row) { continue }
 
+                    # FOUNDRY FOLD CAPTURE (P1). The deployed ingestion server reads ONLY
+                    # Consumption_*.csv and has NO reader for this Marketplace_*.csv, so Claude/
+                    # Anthropic usage collected here is invisible server-side unless it is ALSO
+                    # folded into the Consumption CSV as a "Foundry Models" row. Capture the RAW
+                    # (pre-obfuscation) Claude rows now, keyed by the pinned subscription, so the
+                    # fold step (GetFoundryFoldConsumption, invoked after this phase) can shape and
+                    # append them with its OWN obfuscation pass - identical in spirit to how the
+                    # Marketplace export below runs its own ConvertTo-RdaMarketplaceRow. Detection
+                    # is the single-owner predicate Test-RdaClaudeMarketplaceRow.
+                    if (Test-RdaClaudeMarketplaceRow -Row $Row)
+                    {
+                        if ($null -eq $script:FoundryFoldClaudeRows) { $script:FoundryFoldClaudeRows = [System.Collections.ArrayList]::new() }
+                        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = $sub.Id; SubName = $sub.Name; Row = $Row })
+                    }
+
                     # Field mapping + obfuscation live in ConvertTo-RdaMarketplaceRow
                     # (Functions/ResourceInventory.Functions.ps1) so the exact same code path
                     # is unit-tested. Product identifiers (PublisherName/OfferName/PlanName)
@@ -2018,6 +2043,943 @@ function ExecuteInventoryProcessing()
         if ($script:MarketplaceRecordsThisRun -eq 0 -and $script:MarketplaceFailedSubsThisRun -eq 0)
         {
             Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an ISV SaaS offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+        }
+    }
+
+    function GetFoundryFoldConsumption()
+    {
+        # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
+        # the deployed ingestion server - which reads ONLY Consumption_*.csv and has NO reader for
+        # Marketplace_*.csv - actually sees it. Runs AFTER GetMarketplaceConsumption (it consumes the
+        # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
+        # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
+        # off), so the fold follows the Marketplace phase's skip coherence exactly.
+        #
+        #   Tier 1 (CCU / cost, ALWAYS): one folded "Foundry Models" row per captured Claude
+        #     Marketplace row, carrying the Azure cost, marked non-token. This is the certain part.
+        #
+        # Tier 2 per-model token-role fold deferred - needs live-tenant metric-name verification
+        # + account->Claude correlation; see findings ledger.
+        #
+        # The shaping + obfuscation of each row lives in the unit-tested pure helper
+        # (ConvertTo-RdaFoldedFoundryRow in Functions/ResourceInventory.Functions.ps1); this
+        # function is the collector wiring.
+
+        $DebugPreference = "SilentlyContinue"
+
+        if ($null -eq $Global:FoundryFoldRecordCount) { $Global:FoundryFoldRecordCount = 0 }
+        if ($null -eq $script:FoundryFoldRecordsThisRun) { $script:FoundryFoldRecordsThisRun = 0 }
+
+        $ClaudeRows = @($script:FoundryFoldClaudeRows)
+        if ($ClaudeRows.Count -eq 0)
+        {
+            # CONFIRMED ZERO, not a silent skip: the Marketplace phase ran and found no Claude/
+            # Anthropic rows to fold. Mirrors the Marketplace confirmed-zero notice.
+            Write-Log -Message ('Foundry fold: no Claude/Anthropic Marketplace rows were collected for the subscription(s) in scope, so there is nothing to fold into the Consumption CSV. This is a CONFIRMED ZERO (the Marketplace phase ran), NOT a skipped/failed section.') -Severity 'Info'
+            return
+        }
+
+        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so the server's Foundry->Bedrock path sees them." -f $ClaudeRows.Count) -Severity 'Info'
+
+        # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
+        # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
+        if ($Obfuscate.IsPresent)
+        {
+            if (-not $script:FoundryFoldSubCache) { $script:FoundryFoldSubCache = @{} }
+            if (-not $script:FoundryFoldRgCache) { $script:FoundryFoldRgCache = @{} }
+            if (-not $script:FoundryFoldNameCache) { $script:FoundryFoldNameCache = @{} }
+        }
+
+        $FoldExport = [System.Collections.ArrayList]::new()
+
+        # ---- Tier 1: one folded cost row per captured Claude Marketplace row (always) ----
+        foreach ($Captured in $ClaudeRows)
+        {
+            # ConvertTo-RdaFoldedFoundryRow's -Row is Mandatory, so a null captured row would throw
+            # a terminating parameter-binding error ("Cannot bind argument to parameter 'Row'").
+            # Under the run's default SilentlyContinue that terminating error aborts the whole
+            # consumption block BEFORE the Tier 2 token phase runs, silently collecting zero token
+            # rows. Skip a null row so one bad captured entry cannot defeat the token collection.
+            if ($null -eq $Captured.Row) { continue }
+            $Folded = ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
+            $null = $FoldExport.Add($Folded)
+        }
+
+        # ---- Append the folded rows onto the SAME Consumption CSV the server reads ----
+        # Export-Csv -Append with the identical column set the first-party path emits, so a folded
+        # row is schema-identical to a native consumption row (it just carries MeterCategory=
+        # 'Foundry Models' + the fold markers inside AdditionalInfo). If the first-party phase wrote
+        # no rows, -Append creates the file with the same header.
+        if ($FoldExport.Count -gt 0)
+        {
+            $FoldExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+        }
+
+        $Global:FoundryFoldRecordCount += $FoldExport.Count
+        $script:FoundryFoldRecordsThisRun += $FoldExport.Count
+        Write-Log -Message ("Foundry fold: appended {0} folded 'Foundry Models' (Tier 1 CCU/cost) row(s) to the Consumption CSV." -f $FoldExport.Count) -Severity 'Info'
+    }
+
+    function GetFoundryTokenConsumption()
+    {
+        # TIER 2 FOUNDRY TOKEN COLLECTOR (per-model token counts).
+        #
+        # WHY THIS EXISTS. RDA's inventory is Azure-Resource-Graph-based, and Resource Graph does
+        # NOT index Cognitive Services model DEPLOYMENTS, and RDA had no metrics path that reached
+        # per-model TOKEN telemetry (the metrics phase never queried the Cognitive Services account
+        # token metrics). So Azure AI Foundry models that DO expose token usage (Phi / OpenAI /
+        # DeepSeek / etc.) were collected NOWHERE: the deployed ingestion server saw the account but
+        # had no token quantities to price against AWS Bedrock. This phase closes that gap by
+        # discovering the accounts + deployments via ARM and reading the per-model token metrics,
+        # then folding them into the SAME first-party Consumption_*.csv the server reads as
+        # "Foundry Models" rows (MeterCategory exact string = the server's Foundry->Bedrock gate).
+        #
+        # RELATIONSHIP TO TIER 1 (GetFoundryFoldConsumption, above). Tier 1 folds Claude/Anthropic
+        # MARKETPLACE cost rows (CCU, no token telemetry) as non-token "Foundry Models" rows. Tier 2
+        # (this) folds the per-(model, role) TOKEN rows for the Azure-hosted models that DO expose
+        # token metrics. The two are complementary and additive; neither changes first-party
+        # consumption or Marketplace semantics. The row shaping + obfuscation live in the unit-tested
+        # pure helpers ConvertTo-RdaFoldedFoundryTokenRow / Get-RdaFoundryTokenRole /
+        # Get-RdaFoundryTokenSeriesTotals (Functions/ResourceInventory.Functions.ps1); this function
+        # is the collector wiring.
+        #
+        # LIVE-VERIFIED CONTRACT (confirmed 2026-09-26 against a real Phi-4 + Phi-4-mini deployment):
+        #   DISCOVERY: Get-AzCognitiveServicesAccount (per subscription) then, per account,
+        #     Get-AzCognitiveServicesAccountDeployment (both ARM - Resource Graph returns empty for
+        #     microsoft.cognitiveservices/accounts deployments, verified). Each deployment exposes a
+        #     model Name (e.g. "Phi-4"), Version, Format.
+        #   TOKEN METRICS: Get-AzMetric on the ACCOUNT ResourceId, one call per token metric, split
+        #     per model via -MetricFilter "ModelDeploymentName eq '*'", AggregationType Total over the
+        #     collection window. Verified metric names (Unit=Count): InputTokens, OutputTokens,
+        #     TotalTokens, cacheReadInputTokens, ephemeral5mInputTokens, ephemeral1hInputTokens,
+        #     ModelRequests, TotalCalls. Only the per-ROLE token metrics become priced rows
+        #     (Get-RdaFoundryTokenRole decides); TotalTokens/ModelRequests/TotalCalls are kept for
+        #     fidelity in AdditionalInfo, never emitted as their own rows (would double-count).
+        #
+        # ROLE / RETRY / CONTEXT REUSE. Reuses the SAME Monitoring Reader requirement the metrics
+        # phase needs, and the SAME per-subscription context re-pin+verify and per-call
+        # retry/Retry-After/denial/auth-expiry envelope the consumption + Marketplace loops use
+        # (Test-DataPlaneAuthReady, Set-AzContext + verify, Test-RdaConsumptionDenial,
+        # Test-RdaAuthExpiry, Get-RdaRetryAfterSeconds), deliberately mirrored rather than reinvented.
+        #
+        # OUTPUT. Appends per-(account, model, role) token rows onto the existing Consumption_*.csv
+        # with the identical 15-column projection, so a folded token row is schema-identical to a
+        # native consumption row. Never touches the Marketplace_* / FoundryModelCoverage_* paths.
+
+        $DebugPreference = "SilentlyContinue"
+
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
+
+        # Match the metrics phase window: previous 31 days through yesterday. AggregationType Total
+        # over the whole window gives the token total per model for the period.
+        $FtStartTime = (Get-Date).AddDays(-31).Date
+        $FtEndTime = (Get-Date).AddDays(-1).Date
+
+        # The live-verified per-model token metric names. Only the ones Get-RdaFoundryTokenRole maps
+        # to a role become priced rows; the rest are collected for fidelity (folded into the priced
+        # rows' AdditionalInfo where they belong to the same model).
+        $FtTokenMetricNames = @('InputTokens', 'OutputTokens', 'cacheReadInputTokens', 'ephemeral5mInputTokens', 'ephemeral1hInputTokens')
+        # Non-priced fidelity metrics captured per model and stashed in AdditionalInfo.
+        $FtFidelityMetricNames = @('TotalTokens', 'ModelRequests', 'TotalCalls')
+
+        if ($null -eq $Global:FoundryTokenRecordCount) { $Global:FoundryTokenRecordCount = 0 }
+        if ($null -eq $Global:FoundryTokenFailedSubs) { $Global:FoundryTokenFailedSubs = @() }
+        if ($null -eq $script:FoundryTokenRecordsThisRun) { $script:FoundryTokenRecordsThisRun = 0 }
+        # Per-INVOCATION accounting (the wrapper invokes this script once per subscription with `&`,
+        # giving each a fresh $script: scope while $Global: accumulates - same pattern the Marketplace
+        # phase documents), so the confirmed-zero notice describes THIS invocation only.
+        if ($null -eq $script:FoundryTokenFailedSubsThisRun) { $script:FoundryTokenFailedSubsThisRun = 0 }
+        if ($null -eq $script:FoundryTokenAccountsSeenThisRun) { $script:FoundryTokenAccountsSeenThisRun = 0 }
+
+        # What this phase collected, kept for GetFoundryModelCoverage (which runs next) so the
+        # coverage CSV's token columns come from these results instead of a second set of Azure
+        # Monitor calls. Keyed by account resource id (case-insensitive); each record holds the
+        # outcome of every metric query and the per-deployment totals. See
+        # Get-RdaFoundryCoverageTokenFields for how coverage reads them.
+        $script:FoundryTokenResults = @{}
+        $script:FoundryTokenFailedSubIds = @{}
+        $script:FoundryTokenPhaseState = 'Ran'
+
+        if (-not (Test-DataPlaneAuthReady -Phase 'FoundryTokens'))
+        {
+            $script:FoundryTokenPhaseState = 'Failed'
+            Write-Log -Message ('Foundry tokens: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Foundry token collection was requested (no -SkipConsumption / -SkipMetrics / -SkipFoundryTokens) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+            $Global:FoundryTokenFailedSubs += [pscustomobject]@{
+                Name             = '(all subscriptions)'
+                Id               = '(auth)'
+                Message          = 'Foundry token phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Complete         = $false
+                RecordsCollected = 0
+            }
+            return
+        }
+
+        # Per-run obfuscation caches for the folded token rows (parity with the other fold paths).
+        if ($Obfuscate.IsPresent)
+        {
+            if (-not $script:FoundryTokenSubCache) { $script:FoundryTokenSubCache = @{} }
+            if (-not $script:FoundryTokenRgCache) { $script:FoundryTokenRgCache = @{} }
+            if (-not $script:FoundryTokenNameCache) { $script:FoundryTokenNameCache = @{} }
+        }
+
+        foreach ($sub in $Global:Subscriptions)
+        {
+            if (![string]::IsNullOrEmpty($SubscriptionID))
+            {
+                if ($SubscriptionID -ne $sub.Id)
+                {
+                    Write-Log -Message ("Skipping (Foundry tokens): {0}" -f $sub.Name) -Severity 'Info'
+                    continue
+                }
+            }
+
+            # Per-subscription context re-pin + verify, exactly like the consumption/marketplace loops,
+            # so per-account metrics are read under the right subscription and never cross-attributed.
+            $FtContextOk = $false
+            $FtContextSwitchError = $null
+            try
+            {
+                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $FtContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+            }
+            catch
+            {
+                $FtContextSwitchError = $_.Exception.Message
+            }
+
+            if (-not $FtContextOk)
+            {
+                $SkipMessage = ("Foundry tokens SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's token usage to this one." -f $(if ($FtContextSwitchError) { " ($FtContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                Write-Log -Message ("Foundry tokens: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
+                $Global:FoundryTokenFailedSubs += [pscustomobject]@{
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $SkipMessage
+                    Complete         = $false
+                    RecordsCollected = 0
+                }
+                $script:FoundryTokenFailedSubsThisRun++
+                $script:FoundryTokenFailedSubIds[$sub.Id] = $true
+                continue
+            }
+
+            Write-Log -Message ("Gathering Foundry token usage for: {0}" -f $sub.Name) -Severity 'Info'
+
+            # --- DISCOVERY: Cognitive Services accounts in this subscription (ARM, NOT Resource Graph) ---
+            $FtAccounts = $null
+            try
+            {
+                $FtAccounts = @(Get-AzCognitiveServicesAccount -ErrorAction Stop)
+            }
+            catch
+            {
+                if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                {
+                    $DenyMessage = ("Foundry tokens: account discovery DENIED for {0}: {1}. This is an authorization failure (needs Reader on the Cognitive Services accounts), not transient - grant access and re-run." -f $sub.Name, $_.Exception.Message)
+                    Write-Log -Message $DenyMessage -Severity 'Error'
+                    $Global:FoundryTokenFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $DenyMessage; Complete = $false; RecordsCollected = 0 }
+                    $script:FoundryTokenFailedSubsThisRun++
+                    $script:FoundryTokenFailedSubIds[$sub.Id] = $true
+                    continue
+                }
+                $FailMessage = ("Foundry tokens: could not list Cognitive Services accounts for {0}: {1}. Skipping this subscription's Foundry token collection." -f $sub.Name, $_.Exception.Message)
+                Write-Log -Message $FailMessage -Severity 'Warning'
+                $Global:FoundryTokenFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $FailMessage; Complete = $false; RecordsCollected = 0 }
+                $script:FoundryTokenFailedSubsThisRun++
+                $script:FoundryTokenFailedSubIds[$sub.Id] = $true
+                continue
+            }
+
+            if ($null -eq $FtAccounts -or $FtAccounts.Count -eq 0)
+            {
+                Write-Log -Message ("Foundry tokens: no Azure AI / Cognitive Services accounts found in {0}. Nothing to collect for this subscription (confirmed zero for this sub)." -f $sub.Name) -Severity 'Info'
+                continue
+            }
+
+            $FtFoldExport = [System.Collections.ArrayList]::new()
+
+            foreach ($Account in $FtAccounts)
+            {
+                if ($null -eq $Account) { continue }
+                $script:FoundryTokenAccountsSeenThisRun++
+                $AccountId = $Account.Id
+                $AccountLocation = if ($null -ne $Account.Location -and -not [string]::IsNullOrWhiteSpace([string]$Account.Location)) { [string]$Account.Location } else { 'global' }
+
+                # PER-ACCOUNT ISOLATION. The whole account body runs inside this try so that ANY
+                # failure on ONE account - an odd/differently-shaped account that breaks name
+                # resolution, a metric-shape surprise, anything unforeseen - is caught, logged as a
+                # confirmed per-account skip (with the reason), and the foreach CONTINUES to the next
+                # account. A single bad account must NEVER abort this subscription's Foundry-token
+                # phase or the run: a real run had one differently-shaped account fail and a healthy
+                # Phi-4 account in the SAME subscription then went uncollected. Collect everything
+                # collectable even when some accounts are broken. (The inner try/catch blocks below
+                # still handle the two EXPECTED failure modes with their own specific messages; this
+                # outer one is the backstop for the unexpected.)
+                try
+                {
+                    # This account's record for the coverage phase. Every metric starts out
+                    # 'Failed' until its query reports an outcome, so a failure anywhere below
+                    # leaves an honest record rather than a missing one.
+                    $FtAccountResult = @{ NoDeployments = $false; Metrics = @{}; Totals = @{} }
+                    $script:FoundryTokenResults[$AccountId] = $FtAccountResult
+
+                    # --- DISCOVERY: model deployments on this account (ARM) ---
+                    $FtDeployments = $null
+                    try
+                    {
+                        $FtDeployments = @(Get-AzCognitiveServicesAccountDeployment -ResourceGroupName $Account.ResourceGroupName -AccountName $Account.AccountName -ErrorAction Stop)
+                    }
+                    catch
+                    {
+                        Write-Log -Message ("Foundry tokens: could not list model deployments for account {0} in {1}: {2}. Skipping this account." -f $Account.AccountName, $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                        continue
+                    }
+
+                    if ($null -eq $FtDeployments -or $FtDeployments.Count -eq 0)
+                    {
+                        $FtAccountResult.NoDeployments = $true
+                        Write-Log -Message ("Foundry tokens: account {0} in {1} has no model deployments. Nothing to collect for it." -f $Account.AccountName, $sub.Name) -Severity 'Info'
+                        continue
+                    }
+
+                    # Map the deployment NAME (the ModelDeploymentName metric dimension value) to the
+                    # underlying model identity used in MeterName. Resolution is a pure, unit-tested helper
+                    # (Get-RdaFoundryDeploymentModelMap in Functions/ResourceInventory.Functions.ps1) that
+                    # reads via DIRECT null-safe member access - the real Az SDK Deployment type does not
+                    # surface its CLR properties as adapted PSObject members, so PSObject.Properties['Name']
+                    # is absent while $Dep.Name works, and the earlier membership-gated read skipped every
+                    # real deployment ("none resolved a usable name" -> zero token rows on live data).
+                    $FtDeployModelMap = Get-RdaFoundryDeploymentModelMap -Deployments $FtDeployments
+
+                    if ($FtDeployModelMap.Count -eq 0)
+                    {
+                        Write-Log -Message ("Foundry tokens: account {0} in {1} exposed deployments but none resolved a usable name. Skipping it." -f $Account.AccountName, $sub.Name) -Severity 'Warning'
+                        continue
+                    }
+
+                    # --- TOKEN METRICS: one Get-AzMetric per metric on the ACCOUNT, split per model ---
+                    # Collect priced + fidelity metrics into per-model buckets keyed by ModelDeploymentName.
+                    # $FtModelBuckets[<deployName>] = @{ Priced = @{ metric = total }; Fidelity = @{ metric = total } }
+                    $FtModelBuckets = @{}
+                    $AllMetricNames = @($FtTokenMetricNames + $FtFidelityMetricNames)
+                    # A dimension-split metric query returns at most -Top series, and Azure Monitor
+                    # defaults that to 10. Ask for at least one per deployment so an account with more
+                    # than 10 deployments is not silently cut short.
+                    $FtSeriesTop = [Math]::Max(10, @($FtDeployments).Count)
+                    foreach ($MetricName in $AllMetricNames)
+                    {
+                        $FtAccountResult.Metrics[$MetricName] = 'Failed'
+                        $FtMetricOutcome = @{}
+                        $MetricResult = Invoke-RdaFoundryTokenMetricQuery -AccountResourceId $AccountId -MetricName $MetricName -StartTime $FtStartTime -EndTime $FtEndTime -SubName $sub.Name -Top $FtSeriesTop -Outcome $FtMetricOutcome
+                        if ($FtMetricOutcome.ContainsKey('Status')) { $FtAccountResult.Metrics[$MetricName] = $FtMetricOutcome['Status'] }
+                        if ($null -eq $MetricResult) { continue }
+
+                        $PerModel = @(Get-RdaFoundryTokenSeriesTotals -MetricResult $MetricResult -DimensionName 'ModelDeploymentName')
+                        foreach ($ModelTotal in $PerModel)
+                        {
+                            $DeployName = $ModelTotal.ModelDeploymentName
+                            if ([string]::IsNullOrWhiteSpace($DeployName)) { continue }
+                            if (-not $FtAccountResult.Totals.ContainsKey($DeployName)) { $FtAccountResult.Totals[$DeployName] = @{} }
+                            $FtAccountResult.Totals[$DeployName][$MetricName] = $ModelTotal.Total
+                            if (-not $FtModelBuckets.ContainsKey($DeployName)) { $FtModelBuckets[$DeployName] = @{ Priced = @{}; Fidelity = @{} } }
+                            if ($FtFidelityMetricNames -contains $MetricName)
+                            {
+                                $FtModelBuckets[$DeployName].Fidelity[$MetricName] = $ModelTotal.Total
+                            }
+                            else
+                            {
+                                $FtModelBuckets[$DeployName].Priced[$MetricName] = $ModelTotal.Total
+                            }
+                        }
+                    }
+
+                    # --- Shape one folded row per (account, model, role) that has a non-zero token total ---
+                    foreach ($DeployName in $FtModelBuckets.Keys)
+                    {
+                        # Resolve the model identity for MeterName; fall back to the deployment name.
+                        $ModelName = if ($FtDeployModelMap.ContainsKey($DeployName)) { $FtDeployModelMap[$DeployName] } else { $DeployName }
+                        $Bucket = $FtModelBuckets[$DeployName]
+                        $Fidelity = $Bucket.Fidelity
+
+                        $RowsForModel = 0
+                        $RoleAgg = [ordered]@{}
+                        foreach ($MetricName in $Bucket.Priced.Keys)
+                        {
+                            $RoleInfo = Get-RdaFoundryTokenRole -MetricName $MetricName
+                            if ($null -eq $RoleInfo) { continue }
+                            $TokenQty = [double]$Bucket.Priced[$MetricName]
+                            if (-not $RoleAgg.Contains($RoleInfo.Role))
+                            {
+                                $RoleAgg[$RoleInfo.Role] = @{ MeterWord = $RoleInfo.MeterWord; Quantity = 0.0; Sources = @() }
+                            }
+                            $RoleAgg[$RoleInfo.Role].Quantity += $TokenQty
+                            $RoleAgg[$RoleInfo.Role].Sources += $MetricName
+                        }
+
+                        foreach ($RoleKey in $RoleAgg.Keys)
+                        {
+                            $RoleEntry = $RoleAgg[$RoleKey]
+                            $TokenQty = [double]$RoleEntry.Quantity
+                            # Skip a zero-token role: it is not usage, and emitting it would clutter the
+                            # CSV with priceless rows. A model with NO non-zero role is logged below.
+                            if ($TokenQty -le 0) { continue }
+
+                            $Folded = ConvertTo-RdaFoldedFoundryTokenRow `
+                                -AccountResourceId $AccountId `
+                                -ModelName $ModelName `
+                                -RoleMeterWord $RoleEntry.MeterWord `
+                                -Role $RoleKey `
+                                -TokenQuantity $TokenQty `
+                                -SourceMetricName ($RoleEntry.Sources -join '+') `
+                                -AccountLocation $AccountLocation `
+                                -UsageStartTime $FtStartTime `
+                                -UsageEndTime $FtEndTime `
+                                -TotalTokens $(if ($Fidelity.ContainsKey('TotalTokens')) { $Fidelity['TotalTokens'] } else { $null }) `
+                                -ModelRequests $(if ($Fidelity.ContainsKey('ModelRequests')) { $Fidelity['ModelRequests'] } else { $null }) `
+                                -TotalCalls $(if ($Fidelity.ContainsKey('TotalCalls')) { $Fidelity['TotalCalls'] } else { $null }) `
+                                -Obfuscate:$Obfuscate.IsPresent `
+                                -UriKeyedNameDictionary $Global:ResourceIdDictionary `
+                                -SubCache $script:FoundryTokenSubCache `
+                                -RgCache $script:FoundryTokenRgCache `
+                                -NameCache $script:FoundryTokenNameCache
+                            $null = $FtFoldExport.Add($Folded)
+                            $RowsForModel++
+                        }
+
+                        if ($RowsForModel -eq 0)
+                        {
+                            # CONFIRMED ZERO for this model: the account + deployment exist and the token
+                            # metrics were queried, but every per-role total was zero. This is expected
+                            # when a model is deployed but not yet used, or when metrics lag ingestion -
+                            # distinct from a failure. Logged, not folded.
+                            Write-Log -Message ("Foundry tokens: model '{0}' (deployment '{1}') on account {2} in {3} has zero token usage in the window (deployed but unused, or metrics lag). Confirmed zero - not a failure." -f $ModelName, $DeployName, $Account.AccountName, $sub.Name) -Severity 'Info'
+                        }
+                    }
+                }
+                catch
+                {
+                    # This ONE account failed unexpectedly. Isolate it: log a confirmed per-account
+                    # skip with the reason and CONTINUE to the next account. The subscription's phase
+                    # (and any healthy sibling account in the same subscription) is unaffected.
+                    $AcctLabel = if ($null -ne $Account -and $Account.AccountName) { $Account.AccountName } else { '(unknown account)' }
+                    Write-Log -Message ("Foundry tokens: account {0} in {1} failed unexpectedly and was skipped ({2}). Other accounts in this subscription are still collected; this is an isolated per-account skip, not a phase/run abort." -f $AcctLabel, $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    continue
+                }
+            }
+
+            # --- Append this subscription's folded token rows onto the SAME Consumption CSV ---
+            if ($FtFoldExport.Count -gt 0)
+            {
+                $FtFoldExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                $Global:FoundryTokenRecordCount += $FtFoldExport.Count
+                $script:FoundryTokenRecordsThisRun += $FtFoldExport.Count
+                Write-Log -Message ("Foundry tokens: appended {0} per-model token row(s) for {1} to the Consumption CSV as 'Foundry Models' rows." -f $FtFoldExport.Count, $sub.Name) -Severity 'Info'
+            }
+        }
+
+        # HONEST NEGATIVE. Zero rows across the run is either "no Foundry accounts anywhere" or
+        # "accounts exist but no token usage / metrics lag" - both confirmed zeros (the ARM discovery
+        # + metric queries ran), NOT a skipped or failed section. Keyed on the per-invocation values.
+        if ($script:FoundryTokenRecordsThisRun -eq 0 -and $script:FoundryTokenFailedSubsThisRun -eq 0)
+        {
+            if ($script:FoundryTokenAccountsSeenThisRun -eq 0)
+            {
+                Write-Log -Message ('Foundry tokens: 0 rows collected - no Azure AI / Cognitive Services accounts were found in the subscription(s) in scope for this run. This is a CONFIRMED ZERO (ARM discovery ran), NOT a skipped/failed section.') -Severity 'Info'
+            }
+            else
+            {
+                Write-Log -Message ("Foundry tokens: 0 rows collected across {0} Cognitive Services account(s) found - the accounts exist but reported no per-model token usage in the window (models unused, or Azure Monitor metrics lag). This is a CONFIRMED ZERO (accounts discovered and token metrics queried), NOT a skipped/failed section." -f $script:FoundryTokenAccountsSeenThisRun) -Severity 'Info'
+            }
+        }
+    }
+
+    function Invoke-RdaFoundryTokenMetricQuery
+    {
+        # Runs ONE Get-AzMetric call for a single Foundry token metric on a Cognitive Services
+        # account, split per model via the ModelDeploymentName dimension, wrapped in the SAME
+        # retry / Retry-After / denial / auth-expiry envelope the consumption + Marketplace loops
+        # use. Returns the raw Get-AzMetric result (parsed by Get-RdaFoundryTokenSeriesTotals) or
+        # $null when the metric could not be collected (denied / permanently failed / exhausted).
+        #
+        # It is a nested helper (not a pure function) because it makes the live Azure call and owns
+        # the retry loop; the PURE dimension parsing it feeds is Get-RdaFoundryTokenSeriesTotals,
+        # which is what the offline tests exercise.
+        #
+        # -Top raises Azure Monitor's default cap of 10 series for the dimension split; it is only
+        # sent when above 10, so the request for an account with 10 or fewer deployments is
+        # unchanged. -Outcome, when given, receives Status = 'Collected', 'Denied' or 'NotSupported'
+        # for the calls that return; a call that throws after its retries leaves it unset.
+        param(
+            [Parameter(Mandatory = $true)][string]$AccountResourceId,
+            [Parameter(Mandatory = $true)][string]$MetricName,
+            [Parameter(Mandatory = $true)]$StartTime,
+            [Parameter(Mandatory = $true)]$EndTime,
+            [string]$SubName = '',
+            [int]$Top = 10,
+            [hashtable]$Outcome = $null
+        )
+
+        $FtMaxRetries = 5
+        $FtAttempt = 0
+        $FtAuthRefreshedThisCall = $false
+        while ($true)
+        {
+            try
+            {
+                # -MetricFilter "ModelDeploymentName eq '*'" requests the per-model breakdown (the
+                # verified dimension). AggregationType Total over the window gives the per-model token
+                # total. WarningAction SilentlyContinue keeps Azure Monitor's "metric not found for
+                # this resource" noise off the console - a model/account with no data returns empty.
+                $FtArgs = @{
+                    ResourceId      = $AccountResourceId
+                    MetricName      = $MetricName
+                    StartTime       = $StartTime
+                    EndTime         = $EndTime
+                    AggregationType = 'Total'
+                    MetricFilter    = "ModelDeploymentName eq '*'"
+                    ErrorAction     = 'Stop'
+                    WarningAction   = 'SilentlyContinue'
+                }
+                if ($Top -gt 10) { $FtArgs['Top'] = $Top }
+                $FtMetricResult = Get-AzMetric @FtArgs
+                if ($null -ne $Outcome) { $Outcome['Status'] = 'Collected' }
+                return $FtMetricResult
+            }
+            catch
+            {
+                if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                {
+                    Write-Log -Message ("Foundry tokens: metric '{0}' DENIED for {1}: {2}. Authorization failure (needs Monitoring Reader on the account), not transient - not retried." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Warning'
+                    if ($null -ne $Outcome) { $Outcome['Status'] = 'Denied' }
+                    return $null
+                }
+
+                # PERMANENT (non-retryable) request error, e.g. HTTP 400 / BadRequest "this metric is
+                # not valid for this resource". Not every account supports every token metric; a 400
+                # will never succeed on retry, so skip THIS metric immediately (log once) instead of
+                # burning the retry budget on a pointless storm. Only genuinely transient errors below
+                # (throttle/timeout) are retried. Mirrors Extension/Metrics.ps1's permanent/transient
+                # split; the classifier is the pure, unit-tested Test-RdaFoundryMetricPermanentFailure.
+                if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $_.Exception.Message)
+                {
+                    Write-Log -Message ("Foundry tokens: metric '{0}' not supported for this account in {1} ({2}). Skipping this metric (permanent - not retried); other metrics on this account still collected." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Info'
+                    if ($null -ne $Outcome) { $Outcome['Status'] = 'NotSupported' }
+                    return $null
+                }
+
+                if ((-not $FtAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
+                {
+                    $FtAuthRefreshedThisCall = $true
+                    Write-Log -Message ("Foundry tokens: metric '{0}' for {1} failed with an expired/invalid token: {2}. Attempting Azure re-authentication before retrying." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Warning'
+                    $null = Test-DataPlaneAuthReady -Phase 'FoundryTokens'
+                    # NOTE: the caller has already pinned the context to this subscription; a reconnect
+                    # can move it, so it is re-pinned by the caller's next-metric loop iteration only
+                    # if it fully fails. Here we simply retry; a wrong-context read would return this
+                    # account's own (empty) data, not another sub's, because the ResourceId is absolute.
+                }
+
+                $FtAttempt++
+                if ($FtAttempt -gt $FtMaxRetries) { throw }
+
+                $FtThrottled = $_.Exception.Message -match 'TooManyRequests|\b429\b|throttl|rate limit'
+                $FtRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_
+                if ($FtRetryAfter -gt 0)
+                {
+                    $FtBackoffSeconds = [math]::Min($FtRetryAfter, 120)
+                }
+                else
+                {
+                    $FtBackoffSeconds = [math]::Min([math]::Pow(2, $FtAttempt), 60)
+                    if ($FtThrottled) { $FtBackoffSeconds = [math]::Min($FtBackoffSeconds * 2, 120) }
+                }
+                $FtBackoffSeconds = [math]::Round($FtBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
+                $FtMarker = if ($FtRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($FtThrottled) { ', throttled' } else { '' }
+                Write-Log -Message ("Foundry tokens: metric '{0}' failed for {1} (attempt {2}/{3}{4}): {5}. Retrying in {6}s..." -f $MetricName, $SubName, $FtAttempt, $FtMaxRetries, $FtMarker, $_.Exception.Message, $FtBackoffSeconds) -Severity 'Warning'
+                Start-Sleep -Seconds $FtBackoffSeconds
+            }
+        }
+    }
+
+    function GetFoundryModelCoverage()
+    {
+        # ADDITIVE Azure AI Foundry model billing-plane coverage collector.
+        #
+        # WHY THIS EXISTS. A downstream server-side pricing pipeline ingests ONLY the Azure
+        # Retail Prices API. Microsoft splits Foundry models across TWO independent billing
+        # planes: "sold directly by Azure" (billed on Azure meters -> appears in Retail
+        # Prices -> priced fine) and "from partners/community" (billed through Azure
+        # Marketplace - for Claude via Claude Consumption Units / CCU - NOT in Retail
+        # Prices). A Marketplace-only model was therefore SILENTLY DROPPED: no Azure cost,
+        # no AWS mapping, and (the real bug) NO WARNING. The split is PER MODEL, not per
+        # vendor, so a vendor can look "covered" while one SKU vanishes. This phase probes
+        # BOTH planes per deployed model and emits an explicit coverage flag so a
+        # Marketplace-only or entirely-uncovered model is NEVER silently dropped again.
+        #
+        # COLLECTION AND HANDOFF ONLY. This does NOT price anything and does NOT map to AWS
+        # - it collects the Azure-side signal (what is deployed, which plane covers each,
+        # and whatever usage was collectable) and hands it to the server pricing team.
+        #
+        # RELATIONSHIP TO THE MARKETPLACE COLLECTOR. GetMarketplaceConsumption (above)
+        # answers "what Marketplace/CCU dollars were billed"; this phase answers "what
+        # models are deployed and which plane covers each", then JOINS the Marketplace rows
+        # back to deployed models where possible. It performs its OWN per-subscription
+        # Get-AzConsumptionMarketplace probe (scoped to the subscription context inside this
+        # phase's loop), independent of GetMarketplaceConsumption. Both reads are idempotent
+        # billing-plane reads, so the extra call is safe; the two phases are not coupled.
+        #
+        # SOURCE OF TRUTH for "what is deployed" (the design spec section 3.2, verified live): the ARM
+        # per-account deployments list. Resource Graph indexes the deployment resource SHELL
+        # but returns EMPTY name/properties.model, so Graph is used ONLY to enumerate the
+        # CognitiveServices accounts; each account's deployments are then read via ARM.
+        #
+        # GRACEFUL DEGRADATION (the design spec section 10). Every probe fails loud-and-local, never
+        # silently. UNPRICED is emitted ONLY when BOTH planes were successfully probed and
+        # BOTH came back negative; any probe failure yields an Unknown-<reason> status, so a
+        # probe gap never masquerades as a confirmed coverage gap (no-overclaiming).
+
+        $DebugPreference = "SilentlyContinue"
+
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
+
+        if ($null -eq $Global:FoundryCoverageRecordCount) { $Global:FoundryCoverageRecordCount = 0 }
+        if ($null -eq $Global:FoundryCoverageFailedSubs) { $Global:FoundryCoverageFailedSubs = @() }
+        if ($null -eq $Global:FoundryCoverageUnpricedCount) { $Global:FoundryCoverageUnpricedCount = 0 }
+        if ($null -eq $script:FoundryCoverageRecordsThisRun) { $script:FoundryCoverageRecordsThisRun = 0 }
+
+        $DeploymentsApiVersion = '2024-10-01'  # single named constant; a future bump is one edit (the design spec section 3.3)
+        $ProbeWindowStart = (Get-Date).AddDays(-31).Date
+        $ProbeWindowEnd = (Get-Date).AddDays(-1).Date
+        $RunTimestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+
+        if (-not (Test-DataPlaneAuthReady -Phase 'FoundryModelCoverage'))
+        {
+            Write-Log -Message ('FoundryModelCoverage: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. The rest of the inventory will continue.') -Severity 'Error'
+            $Global:FoundryCoverageFailedSubs += [pscustomobject]@{
+                Name             = '(all subscriptions)'
+                Id               = '(auth)'
+                Message          = 'FoundryModelCoverage phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Complete         = $false
+                RecordsCollected = 0
+            }
+            return
+        }
+
+        # Token columns come from the Tier 2 token phase (GetFoundryTokenConsumption), which runs just
+        # before this one; this phase makes no Azure Monitor calls of its own. When the token phase did
+        # not run, every deployment row says TokenProbeStatus NotRun - say so once, here.
+        $FcTokenPhaseState = if ($script:FoundryTokenPhaseState) { [string]$script:FoundryTokenPhaseState } else { 'NotRun' }
+        if ($FcTokenPhaseState -eq 'NotRun')
+        {
+            Write-Log -Message ('FoundryModelCoverage: the token columns are not filled in this run (TokenProbeStatus NotRun). They come from the Foundry token phase, which did not run (-SkipMetrics or -SkipFoundryTokens).') -Severity 'Info'
+        }
+
+        # Retail Prices catalog is GLOBAL + unauthenticated (the design spec section 4.1): pull the
+        # 'Foundry Models' service catalog ONCE per run and cache it. A network failure
+        # here is not fatal - it makes the Azure-metered axis INDETERMINATE (never UNPRICED).
+        $RetailCatalog = $null
+        $RetailProbed = $false
+        try
+        {
+            $RetailCatalog = @(Get-RdaFoundryRetailCatalog)
+            $RetailProbed = $RetailCatalog.Count -gt 0
+            if ($RetailProbed)
+            {
+                Write-Log -Message ("FoundryModelCoverage: pulled {0} Retail Prices catalog item(s) for serviceName 'Foundry Models'." -f $RetailCatalog.Count) -Severity 'Info'
+            }
+            else
+            {
+                Write-Log -Message ("FoundryModelCoverage: the Retail Prices catalog for serviceName 'Foundry Models' returned zero items on a successful call. The Azure-metered axis will be marked INDETERMINATE (never UNPRICED) for this run.") -Severity 'Warning'
+            }
+        }
+        catch
+        {
+            Write-Log -Message ("FoundryModelCoverage: Retail Prices catalog could not be read ({0}). The Azure-metered axis will be marked INDETERMINATE (never UNPRICED) for this run." -f $_.Exception.Message) -Severity 'Warning'
+        }
+
+        # Shared obfuscation dictionary views (same derivation as the Marketplace collector).
+        $script:FoundrySubGuidTokenMap = $null
+        $script:FoundryRgTokenMap = $null
+        if ($Obfuscate.IsPresent)
+        {
+            $script:FoundrySubGuidTokenMap = @{}
+            if ($null -ne $Global:ResourceSubscriptionDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceSubscriptionDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/subscriptions/([^/]+)')
+                    {
+                        $ShGuid = $Matches[1]
+                        if (-not $script:FoundrySubGuidTokenMap.ContainsKey($ShGuid)) { $script:FoundrySubGuidTokenMap[$ShGuid] = $Global:ResourceSubscriptionDictionary[$ShKey] }
+                    }
+                }
+            }
+            $script:FoundryRgTokenMap = @{}
+            if ($null -ne $Global:ResourceResourceGroupDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceResourceGroupDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/resourcegroups/([^/]+)')
+                    {
+                        $ShRg = $Matches[1]
+                        if (-not $script:FoundryRgTokenMap.ContainsKey($ShRg)) { $script:FoundryRgTokenMap[$ShRg] = $Global:ResourceResourceGroupDictionary[$ShKey] }
+                    }
+                }
+            }
+            if (-not $script:FoundrySubCache) { $script:FoundrySubCache = @{} }
+            if (-not $script:FoundryRgCache) { $script:FoundryRgCache = @{} }
+            if (-not $script:FoundryNameCache) { $script:FoundryNameCache = @{} }
+        }
+
+        foreach ($sub in $Global:Subscriptions)
+        {
+            if (![string]::IsNullOrEmpty($SubscriptionID))
+            {
+                if ($SubscriptionID -ne $sub.Id)
+                {
+                    Write-Log -Message ("Skipping (FoundryModelCoverage): {0}" -f $sub.Name) -Severity 'Info'
+                    continue
+                }
+            }
+
+            $FcContextOk = $false
+            $FcContextSwitchError = $null
+            try
+            {
+                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $FcContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+            }
+            catch { $FcContextSwitchError = $_.Exception.Message }
+
+            if (-not $FcContextOk)
+            {
+                $SkipMessage = ("FoundryModelCoverage SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped rather than reporting zero deployed models." -f $(if ($FcContextSwitchError) { " ($FcContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                Write-Log -Message ("FoundryModelCoverage: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
+                $Global:FoundryCoverageFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $SkipMessage; Complete = $false; RecordsCollected = 0 }
+                continue
+            }
+
+            Write-Log -Message ("Assessing Foundry model billing-plane coverage for: {0}" -f $sub.Name) -Severity 'Info'
+
+            $FcRecordsThisSub = 0
+            $FcFailedThisSub = $false
+            $FcFailureMessage = $null
+            $FcTokenSubFailed = ($null -ne $script:FoundryTokenFailedSubIds -and $script:FoundryTokenFailedSubIds.ContainsKey("$($sub.id)"))
+
+            try
+            {
+                # 1. Enumerate CognitiveServices accounts (Graph preferred; RDA already has
+                #    Search-AzGraph plumbing). Graph is only used to LIST accounts here - never
+                #    to read deployment model detail (the design spec section 3.2).
+                $Accounts = @()
+                try
+                {
+                    $AccountsResult = Invoke-AzGraphQuerySafe -Subscription @($sub.id) -Query @"
+resources
+| where type =~ 'microsoft.cognitiveservices/accounts'
+| project id, name, kind, sku, location, resourceGroup, subscriptionId
+"@
+                    $Accounts = @($AccountsResult.data)
+                }
+                catch
+                {
+                    # ARM accounts-list fallback (the design spec section 3.3, verified HTTP 200).
+                    Write-Log -Message ("FoundryModelCoverage: Resource Graph account enumeration failed for {0} ({1}); falling back to the ARM accounts-list." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    $ArmAcctResp = Invoke-AzRestMethod -Method GET -Path ("/subscriptions/{0}/providers/Microsoft.CognitiveServices/accounts?api-version={1}" -f $sub.id, $DeploymentsApiVersion) -ErrorAction Stop
+                    if ($ArmAcctResp.StatusCode -ge 400) { throw ("ARM accounts-list returned HTTP {0}: {1}" -f $ArmAcctResp.StatusCode, $ArmAcctResp.Content) }
+                    $Accounts = @((($ArmAcctResp.Content | ConvertFrom-Json).value) | ForEach-Object {
+                            [pscustomobject]@{ id = $_.id; name = $_.name; kind = $_.kind; sku = $_.sku; location = $_.location; resourceGroup = ($_.id -replace '(?i)^/subscriptions/[^/]+/resourcegroups/([^/]+)/.*$', '$1'); subscriptionId = $sub.id }
+                        })
+                }
+
+                # Probe the Marketplace plane ONCE for this subscription (the design spec section 5). A
+                # denial makes the Marketplace axis INDETERMINATE for every model in this sub
+                # (never UNPRICED) rather than falsely calling models UNPRICED.
+                $MarketplaceRows = @()
+                $MarketplaceProbed = $true
+                $MarketplaceDeniedReason = $null
+                try
+                {
+                    $MarketplaceRows = @(Get-AzConsumptionMarketplace -StartDate $ProbeWindowStart -EndDate $ProbeWindowEnd -ErrorAction Stop)
+                }
+                catch
+                {
+                    $MarketplaceProbed = $false
+                    if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                    {
+                        $MarketplaceDeniedReason = 'MarketplaceDenied'
+                        Write-Log -Message ("FoundryModelCoverage: Marketplace plane DENIED for {0}: {1}. Models will be marked Unknown-MarketplaceDenied (NOT UNPRICED). Grant Cost Management Reader and re-run." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    }
+                    else
+                    {
+                        $MarketplaceDeniedReason = 'MarketplaceProbeFailed'
+                        Write-Log -Message ("FoundryModelCoverage: Marketplace plane probe failed for {0}: {1}. Models will be marked Unknown-MarketplaceProbeFailed (NOT UNPRICED)." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    }
+                }
+
+                $ExportRows = [System.Collections.ArrayList]::new()
+                $MatchedMarketplaceRows = [System.Collections.Generic.HashSet[string]]::new()
+
+                foreach ($acct in $Accounts)
+                {
+                    # 2. List deployments per account via ARM (authoritative; the design spec section 3.3).
+                    $Deployments = @()
+                    try
+                    {
+                        $DepResp = Invoke-AzRestMethod -Method GET -Path ($acct.id + '/deployments?api-version=' + $DeploymentsApiVersion) -ErrorAction Stop
+                        if ($DepResp.StatusCode -ge 400) { throw ("ARM deployments-list returned HTTP {0}" -f $DepResp.StatusCode) }
+                        $Deployments = @(($DepResp.Content | ConvertFrom-Json).value)
+                    }
+                    catch
+                    {
+                        Write-Log -Message ("FoundryModelCoverage: could not list deployments for account {0} ({1}); recording an account-level probe failure rather than assuming zero deployments." -f $acct.name, $_.Exception.Message) -Severity 'Warning'
+                        # Do NOT report zero deployed models - emit a probe-failure marker row.
+                        $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record ([pscustomobject]@{
+                                        SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = $acct.resourceGroup; AccountName = $acct.name; AccountId = $acct.id
+                                        AccountKind = "$($acct.kind)"; DeploymentName = '(deployments not enumerated)'; ModelName = ''; ModelFormat = ''; ModelVersion = ''
+                                        DeploymentSku = ''; DeploymentCapacity = ''; Region = "$($acct.location)"; DetectedPlanes = 'None'
+                                        CoverageStatus = 'Unknown-DeploymentsNotEnumerated'; CoverageFlag = ('Coverage INDETERMINATE: the account''s deployments could not be listed ({0}). NOT declared UNPRICED.' -f $_.Exception.Message)
+                                        RetailPriceMatch = '(not probed)'; MarketplacePublisher = ''; MarketplaceOffer = ''; CcuQuantity = ''; CcuUnitOfMeasure = ''; MarketplacePretaxCost = ''; MarketplaceCurrency = ''; CcuAttribution = ''
+                                        TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
+                                        ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                                        TokenProbeStatus = 'NotApplicable'
+                                    }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
+                        continue
+                    }
+
+                    # What the token phase collected for this account, if anything (see above).
+                    $FcAccountTokenResult = $null
+                    if ($null -ne $script:FoundryTokenResults -and $script:FoundryTokenResults.ContainsKey("$($acct.id)")) { $FcAccountTokenResult = $script:FoundryTokenResults["$($acct.id)"] }
+
+                    foreach ($d in $Deployments)
+                    {
+                        $Model = [pscustomobject]@{
+                            SubscriptionGuid = $sub.id
+                            SubscriptionName = $sub.Name
+                            ResourceGroup    = $acct.resourceGroup
+                            AccountName      = $acct.name
+                            AccountId        = $acct.id
+                            AccountKind      = "$($acct.kind)"
+                            DeploymentName   = "$($d.name)"
+                            ModelName        = "$($d.properties.model.name)"
+                            ModelFormat      = "$($d.properties.model.format)"
+                            ModelVersion     = "$($d.properties.model.version)"
+                            DeploymentSku    = "$($d.sku.name)"
+                            DeploymentCapacity = "$($d.sku.capacity)"
+                            Region           = "$($acct.location)"
+                        }
+
+                        # 3a. Azure-metered plane: confident per-model Retail Prices match.
+                        $RetailMatch = Test-RdaRetailPriceMatch -Model $Model -CatalogItems $RetailCatalog
+                        $AzureMetered = [bool]$RetailMatch.Matched
+
+                        # 3b. Marketplace plane.
+                        $MpMatch = Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $MarketplaceRows
+                        $MarketplaceCovered = [bool]$MpMatch.Matched
+
+                        $Coverage = Get-RdaFoundryCoverageStatus -AzureMetered $AzureMetered -MarketplaceCovered $MarketplaceCovered -RetailProbed $RetailProbed -MarketplaceProbed $MarketplaceProbed -MarketplaceDeniedReason $MarketplaceDeniedReason
+
+                        $DetectedPlanes = @()
+                        if ($AzureMetered) { $DetectedPlanes += 'AzureMetered' }
+                        if ($MarketplaceCovered) { $DetectedPlanes += 'Marketplace' }
+                        if ($DetectedPlanes.Count -eq 0) { $DetectedPlanes = @('None') }
+
+                        $MpRow = $MpMatch.Row
+                        if ($null -ne $MpRow -and -not [string]::IsNullOrEmpty("$($MpRow.InstanceId)")) { $null = $MatchedMarketplaceRows.Add("$($MpRow.InstanceId)|$($MpRow.MeterId)") }
+
+                        if ($Coverage.CoverageStatus -eq 'UNPRICED') { $Global:FoundryCoverageUnpricedCount++ }
+
+                        # 4. Token usage for this deployment, taken from the token phase's results for
+                        #    its account (Get-RdaFoundryCoverageTokenFields). A Marketplace/partner
+                        #    deployment with no token metrics is EXPECTED, not an error.
+                        $TokenFields = Get-RdaFoundryCoverageTokenFields -TokenPhaseState $FcTokenPhaseState -AccountResult $FcAccountTokenResult -SubscriptionFailed $FcTokenSubFailed -DeploymentName $Model.DeploymentName
+
+                        $Record = [pscustomobject]@{
+                            SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = $acct.resourceGroup; AccountName = $acct.name; AccountId = $acct.id
+                            AccountKind = $Model.AccountKind; DeploymentName = $Model.DeploymentName; ModelName = $Model.ModelName; ModelFormat = $Model.ModelFormat; ModelVersion = $Model.ModelVersion
+                            DeploymentSku = $Model.DeploymentSku; DeploymentCapacity = $Model.DeploymentCapacity; Region = $Model.Region
+                            DetectedPlanes = ($DetectedPlanes -join '+'); CoverageStatus = $Coverage.CoverageStatus; CoverageFlag = $Coverage.CoverageFlag; RetailPriceMatch = $RetailMatch.RetailMatch
+                            MarketplacePublisher = $(if ($MarketplaceCovered) { "$($MpRow.PublisherName)" } else { '' })
+                            MarketplaceOffer = $(if ($MarketplaceCovered) { "$($MpRow.OfferName)" } else { '' })
+                            CcuQuantity = $(if ($MarketplaceCovered) { $MpRow.ConsumedQuantity } else { '' })
+                            CcuUnitOfMeasure = $(if ($MarketplaceCovered) { "$($MpRow.UnitOfMeasure)" } else { '' })
+                            MarketplacePretaxCost = $(if ($MarketplaceCovered) { $MpRow.PretaxCost } else { '' })
+                            MarketplaceCurrency = $(if ($MarketplaceCovered) { "$($MpRow.Currency)" } else { '' })
+                            CcuAttribution = $(if ($MarketplaceCovered) { $MpMatch.CcuAttribution } else { '' })
+                            TokenMetricsPresent = $TokenFields.TokenMetricsPresent; InputTokens = $TokenFields.InputTokens; OutputTokens = $TokenFields.OutputTokens; TotalTokens = $TokenFields.TotalTokens
+                            ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                            TokenProbeStatus = $TokenFields.TokenProbeStatus
+                        }
+
+                        $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
+                    }
+                }
+
+                # 3c. Unattributed Marketplace/CCU rows: a Claude/partner CCU line that could
+                #     NOT be tied to any deployed model (deleted deployment, or a sub the
+                #     identity could not fully enumerate). Emit a synthetic row so the DOLLARS
+                #     are never dropped (the design spec section 9 anti-silent-drop guarantee). Only rows
+                #     whose offer names a KNOWN Foundry model vendor are surfaced. The match
+                #     is on precise, multi-character vendor discriminators (the model-format
+                #     vendors from the design spec section 4.2 plus the 'foundry' service token) - NOT a
+                #     bare 'ai' token, which is far too common a substring and would sweep in
+                #     unrelated Marketplace SaaS charges as false model coverage gaps.
+                foreach ($MpRow in $MarketplaceRows)
+                {
+                    if ($null -eq $MpRow) { continue }
+                    $Key = "$($MpRow.InstanceId)|$($MpRow.MeterId)"
+                    if ($MatchedMarketplaceRows.Contains($Key)) { continue }
+                    $OfferTokens = @(Get-RdaFoundryModelMatchTokens -Value ("$($MpRow.PublisherName) $($MpRow.OfferName) $($MpRow.PlanName)"))
+                    $LooksLikeModelVendor = @($OfferTokens | Where-Object { $_ -in @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry') }).Count -gt 0
+                    if (-not $LooksLikeModelVendor) { continue }
+
+                    $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record ([pscustomobject]@{
+                                    SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = "$($MpRow.ResourceGroup)"; AccountName = ''; AccountId = ''
+                                    AccountKind = ''; DeploymentName = '(unattributed Marketplace/CCU charge)'; ModelName = ''; ModelFormat = ''; ModelVersion = ''
+                                    DeploymentSku = ''; DeploymentCapacity = ''; Region = ''; DetectedPlanes = 'Marketplace'
+                                    CoverageStatus = 'MarketplaceOnly'; CoverageFlag = 'Marketplace/CCU charge that could NOT be tied to a deployed model in this subscription; carried so the billed dollars are not dropped.'
+                                    RetailPriceMatch = '(n/a - unattributed Marketplace charge)'
+                                    MarketplacePublisher = "$($MpRow.PublisherName)"; MarketplaceOffer = "$($MpRow.OfferName)"; CcuQuantity = $MpRow.ConsumedQuantity; CcuUnitOfMeasure = "$($MpRow.UnitOfMeasure)"; MarketplacePretaxCost = $MpRow.PretaxCost; MarketplaceCurrency = "$($MpRow.Currency)"; CcuAttribution = 'AggregatedOffer'
+                                    TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
+                                    ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                                    TokenProbeStatus = 'NotApplicable'
+                                }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
+                }
+
+                if ($ExportRows.Count -gt 0)
+                {
+                    $ExportRows | Select-Object SubscriptionGuid, SubscriptionName, ResourceGroup, AccountName, AccountKind, DeploymentName, ModelName, ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region, DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch, MarketplacePublisher, MarketplaceOffer, CcuQuantity, CcuUnitOfMeasure, MarketplacePretaxCost, MarketplaceCurrency, CcuAttribution, TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens, ProbeWindowStart, ProbeWindowEnd, RunTimestampUtc, TokenProbeStatus | Export-Csv -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8 -Append -NoTypeInformation
+                }
+
+                $FcRecordsThisSub = $ExportRows.Count
+                Write-Log -Message ("FoundryModelCoverage records for {0}: {1} (deployed-model + coverage-gap rows)." -f $sub.Name, $FcRecordsThisSub) -Severity 'Info'
+            }
+            catch
+            {
+                $FcFailedThisSub = $true
+                $FcFailureMessage = ("{0} (this subscription's Foundry coverage assessment is INCOMPLETE)" -f $_.Exception.Message)
+                Write-Log -Message ("FoundryModelCoverage failed for {0}: {1}" -f $sub.Name, $FcFailureMessage) -Severity 'Warning'
+            }
+
+            $Global:FoundryCoverageRecordCount += $FcRecordsThisSub
+            $script:FoundryCoverageRecordsThisRun += $FcRecordsThisSub
+            if ($FcFailedThisSub)
+            {
+                $Global:FoundryCoverageFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $FcFailureMessage; Complete = $false; RecordsCollected = $FcRecordsThisSub }
+            }
+        }
+
+        # HONEST NEGATIVES (the design spec section 9). Zero deployed Foundry models is a CONFIRMED ZERO
+        # (accounts were enumerated and none held deployments), NOT a silently-missing
+        # section - log it explicitly so an empty file reads as "verified none".
+        if ($Global:FoundryCoverageRecordCount -eq 0 -and ($Global:FoundryCoverageFailedSubs | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
+        {
+            Write-Log -Message ('FoundryModelCoverage: 0 deployed Foundry/CognitiveServices model deployments found across all in-scope subscriptions. This is a CONFIRMED ZERO - accounts were enumerated and none held model deployments. It is NOT a missing/failed section.') -Severity 'Warning'
+        }
+        if ($Global:FoundryCoverageUnpricedCount -gt 0)
+        {
+            Write-Log -Message ("FoundryModelCoverage: {0} deployed model(s) classified UNPRICED (found in NEITHER billing plane). These are LOUD coverage gaps the server pricing team must investigate - see the UNPRICED rows in the coverage CSV." -f $Global:FoundryCoverageUnpricedCount) -Severity 'Warning'
         }
     }
 
@@ -2139,6 +3101,55 @@ function ExecuteInventoryProcessing()
             GetMarketplaceConsumption
             $MarketplacePhaseTimer.Stop()
             $script:PhaseTimings['Marketplace consumption collection (billing)'] = $MarketplacePhaseTimer.Elapsed
+
+            # P1 FOUNDRY FOLD. Folds the Claude/Anthropic Marketplace rows the phase above captured
+            # into the SAME first-party Consumption_*.csv the server reads, as 'Foundry Models' rows,
+            # so Claude usage is no longer dropped server-side. Runs under the SAME gate as the
+            # Marketplace phase (only when neither -SkipConsumption nor -SkipMarketplace is set), so
+            # the fold follows the identical skip coherence. It appends to the Consumption CSV
+            # written by GetResourceConsumption above.
+            $FoundryFoldPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetFoundryFoldConsumption
+            $FoundryFoldPhaseTimer.Stop()
+            $script:PhaseTimings['Foundry fold (Claude -> Consumption CSV)'] = $FoundryFoldPhaseTimer.Elapsed
+        }
+
+        # TIER 2 FOUNDRY TOKEN COLLECTOR. Discovers Azure AI / Cognitive Services accounts + model
+        # deployments via ARM and reads per-model token metrics via Get-AzMetric, folding them into
+        # the SAME first-party Consumption_*.csv as per-(model, role) 'Foundry Models' token rows so
+        # the server can price the Azure-hosted models against Bedrock. Gated additively:
+        #   - inside this -SkipConsumption block (it writes to the Consumption CSV and needs context);
+        #   - honours -SkipMetrics (it uses Get-AzMetric, the metrics data plane / Monitoring Reader);
+        #   - skippable on its own with -SkipFoundryTokens.
+        # Independent of the Marketplace / Claude fold above (those are the CCU/Marketplace path, Tier 1).
+        if (!$SkipMetrics.IsPresent -and !$SkipFoundryTokens.IsPresent)
+        {
+            $FoundryTokenPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetFoundryTokenConsumption
+            $FoundryTokenPhaseTimer.Stop()
+            $script:PhaseTimings['Foundry token collection (per-model tokens -> Consumption CSV)'] = $FoundryTokenPhaseTimer.Elapsed
+        }
+        elseif (!$SkipFoundryTokens.IsPresent)
+        {
+            # -SkipMetrics implies no Foundry token collection: the token counts come from the metrics
+            # data plane (Get-AzMetric). Say so out loud - the operator asked to skip metrics, and the
+            # only other trace would be Foundry token rows silently missing from the Consumption CSV.
+            Write-Log -Message ('Foundry tokens: SKIPPED because -SkipMetrics was passed (per-model token counts come from the Azure Monitor metrics data plane, so -SkipMetrics implies it). This is NOT a confirmed zero - no token metric query was issued. Drop -SkipMetrics to collect Foundry per-model token usage, or pass -SkipFoundryTokens to make this explicit.') -Severity 'Warning'
+        }
+
+        # ADDITIVE Foundry model billing-plane coverage collector. Gated by the SAME
+        # -SkipConsumption switch: it needs the same billing / Cost Management Reader
+        # access to probe the Marketplace plane per subscription, and it performs its own
+        # per-subscription Get-AzConsumptionMarketplace read (independent of, and idempotent
+        # with, the Marketplace collector's). It is skipped independently with
+        # -SkipFoundryCoverage. It emits a SEPARATE FoundryModelCoverage_* output and never
+        # touches the first-party Consumption_* or Marketplace_* paths.
+        if (!$SkipFoundryCoverage.IsPresent)
+        {
+            $FoundryCoveragePhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetFoundryModelCoverage
+            $FoundryCoveragePhaseTimer.Stop()
+            $script:PhaseTimings['Foundry model coverage collection (billing-plane probe)'] = $FoundryCoveragePhaseTimer.Elapsed
         }
     }
     elseif (!$SkipMarketplace.IsPresent)
@@ -2498,7 +3509,7 @@ if ($ConsumptionCreated)
 
 if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 {
-    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
+    "AdditionalInfo,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
 }
 
 # Marketplace CSV parallels the Consumption CSV: an empty-but-present file (header only)
@@ -2524,6 +3535,29 @@ if ($SkipConsumption.IsPresent -or $SkipMarketplace.IsPresent -or !$MarketplaceC
     "PublisherName,OfferName,PlanName,OrderNumber,ConsumedService,ConsumedQuantity,UnitOfMeasure,PretaxCost,Currency,IsEstimated,MeterId,UsageStart,UsageEnd,SubscriptionGuid,SubscriptionName,ResourceGroup,InstanceId,InstanceName" | Out-File -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8
 }
 
+# FoundryModelCoverage CSV parallels the Consumption/Marketplace CSVs: an empty-but-present
+# file (header only) is written when the phase was skipped or produced no rows, so a
+# downstream consumer sees a deliberate, schema-shaped "0 coverage rows" rather than a
+# missing file. This mirrors the confirmed-zero diagnostic the collector logs.
+$FoundryCoverageCreated = Test-Path -LiteralPath $Global:FoundryCoverageFileCsv
+$FoundryCoverageEmpty = $false
+if ($FoundryCoverageCreated)
+{
+    try
+    {
+        $FoundryCoverageEmpty = ((Get-Item -LiteralPath $Global:FoundryCoverageFileCsv -ErrorAction Stop).Length -eq 0)
+    }
+    catch
+    {
+        $FoundryCoverageEmpty = $true
+    }
+}
+
+if ($SkipConsumption.IsPresent -or $SkipFoundryCoverage.IsPresent -or !$FoundryCoverageCreated -or $FoundryCoverageEmpty)
+{
+    "SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,DeploymentName,ModelName,ModelFormat,ModelVersion,DeploymentSku,DeploymentCapacity,Region,DetectedPlanes,CoverageStatus,CoverageFlag,RetailPriceMatch,MarketplacePublisher,MarketplaceOffer,CcuQuantity,CcuUnitOfMeasure,MarketplacePretaxCost,MarketplaceCurrency,CcuAttribution,TokenMetricsPresent,InputTokens,OutputTokens,TotalTokens,ProbeWindowStart,ProbeWindowEnd,RunTimestampUtc,TokenProbeStatus" | Out-File -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8
+}
+
 Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
 
 if ($Obfuscate.IsPresent)
@@ -2534,7 +3568,7 @@ if ($Obfuscate.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
     $CompressionOutput = @{
-        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv, $Global:FoundryCoverageFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }
@@ -2556,7 +3590,7 @@ else
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
 
     $CompressionOutput = @{
-        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv, $Global:FoundryCoverageFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
         DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }

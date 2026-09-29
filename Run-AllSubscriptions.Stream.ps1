@@ -23,6 +23,8 @@ param (
     [switch] $SkipMetrics,
     [switch] $SkipConsumption,
     [switch] $SkipMarketplace,
+    [switch] $SkipFoundryCoverage,
+    [switch] $SkipFoundryTokens,
     [switch] $UseMetricsBatch,
     [switch] $IncludeStorageMetrics,
     [switch] $SkipDiskMetrics,
@@ -183,6 +185,8 @@ if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 if ($SkipMarketplace) { $InventoryPassthrough['SkipMarketplace'] = $true }
+if ($SkipFoundryCoverage) { $InventoryPassthrough['SkipFoundryCoverage'] = $true }
+if ($SkipFoundryTokens) { $InventoryPassthrough['SkipFoundryTokens'] = $true }
 if ($UseMetricsBatch) { $InventoryPassthrough['UseMetricsBatch'] = $true }
 if ($IncludeStorageMetrics) { $InventoryPassthrough['IncludeStorageMetrics'] = $true }
 if ($SkipDiskMetrics) { $InventoryPassthrough['SkipDiskMetrics'] = $true }

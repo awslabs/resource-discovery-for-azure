@@ -134,10 +134,11 @@ function New-RdaAllSubHtmlSummary
         $MarketplaceFailedSubs = @(),
         $CollectorFailures = @(),
         $ProcessedSubscriptions = @(),
-        # Report folders to leave out entirely: a subscription whose collection was aborted holds a
-        # PARTIAL inventory, and listing it as a normal row would present it as a complete one. It is
-        # still reported, as a failure, through -FailedSubscriptions.
-        $ExcludeFolders = @(),
+        # When given, the ONLY report folders to list, by folder name: the wrapper passes the folders its
+        # bundle carries, so a partial inventory (an aborted collection) or another run's output is never
+        # presented as a complete report. A failed subscription is still reported, as a failure, through
+        # -FailedSubscriptions. Omitted, every report folder under the directory is listed.
+        [string[]]$IncludeFolders,
 
         $TenantId,
         $Version,
@@ -160,14 +161,43 @@ function New-RdaAllSubHtmlSummary
     }
 
     $Folders = @(Get-ChildItem -LiteralPath $RunOutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue)
-    if ($null -ne $SinceTime)
+    $IncludeGiven = $PSBoundParameters.ContainsKey('IncludeFolders')
+    # A folder the caller names is listed whatever its timestamp: the wrapper names the folders its
+    # bundle carries, which can include one whose modified time predates the run.
+    if ($null -ne $SinceTime -and -not $IncludeGiven)
     {
         $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
     }
-    $Excluded = @(@($ExcludeFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
-    if ($Excluded.Count -gt 0)
+    if ($IncludeGiven)
     {
-        $Folders = @($Folders | Where-Object { $_.FullName -notin $Excluded })
+        # By name, not by full path: the caller's path and this listing can spell the same folder
+        # differently (a trailing separator, a relative segment, a symlinked root).
+        $IncludedNames = @(@($IncludeFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                ForEach-Object { [System.IO.Path]::GetFileName($_.TrimEnd([char[]]@('/', '\'))) } | Where-Object { $_ })
+        $FolderNames = @($Folders | ForEach-Object { $_.Name })
+        $Unmatched = @($IncludedNames | Where-Object { $FolderNames -notcontains $_ })
+        if ($Unmatched.Count -gt 0)
+        {
+            Write-Warning ("Main summary: {0} report folder(s) to list were not found under {1}, so they are missing from the summary: {2}" -f $Unmatched.Count, $RunOutputDirectory, ($Unmatched -join ', '))
+        }
+        $Folders = @($Folders | Where-Object { $IncludedNames -contains $_.Name })
+    }
+
+    # Joins a row to its subscription, and to what discovery found for it, through the report folder
+    # named by the wrapper's zip path. Display names repeat across subscriptions and obfuscated rows
+    # carry tokens, so neither can safely tie a failure to a row. Discovery matters because the
+    # inventory's record count is lower whenever a subscription holds types no collector covers, so
+    # the record count cannot say "0 resources".
+    $FolderSubscriptionId = @{}
+    $FolderDiscoveredCount = @{}
+    foreach ($Processed in @(@($ProcessedSubscriptions) | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Zip) }))
+    {
+        $ReportFolder = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName([string]$Processed.Zip))
+        if ([string]::IsNullOrWhiteSpace($ReportFolder)) { continue }
+        if (-not [string]::IsNullOrWhiteSpace([string]$Processed.Id)) { $FolderSubscriptionId[$ReportFolder] = [string]$Processed.Id }
+        # Read only once a Count property is confirmed: an object without one reports PowerShell's
+        # intrinsic count of 1, which would read as one discovered resource.
+        if ($Processed.PSObject.Properties.Name -contains 'Count') { $FolderDiscoveredCount[$ReportFolder] = [int]$Processed.Count }
     }
 
     $ObfPattern = '^(prod_|nonprod_)(databricks_|aks_|vmss_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
@@ -178,14 +208,18 @@ function New-RdaAllSubHtmlSummary
     foreach ($Folder in $Folders)
     {
         $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $InvFile) { continue }
+        if ($null -eq $InvFile)
+        {
+            if ($IncludeGiven) { Write-Warning ("Main summary: report folder {0} has no Inventory_*.json, so it is missing from the summary." -f $Folder.Name) }
+            continue
+        }
         try
         {
             $Inv = Get-Content -LiteralPath $InvFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
         }
         catch
         {
-            $SubReports += [pscustomobject]@{ Name = ('(unreadable inventory: {0})' -f $Folder.Name); Total = 0; Link = $null; Folder = $Folder.Name }
+            $SubReports += [pscustomobject]@{ Name = ('(unreadable inventory: {0})' -f $Folder.Name); Total = 0; Discovered = $(if ($FolderDiscoveredCount.ContainsKey($Folder.Name)) { $FolderDiscoveredCount[$Folder.Name] } else { $null }); Link = $null; Folder = $Folder.Name }
             continue
         }
 
@@ -210,13 +244,14 @@ function New-RdaAllSubHtmlSummary
                 if (($Rec.PSObject.Properties.Name -contains 'Subscription') -and -not [string]::IsNullOrWhiteSpace([string]$Rec.Subscription)) { $Samples.Add([string]$Rec.Subscription) }
             }
         }
-        if (-not $SubName) { $SubName = '(name unavailable - 0 resources)' }
+        $Discovered = if ($FolderDiscoveredCount.ContainsKey($Folder.Name)) { $FolderDiscoveredCount[$Folder.Name] } else { $Total }
+        if (-not $SubName) { $SubName = if ($Discovered -eq 0) { '(name unavailable - 0 resources)' } else { '(name unavailable)' } }
 
         $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
         $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
 
-        $SubReports += [pscustomobject]@{ Name = $SubName; Total = $Total; Link = $Link; Folder = $Folder.Name }
+        $SubReports += [pscustomobject]@{ Name = $SubName; Total = $Total; Discovered = $Discovered; Link = $Link; Folder = $Folder.Name }
     }
 
     $ObfuscationStatus = 'identifiable'
@@ -231,7 +266,7 @@ function New-RdaAllSubHtmlSummary
     $SubReports = @($SubReports | Sort-Object -Property Total -Descending)
     $RunTotalResources = [int](($SubReports | Measure-Object -Property Total -Sum).Sum)
     $SubCount = $SubReports.Count
-    $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
+    $EmptyCount = @($SubReports | Where-Object { $null -ne $_.Discovered -and $_.Discovered -eq 0 }).Count
 
     $Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
     $TenantSafe = if ($IsObfuscated -or [string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
@@ -267,6 +302,8 @@ function New-RdaAllSubHtmlSummary
     }
     if ($EmptyCount -gt 0)
     {
+        # Without the wrapper's discovery counts (a rebuild from a zip) this is the inventory's record
+        # count, which is also 0 for a subscription whose resources are all of types no collector covers.
         [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) returned 0 resources.</b> Often a Reader-permission gap rather than a genuinely empty subscription.</div>', $EmptyCount)
     }
     if ($ConsumpList.Count -gt 0)
@@ -317,18 +354,10 @@ function New-RdaAllSubHtmlSummary
         $ChartsHtml = "<div class='charts'><div class='chart-card'><h3>Resources by service (run-wide)</h3>$DonutSvg</div><div class='chart-card'><h3>Top services</h3>$BarSvg</div></div>"
     }
 
-    # Join a row to its subscription through the report folder named by the wrapper's zip path.
-    # Display names repeat across subscriptions and obfuscated rows carry tokens, so neither can
-    # safely tie a failure to a row.
-    $FolderSubscriptionId = @{}
-    foreach ($Processed in @(@($ProcessedSubscriptions) | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Zip) -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) }))
-    {
-        $ReportFolder = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName([string]$Processed.Zip))
-        if (-not [string]::IsNullOrWhiteSpace($ReportFolder)) { $FolderSubscriptionId[$ReportFolder] = [string]$Processed.Id }
-    }
     $ConsumpIds = @($ConsumpList | ForEach-Object { [string]$_.Id })
     $MetricsIds = @($MetricsList | ForEach-Object { [string]$_.Id })
     $MarketplaceIds = @($MarketplaceList | ForEach-Object { [string]$_.Id })
+    $CollectorIds = @($CollectorList | ForEach-Object { [string]$_.Id })
 
     $Rows = New-Object System.Text.StringBuilder
     foreach ($Sr in $SubReports)
@@ -352,9 +381,19 @@ function New-RdaAllSubHtmlSummary
         {
             '<span class="tag warn">marketplace incomplete</span>'
         }
-        elseif ($Sr.Total -eq 0)
+        elseif ($null -ne $Sr.Discovered -and $Sr.Discovered -eq 0)
         {
             '<span class="tag warn">0 resources</span>'
+        }
+        elseif ($RowSubscriptionId -and ($CollectorIds -contains $RowSubscriptionId))
+        {
+            # A collector threw, so its type is missing from this report rather than empty.
+            '<span class="tag warn">collector failed</span>'
+        }
+        elseif ($Sr.Total -eq 0)
+        {
+            # Discovery found resources, but none of a type any collector covers.
+            '<span class="tag warn">none of a collected type</span>'
         }
         else
         {

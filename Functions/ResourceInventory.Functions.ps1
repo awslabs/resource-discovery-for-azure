@@ -712,10 +712,13 @@ function Write-RdaShareableDiagnosticsLog
         [bool]$MarketplaceRequested = $true,
         [int]$MetricsApiCallCount = 0,
         [bool]$MetricsRequested = $true,
-        # Why a requested billing phase did not run, when it was not the operator's -Skip switch. The
-        # n/a line otherwise says "-SkipConsumption was passed", which is false for an aborted run.
-        [string]$ConsumptionSkipReason,
-        [string]$MarketplaceSkipReason,
+        # Billing was not pulled because the collector circuit breaker aborted collection, not because
+        # of an operator -Skip switch; the n/a line would otherwise name a switch nobody passed. Closed
+        # switches rather than free text: the Diagnostics log ships, and its wording is owned here. Each
+        # is read only on the n/a line, that is, when the matching -*Requested is false and no record
+        # was kept.
+        [switch]$ConsumptionSkippedForAbort,
+        [switch]$MarketplaceSkippedForAbort,
         [switch]$Obfuscated
     )
 
@@ -823,13 +826,14 @@ function Write-RdaShareableDiagnosticsLog
         }
 
         $DiagLines.Add('')
+        $AbortNaReason = 'not pulled because collection was aborted by the circuit breaker'
         if ($ConsumptionRequested -or $ConsumptionRecordCount -ne 0)
         {
             $DiagLines.Add(('Consumption records collected: {0}' -f $ConsumptionRecordCount.ToString('N0', [cultureinfo]::InvariantCulture)))
         }
         else
         {
-            $ConsumptionNaReason = if ([string]::IsNullOrWhiteSpace($ConsumptionSkipReason)) { '-SkipConsumption was passed' } else { $ConsumptionSkipReason }
+            $ConsumptionNaReason = if ($ConsumptionSkippedForAbort) { $AbortNaReason } else { '-SkipConsumption was passed' }
             $DiagLines.Add(('Consumption records collected: n/a ({0})' -f $ConsumptionNaReason))
         }
 
@@ -873,7 +877,7 @@ function Write-RdaShareableDiagnosticsLog
         }
         else
         {
-            $MarketplaceNaReason = if ([string]::IsNullOrWhiteSpace($MarketplaceSkipReason)) { '-SkipMarketplace or -SkipConsumption was passed' } else { $MarketplaceSkipReason }
+            $MarketplaceNaReason = if ($MarketplaceSkippedForAbort) { $AbortNaReason } else { '-SkipMarketplace or -SkipConsumption was passed' }
             $DiagLines.Add(('Marketplace consumption records collected: n/a ({0})' -f $MarketplaceNaReason))
         }
 

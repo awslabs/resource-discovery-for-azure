@@ -3169,6 +3169,17 @@ The bottom of `ExecuteInventoryProcessing`, where the nested functions get calle
     #
     #  A failure here must never fail the run: the inventory, metrics and report are
     #  already written, so it is downgraded to a warning.]
+    $PlacementInputFailed = @($script:CollectorFailuresThisRun | Where-Object { $_.Module -in @('VirtualMachines', 'VMSS') } | ForEach-Object { $_.Module })
+    if ($CapacityPlan.IsPresent -and -not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+    {
+        Write-Log -Message ('VM placement CSV SKIPPED: collection was aborted by the circuit breaker, ...') -Severity 'Error'
+    }
+    elseif ($CapacityPlan.IsPresent -and $PlacementInputFailed.Count -gt 0)
+    {
+        Write-Log -Message ('VM placement CSV SKIPPED: the {0} {1}, so the rows it joins are incomplete. ...' -f ...) -Severity 'Error'
+    }
+    elseif ($CapacityPlan.IsPresent)
+    {
     try
     {
         $PlacementScript = Join-Path $PSScriptRoot 'Extension/VMPlacement.ps1'
@@ -3198,7 +3209,7 @@ The bottom of `ExecuteInventoryProcessing`, where the nested functions get calle
     }
 ```
 
-Three design decisions here, each worth noting because each is a reasonable pattern to copy.
+Four design decisions here, each worth noting because each is a reasonable pattern to copy.
 
 **A separate file, not new collector fields.**
 Adding fields to the VM collector's output object would change `Inventory_*.json`, which is a schema the server ingestion pipeline binds to on fixed field names.
@@ -3209,6 +3220,10 @@ Under the wrapper this is a *part* file, `VMPlacementPart_*`, written to the **p
 `Run-AllSubscriptions.ps1` later concatenates every part into one tenant wide `VMPlacement.csv`.
 Writing it into the report folder instead would let the zip sweep pick it up and silently add a member to every per subscription bundle.
 A standalone run has nothing to aggregate, so it just writes `VMPlacement_*` next to its own report.
+
+**No part from partial collector output.**
+The rows join the VirtualMachines and VMSS collector output, so the block is skipped, loudly at Error severity, when the collector circuit breaker aborted collection or either of those two collectors failed.
+A part built on that output would be merged into the tenant wide CSV and read as complete; the wrapper also merges only the parts whose report folder is in the bundle.
 
 **Failure is downgraded.**
 By this point the inventory, metrics and report are already written.
@@ -3226,7 +3241,14 @@ Note the missing extension is logged at `Error` severity but does not throw, whi
     }
     $script:PhaseTimings['Resource detail collection (service collectors)'] = $CollectorPhaseTimer.Elapsed
 
-    if (!$SkipConsumption.IsPresent)
+    if (-not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError) -and -not $SkipConsumption.IsPresent)
+    {
+        # [comment: an aborted collection is reported FAILED and its archive removed whatever billing
+        #  returns, so the pull would only spend its retry budget against the same failure.]
+        $script:BillingSkippedForAbort = $true
+        Write-Log -Message ('{0} SKIPPED: collection was aborted by the circuit breaker, ...' -f $SkippedBilling) -Severity 'Error'
+    }
+    elseif (!$SkipConsumption.IsPresent)
     {
         $ConsumptionPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
         GetResourceConsumption
@@ -3241,7 +3263,7 @@ Note the missing extension is logged at `Error` severity but does not throw, whi
 |---|---|---|
 | 2187-2190 | conditionally record the metrics timing | The metrics stopwatch always ran, but its elapsed time is only *recorded* when metrics were requested. So a `-SkipMetrics` run shows no metrics row in the report header at all, rather than a misleading "0 seconds". |
 | 2190 | the collector timing, unconditional | Collectors always run. |
-| 2192-2199 | the consumption phase | Note it is inside its own `if`, so unlike metrics the consumption function is not even called when skipped. The stopwatch is created inside the `if` for the same reason. |
+| 2192-2199 | the consumption phase | Note it is inside its own `if`, so unlike metrics the consumption function is not even called when skipped. The stopwatch is created inside the `if` for the same reason. After a circuit-breaker abort billing is skipped too, loudly, and `$script:BillingSkippedForAbort` tells the Diagnostics log why. |
 
 The `#ProcessResourceConsumption` on line 2196 is a commented out call to a function that no longer exists.
 Harmless, but it is the kind of leftover worth noticing so you do not go looking for it.
@@ -4104,7 +4126,7 @@ Deleting it is best effort: if the removal fails, the message tells the operator
 | 0 | Success | falling off the end of the script, or `exit 0` after help |
 | 1 | Generic hard fail | unrecognised args, missing functions file, pre flight gates, discovery failure |
 | 2 | The report archive is missing | the archive gate, when the archive could not be written |
-| 3 | Collection was aborted | the archive gate, when the collector circuit breaker tripped; the inventory is partial and a `COLLECTION_ABORTED.txt` marker is left in the report folder |
+| 3 | Collection was aborted | the archive gate, when the collector circuit breaker tripped; the inventory is partial, the archive is removed, no VM placement part is written, and a `COLLECTION_ABORTED.txt` marker is left in the report folder |
 
 The wrapper treats **any** non zero code as "this subscription failed", so exit 2 is not needed for that.
 It exists so the wrapper can read the 2 and set its **own** exit code 2, which already means "per subscription output gap".

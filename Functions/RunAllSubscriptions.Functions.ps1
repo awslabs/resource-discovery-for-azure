@@ -1267,6 +1267,91 @@ function Get-InventoryExitCodeMeaning
     }
 }
 
+function Select-RdaShippableReports
+{
+    # What a run may put in its consolidated bundle. Every subscription that completes records the
+    # exact archive it wrote, so when the record is whole the bundle is exactly those archives and
+    # their report folders, both taken from the record so neither can ship without the other.
+    # Every other report folder the run left under the inventory root stays out and is named: a
+    # partial inventory whose aborted marker could not be written or whose archive could not be
+    # removed, a subscription that failed, or another run's output. When the record is short (an
+    # archive path is missing, or a stream worker died before reporting what it completed) the
+    # report folders are swept instead, less the ones marked aborted. Only ResourcesReport* folders
+    # hold per-subscription reports, in either mode. Test-RdaCollectionAborted comes from
+    # Functions/Common.Functions.ps1.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InventoryRoot,
+        [Parameter(Mandatory = $true)][datetime]$SinceTime,
+        [object[]]$ProcessedSubscriptions = @(),
+        # The caller knows the record is short: a stream worker died before writing its summary, so it
+        # may have completed subscriptions that are not in -ProcessedSubscriptions.
+        [switch]$RecordIncomplete
+    )
+
+    $Processed = @(@($ProcessedSubscriptions) | Where-Object { $null -ne $_ })
+    $RecordedOnly = (-not $RecordIncomplete) -and @($Processed | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Zip) }).Count -eq 0
+
+    $ListErrors = $null
+    $RunFolders = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue -ErrorVariable ListErrors |
+            Where-Object { $_.LastWriteTime -ge $SinceTime })
+    if (@($ListErrors).Count -gt 0)
+    {
+        $Lost = if ($RecordedOnly) { 'the list of report folders left out of the bundle may be incomplete' } else { 'report folders written by this run may be missing from the bundle' }
+        Write-Warning ("Could not list the report folders under {0}: {1}. {2}." -f $InventoryRoot, $ListErrors[0].Exception.Message, $Lost)
+    }
+
+    $Folders = @()
+    $Archives = @()
+    $LeftOut = @()
+    if ($RecordedOnly)
+    {
+        $RecordedNames = @{}
+        foreach ($Entry in $Processed)
+        {
+            $Dir = [System.IO.Path]::GetDirectoryName([string]$Entry.Zip)
+            $Name = [System.IO.Path]::GetFileName($Dir)
+            if ([string]::IsNullOrWhiteSpace($Name)) { continue }
+            $FirstForFolder = -not $RecordedNames.ContainsKey($Name)
+            $RecordedNames[$Name] = $true
+            if (Test-RdaCollectionAborted -Folder $Dir)
+            {
+                if ($FirstForFolder) { $LeftOut += [pscustomobject]@{ Path = $Dir; Name = $Name; Reason = 'Aborted' } }
+                continue
+            }
+            if ($FirstForFolder -and (Test-Path -LiteralPath $Dir -PathType Container)) { $Folders += Get-Item -LiteralPath $Dir }
+            if (Test-Path -LiteralPath ([string]$Entry.Zip) -PathType Leaf) { $Archives += [string]$Entry.Zip }
+        }
+        foreach ($Folder in $RunFolders)
+        {
+            if ($RecordedNames.ContainsKey($Folder.Name)) { continue }
+            $Reason = if (Test-RdaCollectionAborted -Folder $Folder.FullName) { 'Aborted' } else { 'NotRecorded' }
+            $LeftOut += [pscustomobject]@{ Path = $Folder.FullName; Name = $Folder.Name; Reason = $Reason }
+        }
+    }
+    else
+    {
+        foreach ($Folder in $RunFolders)
+        {
+            if (Test-RdaCollectionAborted -Folder $Folder.FullName)
+            {
+                $LeftOut += [pscustomobject]@{ Path = $Folder.FullName; Name = $Folder.Name; Reason = 'Aborted' }
+                continue
+            }
+            $Folders += $Folder
+            $Archives += @(Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.zip' -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -ge $SinceTime } | ForEach-Object { $_.FullName })
+        }
+    }
+
+    return [pscustomobject]@{
+        RecordedOnly = $RecordedOnly
+        Archives     = $Archives
+        Folders      = $Folders
+        LeftOut      = $LeftOut
+    }
+}
+
 function Get-RunSummaryLogContent
 {
     param(
@@ -1905,6 +1990,9 @@ function Get-StateBlobNames
     }
     catch
     {
+        # An empty answer reads as "no stream state", so a listing that failed must say so: otherwise
+        # recovery skips what a killed run completed and the merge forgets a stream's results.
+        Write-Host ("WARNING: could not list the per-stream state blobs under {0}/{1}: {2}" -f $Container, $ListPrefix, $_.Exception.Message) -ForegroundColor Yellow
         return @()
     }
 }

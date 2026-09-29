@@ -2023,7 +2023,21 @@ function ExecuteInventoryProcessing()
     ProcessResourceResult
     Write-RdaMemorySnapshot -Phase 'collectors' -Compact -Record
 
-    if ($CapacityPlan.IsPresent)
+    # The placement rows join the VirtualMachines and VMSS collector output, and under the wrapper
+    # every part is merged into the tenant-wide CSV it ships, so a part built on partial output would
+    # ship as complete: after an abort the collectors stopped part way, and a failed VM or scale-set
+    # collector leaves its type empty.
+    $PlacementInputFailed = @($script:CollectorFailuresThisRun | Where-Object { $_.Module -in @('VirtualMachines', 'VMSS') } | ForEach-Object { $_.Module })
+    if ($CapacityPlan.IsPresent -and -not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+    {
+        Write-Log -Message ('VM placement CSV SKIPPED: collection was aborted by the circuit breaker, so the collector output it joins is partial. No placement CSV is written for this subscription; the re-run collects it.') -Severity 'Error'
+    }
+    elseif ($CapacityPlan.IsPresent -and $PlacementInputFailed.Count -gt 0)
+    {
+        $FailedNoun = if ($PlacementInputFailed.Count -gt 1) { 'collectors failed' } else { 'collector failed' }
+        Write-Log -Message ('VM placement CSV SKIPPED: the {0} {1}, so the rows it joins are incomplete. No placement CSV is written for this subscription; re-run once the failure above is resolved.' -f ($PlacementInputFailed -join ' and '), $FailedNoun) -Severity 'Error'
+    }
+    elseif ($CapacityPlan.IsPresent)
     {
         try
         {
@@ -2488,7 +2502,7 @@ Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
 
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkipReason $(if ($script:BillingSkippedForAbort) { 'not pulled because collection was aborted by the circuit breaker' }) -MarketplaceSkipReason $(if ($script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) { 'not pulled because collection was aborted by the circuit breaker' }) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
@@ -2502,7 +2516,7 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkipReason $(if ($script:BillingSkippedForAbort) { 'not pulled because collection was aborted by the circuit breaker' }) -MarketplaceSkipReason $(if ($script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) { 'not pulled because collection was aborted by the circuit breaker' })
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 

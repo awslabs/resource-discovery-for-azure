@@ -141,7 +141,7 @@ Describe 'ResourceInventory.ps1 releases the two large structures after their la
         $At['discovery'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc 'FAILED to complete resource discovery')
         $At['discovery'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'function ExecuteInventoryProcessing()')
         $At['collectors'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*ProcessResourceResult[ \t]*\r?$')
-        $At['collectors'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'if ($CapacityPlan.IsPresent)')
+        $At['collectors'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'if ($CapacityPlan.IsPresent -and -not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError))')
         $At['released'] | Should -BeGreaterThan (Get-SourceOffset $script:InvSrc '$Global:SmaResources = $null') -Because 'the released reading must follow the release itself'
         $At['released'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc -Pattern '(?m)^[ \t]*GetResourceConsumption[ \t]*\r?$')
         $At['end'] | Should -BeLessThan (Get-SourceOffset $script:InvSrc 'Write-RdaShareableDiagnosticsLog -DefaultPath') -Because 'the end reading must exist before the diagnostics log renders it'

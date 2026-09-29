@@ -128,6 +128,18 @@ everything" question is answered on the same page:
 These are the approved health globals (see steering `anti-patterns.md`); the
 main summary only READS them — it introduces no new globals.
 
+As built, the row joins to `$SubResourceCounts` through the report folder named
+by each entry's `Zip`. The "returned 0 resources" banner, the Empty card and the
+`0 resources` tag use that entry's `Count` (what discovery found); the Resources
+column and the Total card count inventory records, like each subscription's own
+report. A row whose subscription had a collector failure is tagged `collector
+failed`; otherwise a row with discovered resources but no records is tagged
+`none of a collected type`. Without
+`$SubResourceCounts` (a rebuild from a zip) the empty count falls back to the
+record count, so there a subscription whose resources are all of types no
+collector covers still counts as empty. The wrapper passes `-IncludeFolders` with
+the report folders its bundle carries, so a partial or stray report is never a row.
+
 ## 6. Obfuscation handling
 
 The main summary must never weaken the obfuscation posture of the run it

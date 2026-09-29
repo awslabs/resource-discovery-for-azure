@@ -23,7 +23,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Invoke-RdaSupportLogCollectionInTranscript', 'Test-RdaFinalScreenClearable', 'Get-RdaFinalScreenLines', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
         'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
         'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks')
     foreach ($Fn in $TargetFunctions)
@@ -605,6 +605,253 @@ Describe 'Run-AllSubscriptions.ps1: the partial-access stop points ask a user be
             $R.Lines[-1] | Should -Be '  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s).'
             Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 0
         }
+    }
+}
+
+Describe 'Invoke-RdaSupportLogCollectionInTranscript (support-log lines reach the reopened transcript)' {
+    BeforeEach {
+        $script:Tr = Join-Path $script:TestRoot ('transcript_{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    }
+
+    It 'writes the held lines once, in order and colour, and appends them to the closed transcript' {
+        Start-Transcript -LiteralPath $script:Tr -UseMinimalHeader -Force | Out-Null
+        Write-Host 'last line before the stop'
+        Stop-Transcript | Out-Null
+        Mock Invoke-RdaSupportLogCollection {
+            Write-Host 'Support logs collected: /x/SupportLogs_Run.zip' -ForegroundColor Cyan
+            Write-Host '  plain line'
+        }
+
+        $Records = @(Invoke-RdaSupportLogCollectionInTranscript -TranscriptStarted -TranscriptFile $script:Tr -InventoryRoot 'root' -SinceTime (Get-Date) 6>&1)
+
+        @($Records | ForEach-Object { [string]$_.MessageData.Message }) | Should -Be @('Support logs collected: /x/SupportLogs_Run.zip', '  plain line')
+        $Records[0].MessageData.ForegroundColor | Should -Be 'Cyan'
+        [int]$Records[1].MessageData.ForegroundColor | Should -Be -1
+        $Text = Get-Content -LiteralPath $script:Tr -Raw
+        $Text.IndexOf('last line before the stop') | Should -BeGreaterOrEqual 0
+        $Text.IndexOf('last line before the stop') | Should -BeLessThan $Text.IndexOf('Support logs collected: /x/SupportLogs_Run.zip')
+        $Text | Should -Match '  plain line'
+        { Stop-Transcript -ErrorAction Stop } | Should -Throw -Because 'the reopened transcript must be closed again before the run exits'
+    }
+
+    It 'still writes the lines, and creates no transcript, when none was started' {
+        Mock Invoke-RdaSupportLogCollection { Write-Host 'Support logs collected: /x/b.zip' }
+        $Lines = @(Invoke-RdaSupportLogCollectionInTranscript -TranscriptFile $script:Tr -InventoryRoot 'root' -SinceTime (Get-Date) 6>&1 | ForEach-Object { [string]$_ })
+        $Lines | Should -Be @('Support logs collected: /x/b.zip')
+        Test-Path -LiteralPath $script:Tr | Should -BeFalse
+    }
+
+    It 'does not reopen the transcript when the step printed nothing' {
+        Set-Content -LiteralPath $script:Tr -Value 'closed transcript'
+        Mock Invoke-RdaSupportLogCollection { }
+        Invoke-RdaSupportLogCollectionInTranscript -TranscriptStarted -TranscriptFile $script:Tr -InventoryRoot 'root' -SinceTime (Get-Date) 6>$null
+        (Get-Content -LiteralPath $script:Tr -Raw).Trim() | Should -BeExactly 'closed transcript'
+    }
+
+    It 'reports through -Outcome whether it listed a support bundle' {
+        Mock Invoke-RdaSupportLogCollection { Write-Host 'Support logs collected: /x/c.zip' }
+        $Listed = @{}
+        Invoke-RdaSupportLogCollectionInTranscript -TranscriptFile $script:Tr -InventoryRoot 'root' -SinceTime (Get-Date) -Outcome $Listed 6>$null
+        $Listed['Listed'] | Should -BeExactly $true
+
+        Mock Invoke-RdaSupportLogCollection { }
+        $Quiet = @{}
+        Invoke-RdaSupportLogCollectionInTranscript -TranscriptFile $script:Tr -InventoryRoot 'root' -SinceTime (Get-Date) -Outcome $Quiet 6>$null
+        $Quiet['Listed'] | Should -BeExactly $false
+    }
+}
+
+Describe 'Write-RdaHostLinesInTranscript (lines printed after the stop still reach the transcript)' {
+    BeforeEach {
+        $script:Tr = Join-Path $script:TestRoot ('transcript_{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    }
+
+    It 'writes the lines in order and colour, appends them to the closed transcript, then closes it again' {
+        Start-Transcript -LiteralPath $script:Tr -UseMinimalHeader -Force | Out-Null
+        Write-Host 'last line before the stop'
+        Stop-Transcript | Out-Null
+        $FinalLines = @(
+            [pscustomobject]@{ Text = 'RUN COMPLETE - EXIT CODE 0.'; Color = 'Green' }
+            [pscustomobject]@{ Text = '  plain line'; Color = $null }
+        )
+
+        $Records = @(Write-RdaHostLinesInTranscript -Lines $FinalLines -TranscriptStarted -TranscriptFile $script:Tr 6>&1)
+
+        @($Records | ForEach-Object { [string]$_.MessageData.Message }) | Should -Be @('RUN COMPLETE - EXIT CODE 0.', '  plain line')
+        $Records[0].MessageData.ForegroundColor | Should -Be 'Green'
+        [int]$Records[1].MessageData.ForegroundColor | Should -Be -1
+        $Text = Get-Content -LiteralPath $script:Tr -Raw
+        $Text.IndexOf('last line before the stop') | Should -BeGreaterOrEqual 0
+        $Text.IndexOf('last line before the stop') | Should -BeLessThan $Text.IndexOf('RUN COMPLETE - EXIT CODE 0.')
+        $Text | Should -Match '  plain line'
+        { Stop-Transcript -ErrorAction Stop } | Should -Throw -Because 'the reopened transcript must be closed again before the run exits'
+    }
+
+    It 'still writes the lines, and creates no transcript, when none was kept' {
+        $Out = @(Write-RdaHostLinesInTranscript -Lines @([pscustomobject]@{ Text = 'only line'; Color = 'Red' }) -TranscriptFile $script:Tr 6>&1 | ForEach-Object { [string]$_ })
+        $Out | Should -Be @('only line')
+        Test-Path -LiteralPath $script:Tr | Should -BeFalse
+    }
+}
+
+Describe 'Test-RdaFinalScreenClearable (clear only when nothing is lost)' {
+    It 'returns <Expected> for console=<IsConsole>, bundle=<BundleBuilt>, transcript=<TranscriptKept>' -ForEach @(
+        @{ IsConsole = $true; BundleBuilt = $true; TranscriptKept = $true; Expected = $true }
+        @{ IsConsole = $false; BundleBuilt = $true; TranscriptKept = $true; Expected = $false }
+        @{ IsConsole = $true; BundleBuilt = $false; TranscriptKept = $true; Expected = $false }
+        @{ IsConsole = $true; BundleBuilt = $true; TranscriptKept = $false; Expected = $false }
+    ) {
+        Test-RdaFinalScreenClearable -BundleBuilt $BundleBuilt -TranscriptKept $TranscriptKept -IsConsole $IsConsole | Should -Be $Expected
+    }
+}
+
+Describe 'Get-RdaFinalScreenLines (outcome first, then one file to send)' {
+    BeforeAll {
+        $script:Bundle = '/Users/Someone/InventoryReports/AllSubscriptions_Run.zip'
+        $script:Transcript = '/Users/Someone/InventoryReports/RunAllSubscriptions_transcript_Run.txt'
+        function Get-FinalText
+        {
+            param([hashtable]$Params)
+            $Base = @{ ExitCode = 0; HasWarnings = $false; TranscriptFile = $script:Transcript; TranscriptKept = $true; BundleFile = $script:Bundle; InventoryFolderName = 'InventoryReports' }
+            foreach ($Key in $Params.Keys) { $Base[$Key] = $Params[$Key] }
+            @(Get-RdaFinalScreenLines @Base)
+        }
+    }
+
+    It 'a clean run: outcome, the one file, and the folder warning' {
+        $Lines = Get-FinalText @{}
+        @($Lines | ForEach-Object { $_.Text }) | Should -Be @(
+            'RUN COMPLETE - EXIT CODE 0.'
+            ('SEND THIS ONE FILE:  {0}' -f $script:Bundle)
+            '  DO NOT ZIP OR SEND THE InventoryReports FOLDER ITSELF. IT HOLDS FILES THAT MUST STAY LOCAL.'
+        )
+        $Lines[0].Color | Should -Be 'Green'
+    }
+
+    It 'opens with <Outcome> and points at the transcript for exit code <ExitCode>, warnings <HasWarnings>' -ForEach @(
+        @{ ExitCode = 0; HasWarnings = $true; Outcome = 'RUN COMPLETE WITH WARNINGS - EXIT CODE 0.'; Color = 'Yellow' }
+        @{ ExitCode = 2; HasWarnings = $false; Outcome = 'RUN FINISHED WITH FAILURES - EXIT CODE 2.'; Color = 'Red' }
+        @{ ExitCode = 5; HasWarnings = $true; Outcome = 'RUN FINISHED WITH FAILURES - EXIT CODE 5.'; Color = 'Red' }
+    ) {
+        $Lines = Get-FinalText @{ ExitCode = $ExitCode; HasWarnings = $HasWarnings }
+        $Lines[0].Text | Should -BeExactly $Outcome
+        $Lines[0].Color | Should -Be $Color
+        $Lines[1].Text | Should -BeExactly ('THE DETAILS ARE IN THE TRANSCRIPT: {0}' -f $script:Transcript)
+        @($Lines | Where-Object { $_.Text -like 'SEND THIS ONE FILE:*' }).Count | Should -Be 1 -Because 'the final screen carries one upload instruction'
+    }
+
+    It 'says to scroll up when the transcript was not kept' {
+        $Lines = Get-FinalText @{ ExitCode = 2; TranscriptKept = $false }
+        $Lines[1].Text | Should -BeExactly 'SCROLL UP FOR THE DETAILS.'
+    }
+
+    It 'says there is nothing to send when no bundle was produced' {
+        $Lines = Get-FinalText @{ ExitCode = 2; BundleFile = '' }
+        $Lines[-1].Text | Should -BeExactly 'NO REPORT BUNDLE WAS PRODUCED, SO THERE IS NO FILE TO SEND.'
+        @($Lines | Where-Object { $_.Text -like 'SEND THIS ONE FILE:*' }).Count | Should -Be 0
+    }
+
+    It 'names the shard when the run is one of several' {
+        $Lines = Get-FinalText @{ ShardIndex = 2; ShardCount = 3 }
+        $Lines[2].Text | Should -BeExactly "  THIS IS SHARD 2 OF 3 AND COVERS ONLY THIS NODE'S SUBSCRIPTIONS. SEND ONE SUCH FILE FROM EVERY SHARD."
+    }
+
+    It 'writes every instruction in capitals and keeps the case of paths and the folder name' {
+        $Lines = Get-FinalText @{ ExitCode = 2; ShardIndex = 1; ShardCount = 2 }
+        foreach ($Line in $Lines)
+        {
+            $Instruction = $Line.Text.Replace($script:Bundle, '').Replace($script:Transcript, '').Replace('InventoryReports', '')
+            $Instruction | Should -BeExactly $Instruction.ToUpperInvariant()
+        }
+        ($Lines.Text -join "`n") | Should -Match ([regex]::Escape($script:Bundle))
+    }
+
+    It 'says a support log bundle still listed above is only for support, and still names one file to send' {
+        $Lines = Get-FinalText @{ ExitCode = 2; SupportBundleListed = $true }
+        @($Lines | Where-Object { $_.Text -like 'SEND THIS ONE FILE:*' }).Count | Should -Be 1
+        $Lines[-1].Text | Should -BeExactly '  THE SUPPORT LOG BUNDLE LISTED ABOVE IS ONLY FOR SUPPORT. SEND IT ONLY IF SUPPORT ASKS FOR IT.'
+    }
+
+    It 'points at the support log bundle listed above when no report bundle was produced' {
+        $Lines = Get-FinalText @{ ExitCode = 2; BundleFile = ''; SupportBundleListed = $true }
+        $Lines[-1].Text | Should -BeExactly 'NO REPORT BUNDLE WAS PRODUCED. SEND THE SUPPORT LOG BUNDLE LISTED ABOVE TO SUPPORT INSTEAD.'
+        @($Lines | Where-Object { $_.Text -like '*NO FILE TO SEND*' }).Count | Should -Be 0
+    }
+}
+
+Describe 'Run-AllSubscriptions.ps1: the final screen comes last and the support-log step writes into the transcript' {
+    BeforeAll {
+        $Root = Split-Path $PSScriptRoot -Parent
+        $script:WrapperLines = Get-Content -LiteralPath (Join-Path $Root 'Run-AllSubscriptions.ps1')
+        $Tokens = $null
+        $ParseErrors = $null
+        $script:WrapperAstForFinal = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $FunctionsAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'Functions/RunAllSubscriptions.Functions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $script:ExitWrapperAst = $FunctionsAst.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Exit-Wrapper' }, $true)
+
+        function Get-CommandLine
+        {
+            param($Ast, [string]$Name)
+            @($Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq $Name }, $true) | ForEach-Object { $_.Extent.StartLineNumber })
+        }
+    }
+
+    It 'the wrapper runs the support-log step only through the transcript-aware helper' {
+        @(Get-CommandLine -Ast $script:WrapperAstForFinal -Name 'Invoke-RdaSupportLogCollection').Count | Should -Be 0
+        @(Get-CommandLine -Ast $script:WrapperAstForFinal -Name 'Invoke-RdaSupportLogCollectionInTranscript').Count | Should -Be 1
+    }
+
+    It 'stops the transcript, runs the support-log step, then clears and prints the final block, then exits' {
+        $StopIdx = ($script:WrapperLines | Select-String -SimpleMatch 'Stop-Transcript on normal completion failed' | Select-Object -First 1).LineNumber
+        $SupportIdx = @(Get-CommandLine -Ast $script:WrapperAstForFinal -Name 'Invoke-RdaSupportLogCollectionInTranscript')[0]
+        $LastCodeIdx = ($script:WrapperLines | Select-String -Pattern '^\s*\$WrapperExitCode = 2\s*$' | Select-Object -Last 1).LineNumber
+        $ClearIdx = @(Get-CommandLine -Ast $script:WrapperAstForFinal -Name 'Clear-Host')
+        $FinalIdx = @(Get-CommandLine -Ast $script:WrapperAstForFinal -Name 'Get-RdaFinalScreenLines')
+        $ExitIdx = ($script:WrapperLines | Select-String -Pattern '^exit \$WrapperExitCode\s*$' | Select-Object -Last 1).LineNumber
+
+        $ClearIdx.Count | Should -Be 1
+        $FinalIdx.Count | Should -Be 1
+        $StopIdx | Should -BeLessThan $SupportIdx
+        $SupportIdx | Should -BeLessThan $LastCodeIdx
+        $LastCodeIdx | Should -BeLessThan $ClearIdx[0] -Because 'the outcome line needs the final exit code'
+        $ClearIdx[0] | Should -BeLessThan $FinalIdx[0]
+        $FinalIdx[0] | Should -BeLessThan $ExitIdx
+    }
+
+    It 'clears the screen only when Test-RdaFinalScreenClearable allows it' {
+        $ClearIf = $script:WrapperAstForFinal.Find({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item2.Extent.Text -match 'Clear-Host' }, $true)
+        $ClearIf | Should -Not -BeNullOrEmpty
+        $ClearIf.Clauses[0].Item1.Extent.Text | Should -Match '^Test-RdaFinalScreenClearable '
+    }
+
+    It 'Exit-Wrapper stops the transcript before the support-log step and never clears the screen' {
+        $script:ExitWrapperAst | Should -Not -BeNullOrEmpty
+        $Stop = @(Get-CommandLine -Ast $script:ExitWrapperAst -Name 'Stop-Transcript')
+        $Support = @(Get-CommandLine -Ast $script:ExitWrapperAst -Name 'Invoke-RdaSupportLogCollectionInTranscript')
+        $Stop.Count | Should -Be 1
+        $Support.Count | Should -Be 1
+        $Stop[0] | Should -BeLessThan $Support[0]
+        @(Get-CommandLine -Ast $script:ExitWrapperAst -Name 'Invoke-RdaSupportLogCollection').Count | Should -Be 0
+        @(Get-CommandLine -Ast $script:ExitWrapperAst -Name 'Clear-Host').Count | Should -Be 0
+    }
+
+    It 'writes the final block with the transcript reopened, and tells it whether the support bundle is still on screen' {
+        $FindCommand = {
+            param([string]$Name)
+            @($script:WrapperAstForFinal.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq $Name }, $true))
+        }
+        $SupportCmd = @(& $FindCommand 'Invoke-RdaSupportLogCollectionInTranscript')
+        $FinalCmd = @(& $FindCommand 'Get-RdaFinalScreenLines')
+        $WriteCmd = @(& $FindCommand 'Write-RdaHostLinesInTranscript')
+        $ExitIdx = ($script:WrapperLines | Select-String -Pattern '^exit \$WrapperExitCode\s*$' | Select-Object -Last 1).LineNumber
+
+        $WriteCmd.Count | Should -Be 1
+        $FinalCmd[0].Extent.StartLineNumber | Should -BeLessThan $WriteCmd[0].Extent.StartLineNumber
+        $WriteCmd[0].Extent.StartLineNumber | Should -BeLessThan $ExitIdx
+        $WriteCmd[0].Extent.Text | Should -Match '-TranscriptStarted:\$FinalTranscriptKept'
+        $SupportCmd[0].Extent.Text | Should -Match '-Outcome \$SupportLogOutcome'
+        $FinalCmd[0].Extent.Text | Should -Match '-SupportBundleListed \(\$SupportLogOutcome\[''Listed''\] -and -not \$FinalScreenCleared\)'
+        @($script:WrapperLines | Select-String -SimpleMatch 'Write-Host $FinalLine.Text').Count | Should -Be 0 -Because 'the final block is written only through the transcript-aware helper'
     }
 }
 

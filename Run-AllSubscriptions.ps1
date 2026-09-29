@@ -2755,6 +2755,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     Write-Host "=============================================" -ForegroundColor Green
 }
 
+$BlobUploadProblem = $false
 if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 {
     try
@@ -2792,16 +2793,19 @@ if ($UploadToBlobContainerUri -and $null -ne $OuterZipFile -and (Test-Path -Lite
         }
         catch
         {
+            $BlobUploadProblem = $true
             Write-Host ("WARNING: Obfuscation dictionary upload failed ({0}). The dictionaries remain on local disk under {1} - capture them before the node is reclaimed if you need token-consistent recovery later." -f $_.Exception.Message, $InventoryRoot) -ForegroundColor Yellow
         }
     }
     catch
     {
+        $BlobUploadProblem = $true
         Write-Host ("WARNING: Blob upload failed ({0}). The consolidated zip remains on local disk at: {1}" -f $_.Exception.Message, $OuterZipFile) -ForegroundColor Yellow
     }
 }
 elseif ($UploadToBlobContainerUri)
 {
+    $BlobUploadProblem = $true
     $NoZipDetail = if ($OuterZipFile) { "expected zip not found at: $OuterZipFile" } else { 'no consolidated zip was produced' }
     Write-Host ("WARNING: Blob upload was requested (-UploadToBlobContainerUri) but nothing was uploaded - {0}. Check that the run produced an AllSubscriptions_*.zip (look for the earlier 'Consolidated bundle created:' line)." -f $NoZipDetail) -ForegroundColor Yellow
 }
@@ -2879,9 +2883,10 @@ if ($WrapperTranscriptStarted)
 # whole run failed. First-party Consumption remains a hard-participating phase below.
 # See the exit-code table in README.md.
 $RunHadFailures = ($FailedSubscriptions.Count -gt 0) -or (@($Global:CollectorFailures).Count -gt 0) -or (@($Global:MetricsFailedSubs).Count -gt 0) -or (@($Global:ConsumptionFailedSubs).Count -gt 0)
+$SupportLogOutcome = @{ Listed = $false }
 if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
 {
-    Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount
+    Invoke-RdaSupportLogCollectionInTranscript -TranscriptStarted:$WrapperTranscriptStarted -TranscriptFile $WrapperTranscriptFile -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount -Outcome $SupportLogOutcome
 }
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
@@ -2905,5 +2910,26 @@ if (@($FailedSubscriptionIds).Count -gt 0)
 {
     $WrapperExitCode = 2
 }
+
+# The last thing on screen is the outcome and the one file to send. Everything above it is already in
+# the transcript, so the screen is cleared first when a person is watching and the transcript on disk
+# holds it; otherwise the block is simply printed last. The block itself is written with the
+# transcript reopened, so the transcript ends on the same outcome the screen does.
+$FinalBundleBuilt = Test-ReportArchiveUsable -Path $OuterZipFile
+$FinalTranscriptKept = $WrapperTranscriptStarted -and (Test-ReportArchiveUsable -Path $WrapperTranscriptFile)
+$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0)
+$FinalScreenCleared = $false
+if (Test-RdaFinalScreenClearable -BundleBuilt $FinalBundleBuilt -TranscriptKept $FinalTranscriptKept)
+{
+    Clear-Host
+    $FinalScreenCleared = $true
+}
+else
+{
+    Write-Host ""
+}
+$FinalBundleFile = if ($FinalBundleBuilt) { $OuterZipFile } else { '' }
+$FinalLines = Get-RdaFinalScreenLines -ExitCode $WrapperExitCode -HasWarnings $FinalHasWarnings -TranscriptFile $WrapperTranscriptFile -TranscriptKept $FinalTranscriptKept -BundleFile $FinalBundleFile -InventoryFolderName (Split-Path -Path $InventoryRoot -Leaf) -ShardIndex $ShardIndex -ShardCount $ShardCount -SupportBundleListed ($SupportLogOutcome['Listed'] -and -not $FinalScreenCleared)
+Write-RdaHostLinesInTranscript -Lines $FinalLines -TranscriptStarted:$FinalTranscriptKept -TranscriptFile $WrapperTranscriptFile
 exit $WrapperExitCode
 

@@ -46,6 +46,86 @@ function Invoke-RdaSupportLogCollection
     catch { Write-Verbose ("Support-log collection failed: {0}" -f $_.Exception.Message) }
 }
 
+function Write-RdaHostLinesInTranscript
+{
+    # Writes Text/Color records to the console with the wrapper transcript reopened (-Append), for
+    # lines printed after the transcript was stopped, so they reach the transcript as well. The
+    # transcript is closed again afterwards. Without a kept transcript the lines only reach the
+    # console. A $null Color writes the line in the default colour.
+    param(
+        [object[]]$Lines,
+        [switch]$TranscriptStarted,
+        [string]$TranscriptFile
+    )
+
+    $Reopened = $false
+    if ($TranscriptStarted -and -not [string]::IsNullOrWhiteSpace($TranscriptFile))
+    {
+        try
+        {
+            Start-Transcript -LiteralPath $TranscriptFile -Append -UseMinimalHeader | Out-Null
+            $Reopened = $true
+        }
+        catch { Write-Verbose ("Reopening the wrapper transcript failed: {0}" -f $_.Exception.Message) }
+    }
+
+    foreach ($Line in @($Lines))
+    {
+        if ($null -ne $Line.Color) { Write-Host $Line.Text -ForegroundColor $Line.Color }
+        else { Write-Host $Line.Text }
+    }
+
+    if ($Reopened)
+    {
+        try { Stop-Transcript | Out-Null }
+        catch { Write-Verbose ("Stop-Transcript after writing to the reopened transcript failed: {0}" -f $_.Exception.Message) }
+    }
+}
+
+function Invoke-RdaSupportLogCollectionInTranscript
+{
+    # Runs the support-log step after the wrapper transcript has been stopped, so the bundle copies a
+    # finished, closed transcript (one that is still open can fail to copy on Windows). The step's
+    # console lines are held while it runs and written afterwards with the transcript reopened
+    # (-Append), so they reach the transcript as well as the console. -Outcome, when given, receives
+    # Listed = $true when the step listed a support bundle on the console, so the final block can
+    # say what that bundle is for.
+    param(
+        [switch]$TranscriptStarted,
+        [string]$TranscriptFile,
+        [string]$InventoryRoot,
+        $SinceTime,
+        [string]$ContainerUri,
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1,
+        [hashtable]$Outcome = $null
+    )
+
+    $Held = @(Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $SinceTime -ContainerUri $ContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount 6>&1)
+    if ($null -ne $Outcome) { $Outcome['Listed'] = ($Held.Count -gt 0) }
+    if ($Held.Count -eq 0)
+    {
+        return
+    }
+
+    $HeldLines = foreach ($Record in $Held)
+    {
+        $Message = if ($Record -is [System.Management.Automation.InformationRecord]) { $Record.MessageData } else { $Record }
+        if ($Message -is [System.Management.Automation.HostInformationMessage])
+        {
+            # A Write-Host call without -ForegroundColor records the colour as -1.
+            $Color = if ([int]$Message.ForegroundColor -ge 0) { $Message.ForegroundColor } else { $null }
+            [pscustomobject]@{ Text = $Message.Message; Color = $Color }
+        }
+        else
+        {
+            [pscustomobject]@{ Text = [string]$Message; Color = $null }
+        }
+    }
+
+    Write-RdaHostLinesInTranscript -Lines $HeldLines -TranscriptStarted:$TranscriptStarted -TranscriptFile $TranscriptFile
+}
+
 function Exit-Wrapper
 {
     param([int]$Code = 0)
@@ -57,10 +137,96 @@ function Exit-Wrapper
 
     if ($Code -ne 0 -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainerUri))
     {
-        Invoke-RdaSupportLogCollection -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount
+        Invoke-RdaSupportLogCollectionInTranscript -TranscriptStarted:([bool]$WrapperTranscriptStarted) -TranscriptFile $WrapperTranscriptFile -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount
     }
 
     exit $Code
+}
+
+function Test-RdaFinalScreenClearable
+{
+    # Clearing the screen before the final block is safe only when a person is watching a real
+    # terminal (input and output both attached), there is a report bundle to point at, and the
+    # transcript on disk still holds everything the clear removes from view.
+    param(
+        [bool]$BundleBuilt,
+        [bool]$TranscriptKept,
+        [bool]$IsConsole = ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected)
+    )
+
+    return ($IsConsole -and $BundleBuilt -and $TranscriptKept)
+}
+
+function Get-RdaFinalScreenLines
+{
+    # The last block a run prints: a one-line outcome with the exit code, where to find the details
+    # when anything went wrong, and the one file to send. Instructions are in capitals; paths and the
+    # folder name keep their real case, because Linux and macOS paths are case-sensitive. Returns
+    # Text/Color records for the caller to write. -SupportBundleListed says the support-log step's
+    # "send this file to support" lines are still visible above this block (the screen was not
+    # cleared), so the block says what that bundle is for instead of contradicting it.
+    param(
+        [int]$ExitCode,
+        [bool]$HasWarnings,
+        [string]$TranscriptFile,
+        [bool]$TranscriptKept,
+        [string]$BundleFile,
+        [string]$InventoryFolderName,
+        [int]$ShardIndex = 0,
+        [int]$ShardCount = 1,
+        [bool]$SupportBundleListed = $false
+    )
+
+    $Lines = [System.Collections.Generic.List[object]]::new()
+
+    if ($ExitCode -ne 0)
+    {
+        $Lines.Add([pscustomobject]@{ Text = ('RUN FINISHED WITH FAILURES - EXIT CODE {0}.' -f $ExitCode); Color = 'Red' })
+    }
+    elseif ($HasWarnings)
+    {
+        $Lines.Add([pscustomobject]@{ Text = ('RUN COMPLETE WITH WARNINGS - EXIT CODE {0}.' -f $ExitCode); Color = 'Yellow' })
+    }
+    else
+    {
+        $Lines.Add([pscustomobject]@{ Text = ('RUN COMPLETE - EXIT CODE {0}.' -f $ExitCode); Color = 'Green' })
+    }
+
+    if ($ExitCode -ne 0 -or $HasWarnings)
+    {
+        if ($TranscriptKept)
+        {
+            $Lines.Add([pscustomobject]@{ Text = ('THE DETAILS ARE IN THE TRANSCRIPT: {0}' -f $TranscriptFile); Color = 'Yellow' })
+        }
+        else
+        {
+            $Lines.Add([pscustomobject]@{ Text = 'SCROLL UP FOR THE DETAILS.'; Color = 'Yellow' })
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($BundleFile))
+    {
+        $Lines.Add([pscustomobject]@{ Text = ('SEND THIS ONE FILE:  {0}' -f $BundleFile); Color = 'Green' })
+        if ($ShardCount -gt 1)
+        {
+            $Lines.Add([pscustomobject]@{ Text = ('  THIS IS SHARD {0} OF {1} AND COVERS ONLY THIS NODE''S SUBSCRIPTIONS. SEND ONE SUCH FILE FROM EVERY SHARD.' -f $ShardIndex, $ShardCount); Color = 'Yellow' })
+        }
+        $Lines.Add([pscustomobject]@{ Text = ('  DO NOT ZIP OR SEND THE {0} FOLDER ITSELF. IT HOLDS FILES THAT MUST STAY LOCAL.' -f $InventoryFolderName); Color = 'Yellow' })
+        if ($SupportBundleListed)
+        {
+            $Lines.Add([pscustomobject]@{ Text = '  THE SUPPORT LOG BUNDLE LISTED ABOVE IS ONLY FOR SUPPORT. SEND IT ONLY IF SUPPORT ASKS FOR IT.'; Color = 'Yellow' })
+        }
+    }
+    elseif ($SupportBundleListed)
+    {
+        $Lines.Add([pscustomobject]@{ Text = 'NO REPORT BUNDLE WAS PRODUCED. SEND THE SUPPORT LOG BUNDLE LISTED ABOVE TO SUPPORT INSTEAD.'; Color = 'Red' })
+    }
+    else
+    {
+        $Lines.Add([pscustomobject]@{ Text = 'NO REPORT BUNDLE WAS PRODUCED, SO THERE IS NO FILE TO SEND.'; Color = 'Red' })
+    }
+
+    return $Lines.ToArray()
 }
 
 function Get-RecommendedParallelism

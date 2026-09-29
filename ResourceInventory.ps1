@@ -982,12 +982,14 @@ function ExecuteInventoryProcessing()
 
                 if ($ConsecutiveCollectorFailures -ge $CollectorFailureCircuitBreakerThreshold)
                 {
-                    # Recorded and BROKEN out of, not thrown. A bare throw here did not stop the run and
-                    # did not even leave this foreach: the global $ErrorActionPreference is
-                    # SilentlyContinue outside -Debug, which makes a throw from inside a catch continue
-                    # with the next iteration. The breaker was therefore inert in exactly the systemic
-                    # case it exists for, and every remaining collector went on to record @() - the
+                    # Recorded and BROKEN out of, not thrown. A bare throw here was observed NOT to stop
+                    # the run and not even to leave this foreach, so the breaker was inert in exactly the
+                    # systemic case it exists for: every remaining collector went on to record @(), the
                     # "incomplete report that looks like an empty environment" its own message warns of.
+                    # Whether a throw propagates depends on the surrounding $ErrorActionPreference state
+                    # (this script sets SilentlyContinue outside -Debug), and it does propagate in some
+                    # hosts - which is the point: break is deterministic where throw is not, so the
+                    # breaker must not depend on it. Do not "simplify" this back to a throw.
                     #
                     # break leaves the loop, so the remaining collectors are never attempted and their
                     # keys are ABSENT from the inventory rather than present and empty. That is the
@@ -1107,7 +1109,16 @@ function ExecuteInventoryProcessing()
 
         Write-RdaProgress -Activity 'Service Processing' -Completed
 
-        Write-Log -Message ("Service processing complete: {0} collectors" -f $ModuleTotal) -NoConsole -ToDebugLog
+        if ([string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+        {
+            Write-Log -Message ("Service processing complete: {0} collectors" -f $ModuleTotal) -NoConsole -ToDebugLog
+        }
+        else
+        {
+            # The debug log is the artifact used to explain a thin report, so it must not claim every
+            # collector completed when the loop was abandoned part-way.
+            Write-Log -Message ("Service processing ABORTED after {0} of {1} collectors; the remainder were never attempted." -f $ModuleIndex, $ModuleTotal) -NoConsole -ToDebugLog
+        }
     }
 
     function ProcessResourceResult()
@@ -1268,7 +1279,7 @@ function ExecuteInventoryProcessing()
                                 #
                                 # Yields to the auth branch below while a refresh is still available, for
                                 # the same reason the Marketplace gate does.
-                                Write-Log -Message ("Consumption page query REJECTED for {0} after {1} attempt(s): {2}. A 400 rejects the request itself and this page is re-sent unchanged on every retry, so it will not be retried. This indicates a malformed request window rather than a transient fault; re-run, and pass -SkipConsumption to leave billing out of the run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                                Write-Log -Message ("Consumption page query REJECTED for {0} after {1} attempt(s): {2}. A 400 means the request itself was rejected, and this page is re-sent unchanged on every retry, so it will not be retried. A malformed request window is the usual cause. Pass -SkipConsumption to leave billing out of the run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
                                 throw
                             }
 

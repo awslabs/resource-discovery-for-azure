@@ -18,6 +18,16 @@
     durable point is the opposite one: `break` is deterministic where `throw` is preference-dependent,
     which is why the product uses it. The evidence for the behaviour itself is the end-to-end run.
 
+    A fourth, related fix is pinned by the last Describe: ResourceInventory.ps1 sets CurrentCulture to
+    en-US inside its two billing functions and never restores it, so figures elsewhere printed a dot
+    only as a side effect of that leak, and entry points that never call those functions got the host
+    culture. It is here rather than in its own file because it shares the root cause with nothing else
+    and shipped in the same change; look here for a culture regression in FindResource or Reveal.
+
+    NOT pinned here, and it needs planted failing collectors so it cannot be: the OUTPUT-level
+    consequence that types after an abort are ABSENT from Inventory_*.json rather than present as [].
+    The end-to-end run below is the record for that; the structural assertions are not a substitute.
+
     Verified end to end before the fix was called done, by planting deliberately failing collectors
     in Services/: one failure now names the type in the report, and five consecutive failures stop
     collection at the fifth (the sixth is never attempted), report the subscription FAILED, exit 2,
@@ -30,7 +40,7 @@ BeforeAll {
     $script:InvSrc = Get-Content -LiteralPath $script:InvPath -Raw
     $Errors = $null
     $script:InvAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$Errors)
-    if (@($Errors).Count -gt 0) { throw ('ResourceInventory.ps1 does not parse: {0}' -f $Errors[0].Message) }
+    if ($null -ne $Errors -and $Errors.Count -gt 0) { throw ('ResourceInventory.ps1 does not parse: {0}' -f $Errors[0].Message) }
 
     $script:SummaryPath = Join-Path $script:Repo 'Extension/Summary.ps1'
     $script:SummarySrc = Get-Content -LiteralPath $script:SummaryPath -Raw
@@ -64,10 +74,12 @@ Describe 'The collector circuit breaker actually stops collection' {
         } | Select-Object -First 1
         $Target | Should -Not -BeNullOrEmpty
 
+        # A switch also consumes a break but is NOT a LoopStatementAst, so walking only to the nearest
+        # loop would skip past one and pass on the exact defect this test exists to catch.
         $Loop = $Target.Parent
-        while ($null -ne $Loop -and -not ($Loop -is [System.Management.Automation.Language.LoopStatementAst])) { $Loop = $Loop.Parent }
+        while ($null -ne $Loop -and -not ($Loop -is [System.Management.Automation.Language.LoopStatementAst] -or $Loop -is [System.Management.Automation.Language.SwitchStatementAst])) { $Loop = $Loop.Parent }
         $Loop | Should -BeOfType ([System.Management.Automation.Language.ForEachStatementAst])
-        $Loop.Variable.Extent.Text | Should -Be '$Module' -Because 'it must abandon the per-collector loop'
+        $Loop.Variable.Extent.Text | Should -BeExactly '$Module' -Because 'it must abandon the per-collector loop'
     }
 
     It 'an aborted run is reported FAILED through the existing archive gate' {
@@ -83,7 +95,9 @@ Describe 'The collector circuit breaker actually stops collection' {
 
 Describe 'A failed collector is visible in the per-subscription HTML report' {
     It 'Summary.ps1 accepts the failed-collector list and the abort flag' {
-        $SumAst = [System.Management.Automation.Language.Parser]::ParseFile($script:SummaryPath, [ref]$null, [ref]$null)
+        $SumErrors = $null
+        $SumAst = [System.Management.Automation.Language.Parser]::ParseFile($script:SummaryPath, [ref]$null, [ref]$SumErrors)
+        if ($null -ne $SumErrors -and $SumErrors.Count -gt 0) { throw ('Extension/Summary.ps1 does not parse: {0}' -f $SumErrors[0].Message) }
         $Params = @($SumAst.ParamBlock.Parameters | ForEach-Object { $_.Name.Extent.Text })
         $Params | Should -Contain '$CollectorFailures'
         $Params | Should -Contain '$CollectorsAborted'
@@ -92,8 +106,10 @@ Describe 'A failed collector is visible in the per-subscription HTML report' {
     It 'ResourceInventory.ps1 passes the PER-INVOCATION list, not the cross-subscription global' {
         # The wrapper invokes this script once per subscription in the SAME process, so the global
         # accumulates. Passing it would make one subscription's report name another's failures.
-        $script:InvSrc | Should -Match '-CollectorFailures \$script:CollectorFailuresThisRun'
-        $script:InvSrc | Should -Not -Match '-CollectorFailures \$Global:CollectorFailures'
+        # A count, not a negative: the negative was green both before and after the fix, and could only
+        # ever fire if a SECOND call site were added beside a correct one.
+        @([regex]::Matches($script:InvSrc, '-CollectorFailures ')).Count | Should -Be 1 -Because 'exactly one call site passes the list'
+        $script:InvSrc | Should -Match '-CollectorFailures \$script:CollectorFailuresThisRun' -Because 'and it must be the per-invocation list'
         $script:InvSrc | Should -Match '-CollectorsAborted:\(\[bool\]\$script:CollectorBreakerError\)'
     }
 
@@ -101,6 +117,9 @@ Describe 'A failed collector is visible in the per-subscription HTML report' {
         $script:InvSrc | Should -Match '\$script:CollectorFailuresThisRun = @\(\)' -Because 'a stale list would carry into the next subscription'
         $Appends = @($script:JobsFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$script:CollectorFailuresThisRun' }, $true))
         $Appends.Count | Should -Be 1 -Because 'appended in exactly one place, the collector catch'
+        # FindAll cannot tell = from +=, and a plain = would keep only the LAST failure, so the banner
+        # would under-report every earlier failed collector while this test stayed green.
+        $Appends[0].Operator | Should -Be 'PlusEquals' -Because 'it accumulates; a plain assignment would drop every earlier failure'
     }
 
     It 'the renderer emits a banner naming the failed types, and marks an aborted run PARTIAL' {
@@ -114,7 +133,7 @@ Describe 'A failed collector is visible in the per-subscription HTML report' {
 
     It 'the banner is emitted into the page, not just computed' {
         # Computed and never interpolated is the classic way a banner silently does nothing.
-        $Emitted = [regex]::Matches($script:SummarySrc, '(?m)^\$CollectorBanner$')
+        $Emitted = [regex]::Matches($script:SummarySrc, '(?m)^\$CollectorBanner\s*$')
         @($Emitted).Count | Should -Be 1 -Because 'it has to appear on its own line inside the page here-string'
     }
 }
@@ -158,10 +177,11 @@ Describe 'A rejected billing request is permanent, whatever the message says' {
         $Gate[0].Extent.Text | Should -Match '-Exception \$_\.Exception' -Because 'the status is what decides; the message does not carry it'
     }
 
-    It 'both billing loops gate BEFORE they consume a retry attempt' {
+    It 'the consumption loop gates BEFORE it consumes a retry attempt' {
+        # Scoped to the NEW gate. The Marketplace ordering is owned by
+        # Tests/ConsumptionDenialFastFail.Tests.ps1, which also pins its denial/OOM/auth neighbours.
         foreach ($Pair in @(
                 @{ Fn = 'GetResourceConsumption'; Budget = '$ConsumptionAttempt++' }
-                @{ Fn = 'GetMarketplaceConsumption'; Budget = '$MpAttempt++' }
             ))
         {
             $Fn = $script:InvAst.Find([scriptblock]::Create(('param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq ''{0}''' -f $Pair.Fn)), $true)
@@ -201,5 +221,88 @@ Describe 'Diagnostic figures outside the billing phases are culture-invariant' {
             $Hit.Count | Should -Be 1 -Because ('{0} must still be logged on the retry line for this to be worth asserting' -f $Var)
             $Hit[0] | Should -Match 'InvariantCulture' -Because ('{0} must not depend on the en-US the billing function leaks' -f $Var)
         }
+    }
+}
+
+Describe 'The banner as the renderer actually emits it' {
+    # Source-text matches on Summary.ps1 pass whatever the banner renders. These run the real script
+    # and read the HTML, the way Tests/VmBillingGap.Tests.ps1 does.
+    BeforeAll {
+        $script:WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("CollectorBanner_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
+
+        function script:Render
+        {
+            param([array]$Failures, [switch]$Aborted)
+            $Json = Join-Path $script:WorkDir ("inv_" + [guid]::NewGuid().ToString('N') + '.json')
+            [pscustomobject]@{
+                Version    = '9.9.9'
+                StorageAcc = @([pscustomobject]@{ Subscription = 'Sub A'; ResourceGroup = 'rg'; Name = 'sa'; Location = 'westeurope' })
+            } | ConvertTo-Json -Depth 6 | Out-File -LiteralPath $Json -Encoding utf8
+            $Html = Join-Path $script:WorkDir ("rep_" + [guid]::NewGuid().ToString('N') + '.html')
+            $SummaryArgs = @{ JsonFile = $Json; HtmlFile = $Html; Version = '9.9.9' }
+            if ($null -ne $Failures) { $SummaryArgs['CollectorFailures'] = $Failures }
+            if ($Aborted) { $SummaryArgs['CollectorsAborted'] = $true }
+            & (Join-Path $script:Repo 'Extension/Summary.ps1') @SummaryArgs | Out-Null
+            return (Get-Content -LiteralPath $Html -Raw)
+        }
+    }
+
+    AfterAll {
+        if ($script:WorkDir -and (Test-Path -LiteralPath $script:WorkDir)) { Remove-Item -LiteralPath $script:WorkDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'says nothing when nothing failed' {
+        $Html = script:Render -Failures @()
+        $Html | Should -Not -Match 'Incomplete collection'
+        $Html | Should -Not -Match 'collection incomplete, see below'
+    }
+
+    It 'names the failed type, and qualifies the Service Types header' {
+        $Html = script:Render -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'boom' })
+        $Html | Should -Match 'Incomplete collection'
+        $Html | Should -Match '<code>VirtualMachines</code>'
+        $Html | Should -Match '1 resource type\(s\) could not be collected'
+        $Html | Should -Match 'collection incomplete, see below' -Because 'the header count must not read as complete while the banner says otherwise'
+    }
+
+    It 'never puts the exception MESSAGE on the page' {
+        # Summary.ps1 has no scrub map, so an exception string could carry real resource ids into an
+        # obfuscated report. The page points at the Diagnostics log instead.
+        $Html = script:Render -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'secret-vm-name-12345 blew up' })
+        $Html | Should -Not -Match 'secret-vm-name-12345'
+        $Html | Should -Match 'See the Diagnostics log'
+    }
+
+    It 'escapes a module name that contains markup' {
+        $Html = script:Render -Failures @([pscustomobject]@{ Module = '<img src=x onerror=alert(1)>'; Message = 'x' })
+        $Html | Should -Not -Match '<img src=x'
+        $Html | Should -Match '&lt;img src=x'
+    }
+
+    It 'renders a record with no Module as an unnamed collector rather than dropping the banner' {
+        $Html = script:Render -Failures @([pscustomobject]@{ Message = 'no module recorded' })
+        $Html | Should -Match 'Incomplete collection' -Because 'a malformed record must not delete the only signal on the page'
+        $Html | Should -Match '\(unnamed collector\)'
+    }
+
+    It 'marks an aborted run PARTIAL and styles it as an error' {
+        $Html = script:Render -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'x' }) -Aborted
+        $Html | Should -Match 'PARTIAL view of the subscription'
+        $Html | Should -Match 'class="coverage-banner collector-abort"'
+        $Html | Should -Match '\.collector-abort' -Because 'the style it references has to exist in the inlined CSS'
+    }
+
+    It 'does not contradict itself when an abort recorded no individual failures' {
+        $Html = script:Render -Failures @() -Aborted
+        $Html | Should -Match 'Incomplete collection'
+        $Html | Should -Not -Match '0 resource type\(s\)' -Because 'that read as a bug to the operator'
+        $Html | Should -Match 'Collection did not complete'
+        $Html | Should -Match 'PARTIAL view of the subscription'
+    }
+
+    It 'accepts a single object as well as an array' {
+        $Html = script:Render -Failures @([pscustomobject]@{ Module = 'AppServices'; Message = 'x' })
+        $Html | Should -Match '<code>AppServices</code>'
     }
 }

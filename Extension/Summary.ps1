@@ -531,6 +531,8 @@ footer {
     color: #856404;
 }
 .coverage-banner b { font-weight: 600; }
+.coverage-banner.collector-abort { background: #fdecea; border-color: #d13212; color: #7d2019; }
+.incomplete-note { font-weight: 600; color: #7d2019; }
 .coverage-icon { font-size: 16px; }
 @media print {
     body { background: white; font-size: 11px; }
@@ -672,17 +674,35 @@ else
 # section is dropped, which reads identically to a subscription that owns none of that type. Naming
 # the types here is the only thing on this page that distinguishes the two.
 $CollectorBanner = ''
-$FailedCollectors = @(@($CollectorFailures) | Where-Object { $_ -and $_.Module })
-if ($FailedCollectors.Count -gt 0 -or $CollectorsAborted)
+# Counted UNFILTERED on purpose. Filtering first and keying the guard off the filtered count would
+# make a malformed record delete the whole banner, which is the same silent disappearance this
+# change exists to end.
+$AllFailures = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
+if ($AllFailures.Count -gt 0 -or $CollectorsAborted)
 {
-    $Names = @($FailedCollectors | ForEach-Object { [string]$_.Module } | Sort-Object -Unique)
-    $NameList = if ($Names.Count -gt 0) { (($Names | ForEach-Object { '<code>' + (ConvertTo-HtmlSafe $_) + '</code>' }) -join ', ') } else { '(none individually recorded)' }
+    $Names = @($AllFailures | ForEach-Object { if ([string]::IsNullOrWhiteSpace([string]$_.Module)) { '(unnamed collector)' } else { [string]$_.Module } } | Sort-Object -Unique)
+    $NameList = (($Names | ForEach-Object { '<code>' + (ConvertTo-HtmlSafe $_) + '</code>' }) -join ', ')
+
+    # An abort with nothing individually recorded must not read "0 resource type(s) ... errored":
+    # lead with the abort in that case instead of contradicting itself.
+    if ($Names.Count -gt 0)
+    {
+        $CollectorLead = ('{0} resource type(s) could not be collected and are MISSING from this report - not empty because there are none, but because the collector errored: {1}.' -f $Names.Count, $NameList)
+    }
+    else
+    {
+        $CollectorLead = 'Collection did not complete, so this report does not cover every resource type.'
+    }
+
     $AbortNote = if ($CollectorsAborted)
     {
         ' Collection was then STOPPED by the circuit breaker, so every resource type after that point was never attempted and is absent from this report entirely. Treat this report as a PARTIAL view of the subscription.'
     }
     else { '' }
-    $CollectorBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>Incomplete collection:</b> {0} resource type(s) could not be collected and are MISSING from this report - not empty because there are none, but because the collector errored: {1}.{2} See the Diagnostics log in this bundle for the underlying error, then re-run.</div></div>' -f $Names.Count, $NameList, $AbortNote)
+
+    # An aborted run is a failure, not a caveat, so it gets the error styling rather than the amber.
+    $CollectorClass = if ($CollectorsAborted) { 'coverage-banner collector-abort' } else { 'coverage-banner' }
+    $CollectorBanner = ('<div class="{0}"><span class="coverage-icon">&#9888;</span><div><b>Incomplete collection:</b> {1}{2} See the Diagnostics log in this bundle for the underlying error, then re-run.</div></div>' -f $CollectorClass, $CollectorLead, $AbortNote)
 }
 
 $CoverageBanner = ''
@@ -726,7 +746,7 @@ $ReportBlock
 $RenderBlock
 $PlatBlock
 <div><b>Total Resources:</b> $TotalResources</div>
-<div><b>Service Types:</b> $($ServiceSummary.Count)</div>
+<div><b>Service Types:</b> $($ServiceSummary.Count)$(if ($CollectorBanner) { ' <span class="incomplete-note">(collection incomplete, see below)</span>' })</div>
 </div>
 </header>
 

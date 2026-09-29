@@ -405,13 +405,29 @@ function Test-RdaPermanentRequestError
 
     if ($null -ne $Exception)
     {
-        $Status = $null
-        try { $Status = $Exception.Response.StatusCode } catch { $Status = $null }
-        if ($null -ne $Status)
+        # Walks InnerException, bounded. Measured live that Get-UsageAggregates surfaces the
+        # CloudException itself, so the top level carries .Response today - but a wrapper
+        # (MethodInvocationException, AggregateException) would put .Response out of reach and make
+        # this gate inert in production while every offline test still passed.
+        $Node = $Exception
+        for ($Depth = 0; $Depth -lt 5 -and $null -ne $Node; $Depth++)
         {
-            $Code = 0
-            try { $Code = [int]$Status } catch { $Code = 0 }
-            if ($Code -eq 400 -or ([string]$Status) -eq 'BadRequest') { return $true }
+            $Status = $null
+            try { $Status = $Node.Response.StatusCode } catch { $Status = $null }
+            if ($null -ne $Status)
+            {
+                $Code = 0
+                try { $Code = [int]$Status } catch { $Code = 0 }
+                # Both forms: an HttpStatusCode enum (or int), and a wrapper that exposes it as text.
+                if ($Code -eq 400 -or ([string]$Status) -eq 'BadRequest') { return $true }
+                # A status was found and it is not a 400, so the text patterns below must not override
+                # it: that is what keeps a 500 whose body quotes a 400 out of the permanent bucket.
+                return $false
+            }
+            $Next = $null
+            try { $Next = $Node.InnerException } catch { $Next = $null }
+            if ($null -eq $Next -or [object]::ReferenceEquals($Next, $Node)) { break }
+            $Node = $Next
         }
     }
 
@@ -426,10 +442,12 @@ function Test-RdaPermanentRequestError
     # into a 200. Observed live against a subscription whose offer does not serve the Marketplace
     # endpoint: 30 attempts escalating to a 60s+ wait each, roughly 25 minutes per subscription.
     #
-    # The one caller today is the Marketplace fetch loop, whose request is byte-identical on every
-    # retry (a fixed window, no page token). The first-party consumption page loop is deliberately NOT
-    # wired to this: its 400 was never reproduced, and it advances a ContinuationToken per attempt, so
-    # "the request is identical" is not the argument there and would need its own evidence.
+    # Both billing loops call this. The Marketplace fetch sends a byte-identical request on every retry
+    # (a fixed window, no page token). The consumption page loop advances a ContinuationToken per PAGE,
+    # but a given page is re-sent unchanged within its own retry loop, which is the same argument at
+    # page granularity - and it has its own evidence: the legacy Commerce usage API answers a malformed
+    # window with HTTP BadRequest whose entire message is "InvalidInput: reportedStartTime has to be
+    # before reportedEndTime.", reproduced live, which is why the status and not the text decides.
     #
     # Deliberately narrower than "the text contains 400": the lookarounds keep a resource name or id
     # that happens to contain the word (rg-BadRequest-01) or the digits (400123 bytes) out of it, the

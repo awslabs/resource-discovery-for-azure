@@ -198,6 +198,7 @@ $ResourceCounts = @()
 $Completed = @($CompletedIds)
 $FailedSubs = @()
 $ArchiveWriteFailures = @()
+$CollectionAbortedSubs = @()
 
 $Global:ConsumptionRecordCount = 0
 $Global:ConsumptionFailedSubs = @()
@@ -235,6 +236,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
         {
             if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $SubName, $SubId) }
+            elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $SubName, $SubId) }
             throw "Script exited with code $LASTEXITCODE"
         }
 
@@ -328,6 +330,7 @@ $Summary = [pscustomobject]@{
     MarketplaceFailedSubs  = @($MarketplaceFailedSubs)
     CollectorFailures      = @($CollectorFailures)
     ArchiveWriteFailures   = @($ArchiveWriteFailures)
+    CollectionAbortedSubs  = @($CollectionAbortedSubs)
     MemoryReadings         = @($MemoryReadings)
 }
 try

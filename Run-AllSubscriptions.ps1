@@ -258,6 +258,10 @@ if ($PSBoundParameters.ContainsKey('MainSummary'))
 $FailedSubscriptions = @()
 
 $ArchiveWriteFailures = @()
+# Inner exit code 3: the collector circuit breaker aborted collection, so that subscription's
+# inventory is partial and its archive was removed. Kept apart from archive-write failures because
+# the remedy differs - a re-run, never zipping the folder by hand.
+$CollectionAbortedSubs = @()
 
 # Two writers only ever add to these run-wide health totals: ResourceInventory.ps1, which runs in
 # this process on the sequential path, and the per-stream summary aggregation on the parallel path.
@@ -1193,6 +1197,7 @@ if ($ParallelStreams -le 1)
             if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
             {
                 if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
+                elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
                 throw "Script exited with code $LASTEXITCODE"
             }
 
@@ -1349,6 +1354,7 @@ else
                 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
                 {
                     if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
+                    elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
                     throw "Script exited with code $LASTEXITCODE"
                 }
                 $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
@@ -1668,6 +1674,10 @@ else
                 {
                     if ($null -eq $Global:MemoryReadings) { $Global:MemoryReadings = @() }
                     $Global:MemoryReadings += @($StreamSummary.MemoryReadings)
+                }
+                if ($StreamSummary.CollectionAbortedSubs -and $StreamSummary.CollectionAbortedSubs.Count -gt 0)
+                {
+                    $CollectionAbortedSubs += @($StreamSummary.CollectionAbortedSubs)
                 }
                 if ($StreamSummary.ArchiveWriteFailures -and $StreamSummary.ArchiveWriteFailures.Count -gt 0)
                 {
@@ -2570,6 +2580,21 @@ if (@($Global:CollectorFailures).Count -gt 0)
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
+if (@($CollectionAbortedSubs).Count -gt 0)
+{
+    Write-Host ""
+    Write-Host "================= FAILED (collection aborted) =================" -ForegroundColor Red
+    Write-Host ("{0} subscription(s) had collection STOPPED by the collector circuit breaker:" -f @($CollectionAbortedSubs).Count) -ForegroundColor Red
+    foreach ($A in @($CollectionAbortedSubs))
+    {
+        Write-Host ("  - {0}" -f $A) -ForegroundColor Red
+    }
+    Write-Host "Several collectors failed in a row, which points at a systemic problem (authentication dropping" -ForegroundColor Red
+    Write-Host "mid-run, network loss, a broken Az module) rather than one resource type. Their inventories are" -ForegroundColor Red
+    Write-Host "PARTIAL, so their reports are NOT in the bundle. Fix the cause named in the per-subscription log" -ForegroundColor Red
+    Write-Host "above, then re-run with -Resume. Do not zip their report folders by hand: they are incomplete." -ForegroundColor Red
+    Write-Host "==============================================================" -ForegroundColor Red
+}
 if (@($ArchiveWriteFailures).Count -gt 0)
 {
     Write-Host ""
@@ -2612,6 +2637,11 @@ $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
 
 if (@($ArchiveWriteFailures).Count -gt 0)
+{
+    $WrapperExitCode = 2
+}
+# An aborted subscription's report is also absent from the bundle, which is what 2 means.
+if (@($CollectionAbortedSubs).Count -gt 0)
 {
     $WrapperExitCode = 2
 }

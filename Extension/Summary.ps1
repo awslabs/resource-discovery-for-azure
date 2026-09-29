@@ -796,4 +796,17 @@ else
 {
     Write-Host "  Privacy posture: identifiable (contains real names; treat as confidential)" -ForegroundColor Yellow
 }
+# Last, so the operator's final console line cannot read clean over an incomplete report.
+if ($CollectorBanner)
+{
+    $ConsoleNames = if (@($Names).Count -gt 0) { (@($Names) -join ', ') } else { 'none individually recorded' }
+    if ($CollectorsAborted)
+    {
+        Write-Host ("  Collection ABORTED: this is a PARTIAL report. Types that failed before the abort: {0}" -f $ConsoleNames) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host ("  Collection INCOMPLETE: {0} resource type(s) missing because the collector errored: {1}" -f @($Names).Count, $ConsoleNames) -ForegroundColor Yellow
+    }
+}
 

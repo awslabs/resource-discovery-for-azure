@@ -2002,6 +2002,7 @@ function ExecuteInventoryProcessing()
     $script:HtmlWriteError = $null
     $script:CollectorBreakerError = $null
     $script:CollectorFailuresThisRun = @()
+    $script:BillingSkippedForAbort = $false
 
     $script:PhaseTimings = [ordered]@{}
 
@@ -2071,7 +2072,16 @@ function ExecuteInventoryProcessing()
     }
     $script:PhaseTimings['Resource detail collection (service collectors)'] = $CollectorPhaseTimer.Elapsed
 
-    if (!$SkipConsumption.IsPresent)
+    if (-not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError) -and -not $SkipConsumption.IsPresent)
+    {
+        # Collection was aborted, so this subscription is reported FAILED and its archive removed
+        # whatever billing returns. A billing pull now would only spend its full retry budget against
+        # the same systemic failure (the usual cause is authentication dropping mid-run) and then have
+        # its output discarded. The re-run collects it.
+        $script:BillingSkippedForAbort = $true
+        Write-Log -Message ('Consumption and Marketplace SKIPPED: collection was aborted by the circuit breaker, so this subscription will be reported FAILED and its archive removed. A billing pull now would spend its full retry budget against the same systemic failure and its output would be discarded. The re-run collects it.') -Severity 'Error'
+    }
+    elseif (!$SkipConsumption.IsPresent)
     {
         $ConsumptionPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
         GetResourceConsumption
@@ -2477,7 +2487,7 @@ Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
 
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
     $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
@@ -2491,7 +2501,7 @@ if ($Obfuscate.IsPresent)
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:(-not $SkipConsumption.IsPresent) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent)) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 
@@ -2574,9 +2584,22 @@ if (-not [string]::IsNullOrWhiteSpace($script:HtmlWriteError))
 
 if (-not $ZipVerified)
 {
-    Write-Log -Message ("FAILED to write the report archive: {0}" -f $Global:ZipOutputFile) -Severity 'Error'
-    Write-Log -Message ("  Reason: {0}" -f $ZipWriteError) -Severity 'Error'
-    Write-Log -Message ("  The uncompressed report files are still in {0} - check free disk space first, then an antivirus/DLP quarantine, then write permissions on that folder." -f $DefaultPath) -Severity 'Error'
+    # An aborted collection gets its own wording and exit code. Folding it into the archive-write
+    # failure made the wrapper report "completed collection but could NOT write a report archive"
+    # and advise zipping the folder by hand, both false for a partial inventory.
+    $CollectionAborted = -not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError)
+    if ($CollectionAborted)
+    {
+        Write-Log -Message ("Collection was ABORTED, so no report archive was kept for this subscription: {0}" -f $Global:ZipOutputFile) -Severity 'Error'
+        Write-Log -Message ("  Reason: {0}" -f $ZipWriteError) -Severity 'Error'
+        Write-Log -Message ("  The uncompressed files in {0} are a PARTIAL inventory, kept for inspection only - do not zip and ship them. Fix the failure named above, then re-run." -f $DefaultPath) -Severity 'Error'
+    }
+    else
+    {
+        Write-Log -Message ("FAILED to write the report archive: {0}" -f $Global:ZipOutputFile) -Severity 'Error'
+        Write-Log -Message ("  Reason: {0}" -f $ZipWriteError) -Severity 'Error'
+        Write-Log -Message ("  The uncompressed report files are still in {0} - check free disk space first, then an antivirus/DLP quarantine, then write permissions on that folder." -f $DefaultPath) -Severity 'Error'
+    }
     Write-Log -Message ('  Reporting this subscription as FAILED so the wrapper does not consolidate a bundle that is missing it. Re-run with -Resume to retry.') -Severity 'Error'
 
     if (Test-Path -LiteralPath $Global:ZipOutputFile -PathType Leaf)
@@ -2591,6 +2614,12 @@ if (-not $ZipVerified)
             Write-Log -Message ('  WARNING: could not remove the unusable archive at {0} ({1}). Delete it by hand before consolidating, or it will ship as a corrupt member.' -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
         }
     }
+
+    # 3 = collection aborted (a partial inventory), 2 = the archive could not be written. The wrapper
+
+    # reads the two separately so it can say which one happened.
+
+    if ($CollectionAborted) { exit 3 }
 
     exit 2
 }

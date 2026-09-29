@@ -306,3 +306,116 @@ Describe 'The banner as the renderer actually emits it' {
         $Html | Should -Match '<code>AppServices</code>'
     }
 }
+
+Describe 'An aborted collection is reported as what it is, not as an archive failure' {
+    It 'the inner script exits 3 for an abort and keeps 2 for an archive write failure' {
+        # 2 made the wrapper say "completed collection but could NOT write a report archive" and advise
+        # zipping the folder by hand, both false for a partial inventory.
+        $script:InvSrc | Should -Match '\$CollectionAborted = -not \[string\]::IsNullOrWhiteSpace\(\$script:CollectorBreakerError\)'
+        $script:InvSrc | Should -Match 'if \(\$CollectionAborted\) \{ exit 3 \}\s*\r?\n\s*exit 2'
+    }
+
+    It 'the abort wording says the files are PARTIAL and must not be zipped by hand' {
+        $script:InvSrc | Should -Match 'PARTIAL inventory, kept for inspection only - do not zip and ship them'
+    }
+
+    It '<Wrapper> collects inner exit 3 separately from inner exit 2' -ForEach @(
+        @{ Wrapper = 'Run-AllSubscriptions.ps1'; Sites = 2 }
+        @{ Wrapper = 'Run-AllSubscriptions.Stream.ps1'; Sites = 1 }
+    ) {
+        $Src = Get-Content -LiteralPath (Join-Path $script:Repo $Wrapper) -Raw
+        @([regex]::Matches($Src, 'elseif \(\$LASTEXITCODE -eq 3\) \{ \$CollectionAbortedSubs \+=')).Count | Should -Be $Sites -Because 'every place that reads an inner exit code must classify an abort'
+        @([regex]::Matches($Src, 'if \(\$LASTEXITCODE -eq 2\) \{ \$ArchiveWriteFailures \+=')).Count | Should -Be $Sites -Because 'the archive-write path is unchanged'
+    }
+
+    It 'the stream worker reports its aborted subscriptions, and the parent aggregates them' {
+        $Stream = Get-Content -LiteralPath (Join-Path $script:Repo 'Run-AllSubscriptions.Stream.ps1') -Raw
+        $Parent = Get-Content -LiteralPath (Join-Path $script:Repo 'Run-AllSubscriptions.ps1') -Raw
+        $Stream | Should -Match 'CollectionAbortedSubs\s+=\s+@\(\$CollectionAbortedSubs\)' -Because 'without it a parallel run silently drops the abort'
+        $Parent | Should -Match '\$CollectionAbortedSubs \+= @\(\$StreamSummary\.CollectionAbortedSubs\)'
+    }
+
+    It 'the wrapper has its own banner for an abort, and still exits 2 because the report is absent' {
+        $Parent = Get-Content -LiteralPath (Join-Path $script:Repo 'Run-AllSubscriptions.ps1') -Raw
+        $Parent | Should -Match 'FAILED \(collection aborted\)'
+        $Parent | Should -Match '(?s)if \(@\(\$CollectionAbortedSubs\)\.Count -gt 0\)\s*\{\s*\$WrapperExitCode = 2\s*\}' -Because 'an aborted report is absent from the bundle, which is exactly what exit 2 documents'
+        # The archive banner must not be what an abort reaches.
+        # From the title to the banner's own closing rule: the title line itself contains a run of '=',
+        # so the capture has to skip past it before looking for the terminator.
+        $Banner = [regex]::Match($Parent, '(?s)FAILED \(collection aborted\) =+".*?"={30,}"').Value
+        $Banner | Should -Not -BeNullOrEmpty
+        $Banner | Should -Not -Match 'could NOT write a report archive'
+        $Banner | Should -Match 'Do not zip their report folders by hand'
+    }
+}
+
+Describe 'Billing is not pulled for a subscription whose collection was aborted' {
+    It 'the billing phase is gated on the breaker state' {
+        $Gate = [regex]::Match($script:InvSrc, '(?s)if \(-not \[string\]::IsNullOrWhiteSpace\(\$script:CollectorBreakerError\) -and -not \$SkipConsumption\.IsPresent\)\s*\{.*?\}\s*elseif \(!\$SkipConsumption\.IsPresent\)').Value
+        $Gate | Should -Not -BeNullOrEmpty -Because 'an aborted subscription must not spend the billing retry budget'
+        $Gate | Should -Match '\$script:BillingSkippedForAbort = \$true'
+        $Gate | Should -Match "Severity 'Error'" -Because 'skipping a requested phase must be loud, never silent'
+        $Gate | Should -Not -Match 'GetResourceConsumption' -Because 'the gated branch must not call the billing pull'
+    }
+
+    It 'the skip flag is reset per invocation' {
+        $script:InvSrc | Should -Match '\$script:BillingSkippedForAbort = \$false'
+    }
+
+    It 'the Diagnostics log is not told billing was requested for a pull that never ran' {
+        # Otherwise it reports "requested but zero rows collected", a false negative.
+        $Calls = @([regex]::Matches($script:InvSrc, 'Write-RdaShareableDiagnosticsLog [^\r\n]+'))
+        $Calls.Count | Should -Be 2
+        foreach ($C in $Calls)
+        {
+            $C.Value | Should -Match '-ConsumptionRequested:\(\(-not \$SkipConsumption\.IsPresent\) -and -not \$script:BillingSkippedForAbort\)'
+            $C.Value | Should -Match '-MarketplaceRequested:\([^\r\n]*-and -not \$script:BillingSkippedForAbort\)'
+        }
+    }
+}
+
+Describe 'The console summary does not read clean over an incomplete report' {
+    BeforeAll {
+        $script:ConsoleDir = Join-Path ([System.IO.Path]::GetTempPath()) ("CollectorConsole_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:ConsoleDir -Force | Out-Null
+        $script:ConsoleJson = Join-Path $script:ConsoleDir 'inv.json'
+        [pscustomobject]@{
+            Version    = '9.9.9'
+            StorageAcc = @([pscustomobject]@{ Subscription = 'Sub A'; ResourceGroup = 'rg'; Name = 'sa'; Location = 'westeurope' })
+        } | ConvertTo-Json -Depth 6 | Out-File -LiteralPath $script:ConsoleJson -Encoding utf8
+
+        function script:Get-ConsoleLines
+        {
+            param([array]$Failures, [switch]$Aborted)
+            $HtmlPath = Join-Path $script:ConsoleDir ("rep_" + [guid]::NewGuid().ToString('N') + '.html')
+            $SummaryArgs = @{ JsonFile = $script:ConsoleJson; HtmlFile = $HtmlPath; Version = '9.9.9'; CollectorFailures = $Failures }
+            if ($Aborted) { $SummaryArgs['CollectorsAborted'] = $true }
+            # Write-Host goes to the information stream; 6>&1 captures it.
+            return @(& (Join-Path $script:Repo 'Extension/Summary.ps1') @SummaryArgs 6>&1 | ForEach-Object { [string]$_ })
+        }
+    }
+
+    AfterAll {
+        if ($script:ConsoleDir -and (Test-Path -LiteralPath $script:ConsoleDir)) { Remove-Item -LiteralPath $script:ConsoleDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'prints nothing extra when nothing failed' {
+        $Lines = script:Get-ConsoleLines -Failures @()
+        @($Lines | Where-Object { $_ -match 'Collection (ABORTED|INCOMPLETE)' }).Count | Should -Be 0
+    }
+
+    It 'ends with an INCOMPLETE line naming the failed type' {
+        $Lines = script:Get-ConsoleLines -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'x' })
+        $Lines[-1] | Should -Match 'Collection INCOMPLETE: 1 resource type\(s\) missing because the collector errored: VirtualMachines' -Because 'it has to be the LAST line, so the operator cannot read the run as clean'
+    }
+
+    It 'ends with an ABORTED line for a breaker trip' {
+        $Lines = script:Get-ConsoleLines -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'x' }) -Aborted
+        $Lines[-1] | Should -Match 'Collection ABORTED: this is a PARTIAL report'
+    }
+
+    It 'never prints the exception message to the console either' {
+        $Lines = script:Get-ConsoleLines -Failures @([pscustomobject]@{ Module = 'VirtualMachines'; Message = 'secret-vm-name-12345 blew up' })
+        ($Lines -join "`n") | Should -Not -Match 'secret-vm-name-12345'
+    }
+}

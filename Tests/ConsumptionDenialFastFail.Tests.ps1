@@ -459,6 +459,42 @@ Describe 'The page loop gives an out-of-memory error one compacted retry, then s
         Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'ran out of memory' -and $Message -notmatch '\.\.' }
     }
 
+    It 'abandons a rejected page after ONE fetch, with no backoff, even though the text never says 400' {
+        # Reproduced live from the Commerce usage API: HTTP BadRequest whose entire message is
+        # "InvalidInput: reportedStartTime has to be before reportedEndTime." The status is on the
+        # exception, not in the text, so this drives a real-shaped exception through the real loop.
+        function Get-UsageAggregates
+        {
+            param($ContinuationToken)
+            $script:Fetches++
+            $Ex = [System.Exception]::new('InvalidInput: reportedStartTime has to be before reportedEndTime.')
+            $Ex | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = [System.Net.HttpStatusCode]::BadRequest })
+            throw $Ex
+        }
+
+        { . $script:PageLoop } | Should -Throw -Because 'it rethrows so the per-subscription catch records the subscription INCOMPLETE'
+        $script:Fetches | Should -Be 1 -Because 'this page is re-sent unchanged on every retry, so one rejection settles it'
+        Should -Invoke Start-Sleep -Exactly -Times 0 -Because 'a rejected request must not spend the escalating backoff'
+        Should -Invoke Write-Log -Exactly -Times 1 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'Consumption page query REJECTED' }
+    }
+
+    It 'lets a rejected page that is ALSO an expired token reach the auth refresh first' {
+        # The gate must yield while a refresh is still available: a refresh is the one thing that can
+        # recover a token-acquisition failure rendered as a 400. Test-DataPlaneAuthReady is stubbed to
+        # throw in this Describe, which is how reaching the AUTH branch is detected.
+        function Get-UsageAggregates
+        {
+            param($ContinuationToken)
+            $script:Fetches++
+            $Ex = [System.Exception]::new('AADSTS700082: The refresh token has expired due to inactivity. Response status code does not indicate success: 400 (BadRequest).')
+            $Ex | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = [System.Net.HttpStatusCode]::BadRequest })
+            throw $Ex
+        }
+
+        { . $script:PageLoop } | Should -Throw -ExpectedMessage '*re-authentication branch ran*' -Because 'the auth path owns this error while a refresh is available'
+        Should -Invoke Write-Log -Exactly -Times 0 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'Consumption page query REJECTED' }
+    }
+
     It 'checks for a denial before the out-of-memory test, so a denial is never retried' {
         $Text = $script:PageLoop.ToString()
         $Denial = $Text.IndexOf('Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message', [System.StringComparison]::Ordinal)

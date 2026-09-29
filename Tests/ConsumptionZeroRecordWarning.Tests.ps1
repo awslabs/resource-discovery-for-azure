@@ -247,8 +247,16 @@ Describe 'RunSummary.log consumption zero-record warning' {
         # Pin the same conversion feeding Write-RdaShareableDiagnosticsLog from ResourceInventory.ps1,
         # form-agnostically (polarity and presence, not the separator). Non-comment anchored so commented-out lines can't satisfy the >=2 count.
         $InnerSrc = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'ResourceInventory.ps1') -Raw
-        @([regex]::Matches($InnerSrc, '(?m)^[^#\r\n]*-ConsumptionRequested:?\s*\(-not \$SkipConsumption\.IsPresent\)')).Count |
+        # Two conditions, and both are load-bearing. The first is the original polarity guard: requested
+        # means NOT skipped. The second was added so a subscription whose collection was ABORTED - billing
+        # deliberately never pulled - does not report "requested but zero rows collected", a false
+        # negative. An inverted polarity (-ConsumptionRequested:($SkipConsumption.IsPresent)) still fails
+        # this, and so does dropping either condition.
+        @([regex]::Matches($InnerSrc, '(?m)^[^#\r\n]*-ConsumptionRequested:?\s*\(\(-not \$SkipConsumption\.IsPresent\) -and -not \$script:BillingSkippedForAbort\)')).Count |
             Should -BeGreaterOrEqual 2 -Because 'both packaging branches pass the flag the same way'
+        # And no call site is left on the old single-condition form, which would re-open the false negative.
+        @([regex]::Matches($InnerSrc, '(?m)^[^#\r\n]*-ConsumptionRequested:?\s*\(-not \$SkipConsumption\.IsPresent\)\s')).Count |
+            Should -Be 0 -Because 'a call site without the abort condition would report a false zero for an aborted subscription'
 
         # Metrics half. It exists now because the diagnostics builder GAINED a
         # -MetricsRequested parameter when its 'Metric-query API calls issued' line was

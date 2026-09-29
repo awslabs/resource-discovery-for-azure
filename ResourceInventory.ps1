@@ -1717,7 +1717,7 @@ function ExecuteInventoryProcessing()
                         # out-of-memory branch reports the same text after a collection has run.
                         $MpErrorText = [string]$_.Exception.Message
 
-                        if ((Test-RdaPermanentRequestError -ErrorMessage $MpErrorText) -and -not (Test-RdaAuthExpiry -ErrorMessage $MpErrorText))
+                        if ((Test-RdaPermanentRequestError -ErrorMessage $MpErrorText) -and -not ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText)))
                         {
                             # A 400 rejects the request, and this endpoint is sent an identical request on
                             # every retry, so the transient budget would spend ~25 minutes of escalating
@@ -1729,6 +1729,11 @@ function ExecuteInventoryProcessing()
                             # error. A token-acquisition failure can surface as a 400 carrying both, and a
                             # refresh is the one thing that recovers it, so abandoning on the 400 alone
                             # would throw away the only available recovery.
+                            #
+                            # The yield mirrors that branch's OWN guard, so it only defers while a refresh
+                            # is actually available. Yielding unconditionally would leave a combined 400
+                            # once the refresh is spent matching neither branch, which drops it back into
+                            # the 30-attempt budget this gate exists to avoid.
                             Write-Log -Message ("Marketplace query REJECTED for {0} after {1} attempt(s): {2}. A 400 rejects the request itself and this endpoint is sent an identical request on every retry, so it will not be retried. The usual cause is a subscription whose offer type does not serve the Microsoft.Consumption/marketplaces endpoint; pass -SkipMarketplace to leave it out of the run." -f $sub.Name, ($MpAttempt + 1), $MpErrorText) -Severity 'Error'
                             throw
                         }

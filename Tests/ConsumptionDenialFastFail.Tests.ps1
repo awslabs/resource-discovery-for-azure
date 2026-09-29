@@ -742,6 +742,26 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         { . $script:MpFetchLoop } | Should -Throw -ExpectedMessage '*re-authentication branch ran*' -Because 'the auth path owns this error, not the permanent gate'
         Should -Invoke Write-Log -Exactly -Times 0 -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'REJECTED' }
     }
+    It 'abandons a combined 400 once the refresh is spent, instead of falling back into the budget' {
+        # The yield to the auth branch mirrors that branch's own guard. If it yielded unconditionally, a
+        # combined 400 would match NEITHER branch once $MpAuthRefreshedThisCall is latched and would drop
+        # into the 30-attempt budget this gate exists to avoid.
+        function Test-DataPlaneAuthReady { param($Phase) $false }
+        function Get-AzConsumptionMarketplace
+        {
+            [CmdletBinding()]
+            param($StartDate, $EndDate)
+            $script:MpFetches++
+            throw 'AADSTS700082: The refresh token has expired due to inactivity. Response status code does not indicate success: 400 (BadRequest).'
+        }
+
+        (Get-Command Get-AzConsumptionMarketplace).CommandType | Should -Be 'Function'
+
+        { . $script:MpFetchLoop } | Should -Throw
+
+        $script:MpFetches | Should -BeLessThan 30 -Because 'once no refresh can help, the rejected request must be abandoned rather than retried to exhaustion'
+        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Error' -and $Message -match 'REJECTED' } -Because 'the abandon is announced once, after the refresh is spent'
+    }
 
     It 'stops after a second out-of-memory error instead of spending the retry budget' {
         # The shadow SUCCEEDS from the third call on, so a regression that spends $MpMaxRetries
@@ -772,7 +792,10 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         # a 400 which is ALSO an expired token yields to this branch instead of being abandoned. The
         # invariant here is which BRANCH an out-of-memory error can reach, so a bare classifier name
         # would now measure that guard instead of the branch.
-        $Auth = $Text.IndexOf('(-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText)', [System.StringComparison]::Ordinal)
+        # Anchored on the branch's own 'if (' so it cannot match the permanent gate, whose condition
+        # deliberately MIRRORS this one (it defers only while a refresh is still available, so the text
+        # is repeated there by design).
+        $Auth = $Text.IndexOf('if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText))', [System.StringComparison]::Ordinal)
         $Perm = $Text.IndexOf('Test-RdaPermanentRequestError -ErrorMessage $MpErrorText', [System.StringComparison]::Ordinal)
         $Budget = $Text.IndexOf('$MpAttempt++', [System.StringComparison]::Ordinal)
 

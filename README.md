@@ -265,7 +265,7 @@ To include every subscription regardless of state, pass `-IncludeDisabled`:
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -IncludeDisabled
 ```
 
-The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
+The wrapper prints the count of excluded subscriptions and a per-state breakdown, and lists each excluded subscription by name, id and state, so the filter is transparent.
 
 #### Subscription access check (up-front)
 

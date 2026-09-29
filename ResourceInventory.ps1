@@ -1157,22 +1157,32 @@ function ExecuteInventoryProcessing()
             return
         }
 
-        # Named in the line logged for every other subscription this run passes over.
-        $TargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
-        $TargetSubLabel = if ($TargetSub) { "'{0}'" -f $TargetSub.Name } else { $SubscriptionID }
+        # One debug-log line for the phase, never one per subscription passed over. The other
+        # subscriptions this identity can see are outside this run's scope (Disabled ones the
+        # wrapper leaves out, other shards, other tenants in Cloud Shell), and the debug log
+        # ships in a default-mode zip, so they are counted here and never named.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            if (![string]::IsNullOrEmpty($ResourceGroup))
+            {
+                Write-Log -Message "Cannot filter consumption by resource group." -Severity 'Info'
+            }
+
+            $PassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID }).Count
+            if ($PassedOverCount -gt 0)
+            {
+                $TargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+                $TargetSubLabel = if ($TargetSub) { "'{0}'" -f $TargetSub.Name } else { $SubscriptionID }
+                Write-Log -Message ("Consumption data not collected for {0} other subscription(s) visible to this identity: this run is limited to subscription {1} by -SubscriptionID." -f $PassedOverCount, $TargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+        }
 
         foreach ($sub in $Global:Subscriptions)
         {
             if (![string]::IsNullOrEmpty($SubscriptionID))
             {
-                if (![string]::IsNullOrEmpty($ResourceGroup))
-                {
-                    Write-Log -Message "Cannot filter consumption by resource group." -Severity 'Info'
-                }
-
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Consumption data not collected for '{0}' ({1}): this run is limited to subscription {2} by -SubscriptionID." -f $sub.Name, $sub.Id, $TargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
                     continue
                 }
             }
@@ -1677,9 +1687,18 @@ function ExecuteInventoryProcessing()
             }
         }
 
-        # Named in the line logged for every other subscription this run passes over.
-        $MpTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
-        $MpTargetSubLabel = if ($MpTargetSub) { "'{0}'" -f $MpTargetSub.Name } else { $SubscriptionID }
+        # One debug-log line for the phase, never one per subscription passed over (see the
+        # same block in GetResourceConsumption): the others are counted, never named.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $MpPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID }).Count
+            if ($MpPassedOverCount -gt 0)
+            {
+                $MpTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+                $MpTargetSubLabel = if ($MpTargetSub) { "'{0}'" -f $MpTargetSub.Name } else { $SubscriptionID }
+                Write-Log -Message ("Marketplace data not collected for {0} other subscription(s) visible to this identity: this run is limited to subscription {1} by -SubscriptionID." -f $MpPassedOverCount, $MpTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+        }
 
         foreach ($sub in $Global:Subscriptions)
         {
@@ -1687,7 +1706,6 @@ function ExecuteInventoryProcessing()
             {
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Marketplace data not collected for '{0}' ({1}): this run is limited to subscription {2} by -SubscriptionID." -f $sub.Name, $sub.Id, $MpTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
                     continue
                 }
             }

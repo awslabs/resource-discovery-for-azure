@@ -278,6 +278,15 @@ successfully probed and both came back negative; any probe gap yields
   collector while leaving first-party consumption and the Marketplace collector
   on. It performs its own per-subscription Marketplace read, independent of and
   idempotent with the Marketplace collector's.
+- The token columns (`TokenMetricsPresent`, `InputTokens`, `OutputTokens`,
+  `TotalTokens`) come from the Tier 2 token collector
+  ([`-SkipFoundryTokens`](#-skipfoundrytokens)); this collector makes no Azure
+  Monitor calls. The last column, `TokenProbeStatus`, says what they mean:
+  `Collected` (a blank is a metric the account does not support, a 0 is a real
+  zero), `Partial` (only the failed metrics are blank), `NoTokenMetrics` (the
+  account supports none), `Failed` (the blanks are not a zero), `NotRun` (the
+  token collector did not run, for example under `-SkipMetrics` or
+  `-SkipFoundryTokens`), or `NotApplicable` on a row that is not a deployment.
 - As with the other phases, finalization guarantees a well-formed output: when
   the phase is skipped (or produced no rows) RDA writes a **header-only**
   `FoundryModelCoverage_*.csv` so downstream tooling always finds a schema-valid
@@ -307,7 +316,9 @@ otherwise be silently dropped from downstream pricing.
 - **Default:** off. When absent, the **additive Tier 2 Azure AI Foundry
   per-model token collector** runs. When present, only that collector is
   skipped; the first-party consumption phase, the Marketplace collector, the
-  Tier 1 Claude/CCU fold, and the Foundry coverage collector are unaffected.
+  Tier 1 Claude/CCU fold, and the Foundry coverage collector are unaffected,
+  except that the coverage CSV's token columns come from this collector and are
+  left blank with `TokenProbeStatus` `NotRun`.
 
 ### What it does
 
@@ -345,6 +356,11 @@ Azure-hosted models that DO expose token metrics (Phi / OpenAI / DeepSeek / …)
 - A confirmed zero (no Foundry accounts found, or accounts exist but reported no
   token usage in the window — e.g. metrics lag) is logged distinctly from a
   failure, so an empty result is never mistaken for a skipped or broken phase.
+- Each metric query asks for one series per deployment when an account has more
+  than 10, because Azure Monitor returns at most 10 dimension series by default.
+- The Foundry coverage collector, which runs next, fills its token columns from
+  this collector's results rather than querying Azure Monitor again (see
+  `TokenProbeStatus` under [`-SkipFoundryCoverage`](#-skipfoundrycoverage)).
 
 In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
 like `-SkipMarketplace` (`$InventoryPassthrough['SkipFoundryTokens'] = $true`),

@@ -1096,7 +1096,7 @@ function Global:ConvertTo-RdaFoundryCoverageRow
     #     ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region,
     #     DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch,
     #     MarketplacePublisher, MarketplaceOffer, CcuAttribution, all numeric usage/cost,
-    #     the probe presence flags, and the run window/timestamp.
+    #     the probe presence flags, TokenProbeStatus, and the run window/timestamp.
     #   - MASKED (identifying), via the SHARED run-wide dictionaries so tokens
     #     cross-reference the rest of the bundle: SubscriptionGuid, SubscriptionName,
     #     ResourceGroup, AccountName, DeploymentName. Reuses the exact
@@ -1194,6 +1194,7 @@ function Global:ConvertTo-RdaFoundryCoverageRow
         ProbeWindowStart      = $Record.ProbeWindowStart
         ProbeWindowEnd        = $Record.ProbeWindowEnd
         RunTimestampUtc       = $Record.RunTimestampUtc
+        TokenProbeStatus      = $Record.TokenProbeStatus
     }
 }
 
@@ -1226,99 +1227,90 @@ function Global:Get-RdaFoundryRetailCatalog
     return @($Items)
 }
 
-function Global:Get-RdaFoundryTokenMetrics
+function Global:Get-RdaFoundryCoverageTokenFields
 {
-    # OPTIONAL richer usage tier (the design spec section 6): per-deployment token metrics from Azure
-    # Monitor, DISCOVERED at runtime via Get-AzMetricDefinition (never hardcoded) because the
-    # metric set differs by account kind and evolves. Returns presence + summed token counts,
-    # or a Present=$false record. A Marketplace/partner deployment that emits nothing here is
-    # EXPECTED, not an error - this NEVER throws for an absent/empty metric, and an account that
-    # defines no token metrics is not logged.
+    # The coverage CSV's token columns for ONE deployment, read from what the Tier 2 token
+    # collector (GetFoundryTokenConsumption in ResourceInventory.ps1) already collected for its
+    # account. Coverage never queries Azure Monitor itself: one owner of the token metric calls,
+    # their retry/denial handling and the Az.Monitor result parsing.
     #
-    # A FAILED call is still recorded as absent (a blank column), because the coverage CSV has no
-    # column for a failed probe. So every failure is logged here, naming the account/deployment
-    # and the error: a Warning for a denial, throttle or other failure, which means the blank is
-    # NOT a real absence of usage; an Info for a permanent "metric not supported for this resource"
-    # error (Test-RdaFoundryMetricPermanentFailure), which is a real absence. Calls are not retried.
+    # TokenProbeStatus says what the token columns mean, so a failed probe is never read as a zero:
+    #   Collected      every token metric the account supports was read. A blank column is a metric
+    #                  the account does not support; 0 is a real zero for the window.
+    #   Partial        some metrics were read and others failed (denied, throttled out, error).
+    #                  Only the failed columns are blank.
+    #   NoTokenMetrics the account supports none of the three token metrics. A real absence.
+    #   Failed         no token metric could be read, or the token phase failed for this
+    #                  subscription or run. The blanks are NOT a zero.
+    #   NotRun         the token phase did not run (-SkipMetrics / -SkipFoundryTokens), or it did not
+    #                  reach this account. The blanks are NOT a zero.
+    # (Rows that are not a deployment use NotApplicable; the caller sets that.)
+    #
+    # $AccountResult is the collector's record for the account: Metrics (metric name -> outcome),
+    # Totals (deployment name -> metric name -> total) and NoDeployments. A deployment missing from
+    # Totals for a Collected metric had no data points in the window, which is a real zero.
     param(
-        [Parameter(Mandatory = $true)][string]$AccountId,
-        [Parameter(Mandatory = $true)][string]$DeploymentName,
-        [Parameter(Mandatory = $true)][datetime]$StartTime,
-        [Parameter(Mandatory = $true)][datetime]$EndTime
+        [ValidateSet('NotRun', 'Failed', 'Ran')][string]$TokenPhaseState = 'NotRun',
+        $AccountResult = $null,
+        [bool]$SubscriptionFailed = $false,
+        [string]$DeploymentName = ''
     )
 
-    $Result = [pscustomobject]@{ Present = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = '' }
+    $Result = [pscustomobject]@{ TokenProbeStatus = 'NotRun'; TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = '' }
 
-    # Same "<account>/<deployment>" form the caller uses in its own probe log line.
-    $ProbeLabel = '{0}/{1}' -f ($AccountId -split '/')[-1], $DeploymentName
-
-    $Defs = @()
-    try { $Defs = @(Get-AzMetricDefinition -ResourceId $AccountId -ErrorAction Stop) }
-    catch
+    if ($TokenPhaseState -eq 'Failed')
     {
-        $DefError = $_.Exception.Message
-        if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $DefError)
-        {
-            Write-Log -Message ("FoundryModelCoverage: metric definitions are not available for {0} ({1}). Its token columns are blank: no token metrics." -f $ProbeLabel, $DefError) -Severity 'Info'
-        }
-        else
-        {
-            Write-Log -Message ("FoundryModelCoverage: the metric definitions lookup FAILED for {0} ({1}). Its token columns are blank because the probe failed, not because the model has no usage." -f $ProbeLabel, $DefError) -Severity 'Warning'
-        }
+        $Result.TokenProbeStatus = 'Failed'
         return $Result
     }
+    if ($TokenPhaseState -ne 'Ran') { return $Result }
+    if ($null -eq $AccountResult)
+    {
+        if ($SubscriptionFailed) { $Result.TokenProbeStatus = 'Failed' }
+        return $Result
+    }
+    if ($AccountResult.NoDeployments) { return $Result }
 
-    # Discover token metrics by NAME rather than assuming a fixed set. Azure OpenAI exposes
-    # ProcessedPromptTokens/GeneratedTokens; newer AIServices adds InputTokens/OutputTokens/
-    # TotalTokens - all dimensioned by ModelDeploymentName (the design spec section 6.1).
-    $NameOf = { param($d) if ($d.Name.Value) { $d.Name.Value } else { "$($d.Name)" } }
-    $HasMetric = { param($n) @($Defs | Where-Object { (& $NameOf $_) -eq $n }).Count -gt 0 }
+    $CollectedCount = 0
+    $FailedCount = 0
+    foreach ($Column in 'InputTokens', 'OutputTokens', 'TotalTokens')
+    {
+        $Outcome = $null
+        if ($null -ne $AccountResult.Metrics -and $AccountResult.Metrics.ContainsKey($Column)) { $Outcome = $AccountResult.Metrics[$Column] }
 
-    $InputMetric = @('InputTokens', 'ProcessedPromptTokens') | Where-Object { & $HasMetric $_ } | Select-Object -First 1
-    $OutputMetric = @('OutputTokens', 'GeneratedTokens') | Where-Object { & $HasMetric $_ } | Select-Object -First 1
-    $TotalMetric = @('TotalTokens') | Where-Object { & $HasMetric $_ } | Select-Object -First 1
-
-    if (-not $InputMetric -and -not $OutputMetric -and -not $TotalMetric) { return $Result }
-
-    $DimFilter = ("ModelDeploymentName eq '{0}'" -f $DeploymentName)
-    $Sum = {
-        param($MetricName)
-        if ([string]::IsNullOrEmpty($MetricName)) { return $null }
-        try
+        if ($Outcome -eq 'Collected')
         {
-            $M = Get-AzMetric -ResourceId $AccountId -MetricName $MetricName -AggregationType Total -StartTime $StartTime -EndTime $EndTime -TimeGrain '1.00:00:00' -MetricFilter $DimFilter -WarningAction SilentlyContinue -ErrorAction Stop
-            # Get-RdaFoundryTokenSeriesTotals is the single tested owner of the Az.Monitor result
-            # shape (the Tier 2 path uses it too). $DimFilter already limits the result to this
-            # deployment, so the deployment's total is the sum of every row it returns.
+            $CollectedCount++
             $Total = 0.0
-            foreach ($Row in @(Get-RdaFoundryTokenSeriesTotals -MetricResult $M -DimensionName 'ModelDeploymentName')) { $Total += [double]$Row.Total }
-            return $Total
+            if ($null -ne $AccountResult.Totals -and $AccountResult.Totals.ContainsKey($DeploymentName) -and $AccountResult.Totals[$DeploymentName].ContainsKey($Column))
+            {
+                $Total = [double]$AccountResult.Totals[$DeploymentName][$Column]
+            }
+            $Result.$Column = $Total
         }
-        catch
+        elseif ($Outcome -ne 'NotSupported')
         {
-            $MetricError = $_.Exception.Message
-            if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $MetricError)
-            {
-                Write-Log -Message ("FoundryModelCoverage: token metric '{0}' is not supported for {1} ({2}). Its column is blank: no data for this metric." -f $MetricName, $ProbeLabel, $MetricError) -Severity 'Info'
-            }
-            else
-            {
-                Write-Log -Message ("FoundryModelCoverage: token metric '{0}' probe FAILED for {1} ({2}). Its column is blank because the probe failed, not because the model has no usage. Not retried." -f $MetricName, $ProbeLabel, $MetricError) -Severity 'Warning'
-            }
-            return $null
+            # Denied, Failed, or never reached because the account failed first.
+            $FailedCount++
         }
     }
 
-    $In = & $Sum $InputMetric
-    $Out = & $Sum $OutputMetric
-    $Tot = & $Sum $TotalMetric
-
-    if ($null -ne $In -or $null -ne $Out -or $null -ne $Tot)
+    $Result.TokenMetricsPresent = ($CollectedCount -gt 0)
+    if ($CollectedCount -gt 0 -and $FailedCount -eq 0)
     {
-        $Result.Present = $true
-        if ($null -ne $In) { $Result.InputTokens = $In }
-        if ($null -ne $Out) { $Result.OutputTokens = $Out }
-        if ($null -ne $Tot) { $Result.TotalTokens = $Tot }
+        $Result.TokenProbeStatus = 'Collected'
+    }
+    elseif ($CollectedCount -gt 0)
+    {
+        $Result.TokenProbeStatus = 'Partial'
+    }
+    elseif ($FailedCount -gt 0)
+    {
+        $Result.TokenProbeStatus = 'Failed'
+    }
+    else
+    {
+        $Result.TokenProbeStatus = 'NoTokenMetrics'
     }
 
     return $Result

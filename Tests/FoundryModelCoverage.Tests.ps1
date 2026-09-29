@@ -254,7 +254,7 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
             'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity',
             'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution',
             'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens',
-            'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc'
+            'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc', 'TokenProbeStatus'
         ) | Sort-Object
         $Actual = @($Out.PSObject.Properties.Name) | Sort-Object
         ($Actual -join ',') | Should -Be ($Expected -join ',')
@@ -320,111 +320,405 @@ Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing
     }
 }
 
-Describe 'Get-RdaFoundryTokenMetrics: coverage token probe parsing and failure logging' {
+Describe 'Get-RdaFoundryCoverageTokenFields: token columns come from the token phase, and a failure never reads as a zero' {
     BeforeAll {
-        # Write-Log is a real dependency of the probe; it is mocked per test to capture what is logged.
+        # One account record in the shape GetFoundryTokenConsumption keeps for the coverage phase.
+        function script:New-TokenAccountResult
+        {
+            param([hashtable]$Metrics = @{}, [hashtable]$Totals = @{}, [bool]$NoDeployments = $false)
+            @{ NoDeployments = $NoDeployments; Metrics = $Metrics; Totals = $Totals }
+        }
+        $script:AllCollected = @{ InputTokens = 'Collected'; OutputTokens = 'Collected'; TotalTokens = 'Collected' }
+    }
+
+    # "$()" turns a numeric 0 into '0', so a blank column cannot pass as a zero or the reverse.
+    It 'says NotRun, with blank columns, when the token phase did not run' {
+        $R = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'NotRun' -AccountResult (script:New-TokenAccountResult -Metrics $script:AllCollected) -DeploymentName 'phi4-prod'
+        $R.TokenProbeStatus | Should -Be 'NotRun'
+        $R.TokenMetricsPresent | Should -BeFalse
+        foreach ($Column in 'InputTokens', 'OutputTokens', 'TotalTokens') { "$($R.$Column)" | Should -Be '' }
+    }
+
+    It 'says Failed when the token phase could not authenticate' {
+        (Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Failed' -DeploymentName 'phi4-prod').TokenProbeStatus | Should -Be 'Failed'
+    }
+
+    It 'says Failed for an account the token phase never reached because its subscription failed there, and NotRun otherwise' {
+        (Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $null -SubscriptionFailed $true -DeploymentName 'phi4-prod').TokenProbeStatus | Should -Be 'Failed'
+        (Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $null -SubscriptionFailed $false -DeploymentName 'phi4-prod').TokenProbeStatus | Should -Be 'NotRun'
+    }
+
+    It 'says Collected with the deployment totals, and a real 0 for a deployment with no data points' {
+        $Account = script:New-TokenAccountResult -Metrics $script:AllCollected -Totals @{ 'phi4-prod' = @{ InputTokens = 30.0; OutputTokens = 7.0; TotalTokens = 37.0 } }
+
+        $Used = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'phi4-prod'
+        $Used.TokenProbeStatus | Should -Be 'Collected'
+        $Used.TokenMetricsPresent | Should -BeTrue
+        "$($Used.InputTokens)" | Should -Be '30'
+        "$($Used.OutputTokens)" | Should -Be '7'
+        "$($Used.TotalTokens)" | Should -Be '37'
+
+        $Idle = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'mini-prod'
+        $Idle.TokenProbeStatus | Should -Be 'Collected'
+        foreach ($Column in 'InputTokens', 'OutputTokens', 'TotalTokens') { "$($Idle.$Column)" | Should -Be '0' }
+    }
+
+    It 'matches deployment names case-insensitively, as the token phase itself does' {
+        $Account = script:New-TokenAccountResult -Metrics $script:AllCollected -Totals @{ 'Phi4-Prod' = @{ InputTokens = 5.0 } }
+        "$((Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'phi4-prod').InputTokens)" | Should -Be '5'
+    }
+
+    It 'leaves a metric the account does not support blank and still says Collected' {
+        $Account = script:New-TokenAccountResult -Metrics @{ InputTokens = 'Collected'; OutputTokens = 'Collected'; TotalTokens = 'NotSupported' } -Totals @{ 'phi4-prod' = @{ InputTokens = 30.0; OutputTokens = 7.0 } }
+        $R = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'phi4-prod'
+        $R.TokenProbeStatus | Should -Be 'Collected'
+        "$($R.InputTokens)" | Should -Be '30'
+        "$($R.TotalTokens)" | Should -Be ''
+    }
+
+    It 'says Partial when some metrics were read and others failed, blanking only the failed ones' {
+        # OutputTokens ran out of retries, and the account failed before TotalTokens was queried.
+        $Account = script:New-TokenAccountResult -Metrics @{ InputTokens = 'Collected'; OutputTokens = 'Failed' } -Totals @{ 'phi4-prod' = @{ InputTokens = 30.0 } }
+        $R = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'phi4-prod'
+        $R.TokenProbeStatus | Should -Be 'Partial'
+        $R.TokenMetricsPresent | Should -BeTrue
+        "$($R.InputTokens)" | Should -Be '30'
+        "$($R.OutputTokens)" | Should -Be ''
+        "$($R.TotalTokens)" | Should -Be ''
+    }
+
+    It 'says Failed, with blank columns, when every token metric was denied' {
+        $Account = script:New-TokenAccountResult -Metrics @{ InputTokens = 'Denied'; OutputTokens = 'Denied'; TotalTokens = 'Denied' }
+        $R = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'phi4-prod'
+        $R.TokenProbeStatus | Should -Be 'Failed'
+        $R.TokenMetricsPresent | Should -BeFalse
+        foreach ($Column in 'InputTokens', 'OutputTokens', 'TotalTokens') { "$($R.$Column)" | Should -Be '' }
+    }
+
+    It 'says NoTokenMetrics when the account supports none of the token metrics' {
+        $Account = script:New-TokenAccountResult -Metrics @{ InputTokens = 'NotSupported'; OutputTokens = 'NotSupported'; TotalTokens = 'NotSupported' }
+        $R = Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult $Account -DeploymentName 'phi4-prod'
+        $R.TokenProbeStatus | Should -Be 'NoTokenMetrics'
+        $R.TokenMetricsPresent | Should -BeFalse
+    }
+
+    It 'says Failed for an account whose deployments the token phase could not list' {
+        (Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult (script:New-TokenAccountResult) -DeploymentName 'phi4-prod').TokenProbeStatus | Should -Be 'Failed'
+    }
+
+    It 'says NotRun when the token phase found no deployments on the account' {
+        (Get-RdaFoundryCoverageTokenFields -TokenPhaseState 'Ran' -AccountResult (script:New-TokenAccountResult -NoDeployments $true) -DeploymentName 'phi4-prod').TokenProbeStatus | Should -Be 'NotRun'
+    }
+}
+
+Describe 'GetFoundryModelCoverage source: the TokenProbeStatus column and no Azure Monitor calls of its own' {
+    BeforeAll {
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $script:CoverageFn = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'GetFoundryModelCoverage' }, $true)
+        if (-not $script:CoverageFn) { throw 'GetFoundryModelCoverage was not found in ResourceInventory.ps1.' }
+
+        # The header-only fallback the finalization writes when the phase produced no rows.
+        $HeaderAst = @($InvAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $N.Value.StartsWith('SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,') }, $true))
+        if ($HeaderAst.Count -ne 1) { throw ('expected one coverage header literal, found {0}' -f $HeaderAst.Count) }
+        $script:HeaderColumns = @($HeaderAst[0].Value -split ',')
+
+        # The projection the phase writes its rows with.
+        $Projection = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Select-Object' -and $N.Parent.Extent.Text -match 'FoundryCoverageFileCsv' }, $true))
+        if ($Projection.Count -ne 1) { throw ('expected one coverage Select-Object projection, found {0}' -f $Projection.Count) }
+        $script:ProjectionColumns = @($Projection[0].CommandElements[1].Elements | ForEach-Object { $_.Value })
+
+        # The columns up to RunTimestampUtc, in order, as they were before TokenProbeStatus existed.
+        $script:ExistingColumns = @(
+            'SubscriptionGuid', 'SubscriptionName', 'ResourceGroup', 'AccountName', 'AccountKind',
+            'DeploymentName', 'ModelName', 'ModelFormat', 'ModelVersion', 'DeploymentSku',
+            'DeploymentCapacity', 'Region', 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag',
+            'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity',
+            'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution',
+            'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens',
+            'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc'
+        )
+    }
+
+    It 'appends TokenProbeStatus after the existing columns, in the same order in the row, the projection and the empty-file header' {
+        $Record = script:New-FakeModel
+        $Row = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$false
+        $RowColumns = @($Row.PSObject.Properties.Name)
+        $Expected = @($script:ExistingColumns + 'TokenProbeStatus') -join ','
+
+        ($RowColumns -join ',') | Should -Be $Expected
+        ($script:ProjectionColumns -join ',') | Should -Be $Expected
+        ($script:HeaderColumns -join ',') | Should -Be $Expected
+    }
+
+    It 'sets TokenProbeStatus on every coverage record it builds' {
+        $Records = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] -and @($N.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text }) -contains 'RunTimestampUtc' }, $true))
+        $Records.Count | Should -Be 3 -Because 'a deployment row, a deployments-not-listed row and an unattributed Marketplace row'
+        foreach ($R in $Records)
+        {
+            @($R.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text }) | Should -Contain 'TokenProbeStatus'
+        }
+    }
+
+    It 'reads the token phase results instead of querying Azure Monitor itself' {
+        $Commands = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        foreach ($Name in 'Get-AzMetric', 'Get-AzMetricDefinition', 'Invoke-RdaFoundryTokenMetricQuery')
+        {
+            $Commands | Should -Not -Contain $Name
+        }
+        $Commands | Should -Contain 'Get-RdaFoundryCoverageTokenFields'
+        Get-Command Get-RdaFoundryTokenMetrics -ErrorAction SilentlyContinue | Should -BeNullOrEmpty -Because 'the separate coverage token probe is gone'
+    }
+}
+
+Describe 'Foundry token phase feeding the coverage CSV (the real collector bodies, offline)' {
+    BeforeAll {
         . (Join-Path $script:Repo 'Functions/Common.Functions.ps1')
 
-        # Stubs so Mock can resolve the commands on a host without Az.Monitor.
-        # Defined only when absent, never shadowing a real cmdlet.
-        if (-not (Get-Command Get-AzMetricDefinition -ErrorAction SilentlyContinue))
+        # Define the real collector functions from their source, not a re-implementation.
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        foreach ($FnName in 'GetFoundryTokenConsumption', 'Invoke-RdaFoundryTokenMetricQuery', 'GetFoundryModelCoverage')
         {
-            function Get-AzMetricDefinition { [CmdletBinding()] param([string]$ResourceId) throw 'stub - should be mocked' }
+            $Fn = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $FnName }, $true)
+            if (-not $Fn) { throw ('{0} was not found in ResourceInventory.ps1.' -f $FnName) }
+            . ([scriptblock]::Create($Fn.Extent.Text))
+        }
+
+        # Stubs so Mock can resolve the commands on a host without the Az modules.
+        # Defined only when absent, never shadowing a real cmdlet.
+        if (-not (Get-Command Get-AzCognitiveServicesAccount -ErrorAction SilentlyContinue))
+        {
+            function Get-AzCognitiveServicesAccount { [CmdletBinding()] param() throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Get-AzCognitiveServicesAccountDeployment -ErrorAction SilentlyContinue))
+        {
+            function Get-AzCognitiveServicesAccountDeployment { [CmdletBinding()] param([string]$ResourceGroupName, [string]$AccountName) throw 'stub - should be mocked' }
         }
         if (-not (Get-Command Get-AzMetric -ErrorAction SilentlyContinue))
         {
             function Get-AzMetric
             {
                 [CmdletBinding()]
-                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [timespan]$TimeGrain, [string]$MetricFilter)
+                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top)
+                throw 'stub - should be mocked'
+            }
+        }
+        if (-not (Get-Command Get-AzConsumptionMarketplace -ErrorAction SilentlyContinue))
+        {
+            function Get-AzConsumptionMarketplace { [CmdletBinding()] param([datetime]$StartDate, [datetime]$EndDate) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue))
+        {
+            function Invoke-AzRestMethod { [CmdletBinding()] param([string]$Method, [string]$Path) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Set-AzContext -ErrorAction SilentlyContinue))
+        {
+            function Set-AzContext { [CmdletBinding()] param([string]$Subscription) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Get-AzContext -ErrorAction SilentlyContinue))
+        {
+            function Get-AzContext { [CmdletBinding()] param() throw 'stub - should be mocked' }
+        }
+        # A nested function of ResourceInventory.ps1, so it has no definition in this scope.
+        function Test-DataPlaneAuthReady { [CmdletBinding()] param([string]$Phase) throw 'stub - should be mocked' }
+
+        $script:E2ESubId = [guid]::NewGuid().ToString()
+        $script:AcctAId = '/subscriptions/{0}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acct-a' -f $script:E2ESubId
+        $script:AcctBId = '/subscriptions/{0}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acct-b' -f $script:E2ESubId
+
+        function script:New-FakeDeployment([string]$Name, [string]$Model)
+        {
+            [pscustomobject]@{ Name = $Name; Properties = [pscustomobject]@{ Model = [pscustomobject]@{ Name = $Model; Format = 'Microsoft'; Version = '1' } } }
+        }
+        function script:New-FakeSeriesResult([hashtable]$PointsByDeployment)
+        {
+            [pscustomobject]@{
+                Timeseries = @($PointsByDeployment.Keys | ForEach-Object {
+                        [pscustomobject]@{
+                            Metadatavalues = @([pscustomobject]@{ Name = [pscustomobject]@{ Value = 'ModelDeploymentName' }; Value = $_ })
+                            Data           = @($PointsByDeployment[$_] | ForEach-Object { [pscustomobject]@{ Total = $_ } })
+                        }
+                    })
+            }
+        }
+        function script:New-FakeArmDeployments([string[]]$Names)
+        {
+            $Value = @($Names | ForEach-Object { [pscustomobject]@{ name = $_; sku = [pscustomobject]@{ name = 'GlobalStandard'; capacity = 1 }; properties = [pscustomobject]@{ model = [pscustomobject]@{ name = 'Phi-4'; format = 'Microsoft'; version = '1' } } } })
+            [pscustomobject]@{ StatusCode = 200; Content = ([pscustomobject]@{ value = $Value } | ConvertTo-Json -Depth 6) }
+        }
+
+        # Token phase: acct-a has usage on one of its two deployments and does not support
+        # TotalTokens; every metric on acct-b is denied.
+        Mock Write-Log { }
+        Mock Test-DataPlaneAuthReady { $true }
+        Mock Set-AzContext { }
+        Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $script:E2ESubId } } }
+        Mock Get-AzCognitiveServicesAccount {
+            @(
+                [pscustomobject]@{ Id = $script:AcctAId; AccountName = 'acct-a'; ResourceGroupName = 'rg-ai'; Location = 'eastus' }
+                [pscustomobject]@{ Id = $script:AcctBId; AccountName = 'acct-b'; ResourceGroupName = 'rg-ai'; Location = 'eastus' }
+            )
+        }
+        Mock Get-AzCognitiveServicesAccountDeployment { @((script:New-FakeDeployment 'phi4-prod' 'Phi-4'), (script:New-FakeDeployment 'mini-prod' 'Phi-4-mini')) } -ParameterFilter { $AccountName -eq 'acct-a' }
+        Mock Get-AzCognitiveServicesAccountDeployment { @(script:New-FakeDeployment 'gpt-prod' 'gpt-4o') } -ParameterFilter { $AccountName -eq 'acct-b' }
+        Mock Get-AzMetric { [pscustomobject]@{ Timeseries = @() } }
+        Mock Get-AzMetric { script:New-FakeSeriesResult @{ 'phi4-prod' = @(10, 20) } } -ParameterFilter { $ResourceId -eq $script:AcctAId -and $MetricName -eq 'InputTokens' }
+        Mock Get-AzMetric { script:New-FakeSeriesResult @{ 'phi4-prod' = @(3, 4) } } -ParameterFilter { $ResourceId -eq $script:AcctAId -and $MetricName -eq 'OutputTokens' }
+        Mock Get-AzMetric { throw "Operation returned an invalid status code 'BadRequest'" } -ParameterFilter { $ResourceId -eq $script:AcctAId -and $MetricName -eq 'TotalTokens' }
+        Mock Get-AzMetric { throw "The client 'x' does not have authorization to perform action 'Microsoft.Insights/metrics/read'. AuthorizationFailed" } -ParameterFilter { $ResourceId -eq $script:AcctBId }
+
+        # Coverage phase: Resource Graph returns the same accounts with the lower-case id form it
+        # commonly uses, so the lookup into the token results has to ignore case.
+        Mock Get-RdaFoundryRetailCatalog { @() }
+        Mock Get-AzConsumptionMarketplace { @() }
+        Mock Invoke-AzGraphQuerySafe {
+            $Accounts = @(
+                [pscustomobject]@{ id = $script:AcctAId.ToLowerInvariant(); name = 'acct-a'; kind = 'AIServices'; sku = 'S0'; location = 'eastus'; resourceGroup = 'rg-ai'; subscriptionId = $script:E2ESubId }
+                [pscustomobject]@{ id = $script:AcctBId.ToLowerInvariant(); name = 'acct-b'; kind = 'AIServices'; sku = 'S0'; location = 'eastus'; resourceGroup = 'rg-ai'; subscriptionId = $script:E2ESubId }
+            )
+            [pscustomobject]@{ data = $Accounts }
+        }
+        Mock Invoke-AzRestMethod { script:New-FakeArmDeployments @('phi4-prod', 'mini-prod') } -ParameterFilter { $Path -like '*/acct-a/deployments*' }
+        Mock Invoke-AzRestMethod { script:New-FakeArmDeployments @('gpt-prod') } -ParameterFilter { $Path -like '*/acct-b/deployments*' }
+
+        # Runs the phases the way ExecuteInventoryProcessing does: the token phase first, then
+        # coverage. The inputs they read from their caller's scope arrive as parameters.
+        $script:RunFoundryPhases = [scriptblock]::Create(@'
+param($SubscriptionID, $Obfuscate, [bool]$WithTokenPhase)
+$script:FoundryTokenResults = $null
+$script:FoundryTokenFailedSubIds = $null
+$script:FoundryTokenPhaseState = $null
+if ($WithTokenPhase) { GetFoundryTokenConsumption }
+GetFoundryModelCoverage
+'@)
+
+        $script:PriorGlobals = @{}
+        foreach ($Name in 'Subscriptions', 'ConsumptionFileCsv', 'FoundryCoverageFileCsv', 'ResourceIdDictionary', 'FoundryTokenRecordCount', 'FoundryTokenFailedSubs', 'FoundryCoverageRecordCount', 'FoundryCoverageFailedSubs', 'FoundryCoverageUnpricedCount')
+        {
+            $script:PriorGlobals[$Name] = Get-Variable -Scope Global -Name $Name -ValueOnly -ErrorAction SilentlyContinue
+        }
+        $Global:Subscriptions = @([pscustomobject]@{ Id = $script:E2ESubId; Name = 'Foundry test subscription' })
+        $Global:ResourceIdDictionary = @{}
+    }
+
+    AfterAll {
+        foreach ($Name in $script:PriorGlobals.Keys)
+        {
+            Set-Variable -Scope Global -Name $Name -Value $script:PriorGlobals[$Name]
+        }
+    }
+
+    BeforeEach {
+        $Stamp = [guid]::NewGuid().ToString('N')
+        $Global:ConsumptionFileCsv = Join-Path ([System.IO.Path]::GetTempPath()) ('Consumption_{0}.csv' -f $Stamp)
+        $Global:FoundryCoverageFileCsv = Join-Path ([System.IO.Path]::GetTempPath()) ('FoundryModelCoverage_{0}.csv' -f $Stamp)
+        foreach ($Name in 'FoundryTokenRecordCount', 'FoundryTokenFailedSubs', 'FoundryCoverageRecordCount', 'FoundryCoverageFailedSubs', 'FoundryCoverageUnpricedCount')
+        {
+            Set-Variable -Scope Global -Name $Name -Value $null
+        }
+    }
+
+    AfterEach {
+        foreach ($Path in $Global:ConsumptionFileCsv, $Global:FoundryCoverageFileCsv)
+        {
+            if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+        }
+    }
+
+    It 'fills each deployment row from the token phase, marking a denied account Failed rather than zero, with no extra metric calls' {
+        & $script:RunFoundryPhases -SubscriptionID $script:E2ESubId -Obfuscate ([pscustomobject]@{ IsPresent = $false }) -WithTokenPhase $true
+
+        $Rows = @(Import-Csv -LiteralPath $Global:FoundryCoverageFileCsv)
+        $Rows.Count | Should -Be 3
+        $ByDeployment = @{}
+        foreach ($Row in $Rows) { $ByDeployment[$Row.DeploymentName] = $Row }
+
+        $ByDeployment['phi4-prod'].TokenProbeStatus | Should -Be 'Collected'
+        $ByDeployment['phi4-prod'].TokenMetricsPresent | Should -Be 'True'
+        $ByDeployment['phi4-prod'].InputTokens | Should -Be '30'
+        $ByDeployment['phi4-prod'].OutputTokens | Should -Be '7'
+        $ByDeployment['phi4-prod'].TotalTokens | Should -Be '' -Because 'the account does not support TotalTokens'
+
+        $ByDeployment['mini-prod'].TokenProbeStatus | Should -Be 'Collected'
+        $ByDeployment['mini-prod'].InputTokens | Should -Be '0' -Because 'the query succeeded and returned no data for this deployment'
+
+        $ByDeployment['gpt-prod'].TokenProbeStatus | Should -Be 'Failed'
+        $ByDeployment['gpt-prod'].TokenMetricsPresent | Should -Be 'False'
+        $ByDeployment['gpt-prod'].InputTokens | Should -Be '' -Because 'a denied query is not a zero'
+
+        # 8 token metrics per account, one call each (denied and unsupported are not retried),
+        # all from the token phase: coverage adds none.
+        Should -Invoke Get-AzMetric -Times 16 -Exactly
+    }
+
+    It 'says NotRun on every deployment row, once in the log, and makes no metric calls when the token phase did not run' {
+        & $script:RunFoundryPhases -SubscriptionID $script:E2ESubId -Obfuscate ([pscustomobject]@{ IsPresent = $false }) -WithTokenPhase $false
+
+        $Rows = @(Import-Csv -LiteralPath $Global:FoundryCoverageFileCsv)
+        $Rows.Count | Should -Be 3
+        foreach ($Row in $Rows)
+        {
+            $Row.TokenProbeStatus | Should -Be 'NotRun'
+            $Row.TokenMetricsPresent | Should -Be 'False'
+            $Row.InputTokens | Should -Be ''
+        }
+        Should -Invoke Get-AzMetric -Times 0 -Exactly
+        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'TokenProbeStatus NotRun' }
+    }
+}
+
+Describe 'Invoke-RdaFoundryTokenMetricQuery: series cap and outcome reporting' {
+    BeforeAll {
+        . (Join-Path $script:Repo 'Functions/Common.Functions.ps1')
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Fn = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Invoke-RdaFoundryTokenMetricQuery' }, $true)
+        if (-not $Fn) { throw 'Invoke-RdaFoundryTokenMetricQuery was not found in ResourceInventory.ps1.' }
+        . ([scriptblock]::Create($Fn.Extent.Text))
+
+        if (-not (Get-Command Get-AzMetric -ErrorAction SilentlyContinue))
+        {
+            function Get-AzMetric
+            {
+                [CmdletBinding()]
+                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top)
                 throw 'stub - should be mocked'
             }
         }
 
-        $script:ProbeSubId = [guid]::NewGuid().ToString()
-        $script:ProbeAccountId = '/subscriptions/{0}/resourceGroups/rg-ai-prod/providers/Microsoft.CognitiveServices/accounts/aiservices-prod' -f $script:ProbeSubId
-        $script:ProbeArgs = @{
-            AccountId      = $script:ProbeAccountId
-            DeploymentName = 'phi4-prod'
-            StartTime      = (Get-Date).AddDays(-30)
-            EndTime        = Get-Date
-        }
-
-        # A metric definition shaped like PSMetricDefinition (.Name is a LocalizableString).
-        function script:New-FakeMetricDefinition([string]$Name)
-        {
-            [pscustomobject]@{ Name = [pscustomobject]@{ Value = $Name } }
-        }
-
-        # A Get-AzMetric result shaped like PSMetric: one per-deployment series under .Timeseries.
-        function script:New-FakeTokenMetric([double[]]$PointTotals)
-        {
-            [pscustomobject]@{
-                Timeseries = @([pscustomobject]@{
-                        Metadatavalues = @([pscustomobject]@{ Name = [pscustomobject]@{ Value = 'ModelDeploymentName' }; Value = 'phi4-prod' })
-                        Data           = @($PointTotals | ForEach-Object { [pscustomobject]@{ Total = $_ } })
-                    })
-            }
+        $script:QueryArgs = @{
+            AccountResourceId = '/subscriptions/{0}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acct-a' -f [guid]::NewGuid()
+            MetricName        = 'InputTokens'
+            StartTime         = (Get-Date).AddDays(-31).Date
+            EndTime           = (Get-Date).AddDays(-1).Date
         }
     }
 
     BeforeEach {
         Mock Write-Log { }
-        Mock Get-AzMetricDefinition { @((script:New-FakeMetricDefinition 'InputTokens'), (script:New-FakeMetricDefinition 'OutputTokens'), (script:New-FakeMetricDefinition 'TotalTokens')) }
-        Mock Get-AzMetric { script:New-FakeTokenMetric -PointTotals @(10, 20) } -ParameterFilter { $MetricName -eq 'InputTokens' }
-        Mock Get-AzMetric { script:New-FakeTokenMetric -PointTotals @(3, 4) } -ParameterFilter { $MetricName -eq 'OutputTokens' }
-        Mock Get-AzMetric { script:New-FakeTokenMetric -PointTotals @(37) } -ParameterFilter { $MetricName -eq 'TotalTokens' }
+        Mock Get-AzMetric { [pscustomobject]@{ Timeseries = @() } }
     }
 
-    It 'sums each metric for the deployment and logs nothing when every call succeeds' {
-        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
-        $R.Present | Should -BeTrue
-        $R.InputTokens | Should -Be 30
-        $R.OutputTokens | Should -Be 7
-        $R.TotalTokens | Should -Be 37
-        Should -Invoke Write-Log -Times 0 -Exactly
+    It 'asks for one series per deployment above the default cap of 10, and sends no -Top at or below it' {
+        $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs -Top 12
+        Should -Invoke Get-AzMetric -Times 1 -Exactly -ParameterFilter { $Top -eq 12 }
+
+        $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs -Top 10
+        $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs
+        Should -Invoke Get-AzMetric -Times 2 -Exactly -ParameterFilter { $null -eq $Top }
     }
 
-    It 'parses every metric result through Get-RdaFoundryTokenSeriesTotals, the single owner of the Az.Monitor shape' {
-        Mock Get-RdaFoundryTokenSeriesTotals { @([pscustomobject]@{ ModelDeploymentName = 'phi4-prod'; Total = 7 }, [pscustomobject]@{ ModelDeploymentName = 'phi4-prod'; Total = 5 }) }
-        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
-        $R.InputTokens | Should -Be 12
-        $R.OutputTokens | Should -Be 12
-        $R.TotalTokens | Should -Be 12
-        Should -Invoke Get-RdaFoundryTokenSeriesTotals -Times 3 -Exactly
-    }
+    It 'reports Collected, Denied and NotSupported to the caller' {
+        $Outcome = @{}
+        $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs -Outcome $Outcome
+        $Outcome['Status'] | Should -Be 'Collected'
 
-    It 'logs a Warning naming the metric when a call fails, and leaves only that column blank' {
-        Mock Get-AzMetric { throw 'TooManyRequests (429): rate is limited' } -ParameterFilter { $MetricName -eq 'InputTokens' }
-        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
-        $R.Present | Should -BeTrue
-        $R.InputTokens | Should -Be ''
-        $R.OutputTokens | Should -Be 7
-        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Warning' -and $Message -match "'InputTokens'" -and $Message -match 'aiservices-prod/phi4-prod' -and $Message -match '429' }
-        Should -Invoke Write-Log -Times 1 -Exactly
-    }
+        Mock Get-AzMetric { throw "The client 'x' does not have authorization to perform action 'Microsoft.Insights/metrics/read'. AuthorizationFailed" }
+        $Outcome = @{}
+        Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs -Outcome $Outcome | Should -BeNullOrEmpty
+        $Outcome['Status'] | Should -Be 'Denied'
 
-    It 'logs an unsupported metric (permanent 400) at Info, not Warning' {
-        Mock Get-AzMetric { throw "Operation returned an invalid status code 'BadRequest'" } -ParameterFilter { $MetricName -eq 'TotalTokens' }
-        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
-        $R.TotalTokens | Should -Be ''
-        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Info' -and $Message -match "'TotalTokens'" }
-        Should -Invoke Write-Log -Times 0 -Exactly -ParameterFilter { $Severity -eq 'Warning' }
-    }
-
-    It 'logs a Warning and returns an absent record when the metric definitions lookup fails' {
-        Mock Get-AzMetricDefinition { throw "The client 'x' does not have authorization to perform action 'Microsoft.Insights/metricDefinitions/read'. AuthorizationFailed" }
-        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
-        $R.Present | Should -BeFalse
-        Should -Invoke Get-AzMetric -Times 0 -Exactly
-        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Severity -eq 'Warning' -and $Message -match 'definitions' -and $Message -match 'AuthorizationFailed' }
-    }
-
-    It 'stays silent when the account defines no token metrics (an expected absence, not a failure)' {
-        Mock Get-AzMetricDefinition { @(script:New-FakeMetricDefinition 'Latency') }
-        $R = Get-RdaFoundryTokenMetrics @script:ProbeArgs
-        $R.Present | Should -BeFalse
-        Should -Invoke Get-AzMetric -Times 0 -Exactly
-        Should -Invoke Write-Log -Times 0 -Exactly
+        Mock Get-AzMetric { throw "Operation returned an invalid status code 'BadRequest'" }
+        $Outcome = @{}
+        Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs -Outcome $Outcome | Should -BeNullOrEmpty
+        $Outcome['Status'] | Should -Be 'NotSupported'
     }
 }

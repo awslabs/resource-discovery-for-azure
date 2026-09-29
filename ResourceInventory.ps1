@@ -1939,8 +1939,18 @@ function ExecuteInventoryProcessing()
         if ($null -eq $script:FoundryTokenFailedSubsThisRun) { $script:FoundryTokenFailedSubsThisRun = 0 }
         if ($null -eq $script:FoundryTokenAccountsSeenThisRun) { $script:FoundryTokenAccountsSeenThisRun = 0 }
 
+        # What this phase collected, kept for GetFoundryModelCoverage (which runs next) so the
+        # coverage CSV's token columns come from these results instead of a second set of Azure
+        # Monitor calls. Keyed by account resource id (case-insensitive); each record holds the
+        # outcome of every metric query and the per-deployment totals. See
+        # Get-RdaFoundryCoverageTokenFields for how coverage reads them.
+        $script:FoundryTokenResults = @{}
+        $script:FoundryTokenFailedSubIds = @{}
+        $script:FoundryTokenPhaseState = 'Ran'
+
         if (-not (Test-DataPlaneAuthReady -Phase 'FoundryTokens'))
         {
+            $script:FoundryTokenPhaseState = 'Failed'
             Write-Log -Message ('Foundry tokens: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Foundry token collection was requested (no -SkipConsumption / -SkipMetrics / -SkipFoundryTokens) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
             $Global:FoundryTokenFailedSubs += [pscustomobject]@{
                 Name             = '(all subscriptions)'
@@ -1997,6 +2007,7 @@ function ExecuteInventoryProcessing()
                     RecordsCollected = 0
                 }
                 $script:FoundryTokenFailedSubsThisRun++
+                $script:FoundryTokenFailedSubIds[$sub.Id] = $true
                 continue
             }
 
@@ -2016,12 +2027,14 @@ function ExecuteInventoryProcessing()
                     Write-Log -Message $DenyMessage -Severity 'Error'
                     $Global:FoundryTokenFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $DenyMessage; Complete = $false; RecordsCollected = 0 }
                     $script:FoundryTokenFailedSubsThisRun++
+                    $script:FoundryTokenFailedSubIds[$sub.Id] = $true
                     continue
                 }
                 $FailMessage = ("Foundry tokens: could not list Cognitive Services accounts for {0}: {1}. Skipping this subscription's Foundry token collection." -f $sub.Name, $_.Exception.Message)
                 Write-Log -Message $FailMessage -Severity 'Warning'
                 $Global:FoundryTokenFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $FailMessage; Complete = $false; RecordsCollected = 0 }
                 $script:FoundryTokenFailedSubsThisRun++
+                $script:FoundryTokenFailedSubIds[$sub.Id] = $true
                 continue
             }
 
@@ -2052,6 +2065,12 @@ function ExecuteInventoryProcessing()
                 # outer one is the backstop for the unexpected.)
                 try
                 {
+                    # This account's record for the coverage phase. Every metric starts out
+                    # 'Failed' until its query reports an outcome, so a failure anywhere below
+                    # leaves an honest record rather than a missing one.
+                    $FtAccountResult = @{ NoDeployments = $false; Metrics = @{}; Totals = @{} }
+                    $script:FoundryTokenResults[$AccountId] = $FtAccountResult
+
                     # --- DISCOVERY: model deployments on this account (ARM) ---
                     $FtDeployments = $null
                     try
@@ -2066,6 +2085,7 @@ function ExecuteInventoryProcessing()
 
                     if ($null -eq $FtDeployments -or $FtDeployments.Count -eq 0)
                     {
+                        $FtAccountResult.NoDeployments = $true
                         Write-Log -Message ("Foundry tokens: account {0} in {1} has no model deployments. Nothing to collect for it." -f $Account.AccountName, $sub.Name) -Severity 'Info'
                         continue
                     }
@@ -2090,9 +2110,16 @@ function ExecuteInventoryProcessing()
                     # $FtModelBuckets[<deployName>] = @{ Priced = @{ metric = total }; Fidelity = @{ metric = total } }
                     $FtModelBuckets = @{}
                     $AllMetricNames = @($FtTokenMetricNames + $FtFidelityMetricNames)
+                    # A dimension-split metric query returns at most -Top series, and Azure Monitor
+                    # defaults that to 10. Ask for at least one per deployment so an account with more
+                    # than 10 deployments is not silently cut short.
+                    $FtSeriesTop = [Math]::Max(10, @($FtDeployments).Count)
                     foreach ($MetricName in $AllMetricNames)
                     {
-                        $MetricResult = Invoke-RdaFoundryTokenMetricQuery -AccountResourceId $AccountId -MetricName $MetricName -StartTime $FtStartTime -EndTime $FtEndTime -SubName $sub.Name
+                        $FtAccountResult.Metrics[$MetricName] = 'Failed'
+                        $FtMetricOutcome = @{}
+                        $MetricResult = Invoke-RdaFoundryTokenMetricQuery -AccountResourceId $AccountId -MetricName $MetricName -StartTime $FtStartTime -EndTime $FtEndTime -SubName $sub.Name -Top $FtSeriesTop -Outcome $FtMetricOutcome
+                        if ($FtMetricOutcome.ContainsKey('Status')) { $FtAccountResult.Metrics[$MetricName] = $FtMetricOutcome['Status'] }
                         if ($null -eq $MetricResult) { continue }
 
                         $PerModel = @(Get-RdaFoundryTokenSeriesTotals -MetricResult $MetricResult -DimensionName 'ModelDeploymentName')
@@ -2100,6 +2127,8 @@ function ExecuteInventoryProcessing()
                         {
                             $DeployName = $ModelTotal.ModelDeploymentName
                             if ([string]::IsNullOrWhiteSpace($DeployName)) { continue }
+                            if (-not $FtAccountResult.Totals.ContainsKey($DeployName)) { $FtAccountResult.Totals[$DeployName] = @{} }
+                            $FtAccountResult.Totals[$DeployName][$MetricName] = $ModelTotal.Total
                             if (-not $FtModelBuckets.ContainsKey($DeployName)) { $FtModelBuckets[$DeployName] = @{ Priced = @{}; Fidelity = @{} } }
                             if ($FtFidelityMetricNames -contains $MetricName)
                             {
@@ -2223,12 +2252,19 @@ function ExecuteInventoryProcessing()
         # It is a nested helper (not a pure function) because it makes the live Azure call and owns
         # the retry loop; the PURE dimension parsing it feeds is Get-RdaFoundryTokenSeriesTotals,
         # which is what the offline tests exercise.
+        #
+        # -Top raises Azure Monitor's default cap of 10 series for the dimension split; it is only
+        # sent when above 10, so the request for an account with 10 or fewer deployments is
+        # unchanged. -Outcome, when given, receives Status = 'Collected', 'Denied' or 'NotSupported'
+        # for the calls that return; a call that throws after its retries leaves it unset.
         param(
             [Parameter(Mandatory = $true)][string]$AccountResourceId,
             [Parameter(Mandatory = $true)][string]$MetricName,
             [Parameter(Mandatory = $true)]$StartTime,
             [Parameter(Mandatory = $true)]$EndTime,
-            [string]$SubName = ''
+            [string]$SubName = '',
+            [int]$Top = 10,
+            [hashtable]$Outcome = $null
         )
 
         $FtMaxRetries = 5
@@ -2252,13 +2288,17 @@ function ExecuteInventoryProcessing()
                     ErrorAction     = 'Stop'
                     WarningAction   = 'SilentlyContinue'
                 }
-                return (Get-AzMetric @FtArgs)
+                if ($Top -gt 10) { $FtArgs['Top'] = $Top }
+                $FtMetricResult = Get-AzMetric @FtArgs
+                if ($null -ne $Outcome) { $Outcome['Status'] = 'Collected' }
+                return $FtMetricResult
             }
             catch
             {
                 if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
                 {
                     Write-Log -Message ("Foundry tokens: metric '{0}' DENIED for {1}: {2}. Authorization failure (needs Monitoring Reader on the account), not transient - not retried." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Warning'
+                    if ($null -ne $Outcome) { $Outcome['Status'] = 'Denied' }
                     return $null
                 }
 
@@ -2271,6 +2311,7 @@ function ExecuteInventoryProcessing()
                 if (Test-RdaFoundryMetricPermanentFailure -ErrorMessage $_.Exception.Message)
                 {
                     Write-Log -Message ("Foundry tokens: metric '{0}' not supported for this account in {1} ({2}). Skipping this metric (permanent - not retried); other metrics on this account still collected." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Info'
+                    if ($null -ne $Outcome) { $Outcome['Status'] = 'NotSupported' }
                     return $null
                 }
 
@@ -2372,6 +2413,15 @@ function ExecuteInventoryProcessing()
             return
         }
 
+        # Token columns come from the Tier 2 token phase (GetFoundryTokenConsumption), which runs just
+        # before this one; this phase makes no Azure Monitor calls of its own. When the token phase did
+        # not run, every deployment row says TokenProbeStatus NotRun - say so once, here.
+        $FcTokenPhaseState = if ($script:FoundryTokenPhaseState) { [string]$script:FoundryTokenPhaseState } else { 'NotRun' }
+        if ($FcTokenPhaseState -eq 'NotRun')
+        {
+            Write-Log -Message ('FoundryModelCoverage: the token columns are not filled in this run (TokenProbeStatus NotRun). They come from the Foundry token phase, which did not run (-SkipMetrics or -SkipFoundryTokens).') -Severity 'Info'
+        }
+
         # Retail Prices catalog is GLOBAL + unauthenticated (the design spec section 4.1): pull the
         # 'Foundry Models' service catalog ONCE per run and cache it. A network failure
         # here is not fatal - it makes the Azure-metered axis INDETERMINATE (never UNPRICED).
@@ -2462,6 +2512,7 @@ function ExecuteInventoryProcessing()
             $FcRecordsThisSub = 0
             $FcFailedThisSub = $false
             $FcFailureMessage = $null
+            $FcTokenSubFailed = ($null -ne $script:FoundryTokenFailedSubIds -and $script:FoundryTokenFailedSubIds.ContainsKey("$($sub.id)"))
 
             try
             {
@@ -2539,9 +2590,14 @@ resources
                                         RetailPriceMatch = '(not probed)'; MarketplacePublisher = ''; MarketplaceOffer = ''; CcuQuantity = ''; CcuUnitOfMeasure = ''; MarketplacePretaxCost = ''; MarketplaceCurrency = ''; CcuAttribution = ''
                                         TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
                                         ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                                        TokenProbeStatus = 'NotApplicable'
                                     }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
                         continue
                     }
+
+                    # What the token phase collected for this account, if anything (see above).
+                    $FcAccountTokenResult = $null
+                    if ($null -ne $script:FoundryTokenResults -and $script:FoundryTokenResults.ContainsKey("$($acct.id)")) { $FcAccountTokenResult = $script:FoundryTokenResults["$($acct.id)"] }
 
                     foreach ($d in $Deployments)
                     {
@@ -2581,6 +2637,11 @@ resources
 
                         if ($Coverage.CoverageStatus -eq 'UNPRICED') { $Global:FoundryCoverageUnpricedCount++ }
 
+                        # 4. Token usage for this deployment, taken from the token phase's results for
+                        #    its account (Get-RdaFoundryCoverageTokenFields). A Marketplace/partner
+                        #    deployment with no token metrics is EXPECTED, not an error.
+                        $TokenFields = Get-RdaFoundryCoverageTokenFields -TokenPhaseState $FcTokenPhaseState -AccountResult $FcAccountTokenResult -SubscriptionFailed $FcTokenSubFailed -DeploymentName $Model.DeploymentName
+
                         $Record = [pscustomobject]@{
                             SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = $acct.resourceGroup; AccountName = $acct.name; AccountId = $acct.id
                             AccountKind = $Model.AccountKind; DeploymentName = $Model.DeploymentName; ModelName = $Model.ModelName; ModelFormat = $Model.ModelFormat; ModelVersion = $Model.ModelVersion
@@ -2593,28 +2654,9 @@ resources
                             MarketplacePretaxCost = $(if ($MarketplaceCovered) { $MpRow.PretaxCost } else { '' })
                             MarketplaceCurrency = $(if ($MarketplaceCovered) { "$($MpRow.Currency)" } else { '' })
                             CcuAttribution = $(if ($MarketplaceCovered) { $MpMatch.CcuAttribution } else { '' })
-                            TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
+                            TokenMetricsPresent = $TokenFields.TokenMetricsPresent; InputTokens = $TokenFields.InputTokens; OutputTokens = $TokenFields.OutputTokens; TotalTokens = $TokenFields.TotalTokens
                             ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
-                        }
-
-                        # 4. OPTIONAL richer usage tiers (probe-and-branch, never fail if absent):
-                        #    Azure Monitor per-deployment token metrics, discovered at runtime via
-                        #    metric-definitions (the design spec section 6). A Marketplace/partner deployment
-                        #    that emits nothing here is EXPECTED, not an error.
-                        try
-                        {
-                            $MetricProbe = Get-RdaFoundryTokenMetrics -AccountId $acct.id -DeploymentName $Model.DeploymentName -StartTime $ProbeWindowStart -EndTime $ProbeWindowEnd
-                            if ($null -ne $MetricProbe)
-                            {
-                                $Record.TokenMetricsPresent = [bool]$MetricProbe.Present
-                                $Record.InputTokens = $MetricProbe.InputTokens
-                                $Record.OutputTokens = $MetricProbe.OutputTokens
-                                $Record.TotalTokens = $MetricProbe.TotalTokens
-                            }
-                        }
-                        catch
-                        {
-                            Write-Log -Message ("FoundryModelCoverage: token-metric probe for {0}/{1} did not complete ({2}); recorded as absent, not failed." -f $acct.name, $Model.DeploymentName, $_.Exception.Message) -Severity 'Info'
+                            TokenProbeStatus = $TokenFields.TokenProbeStatus
                         }
 
                         $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
@@ -2648,12 +2690,13 @@ resources
                                     MarketplacePublisher = "$($MpRow.PublisherName)"; MarketplaceOffer = "$($MpRow.OfferName)"; CcuQuantity = $MpRow.ConsumedQuantity; CcuUnitOfMeasure = "$($MpRow.UnitOfMeasure)"; MarketplacePretaxCost = $MpRow.PretaxCost; MarketplaceCurrency = "$($MpRow.Currency)"; CcuAttribution = 'AggregatedOffer'
                                     TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
                                     ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                                    TokenProbeStatus = 'NotApplicable'
                                 }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
                 }
 
                 if ($ExportRows.Count -gt 0)
                 {
-                    $ExportRows | Select-Object SubscriptionGuid, SubscriptionName, ResourceGroup, AccountName, AccountKind, DeploymentName, ModelName, ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region, DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch, MarketplacePublisher, MarketplaceOffer, CcuQuantity, CcuUnitOfMeasure, MarketplacePretaxCost, MarketplaceCurrency, CcuAttribution, TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens, ProbeWindowStart, ProbeWindowEnd, RunTimestampUtc | Export-Csv -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $ExportRows | Select-Object SubscriptionGuid, SubscriptionName, ResourceGroup, AccountName, AccountKind, DeploymentName, ModelName, ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region, DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch, MarketplacePublisher, MarketplaceOffer, CcuQuantity, CcuUnitOfMeasure, MarketplacePretaxCost, MarketplaceCurrency, CcuAttribution, TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens, ProbeWindowStart, ProbeWindowEnd, RunTimestampUtc, TokenProbeStatus | Export-Csv -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8 -Append -NoTypeInformation
                 }
 
                 $FcRecordsThisSub = $ExportRows.Count
@@ -3217,7 +3260,7 @@ if ($FoundryCoverageCreated)
 
 if ($SkipConsumption.IsPresent -or $SkipFoundryCoverage.IsPresent -or !$FoundryCoverageCreated -or $FoundryCoverageEmpty)
 {
-    "SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,DeploymentName,ModelName,ModelFormat,ModelVersion,DeploymentSku,DeploymentCapacity,Region,DetectedPlanes,CoverageStatus,CoverageFlag,RetailPriceMatch,MarketplacePublisher,MarketplaceOffer,CcuQuantity,CcuUnitOfMeasure,MarketplacePretaxCost,MarketplaceCurrency,CcuAttribution,TokenMetricsPresent,InputTokens,OutputTokens,TotalTokens,ProbeWindowStart,ProbeWindowEnd,RunTimestampUtc" | Out-File -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8
+    "SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,DeploymentName,ModelName,ModelFormat,ModelVersion,DeploymentSku,DeploymentCapacity,Region,DetectedPlanes,CoverageStatus,CoverageFlag,RetailPriceMatch,MarketplacePublisher,MarketplaceOffer,CcuQuantity,CcuUnitOfMeasure,MarketplacePretaxCost,MarketplaceCurrency,CcuAttribution,TokenMetricsPresent,InputTokens,OutputTokens,TotalTokens,ProbeWindowStart,ProbeWindowEnd,RunTimestampUtc,TokenProbeStatus" | Out-File -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8
 }
 
 if ($Obfuscate.IsPresent)

@@ -893,6 +893,9 @@ if ($ResumeFailedOnly)
 }
 
 Write-Host "Verifying full subscription coverage (tenant-root management group)..." -ForegroundColor Cyan
+# A user at the console is asked at each stop point below before the run stops; any other sign-in
+# is unattended and stops as before (Confirm-PartialAccessContinue).
+$PartialAccessAccountType = [string](Get-AzContext -ErrorAction SilentlyContinue).Account.Type
 $PreflightCoverageMsg = $null
 $Coverage = Get-TenantSubscriptionId -TenantId $TenantID
 if ($null -eq $Coverage.Ids)
@@ -908,9 +911,16 @@ if ($null -eq $Coverage.Ids)
     {
         Write-Host ("ERROR: {0}" -f $CoverageMsg) -ForegroundColor Red
         if (-not [string]::IsNullOrWhiteSpace($Coverage.Detail)) { Write-Host ("  Reason: {0}" -f $Coverage.Detail) -ForegroundColor Red }
-        Write-Host "  Grant the identity Reader at the tenant-root management group (it inherits to every subscription and makes coverage verifiable), then re-run." -ForegroundColor Red
-        Write-Host "  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)" -ForegroundColor Red
-        Exit-Wrapper -Code 1
+        if (Confirm-PartialAccessContinue -Question ("Continue with the {0} subscription(s) this identity can see, which may not be the full tenant?" -f $AllSubscriptions.Count) -AccountType $PartialAccessAccountType)
+        {
+            Write-Host "  Confirmed at the prompt: continuing with the enumerated subscription(s), which may not be the full tenant." -ForegroundColor Yellow
+        }
+        else
+        {
+            Write-Host "  Grant the identity Reader at the tenant-root management group (it inherits to every subscription and makes coverage verifiable), then re-run." -ForegroundColor Red
+            Write-Host "  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)" -ForegroundColor Red
+            Exit-Wrapper -Code 1
+        }
     }
 }
 else
@@ -933,9 +943,16 @@ else
         {
             Write-Host ("ERROR: {0}" -f $CoverageMsg) -ForegroundColor Red
             Write-Host ("  Missed: {0}{1}" -f ($ShownMissed -join ', '), $MoreNote) -ForegroundColor Red
-            Write-Host "  Grant the identity Reader at the tenant-root management group (it inherits to all subscriptions) instead of per-subscription, then re-run." -ForegroundColor Red
-            Write-Host "  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)" -ForegroundColor Red
-            Exit-Wrapper -Code 1
+            if (Confirm-PartialAccessContinue -Question ("Continue with the {0} visible subscription(s) and leave the {1} missed subscription(s) out of the inventory?" -f $AllSubscriptions.Count, $MissedIds.Count) -AccountType $PartialAccessAccountType)
+            {
+                Write-Host ("  Confirmed at the prompt: continuing with the {0} visible subscription(s)." -f $AllSubscriptions.Count) -ForegroundColor Yellow
+            }
+            else
+            {
+                Write-Host "  Grant the identity Reader at the tenant-root management group (it inherits to all subscriptions) instead of per-subscription, then re-run." -ForegroundColor Red
+                Write-Host "  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)" -ForegroundColor Red
+                Exit-Wrapper -Code 1
+            }
         }
     }
     else
@@ -958,13 +975,20 @@ if ($ScopeForProbe.Count -gt 0)
             $Label = if ($NA.State -eq 'Unknown') { 'access probe inconclusive after retries' } else { 'no role on the subscription' }
             Write-Host ("    - {0} ({1}) - {2}" -f $NA.Name, $NA.Id, $Label) -ForegroundColor Red
         }
+        $PartialAccessConfirmed = $false
         if ($AccessDecision.ShouldBlock -and -not $Preflight)
         {
-            Write-Host "  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
-            Write-Host "  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)" -ForegroundColor Red
-            Exit-Wrapper -Code 1
+            $ReadableCount = @($Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains $_.Id }).Count
+            $PartialAccessConfirmed = ($ReadableCount -gt 0) -and (Confirm-PartialAccessContinue -Question ("Skip the {0} unreadable subscription(s) and continue with the {1} readable one(s)?" -f $AccessDecision.Inaccessible.Count, $ReadableCount) -AccountType $PartialAccessAccountType)
+            if (-not $PartialAccessConfirmed)
+            {
+                Write-Host "  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
+                Write-Host "  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)" -ForegroundColor Red
+                Exit-Wrapper -Code 1
+            }
         }
         if ($Preflight) { Write-Host "  -Preflight: continuing so the permission matrix can report these subscriptions." -ForegroundColor Yellow }
+        elseif ($PartialAccessConfirmed) { Write-Host "  Confirmed at the prompt: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow }
         else { Write-Host "  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow }
         $PreflightInaccessible = @($AccessDecision.Inaccessible)
         $Subscriptions = @($Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains $_.Id })

@@ -259,6 +259,29 @@ function Resolve-AccessPreflight
     }
 }
 
+function Confirm-PartialAccessContinue
+{
+    # Asks the person at the console whether to go on with only the subscriptions this identity
+    # can read. Returns $false WITHOUT asking when nobody can answer: a non-interactive session,
+    # or a sign-in that is not a user. A service principal or managed identity is an unattended
+    # run even when a console happens to be attached, so a headless run stops exactly as it did
+    # before this prompt existed. -IsInteractive is the same test the wrapper's other prompts use.
+    param(
+        [Parameter(Mandatory = $true)][string]$Question,
+        [string]$AccountType,
+        [bool]$IsInteractive = ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+    )
+
+    if (-not $IsInteractive -or $AccountType -ne 'User')
+    {
+        return $false
+    }
+
+    Write-Host ""
+    $Answer = Read-Host ("{0} [y/N]" -f $Question)
+    return ($Answer -match '^(y|yes)$')
+}
+
 function Get-RdaMgSubscriptionId
 {
     param($Node)

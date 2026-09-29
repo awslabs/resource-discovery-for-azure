@@ -285,6 +285,8 @@ If you *intentionally* have access to only a subset of the tenant, pass `-AllowP
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -AllowPartialAccess
 ```
 
+If you run the wrapper yourself at a console, signed in as a user, and did not pass `-AllowPartialAccess`, it asks whether to continue with only the readable subscriptions instead of stopping. Unattended runs (no console, or a service principal or managed identity) are never asked and still stop.
+
 On `-Resume`, only the subscriptions that still need processing are probed. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs.
 
 #### Checking permissions before a run (`-Preflight`)

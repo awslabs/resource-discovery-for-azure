@@ -23,7 +23,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
         'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
         'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks')
     foreach ($Fn in $TargetFunctions)
@@ -369,6 +369,242 @@ Describe 'Resolve-AccessPreflight (up-front access gate decision)' {
         $D.ShouldBlock | Should -BeFalse
         @($D.Inaccessible).Count | Should -Be 0
         @($D.InaccessibleIds).Count | Should -Be 0
+    }
+}
+
+Describe 'Confirm-PartialAccessContinue (ask before continuing with partial access)' {
+    # A user at the console is asked. Anyone else gets $false with no prompt, so a headless run
+    # stops exactly as it did before the prompt existed.
+    It 'does not ask and returns false when <Case>' -ForEach @(
+        @{ Case = 'the session is not interactive'; AccountType = 'User'; IsInteractive = $false }
+        @{ Case = 'the sign-in is a service principal'; AccountType = 'ServicePrincipal'; IsInteractive = $true }
+        @{ Case = 'the sign-in is a managed identity'; AccountType = 'ManagedService'; IsInteractive = $true }
+        @{ Case = 'the sign-in type is unknown'; AccountType = ''; IsInteractive = $true }
+    ) {
+        Mock Read-Host { 'y' }
+        Confirm-PartialAccessContinue -Question 'Continue?' -AccountType $AccountType -IsInteractive $IsInteractive | Should -BeFalse
+        Should -Invoke Read-Host -Exactly -Times 0 -Because 'nobody can answer, so the run must stop without waiting for input'
+    }
+
+    It 'asks a user at the console once and returns <Expected> for the answer "<Answer>"' -ForEach @(
+        @{ Answer = 'y'; Expected = $true }
+        @{ Answer = 'Y'; Expected = $true }
+        @{ Answer = 'yes'; Expected = $true }
+        @{ Answer = 'YES'; Expected = $true }
+        @{ Answer = ''; Expected = $false }
+        @{ Answer = 'n'; Expected = $false }
+        @{ Answer = 'no'; Expected = $false }
+        @{ Answer = 'yes please'; Expected = $false }
+    ) {
+        $script:NextAnswer = $Answer
+        Mock Read-Host { $script:NextAnswer }
+        $Result = Confirm-PartialAccessContinue -Question 'Continue?' -AccountType 'User' -IsInteractive $true 6>$null
+        $Result | Should -Be $Expected
+        Should -Invoke Read-Host -Exactly -Times 1 -ParameterFilter { $Prompt -eq 'Continue? [y/N]' }
+    }
+}
+
+Describe 'Run-AllSubscriptions.ps1: the partial-access stop points ask a user before stopping' {
+    # Each stop point is lifted from the wrapper's parsed source and run as the wrapper runs it.
+    # Headless runs must print exactly what they printed before and exit 1; a user who answers
+    # yes continues the way -AllowPartialAccess would; -AllowPartialAccess and -Preflight never ask.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+
+        function Get-SingleWrapperIf
+        {
+            param([string]$Condition)
+            $Found = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $Condition }, $true))
+            if ($Found.Count -ne 1) { throw ("expected exactly one 'if ({0})' in Run-AllSubscriptions.ps1, found {1}" -f $Condition, $Found.Count) }
+            return $Found[0]
+        }
+
+        $CoverageIf = Get-SingleWrapperIf -Condition '$null -eq $Coverage.Ids'
+        $script:CoverageBlock = [scriptblock]::Create($CoverageIf.Extent.Text)
+        $script:ProbeBlock = [scriptblock]::Create((Get-SingleWrapperIf -Condition '$ScopeForProbe.Count -gt 0').Extent.Text)
+
+        # The sign-in type every stop point passes on is read once, before the first of them.
+        $script:AccountTypeAssignments = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$PartialAccessAccountType' }, $true))
+        $script:CoverageIfStart = $CoverageIf.Extent.StartOffset
+
+        # The real Exit-Wrapper ends the process; this stand-in turns the call into a result.
+        function Exit-Wrapper { param([int]$Code) throw "Exit-Wrapper $Code" }
+
+        # The wrapper variables a stop point reads, with a user signed in and three visible
+        # subscriptions. $Override replaces or adds entries for one case.
+        function New-StopPointVars
+        {
+            param([hashtable]$Override = @{})
+            $Three = @(
+                [pscustomobject]@{ Id = 's1'; Name = 'One' }
+                [pscustomobject]@{ Id = 's2'; Name = 'Two' }
+                [pscustomobject]@{ Id = 's3'; Name = 'Three' }
+            )
+            $Vars = @{
+                AllowPartialAccess       = $false
+                Preflight                = $false
+                AllSubscriptions         = $Three
+                Subscriptions            = $Three
+                ScopeForProbe            = $Three
+                PartialAccessAccountType = 'User'
+            }
+            foreach ($Key in $Override.Keys) { $Vars[$Key] = $Override[$Key] }
+            return $Vars
+        }
+
+        # Runs a lifted stop point in this function's scope with $Vars as its variables, and
+        # returns what it printed, the exit code it asked for (or $null) and the resulting
+        # $Subscriptions.
+        function Invoke-StopPoint
+        {
+            param([scriptblock]$Block, [hashtable]$Vars)
+            foreach ($Name in $Vars.Keys) { Set-Variable -Name $Name -Value $Vars[$Name] }
+            $Lines = [System.Collections.Generic.List[string]]::new()
+            $ExitCode = $null
+            try
+            {
+                . $Block 6>&1 | ForEach-Object { $Lines.Add([string]$_) }
+            }
+            catch
+            {
+                if ($_.Exception.Message -match '^Exit-Wrapper (\d+)$') { $ExitCode = [int]$Matches[1] } else { throw }
+            }
+            [pscustomobject]@{ Lines = @($Lines); ExitCode = $ExitCode; Subscriptions = @(Get-Variable -Name 'Subscriptions' -ValueOnly) }
+        }
+
+        $script:Unreadable = [pscustomobject]@{ Ids = $null; Detail = 'AuthorizationFailed' }
+        $script:Shortfall = [pscustomobject]@{ Ids = @('s1', 's2', 's3', 's4', 's5'); Detail = $null }
+    }
+
+    It 'reads the sign-in type once, before the first stop point' {
+        $script:AccountTypeAssignments.Count | Should -Be 1
+        $script:AccountTypeAssignments[0].Extent.StartOffset | Should -BeLessThan $script:CoverageIfStart
+    }
+
+    Context 'tenant-root management group cannot be read' {
+        It 'headless: prints what it always printed and exits 1' {
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Unreadable; PartialAccessAccountType = 'ServicePrincipal' })
+            $R.ExitCode | Should -Be 1
+            $R.Lines | Should -Be @(
+                'ERROR: Could not verify full subscription coverage: the tenant-root management group (GroupName = tenant id) could not be read by this identity, so there is no way to confirm the 3 enumerated subscription(s) are ALL of them.'
+                '  Reason: AuthorizationFailed'
+                '  Grant the identity Reader at the tenant-root management group (it inherits to every subscription and makes coverage verifiable), then re-run.'
+                '  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)'
+            )
+        }
+
+        It 'a user who answers yes continues with the enumerated subscriptions' {
+            Mock Confirm-PartialAccessContinue { $true }
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Unreadable })
+            $R.ExitCode | Should -BeNullOrEmpty
+            $R.Lines[-1] | Should -Be '  Confirmed at the prompt: continuing with the enumerated subscription(s), which may not be the full tenant.'
+            ($R.Lines -join "`n") | Should -Not -Match 'Grant the identity'
+            Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 1 -ParameterFilter { $AccountType -eq 'User' -and $Question -eq 'Continue with the 3 subscription(s) this identity can see, which may not be the full tenant?' }
+        }
+
+        It 'a user who answers no gets the fix and exits 1' {
+            Mock Confirm-PartialAccessContinue { $false }
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Unreadable })
+            $R.ExitCode | Should -Be 1
+            $R.Lines[-2] | Should -Match '^  Grant the identity Reader at the tenant-root management group'
+            $R.Lines[-1] | Should -Match '^  \(Or pass -AllowPartialAccess'
+        }
+
+        It 'does not ask when <Switch> is set' -ForEach @(
+            @{ Switch = 'AllowPartialAccess' }
+            @{ Switch = 'Preflight' }
+        ) {
+            Mock Confirm-PartialAccessContinue { $false }
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Unreadable; $Switch = $true })
+            $R.ExitCode | Should -BeNullOrEmpty
+            Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 0
+        }
+    }
+
+    Context 'the management group lists subscriptions this identity cannot see' {
+        It 'headless: prints what it always printed and exits 1' {
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Shortfall; PartialAccessAccountType = '' })
+            $R.ExitCode | Should -Be 1
+            $R.Lines | Should -Be @(
+                'ERROR: Subscription coverage shortfall: the tenant-root management group contains 5 subscription(s) but this identity can enumerate only 3 - 2 would be SILENTLY MISSED from the inventory.'
+                '  Missed: s4, s5'
+                '  Grant the identity Reader at the tenant-root management group (it inherits to all subscriptions) instead of per-subscription, then re-run.'
+                '  (Or pass -AllowPartialAccess to proceed with only the subscriptions this identity can currently see.)'
+            )
+        }
+
+        It 'a user who answers yes continues with the visible subscriptions' {
+            Mock Confirm-PartialAccessContinue { $true }
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Shortfall })
+            $R.ExitCode | Should -BeNullOrEmpty
+            $R.Lines[-1] | Should -Be '  Confirmed at the prompt: continuing with the 3 visible subscription(s).'
+            Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 1 -ParameterFilter { $Question -eq 'Continue with the 3 visible subscription(s) and leave the 2 missed subscription(s) out of the inventory?' }
+        }
+
+        It 'a user who answers no gets the fix and exits 1' {
+            Mock Confirm-PartialAccessContinue { $false }
+            $R = Invoke-StopPoint -Block $script:CoverageBlock -Vars (New-StopPointVars @{ Coverage = $script:Shortfall })
+            $R.ExitCode | Should -Be 1
+            $R.Lines[-1] | Should -Match '^  \(Or pass -AllowPartialAccess'
+        }
+    }
+
+    Context 'the up-front access probe finds unreadable subscriptions' {
+        BeforeEach {
+            $script:Probed = @(
+                [pscustomobject]@{ Id = 's1'; Name = 'One'; State = 'Empty' }
+                [pscustomobject]@{ Id = 's2'; Name = 'Two'; State = 'NoAccess' }
+                [pscustomobject]@{ Id = 's3'; Name = 'Three'; State = 'Empty' }
+            )
+            Mock Test-SubscriptionAccessAll { $script:Probed }
+        }
+
+        It 'headless: prints what it always printed and exits 1' {
+            $R = Invoke-StopPoint -Block $script:ProbeBlock -Vars (New-StopPointVars @{ PartialAccessAccountType = 'ServicePrincipal' })
+            $R.ExitCode | Should -Be 1
+            $R.Lines | Should -Be @(
+                'Verifying subscription access up front for 3 subscription(s)...'
+                '  1 subscription(s) are NOT readable by the signed-in identity:'
+                '    - Two (s2) - no role on the subscription'
+                '  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run.'
+                '  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)'
+            )
+        }
+
+        It 'a user who answers yes skips them and continues with the readable ones' {
+            Mock Confirm-PartialAccessContinue { $true }
+            $R = Invoke-StopPoint -Block $script:ProbeBlock -Vars (New-StopPointVars)
+            $R.ExitCode | Should -BeNullOrEmpty
+            $R.Lines[-1] | Should -Be '  Confirmed at the prompt: skipping the above and continuing with the accessible subscription(s).'
+            @($R.Subscriptions | ForEach-Object { $_.Id }) | Should -Be @('s1', 's3')
+            Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 1 -ParameterFilter { $Question -eq 'Skip the 1 unreadable subscription(s) and continue with the 2 readable one(s)?' }
+        }
+
+        It 'a user who answers no gets the fix and exits 1' {
+            Mock Confirm-PartialAccessContinue { $false }
+            $R = Invoke-StopPoint -Block $script:ProbeBlock -Vars (New-StopPointVars)
+            $R.ExitCode | Should -Be 1
+            $R.Lines[-2] | Should -Match '^  Stopping before any work'
+        }
+
+        It 'does not ask when no subscription would be left' {
+            $script:Probed = @($script:Probed | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.Name; State = 'NoAccess' } })
+            Mock Confirm-PartialAccessContinue { $true }
+            $R = Invoke-StopPoint -Block $script:ProbeBlock -Vars (New-StopPointVars)
+            $R.ExitCode | Should -Be 1
+            $R.Lines[-2] | Should -Match '^  Stopping before any work'
+            Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 0
+        }
+
+        It 'does not ask when -AllowPartialAccess is set, and says so' {
+            Mock Confirm-PartialAccessContinue { $false }
+            $R = Invoke-StopPoint -Block $script:ProbeBlock -Vars (New-StopPointVars @{ AllowPartialAccess = $true })
+            $R.ExitCode | Should -BeNullOrEmpty
+            $R.Lines[-1] | Should -Be '  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s).'
+            Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 0
+        }
     }
 }
 

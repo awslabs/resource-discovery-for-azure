@@ -317,6 +317,14 @@ show it was seen and was empty.
    `-AllowPartialAccess` it skips the unreadable ones and continues with the
    rest.
 
+**At a console.** Without `-AllowPartialAccess`, a person running the wrapper
+at a console and signed in as a user is asked at each of these stop points
+whether to continue with only the subscriptions the identity can read
+(`[y/N]`). Yes continues exactly as `-AllowPartialAccess` would for that stop
+point; anything else stops as before. A non-interactive run, or one signed in
+as a service principal or managed identity, is never asked and stops as before.
+`-Preflight` never asks.
+
 **Why it exists.** Azure Resource Graph returns **zero rows rather than an
 authorization error** for a subscription the identity has no role on. Without a
 gate, a missing Reader assignment is invisible until the finished report turns

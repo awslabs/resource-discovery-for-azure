@@ -29,6 +29,18 @@ function GetLocalVersion()
     return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
 }
 
+function Global:Get-RdaEnvironmentPrefix([string]$Value)
+{
+    # The prod/nonprod decision for ONE real value. Inventory classifies the resource name, the
+    # subscription name and the resource-group name each on their own, so anything that must agree
+    # with an inventory token has to classify that SAME single value, not a larger string that
+    # merely contains it.
+    # The second alternative is deliberately '(^|-)' and not '(^|/|-)': this judges one segment
+    # rather than a path, and a '/' would let a neighbouring segment change this segment's answer.
+    if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-') { return 'nonprod_' }
+    return 'prod_'
+}
+
 function Global:Protect-FreeTextValue([string]$Value)
 {
     if ([string]::IsNullOrEmpty($Value)) { return $null }
@@ -1335,6 +1347,15 @@ function Global:Build-ObfuscatedResourceUri
     param(
         [string]$RawUri,
         [string]$Prefix,
+        # The subscription prefix cannot be derived from the URI: the URI carries the subscription
+        # GUID, and a GUID never matches the non-prod pattern, so classifying it would label every
+        # subscription prod_. Inventory classifies the subscription NAME, which only the caller has.
+        [string]$SubPrefix,
+        # Opt in to classifying the resource-group and name segments on their own values, the way
+        # inventory does. Off by default so existing callers keep their current single-prefix
+        # behaviour. Consumption needs it because one prefix taken from the whole URI lets a 'test'
+        # resource group relabel the subscription and every name segment in that row.
+        [switch]$PerSegmentPrefix,
         $SubscriptionDictionary,
         $ResourceGroupDictionary,
         $NameDictionary,
@@ -1361,13 +1382,15 @@ function Global:Build-ObfuscatedResourceUri
     $RealRg = $Matches[3]
     $RealProv = $Matches[5]
 
-    $ObfSub = Resolve-ObfuscationToken -RealValue $RealSub -LookupKey $RawUri -SharedDictionary $SubscriptionDictionary -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
+    $EffSubPrefix = if (-not [string]::IsNullOrEmpty($SubPrefix)) { $SubPrefix } else { $Prefix }
+    $ObfSub = Resolve-ObfuscationToken -RealValue $RealSub -LookupKey $RawUri -SharedDictionary $SubscriptionDictionary -LocalCache $SubCache -TokenPrefix ($EffSubPrefix + 'sub_')
     $RebuiltUri = '/subscriptions/' + $ObfSub
 
     if (-not [string]::IsNullOrEmpty($RealRg))
     {
         $RgTag = if ($RealRg -match '^mc_') { 'mc_' } else { '' }
-        $ObfRg = Resolve-ObfuscationToken -RealValue $RealRg -LookupKey $RawUri -SharedDictionary $ResourceGroupDictionary -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
+        $EffRgPrefix = if ($PerSegmentPrefix.IsPresent) { Get-RdaEnvironmentPrefix $RealRg } else { $Prefix }
+        $ObfRg = Resolve-ObfuscationToken -RealValue $RealRg -LookupKey $RawUri -SharedDictionary $ResourceGroupDictionary -LocalCache $RgCache -TokenPrefix ($EffRgPrefix + 'rg_' + $RgTag)
         $RebuiltUri += '/resourcegroups/' + $ObfRg
     }
 
@@ -1388,7 +1411,8 @@ function Global:Build-ObfuscatedResourceUri
             if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
             {
                 $LeafShared = if ($Pi -eq $LeafNameIndex) { $NameDictionary } else { $null }
-                $Rebuilt += Resolve-ObfuscationToken -RealValue $Part -LookupKey $RawUri -SharedDictionary $LeafShared -LocalCache $NameCache -TokenPrefix $Prefix
+                $EffNamePrefix = if ($PerSegmentPrefix.IsPresent) { Get-RdaEnvironmentPrefix $Part } else { $Prefix }
+                $Rebuilt += Resolve-ObfuscationToken -RealValue $Part -LookupKey $RawUri -SharedDictionary $LeafShared -LocalCache $NameCache -TokenPrefix $EffNamePrefix
             }
             else
             {

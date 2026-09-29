@@ -169,3 +169,138 @@ Describe 'Build-ObfuscatedResourceUri - determinism and the read-only leaf link'
         ($Out -split '/servers/')[1].StartsWith('leaf_only_token') | Should -BeFalse -Because 'srv1 is an intermediate name and must get its own cache token, not the leaf inventory token'
     }
 }
+
+Describe 'Get-RdaEnvironmentPrefix - one value, classified the way inventory classifies it' {
+
+    It "labels '<Value>' as <Expected>" -ForEach @(
+        @{ Value = 'rg-test'; Expected = 'nonprod_' }
+        @{ Value = 'app-dev-01'; Expected = 'nonprod_' }
+        @{ Value = 'UAT-Web'; Expected = 'nonprod_' }
+        @{ Value = 'd-app01'; Expected = 'nonprod_' }
+        @{ Value = 'app-t-01'; Expected = 'nonprod_' }
+        @{ Value = 'vm1'; Expected = 'prod_' }
+        @{ Value = 'rg-app'; Expected = 'prod_' }
+        @{ Value = 'production'; Expected = 'prod_' }
+        @{ Value = '12345678-1234-1234-1234-123456789012'; Expected = 'prod_' }
+    ) {
+        Get-RdaEnvironmentPrefix $Value | Should -BeExactly $Expected
+    }
+
+    It 'does not treat a slash as a segment boundary, because it judges one segment and not a path' {
+        Get-RdaEnvironmentPrefix 'shared/d-app' | Should -BeExactly 'prod_' -Because 'a neighbouring segment must not change this segment''s answer'
+    }
+
+    It 'uses exactly the two patterns the inventory loop applies to a resource name, a subscription name and a resource-group name' {
+        $Root = Split-Path $PSScriptRoot -Parent
+        $InventorySrc = Get-Content -LiteralPath (Join-Path $Root 'ResourceInventory.ps1') -Raw
+        $FunctionsAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'Functions/ResourceInventory.Functions.ps1'), [ref]$null, [ref]$null)
+        $HelperAst = $FunctionsAst.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -like '*Get-RdaEnvironmentPrefix' }, $true)
+        $HelperAst | Should -Not -BeNullOrEmpty -Because 'the helper must exist before its patterns can be compared'
+        $PairOf = {
+            param([string]$Source, [string]$Subject)
+            $Pattern = [regex]::Escape($Subject) + " -match '([^']+)' -or " + [regex]::Escape($Subject) + " -match '([^']+)'"
+            $Found = [regex]::Match($Source, $Pattern)
+            $Found.Success | Should -BeTrue -Because ("the classifier on {0} must still be written as two -match tests" -f $Subject)
+            '{0} || {1}' -f $Found.Groups[1].Value, $Found.Groups[2].Value
+        }
+        $Helper = & $PairOf $HelperAst.Extent.Text '$Value'
+        (& $PairOf $InventorySrc '$resourceItem.name') | Should -BeExactly $Helper
+        (& $PairOf $InventorySrc '$RealSub') | Should -BeExactly $Helper
+        (& $PairOf $InventorySrc '$RealRG') | Should -BeExactly $Helper
+    }
+}
+
+Describe 'Build-ObfuscatedResourceUri -PerSegmentPrefix - each token labelled by its own value' {
+
+    BeforeAll {
+        function Invoke-SegmentBuild
+        {
+            param([string]$Uri, [string]$Prefix = 'prod_', [string]$SubPrefix = '', $NameDict = $null, $Caches)
+            if (-not $Caches) { $Caches = New-Caches }
+            Build-ObfuscatedResourceUri -RawUri $Uri -Prefix $Prefix -SubPrefix $SubPrefix -PerSegmentPrefix `
+                -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $NameDict `
+                -SubCache $Caches.Sub -RgCache $Caches.Rg -NameCache $Caches.Name
+        }
+    }
+
+    It 'a test resource group in a production subscription no longer relabels the subscription or the resource' {
+        $Uri = "/subscriptions/$script:Sub/resourcegroups/rg-test/providers/microsoft.compute/virtualmachines/vm-app"
+        $Out = Invoke-SegmentBuild -Uri $Uri -Prefix 'nonprod_' -SubPrefix 'prod_'
+        $Out | Should -Match '^/subscriptions/prod_sub_[0-9a-f-]+/resourcegroups/nonprod_rg_[0-9a-f-]+/providers/microsoft\.compute/virtualmachines/prod_[0-9a-f-]+$'
+    }
+
+    It 'a dev resource in a production resource group is labelled on its own name' {
+        $Uri = "/subscriptions/$script:Sub/resourcegroups/rg-app/providers/microsoft.compute/virtualmachines/vm-dev"
+        $Out = Invoke-SegmentBuild -Uri $Uri -SubPrefix 'prod_'
+        $Out | Should -Match '/resourcegroups/prod_rg_[0-9a-f-]+/providers/microsoft\.compute/virtualmachines/nonprod_[0-9a-f-]+$'
+    }
+
+    It 'takes the subscription marker from -SubPrefix, not from -Prefix' {
+        $Out = Invoke-SegmentBuild -Uri $script:Canonical -Prefix 'prod_' -SubPrefix 'nonprod_'
+        $Out | Should -Match '^/subscriptions/nonprod_sub_'
+    }
+
+    It 'keeps the mc_ marker on an AKS-managed resource group' {
+        $Uri = "/subscriptions/$script:Sub/resourcegroups/mc_rg_aks-dev/providers/microsoft.network/loadbalancers/kubernetes"
+        $Out = Invoke-SegmentBuild -Uri $Uri -SubPrefix 'prod_'
+        $Out | Should -Match '/resourcegroups/nonprod_rg_mc_[0-9a-f-]+/'
+    }
+
+    It 'labels each name segment of a child resource on its own value' {
+        $Uri = "/subscriptions/$script:Sub/resourcegroups/rg-app/providers/microsoft.sql/servers/sql-app/databases/db-test"
+        $Out = Invoke-SegmentBuild -Uri $Uri -SubPrefix 'prod_'
+        $Out | Should -Match '/servers/prod_[0-9a-f-]+/databases/nonprod_[0-9a-f-]+$'
+    }
+
+    It 'still reuses the inventory token for the leaf' {
+        $Uri = "/subscriptions/$script:Sub/resourcegroups/rg-test/providers/microsoft.compute/virtualmachines/vm-app"
+        $InvDict = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $InvDict[$Uri] = 'inventory_leaf_token'
+        $Out = Invoke-SegmentBuild -Uri $Uri -SubPrefix 'prod_' -NameDict $InvDict
+        $Out | Should -Match '/virtualmachines/inventory_leaf_token$'
+    }
+
+    It 'gives one resource group the same token across different resources in a run' {
+        $Caches = New-Caches
+        $A = Invoke-SegmentBuild -Uri "/subscriptions/$script:Sub/resourcegroups/rg-test/providers/microsoft.compute/virtualmachines/vm-a" -SubPrefix 'prod_' -Caches $Caches
+        $B = Invoke-SegmentBuild -Uri "/subscriptions/$script:Sub/resourcegroups/rg-test/providers/microsoft.storage/storageaccounts/sta" -SubPrefix 'prod_' -Caches $Caches
+        ($A -split '/')[4] | Should -BeExactly ($B -split '/')[4]
+        ($A -split '/')[2] | Should -BeExactly ($B -split '/')[2]
+    }
+
+    It 'labels a value that is not ARM-shaped with -Prefix, which has no segments to judge' {
+        $Out = Invoke-SegmentBuild -Uri '/providers/microsoft.capacity/reservationorders/order1' -Prefix 'nonprod_' -SubPrefix 'prod_'
+        $Out | Should -Match '^nonprod_[0-9a-f-]+$'
+    }
+
+    It 'without the switch, every segment keeps the single -Prefix (existing callers unchanged)' {
+        $Uri = "/subscriptions/$script:Sub/resourcegroups/rg-test/providers/microsoft.compute/virtualmachines/vm-app"
+        $Out = Invoke-Build -Uri $Uri -Prefix 'prod_'
+        $Out | Should -Match '^/subscriptions/prod_sub_[0-9a-f-]+/resourcegroups/prod_rg_[0-9a-f-]+/providers/microsoft\.compute/virtualmachines/prod_[0-9a-f-]+$'
+    }
+}
+
+Describe 'Consumption call site - the only caller that labels per segment' {
+
+    BeforeAll {
+        $Root = Split-Path $PSScriptRoot -Parent
+        $script:InventorySrc = Get-Content -LiteralPath (Join-Path $Root 'ResourceInventory.ps1') -Raw
+        $script:CallerFiles = @('ResourceInventory.ps1', 'Extension/Metrics.ps1', 'Functions/ResourceInventory.Functions.ps1')
+    }
+
+    It 'passes the subscription-name marker and -PerSegmentPrefix to the builder' {
+        $Call = [regex]::Match($script:InventorySrc, 'Build-ObfuscatedResourceUri -RawUri \$RawUri [^\r\n]+')
+        $Call.Success | Should -BeTrue
+        $Call.Value | Should -Match '-SubPrefix \$SubPrefix -PerSegmentPrefix'
+        $script:InventorySrc | Should -Match '\$SubPrefix = Get-RdaEnvironmentPrefix \$\(if \(-not \[string\]::IsNullOrEmpty\(\$sub\.Name\)\) \{ \$sub\.Name \} else \{ \$sub\.Id \}\)'
+    }
+
+    It 'no other caller opts in, so Marketplace, Foundry and metrics tokens are unchanged' {
+        $Root = Split-Path $PSScriptRoot -Parent
+        $OptIns = foreach ($File in $script:CallerFiles)
+        {
+            Get-Content -LiteralPath (Join-Path $Root $File) | Where-Object { $_ -match 'Build-ObfuscatedResourceUri\b.*-PerSegmentPrefix' } | ForEach-Object { '{0}: {1}' -f $File, $_.Trim() }
+        }
+        @($OptIns).Count | Should -Be 1 -Because (@($OptIns) -join '; ')
+    }
+}

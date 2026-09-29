@@ -1529,7 +1529,15 @@ function ExecuteInventoryProcessing()
 
                         if ($Obfuscate.IsPresent)
                         {
+                            # Each token takes its prod_/nonprod_ marker from the real value it labels,
+                            # the way inventory classifies them: the subscription from its NAME (the URI
+                            # only carries the GUID, which never matches), and the resource-group and name
+                            # segments from their own values inside the builder (-PerSegmentPrefix). One
+                            # verdict from the whole URI let a 'test' resource group relabel the subscription
+                            # and every name in the row. $Prefix, still taken from the whole URI, is used only
+                            # for a value that is not ARM-shaped and so has no segments to label.
                             $Prefix = if ($UsageDataExport[$Item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $UsageDataExport[$Item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                            $SubPrefix = Get-RdaEnvironmentPrefix $(if (-not [string]::IsNullOrEmpty($sub.Name)) { $sub.Name } else { $sub.Id })
 
                             $RawUri = $InstanceObject.'Microsoft.Resources'.resourceUri
 
@@ -1546,7 +1554,7 @@ function ExecuteInventoryProcessing()
                                 }
                             }
 
-                            $ObfuscatedUri = Build-ObfuscatedResourceUri -RawUri $RawUri -Prefix $Prefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $Global:ResourceIdDictionary -SubCache $script:ConsumptionSubCache -RgCache $script:ConsumptionRgCache -NameCache $script:ConsumptionNameCache
+                            $ObfuscatedUri = Build-ObfuscatedResourceUri -RawUri $RawUri -Prefix $Prefix -SubPrefix $SubPrefix -PerSegmentPrefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $Global:ResourceIdDictionary -SubCache $script:ConsumptionSubCache -RgCache $script:ConsumptionRgCache -NameCache $script:ConsumptionNameCache
 
                             $UsageDataExport[$Item].ResourceId = $ObfuscatedUri
                             $InstanceObject.'Microsoft.Resources'.resourceUri = $ObfuscatedUri

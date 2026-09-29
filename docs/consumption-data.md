@@ -113,10 +113,16 @@ the inventory obfuscation dictionary:
   seeing real identifiers.
 - The tokens use per-run caches keyed by the real value, so the same real
   sub/RG/name always maps to the same token **within a run** (deterministic).
-- These caches are **independent of** the inventory `ObfuscationDictionary`.
-  Consumption tokens are therefore internally consistent but do **not** equal the
-  inventory tokens for the same resource — categorisation relies on the path
-  structure, not an ID-to-inventory join.
+- Each token's `prod_`/`nonprod_` marker comes from the value it labels, the
+  same way inventory classifies it: the subscription token from the
+  subscription name, the resource-group token from the resource-group name, and
+  each name token from that name segment. A `test` resource group therefore no
+  longer marks its subscription or its resources `nonprod_`.
+- The subscription and resource-group caches are **independent of** the
+  inventory `ObfuscationDictionary`, so those tokens are internally consistent
+  but do **not** equal the inventory tokens. The leaf resource-name segment is
+  the exception: when the resource was inventoried it reuses the inventory
+  token, so a consumption row joins back to its inventory record.
 - `ReservationId` and `ReservationOrderId` are flattened to `obfuscated`.
 
 ## Per-subscription health and failure-point reporting

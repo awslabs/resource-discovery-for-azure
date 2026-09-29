@@ -851,3 +851,65 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         } -Because 'the absence of a merge path is the thing the operator has to be told'
     }
 }
+
+Describe 'Test-RdaPermanentRequestError: a 400 is abandoned, not retried for 25 minutes' {
+    # Observed live: a subscription whose offer does not serve Microsoft.Consumption/marketplaces
+    # returns BadRequest, and the Marketplace loop retried it 30 times with escalating backoff.
+    # The request is identical on every retry, so it can never succeed.
+    It 'classifies <Label> as permanent' -ForEach @(
+        @{ Label = "the Az cmdlet form"; Message = "Operation returned an invalid status code 'BadRequest'" }
+        @{ Label = "the WebException form"; Message = 'The remote server returned an error: (400) Bad Request.' }
+        @{ Label = "the HttpClient form"; Message = 'Response status code does not indicate success: 400 (BadRequest).' }
+        @{ Label = "a lower-case rendering"; Message = 'operation failed: bad request' }
+    ) {
+        Test-RdaPermanentRequestError -ErrorMessage $Message | Should -BeTrue
+    }
+
+    It 'does NOT classify <Label> as permanent' -ForEach @(
+        @{ Label = "a resource group whose NAME contains the word"; Message = 'Resource /subscriptions/s/resourceGroups/rg-BadRequest-01/providers/x not found' }
+        @{ Label = "a resource name ending in the word"; Message = 'The resource prod-BadRequest could not be read' }
+        @{ Label = "a different permanent status"; Message = "Operation returned an invalid status code 'NotFound'" }
+        @{ Label = "an authorization denial"; Message = 'AuthorizationFailed: does not have authorization to perform action' }
+        @{ Label = "a byte count containing 400"; Message = 'Transferred 400123 bytes before the connection closed' }
+        @{ Label = "a throttle"; Message = 'Too many requests (429). Retry after 30 seconds.' }
+        @{ Label = "an empty message"; Message = '' }
+        @{ Label = "a null message"; Message = $null }
+    ) {
+        Test-RdaPermanentRequestError -ErrorMessage $Message | Should -BeFalse
+    }
+
+    It 'is disjoint from the denial and auth-expiry classifiers on their own messages' {
+        # Overlap would route a 403 or a 401 down the abandon-now path and lose their tailored
+        # remediation text, or send a 400 through an auth refresh that cannot help it.
+        Test-RdaPermanentRequestError -ErrorMessage 'AuthorizationFailed: does not have authorization' | Should -BeFalse
+        Test-RdaPermanentRequestError -ErrorMessage 'ExpiredAuthenticationToken' | Should -BeFalse
+        Test-RdaConsumptionDenial -ErrorMessage "Operation returned an invalid status code 'BadRequest'" | Should -BeFalse
+        Test-RdaAuthExpiry -ErrorMessage "Operation returned an invalid status code 'BadRequest'" | Should -BeFalse
+    }
+
+    It 'the Marketplace retry classifies the 400 BEFORE it can reach the transient budget' {
+        # Ordering is the whole fix: below the out-of-memory and auth branches the 400 would fall
+        # through to $MpAttempt++ and the backoff, which is the behaviour being removed.
+        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1') -Raw
+        $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Src, [ref]$null, [ref]$null)
+
+        $Perm = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Test-RdaPermanentRequestError' }, $true))
+        $Perm.Count | Should -Be 1 -Because 'one owner of the permanent-request gate in this script'
+
+        $Oom = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Test-RdaOutOfMemory' }, $true))
+        $Oom.Count | Should -BeGreaterThan 0
+        $MpOom = @($Oom | Where-Object { $_.Extent.Text -match 'MpErrorText' })
+        $MpOom.Count | Should -Be 1
+        $Perm[0].Extent.StartOffset | Should -BeLessThan $MpOom[0].Extent.StartOffset -Because 'the permanent check has to run first'
+
+        # It abandons rather than continuing the loop: a throw, no $MpAttempt++ on this path.
+        $Clause = $Perm[0].Parent
+        while ($null -ne $Clause -and -not ($Clause -is [System.Management.Automation.Language.IfStatementAst])) { $Clause = $Clause.Parent }
+        $Clause | Should -Not -BeNullOrEmpty
+        $Body = $Clause.Clauses[0].Item2
+        @($Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.ThrowStatementAst] }, $true)).Count | Should -Be 1 -Because 'it abandons this subscription rather than retrying'
+        $Body.Extent.Text | Should -Not -Match 'MpAttempt\+\+' -Because 'it must not consume a transient attempt'
+        $Body.Extent.Text | Should -Match "Severity 'Error'" -Because 'the operator has to be told loudly, it is not a silent skip'
+        $Body.Extent.Text | Should -Match 'SkipMarketplace' -Because 'the message has to name the way out'
+    }
+}

@@ -388,6 +388,34 @@ function Test-RdaOutOfMemory
     return [bool]($ErrorMessage -cmatch $OutOfMemoryPattern)
 }
 
+function Test-RdaPermanentRequestError
+{
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$ErrorMessage)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { return $false }
+
+    # A 400 rejects the REQUEST. The billing calls that use this send an identical request on every
+    # retry - a fixed window, no page token that changes - so a 400 cannot become a 200 and the
+    # transient budget only spends backoff. Observed live against a subscription whose offer does not
+    # serve the Marketplace endpoint: 30 attempts, escalating to a 60s+ wait each, roughly 25 minutes
+    # per subscription to arrive at the failure it already knew about on the first call.
+    #
+    # Deliberately narrower than "the text contains 400": the lookarounds keep a resource name or id
+    # that happens to contain the word (rg-BadRequest-01) or the digits out of it, the same discipline
+    # Test-RdaConsumptionDenial uses for 403. Extension/Metrics.ps1 already classifies BadRequest as
+    # permanent for metric calls; this is the billing-side counterpart.
+    $PermanentPattern = '(?i)(' + (@(
+            '(?<![\w-])BadRequest(?![\w-])'
+            '\(400\)'
+            '\bstatus\s?code\D{0,40}400\b'
+            '\bbad request\b'
+        ) -join '|') + ')'
+
+    return [bool]($ErrorMessage -match $PermanentPattern)
+}
+
 function Write-RdaMemorySnapshot
 {
     [CmdletBinding()]

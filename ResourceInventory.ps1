@@ -1717,6 +1717,17 @@ function ExecuteInventoryProcessing()
                         # out-of-memory branch reports the same text after a collection has run.
                         $MpErrorText = [string]$_.Exception.Message
 
+                        if (Test-RdaPermanentRequestError -ErrorMessage $MpErrorText)
+                        {
+                            # A 400 rejects the request, and this endpoint is sent an identical request on
+                            # every retry, so the transient budget would spend ~25 minutes of escalating
+                            # backoff on a failure already known from the first call. Abandon this
+                            # subscription's Marketplace pull now; the outer catch records it as
+                            # INCOMPLETE so the health report stays honest.
+                            Write-Log -Message ("Marketplace query REJECTED for {0} after {1} attempt(s): {2}. A 400 rejects the request itself and this endpoint is sent an identical request on every retry, so it will not be retried. The usual cause is a subscription whose offer type does not serve the Microsoft.Consumption/marketplaces endpoint; pass -SkipMarketplace to leave it out of the run." -f $sub.Name, ($MpAttempt + 1), $MpErrorText) -Severity 'Error'
+                            throw
+                        }
+
                         if (Test-RdaOutOfMemory -ErrorMessage $MpErrorText)
                         {
                             # Backing off cannot free memory and this error carries no Retry-After, so

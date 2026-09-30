@@ -189,7 +189,9 @@ Describe 'Sequential -Resume cycle' {
         # Each Add-FailedAttempt in Run-AllSubscriptions.ps1 must be followed by the revoke and the save.
         $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
         $Lines = @(Get-Content -Path $WrapperPath)
-        $FailSites = @(for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\s*\$FailedAttempts\s*=\s*Add-FailedAttempt\b') { $i } })
+        # The paths that collect a subscription in this process record $Sub.Id. The stream-summary
+        # fold records a stream's ids instead and revokes through $FailedThisRun (next test).
+        $FailSites = @(for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\s*\$FailedAttempts\s*=\s*Add-FailedAttempt\b' -and (($Lines[$i..([Math]::Min($i + 1, $Lines.Count - 1))] -join ' ') -match '-Id \$Sub\.Id\b')) { $i } })
         $FailSites.Count | Should -BeGreaterOrEqual 2 -Because 'the sequential loop has a collection failure path and a second failure path'
         foreach ($Site in $FailSites)
         {
@@ -199,6 +201,15 @@ Describe 'Sequential -Resume cycle' {
             $SaveAt = [array]::FindIndex([string[]]$Window, [Predicate[string]] { param($L) $L -match '^\s*Save-CompletedSubscriptionIds\b.*-Ids\s+\$CompletedIds' })
             $SaveAt | Should -BeGreaterThan $RevokeAt -Because "the failure path at line $($Site + 1) must persist the revoked set"
         }
+    }
+
+    It 'the parallel fold drops every subscription that failed this run from the completed set before saving' {
+        $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
+        $Code = Get-Content -Path $WrapperPath -Raw
+        $Revoke = $Code.IndexOf('$CompletedIds = @($CompletedIds | Where-Object { $FailedThisRun -notcontains $_ })', [System.StringComparison]::Ordinal)
+        $Revoke | Should -BeGreaterThan -1
+        $Code.IndexOf('$FailedThisRun = @(@($FailedSubscriptionIds)', [System.StringComparison]::Ordinal) | Should -BeLessThan $Revoke -Because 'a stream that failed to start records its ids only in $FailedSubscriptionIds'
+        $Code.IndexOf('Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds', $Revoke, [System.StringComparison]::Ordinal) | Should -BeGreaterThan $Revoke
     }
 
     It 'reconciliation reports no incomplete once the responsible set is fully completed' {

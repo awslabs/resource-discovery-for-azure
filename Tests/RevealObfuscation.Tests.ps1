@@ -1197,3 +1197,37 @@ Describe 'Reveal atomic output packaging (F3)' {
         Test-Path -LiteralPath $Partial | Should -BeFalse -Because 'the temp .partial.zip must be renamed away, never left behind on a successful reveal'
     }
 }
+
+Describe 'Reveal.ps1: -RemoveStaging names why the staging directory was kept' {
+    # The staging decision is lifted from Reveal.ps1's parsed source and run with its inputs.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $RevealAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Reveal.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $Found = @($RevealAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$RemoveStaging -and $CleanRun -and (Test-Path -LiteralPath $OutputZip)' }, $true))
+        if ($Found.Count -ne 1) { throw ("expected exactly one staging decision in Reveal.ps1, found {0}" -f $Found.Count) }
+        $script:StagingBlock = [scriptblock]::Create($Found[0].Extent.Text)
+
+        function Invoke-StagingDecision
+        {
+            param([int]$FailedCount, [string]$ConsolidationMessage)
+            Set-Variable -Name RemoveStaging -Value $true
+            Set-Variable -Name FailedItems -Value @(1..$FailedCount | Where-Object { $FailedCount -gt 0 })
+            Set-Variable -Name ConsolidationError -Value $(if ($ConsolidationMessage) { $ConsolidationMessage } else { $null })
+            Set-Variable -Name CleanRun -Value ($FailedCount -eq 0 -and -not $ConsolidationMessage)
+            Set-Variable -Name OutputZip -Value (Join-Path $TestDrive 'missing.zip')
+            Set-Variable -Name StagingDirectory -Value (Join-Path $TestDrive 'staging')
+            @(. $script:StagingBlock 6>&1 | ForEach-Object { [string]$_ })
+        }
+    }
+    It 'blames the outer zip, not the folders, when only consolidation failed' {
+        $Lines = Invoke-StagingDecision -FailedCount 0 -ConsolidationMessage 'Access denied'
+        @($Lines | Where-Object { $_ -like '-RemoveStaging skipped: the outer zip could not be built*' }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like '*folder(s) failed or timed out*' }).Count | Should -Be 0
+    }
+    It 'keeps the folder wording when folders failed' {
+        $Lines = Invoke-StagingDecision -FailedCount 2 -ConsolidationMessage ''
+        @($Lines | Where-Object { $_ -eq '-RemoveStaging skipped: 2 folder(s) failed or timed out. Staging kept so you can recover them with -Resume:' }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like '*outer zip could not be built*' }).Count | Should -Be 0
+    }
+}

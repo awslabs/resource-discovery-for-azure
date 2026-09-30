@@ -445,7 +445,14 @@ if ($RemoveStaging -and $CleanRun -and (Test-Path -LiteralPath $OutputZip))
 }
 elseif ($RemoveStaging -and -not $CleanRun)
 {
-    Write-Host ("-RemoveStaging skipped: {0} folder(s) failed or timed out. Staging kept so you can recover them with -Resume:" -f $FailedItems.Count) -ForegroundColor Yellow
+    if ($FailedItems.Count -gt 0)
+    {
+        Write-Host ("-RemoveStaging skipped: {0} folder(s) failed or timed out. Staging kept so you can recover them with -Resume:" -f $FailedItems.Count) -ForegroundColor Yellow
+    }
+    if ($null -ne $ConsolidationError)
+    {
+        Write-Host "-RemoveStaging skipped: the outer zip could not be built (see above). Staging kept so you can re-run, or zip the revealed reports by hand:" -ForegroundColor Yellow
+    }
     Write-Host ("  {0}" -f $StagingDirectory) -ForegroundColor Yellow
 }
 else

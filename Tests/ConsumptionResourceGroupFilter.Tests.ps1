@@ -37,6 +37,15 @@ BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:InventoryScript = Join-Path $script:RepoRoot 'ResourceInventory.ps1'
 
+    # The resource-group comparison itself is not copied: it is lifted from ResourceInventory.ps1,
+    # so the cases below judge the production expression.
+    $Tokens = $null
+    $ParseErrors = $null
+    $InventoryAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$Tokens, [ref]$ParseErrors)
+    $RgIfs = @($InventoryAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -like '!$ResourceUriValue.toLower().Contains(*' }, $true))
+    if ($RgIfs.Count -ne 1) { throw ("expected exactly one resource-group comparison in ResourceInventory.ps1, found {0}" -f $RgIfs.Count) }
+    $script:RgExcludes = [scriptblock]::Create($RgIfs[0].Clauses[0].Item1.Extent.Text)
+
     function Invoke-RgFilterDecision
     {
         param($InstanceInfo, [string]$ResourceGroup, [ref]$NullUriSkipCount)
@@ -50,7 +59,7 @@ BeforeAll {
                 return 'SkippedNullUri'
             }
 
-            if (!$ResourceUriValue.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
+            if (& $script:RgExcludes)
             {
                 return 'Skipped'
             }
@@ -125,6 +134,13 @@ Describe 'Consumption -ResourceGroup filter: null resourceUri' {
             $SkipCount = 0
             Invoke-RgFilterDecision -InstanceInfo (New-UsageRecord -ResourceUri '/subscriptions/s1/resourcegroups/rg-other/providers/microsoft.compute/virtualmachines/vm1') -ResourceGroup 'rg-app' -NullUriSkipCount ([ref]$SkipCount) | Should -Be 'Skipped'
             $SkipCount | Should -Be 0
+        }
+
+        It 'excludes a record whose other path segment has the resource group name' {
+            # An RG called 'virtualmachines' must not pick up every VM's billing rows.
+            $SkipCount = 0
+            Invoke-RgFilterDecision -InstanceInfo (New-UsageRecord -ResourceUri '/subscriptions/s1/resourcegroups/rg-other/providers/microsoft.compute/virtualmachines/vm1') -ResourceGroup 'virtualmachines' -NullUriSkipCount ([ref]$SkipCount) | Should -Be 'Skipped'
+            Invoke-RgFilterDecision -InstanceInfo (New-UsageRecord -ResourceUri '/subscriptions/s1/resourcegroups/rg-sql/providers/microsoft.sql/servers/rg-app/databases/db1') -ResourceGroup 'rg-app' -NullUriSkipCount ([ref]$SkipCount) | Should -Be 'Skipped'
         }
 
         It 'matches case-insensitively, because both sides are lowercased' {

@@ -1494,7 +1494,7 @@ function ExecuteInventoryProcessing()
                                 continue
                             }
 
-                            if (!$ResourceUriValue.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
+                            if (!$ResourceUriValue.toLower().Contains("/resourcegroups/" + $ResourceGroup.toLower() + "/"))
                             {
                                 continue;
                             }

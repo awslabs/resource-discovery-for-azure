@@ -2199,6 +2199,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -LiteralPath $InventoryRoot -PathTyp
 }
 
 $OuterZipFile = $null
+$BundleBuildFailed = $false
 
 if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
 {
@@ -2208,8 +2209,23 @@ if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
         $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
         Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
-        Compress-Archive -LiteralPath $SubZips -DestinationPath ([WildcardPattern]::Escape($OuterZipFile)) -Force
-        Write-Host ("Consolidated bundle created: {0}" -f $OuterZipFile) -ForegroundColor Green
+        try
+        {
+            Compress-Archive -LiteralPath $SubZips -DestinationPath ([WildcardPattern]::Escape($OuterZipFile)) -Force -ErrorAction Stop
+            if (-not (Test-ReportArchiveUsable -Path $OuterZipFile))
+            {
+                throw 'the archive is missing or empty after compression.'
+            }
+            Write-Host ("Consolidated bundle created: {0}" -f $OuterZipFile) -ForegroundColor Green
+        }
+        catch
+        {
+            # Nothing later may treat the bundle as built: the summary, the folds and the upload all key on $OuterZipFile.
+            Write-Host ("ERROR: Could not build the consolidated bundle {0}: {1}" -f $OuterZipFile, $_.Exception.Message) -ForegroundColor Red
+            Write-Host ("The per-subscription archives are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red
+            $OuterZipFile = $null
+            $BundleBuildFailed = $true
+        }
     }
     else
     {
@@ -2951,6 +2967,11 @@ if (@($CollectionAbortedSubs).Count -gt 0)
 # subscription deleted while the run was going is the exception: the reconciliation above drops it,
 # because its failure is expected and there is no report left to miss.
 if (@($FailedSubscriptionIds).Count -gt 0)
+{
+    $WrapperExitCode = 2
+}
+# With no consolidated bundle, no subscription's report is in a bundle.
+if ($BundleBuildFailed)
 {
     $WrapperExitCode = 2
 }

@@ -2284,3 +2284,69 @@ Describe 'Az context snapshot lifecycle: it leaves the disk once every stream ha
         }
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: a consolidated bundle that cannot be built is a failure' {
+    # The bundling block and the exit-code rule are lifted from the wrapper's parsed source and run
+    # with Compress-Archive mocked, so a failure reported the way the real cmdlet reports it is what they react to.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $BundleAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $FindIf = {
+            param([string]$Condition, [string]$Contains = '')
+            $Found = @($BundleAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $Condition -and $args[0].Extent.Text.Contains($Contains) }, $true))
+            if ($Found.Count -ne 1) { throw ("expected exactly one 'if ({0})' in Run-AllSubscriptions.ps1, found {1}" -f $Condition, $Found.Count) }
+            $Found[0]
+        }
+        $script:BundleBlock = [scriptblock]::Create((& $FindIf -Condition 'Test-Path -LiteralPath $InventoryRoot -PathType Container' -Contains 'AllSubscriptions_ResourcesReport_').Extent.Text)
+        $script:BundleExitBlock = [scriptblock]::Create((& $FindIf -Condition '$BundleBuildFailed').Extent.Text)
+
+        # Runs the lifted bundling block with the variables it reads; the caller mocks Compress-Archive.
+        function Invoke-BundleBlock
+        {
+            Set-Variable -Name InventoryRoot -Value $TestDrive
+            Set-Variable -Name Shippable -Value ([pscustomobject]@{ Archives = @((Join-Path $TestDrive 'sub1.zip')) })
+            Set-Variable -Name OuterZipFile -Value $null
+            Set-Variable -Name BundleBuildFailed -Value $false
+            $Printed = @(. $script:BundleBlock 6>&1 | ForEach-Object { [string]$_ })
+            [pscustomobject]@{ OuterZipFile = $OuterZipFile; BundleBuildFailed = $BundleBuildFailed; Printed = $Printed }
+        }
+    }
+    It 'a failed build names the cause, claims no bundle, and leaves nothing pointing at the missing zip' {
+        # The error the real cmdlet reports for an unreadable per-subscription zip.
+        Mock Compress-Archive { Write-Error "Access to the path '$LiteralPath' is denied." }
+        $R = Invoke-BundleBlock
+        $R.BundleBuildFailed | Should -BeTrue
+        $R.OuterZipFile | Should -BeNullOrEmpty
+        @($R.Printed | Where-Object { $_ -like 'Consolidated bundle created*' }).Count | Should -Be 0
+        @($R.Printed | Where-Object { $_ -like 'ERROR: Could not build the consolidated bundle*is denied.' }).Count | Should -Be 1
+    }
+    It 'a build that reports no error but leaves no archive is a failure too' {
+        Mock Compress-Archive { }
+        $R = Invoke-BundleBlock
+        $R.BundleBuildFailed | Should -BeTrue
+        $R.OuterZipFile | Should -BeNullOrEmpty
+        @($R.Printed | Where-Object { $_ -like 'Consolidated bundle created*' }).Count | Should -Be 0
+    }
+    It 'a successful build still reports the bundle and keeps its path' {
+        # A real one-entry zip, written without the (mocked) cmdlet.
+        Mock Compress-Archive {
+            $Zip = [System.IO.Compression.ZipFile]::Open($DestinationPath, 'Create')
+            try { $null = $Zip.CreateEntry('sub1.zip') } finally { $Zip.Dispose() }
+        }
+        $R = Invoke-BundleBlock
+        $R.BundleBuildFailed | Should -BeFalse
+        $R.OuterZipFile | Should -BeLike (Join-Path $TestDrive 'AllSubscriptions_ResourcesReport_*.zip')
+        @($R.Printed | Where-Object { $_ -like 'Consolidated bundle created*' }).Count | Should -Be 1
+    }
+    It 'a failed build sets exit code 2, and a built one leaves the code alone' {
+        $WrapperExitCode = 0
+        Set-Variable -Name BundleBuildFailed -Value $true
+        . $script:BundleExitBlock
+        $WrapperExitCode | Should -Be 2
+        $WrapperExitCode = 4
+        Set-Variable -Name BundleBuildFailed -Value $false
+        . $script:BundleExitBlock
+        $WrapperExitCode | Should -Be 4
+    }
+}

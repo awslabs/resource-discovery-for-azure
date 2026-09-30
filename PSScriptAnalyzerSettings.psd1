@@ -87,6 +87,9 @@
         # NOT via $using:. The rule assumes any variable in a job scriptblock
         # needs the Using: modifier and flags the (correct) param-bound ones.
         # Adding $using: would be wrong here.
+        # The exclusion is repo-wide, so it also turns off the $using: check for the
+        # ForEach-Object -Parallel blocks (e.g. Extension/Metrics.ps1), where a missing
+        # $using: silently reads $null. Those blocks need that check by review.
         'PSUseUsingScopeModifierInNewRunspaces',
 
         # False positive for a script-based tool with no exported cmdlets. The

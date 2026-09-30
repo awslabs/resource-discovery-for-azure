@@ -225,6 +225,18 @@ Describe 'All-excluded is not reported as a wrong path' {
         $Out | Should -Match 'does NOT mean the path is wrong'
     }
 
+    It 'tells the operator to check the path when the path does not exist' {
+        $Root = Join-Path $Script:TestRoot ('missing-{0}' -f ([guid]::NewGuid().ToString('N')))
+        $Result = Find-RdaResource -Path $Root -ResourceType 'VMWare' -ThrottleLimit 2 3>$null
+        @($Result.Missing).Count | Should -Be 1
+        [int]$Result.SourceCount | Should -Be 0
+
+        $Out = Write-RdaFindSummary -Result $Result 6>&1 | Out-String
+        $Out | Should -Match 'NOTHING WAS SCANNED. The given path\(s\) do not exist'
+        $Out | Should -Match 'Check the path'
+        $Out | Should -Not -Match 'does NOT mean the path is wrong'
+    }
+
     It 'still tells the operator to check the path when nothing at all was found' {
         $Root = Join-Path $Script:TestRoot ('excluded-empty-{0}' -f ([guid]::NewGuid().ToString('N')))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null

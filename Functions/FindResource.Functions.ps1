@@ -897,12 +897,18 @@ function Write-RdaFindSummary
 
         if ([int]$Result.SourceCount -eq 0)
         {
-            $Excluded = (@($Result.Rejected).Count + @($Result.Unreadable).Count + @($Result.Skipped).Count + @($Result.Missing).Count)
+            # A missing path found nothing, so only refused, unreadable or skipped candidates clear the path.
+            $Excluded = (@($Result.Rejected).Count + @($Result.Unreadable).Count + @($Result.Skipped).Count)
             if ($Excluded -gt 0)
             {
                 Write-Host '  NOTHING WAS SCANNED. Candidates were found but every one was refused,' -ForegroundColor Red
                 Write-Host '  unreadable, skipped, or missing (see the counts and warnings above), so no' -ForegroundColor Red
                 Write-Host '  inventory could be read. This does NOT mean the path is wrong.' -ForegroundColor Red
+            }
+            elseif (@($Result.Missing).Count -gt 0)
+            {
+                Write-Host '  NOTHING WAS SCANNED. The given path(s) do not exist (see Paths not found above),' -ForegroundColor Red
+                Write-Host '  so this result says nothing about whether the type exists. Check the path.' -ForegroundColor Red
             }
             else
             {

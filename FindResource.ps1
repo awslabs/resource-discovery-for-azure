@@ -99,7 +99,9 @@
       0  the scan completed and proved what it reports: every path was
          covered, every inventory read carried the requested key(s), and no
          matched count was inflated by a repeated read
-      1  nothing was scanned - no report bundles were found under -Path
+      1  nothing was scanned - no readable report bundle was found under -Path
+         (none present, a path that does not exist, or every candidate was
+         refused, unreadable or skipped)
       2  the scan completed but some inventories could not be read
       3  the scan completed but did NOT prove what it reports: a path was
          missing or refused, a subtree could not be enumerated, a bundle was

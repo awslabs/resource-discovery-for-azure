@@ -1242,6 +1242,9 @@ $DiagFile = $null
 $SubResourceCounts = @()
 
 $EligibleCount = @($Subscriptions).Count
+# The sequential path runs the inner script in this process, and its $Global:Subscriptions (every
+# subscription it can see) replaces $Subscriptions, so what this run is responsible for is kept here.
+$ResponsibleSubscriptions = @($Subscriptions)
 
 if ($ParallelStreams -le 1)
 {
@@ -1976,7 +1979,7 @@ if ($StartIds.Count -gt 0)
         $EndIds = @($EndSubs | ForEach-Object { $_.Id })
         $Delta = Get-SubscriptionDelta -StartIds $StartIds -EndIds $EndIds -CompletedIds $CompletedIds
         $ResponsibleSet = @{}
-        foreach ($ResponsibleSub in $Subscriptions) { $ResponsibleSet[([string]$ResponsibleSub.Id).ToLowerInvariant()] = $true }
+        foreach ($ResponsibleSub in $ResponsibleSubscriptions) { $ResponsibleSet[([string]$ResponsibleSub.Id).ToLowerInvariant()] = $true }
         $VanishedMine = @($Delta.Vanished | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
         $IncompleteMine = @($Delta.Incomplete | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
         if ($VanishedMine.Count -gt 0 -or $Delta.New.Count -gt 0 -or $IncompleteMine.Count -gt 0)

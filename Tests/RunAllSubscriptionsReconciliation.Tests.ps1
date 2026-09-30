@@ -2457,3 +2457,31 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
         $R.StateKept | Should -BeFalse
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: the reconciliation judges only the subscriptions this run was given' {
+    # The sequential path runs ResourceInventory.ps1 in this process, and it assigns $Global:Subscriptions,
+    # which is the wrapper's own $Subscriptions under pwsh -File. The copy taken before the processing
+    # branch is what the reconciliation must read.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $script:RespAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $script:InnerAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+    }
+    It 'the inner script still assigns $Global:Subscriptions, so the copy is still needed' {
+        @($script:InnerAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$Global:Subscriptions' }, $true)).Count | Should -BeGreaterThan 0
+    }
+    It 'the copy is taken at the top level, before the sequential/parallel branch' {
+        $Top = @($script:RespAst.EndBlock.Statements)
+        $CopyAt = @(0..($Top.Count - 1) | Where-Object { $Top[$_].Extent.Text -eq '$ResponsibleSubscriptions = @($Subscriptions)' })
+        $BranchAt = @(0..($Top.Count - 1) | Where-Object { $Top[$_] -is [System.Management.Automation.Language.IfStatementAst] -and $Top[$_].Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1' })
+        $CopyAt.Count | Should -Be 1
+        $BranchAt.Count | Should -Be 1
+        $CopyAt[0] | Should -BeLessThan $BranchAt[0]
+    }
+    It 'the responsible set is built from the copy' {
+        $Loops = @($script:RespAst.FindAll({ $args[0] -is [System.Management.Automation.Language.ForEachStatementAst] -and $args[0].Variable.Extent.Text -eq '$ResponsibleSub' }, $true))
+        $Loops.Count | Should -Be 1
+        $Loops[0].Condition.Extent.Text | Should -Be '$ResponsibleSubscriptions'
+    }
+}

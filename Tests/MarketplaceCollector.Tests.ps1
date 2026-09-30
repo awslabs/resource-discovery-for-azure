@@ -364,6 +364,7 @@ Describe 'Get-RdaPermanentRequestError: a 4xx that retrying cannot fix ends the 
             $Body = [pscustomobject]@{ Error = [pscustomobject]@{ Code = "$Status"; Message = $ServiceMessage } }
             $Ex | Add-Member -NotePropertyName Response -NotePropertyValue $Response
             $Ex | Add-Member -NotePropertyName Body -NotePropertyValue $Body
+            $Ex | Add-Member -NotePropertyName Request -NotePropertyValue ([pscustomobject]@{ Method = 'GET'; RequestUri = 'https://management.azure.com/subscriptions/sub-x/providers/Microsoft.Consumption/marketplaces?api-version=2023-05-01' })
             return [System.Management.Automation.ErrorRecord]::new($Ex, 'Fake', 'NotSpecified', $null)
         }
         $script:OfferTypeMessage = 'Cost Management supports only Enterprise Agreement, Web direct and Microsoft Customer Agreement offer types. Subscription {0} is not associated with a valid offer type. (Request ID: {1})' -f [guid]::NewGuid(), [guid]::NewGuid()
@@ -406,7 +407,32 @@ Describe 'Get-RdaPermanentRequestError: a 4xx that retrying cannot fix ends the 
         $Counter | Should -Not -BeNullOrEmpty
         $Call[0] | Should -BeGreaterThan $Denial
         $Call[0] | Should -BeLessThan $Counter -Because 'a permanent error must not consume a retry or a backoff sleep'
-        ($Lines[($Call[0] + 1)..($Call[0] + 4)] -join "`n") | Should -Match 'throw' -Because 'a permanent error ends the pull'
+        # The body of the if block that follows the check, up to its closing brace.
+        $BlockEnd = @(for ($i = $Call[0] + 2; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\s*\}\s*$') { $i; break } })[0]
+        ($Lines[($Call[0] + 1)..$BlockEnd] -join "`n") | Should -Match '\bthrow\b' -Because 'a permanent error ends the pull'
+    }
+
+    It 'gives the debug log the full unmasked detail: status, request and raw response with the request ID' {
+        $Er = script:New-FakeServiceError -Status 400 -ServiceMessage $script:OfferTypeMessage
+        $Detail = Get-RdaRequestErrorDetail -ErrorRecord $Er
+        $Detail | Should -Match '^HTTP 400 \(BadRequest\) GET https://management\.azure\.com/subscriptions/sub-x/providers/Microsoft\.Consumption/marketplaces'
+        $Detail | Should -Match 'Request ID: [0-9a-f]{8}-' -Because 'support needs the service request ID, which the console line removes'
+        $Detail | Should -Match "sdk: Operation returned an invalid status code 'BadRequest'"
+    }
+
+    It 'returns nothing for the debug detail when the error has no HTTP response' {
+        $Er = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('The operation has timed out.'), 'Fake', 'NotSpecified', $null)
+        Get-RdaRequestErrorDetail -ErrorRecord $Er | Should -BeNullOrEmpty
+    }
+
+    It 'writes that detail to the debug log only, at both callers of the endpoint (source guard)' {
+        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1')
+        $Sites = @($Src | Where-Object { $_ -match 'Get-RdaRequestErrorDetail\s+-ErrorRecord\s+\$_' })
+        $Sites.Count | Should -Be 2 -Because 'the Marketplace collector and the Foundry coverage probe both call the endpoint'
+        foreach ($Line in $Sites)
+        {
+            $Line | Should -Match '^\s*Write-Log\b.*-NoConsole\s+-ToDebugLog\s*$' -Because 'the unmasked detail must never reach the console, the transcript or RunSummary.log'
+        }
     }
 }
 

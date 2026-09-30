@@ -2184,6 +2184,54 @@ function Get-RdaPermanentRequestError
     return $null
 }
 
+function Get-RdaRequestErrorDetail
+{
+    <#
+    .SYNOPSIS
+        Full, unmasked detail of a failed HTTP request, for the local debug log only.
+    .DESCRIPTION
+        Status, method, request URI, the raw response body (which carries the service's request
+        ID that Microsoft support asks for) and the SDK message. Nothing is masked, so this must
+        go only to $Global:DebugLogFile, which an -Obfuscate run keeps local. Returns $null when
+        the error carries no HTTP response.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord
+    )
+
+    try
+    {
+        $Ex = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ErrorRecord.Exception } else { $ErrorRecord }
+        $Depth = 0
+        while ($null -ne $Ex -and $Depth -lt 5)
+        {
+            $ResponseProp = $Ex.PSObject.Properties['Response']
+            if ($ResponseProp -and $null -ne $ResponseProp.Value -and $ResponseProp.Value.PSObject.Properties['StatusCode'])
+            {
+                $Method = ''
+                $Uri = ''
+                $RequestProp = $Ex.PSObject.Properties['Request']
+                if ($RequestProp -and $null -ne $RequestProp.Value)
+                {
+                    if ($RequestProp.Value.PSObject.Properties['Method']) { $Method = [string]$RequestProp.Value.Method }
+                    if ($RequestProp.Value.PSObject.Properties['RequestUri']) { $Uri = [string]$RequestProp.Value.RequestUri }
+                }
+                $Content = if ($ResponseProp.Value.PSObject.Properties['Content']) { ([string]$ResponseProp.Value.Content) -replace '\s+', ' ' } else { '' }
+                return ('HTTP {0} ({1}) {2} {3} | response: {4} | sdk: {5}' -f [int]$ResponseProp.Value.StatusCode, [string]$ResponseProp.Value.StatusCode, $Method, $Uri, $Content.Trim(), $Ex.Message).Trim()
+            }
+            $Ex = $Ex.InnerException
+            $Depth++
+        }
+    }
+    catch
+    {
+        Write-Verbose ('Get-RdaRequestErrorDetail could not read the error: {0}' -f $_.Exception.Message)
+    }
+    return $null
+}
+
 function Get-RdaRetryAfterSeconds
 {
     param(

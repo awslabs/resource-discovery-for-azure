@@ -664,6 +664,9 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         $MpPermanentFn = $MpFnAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Get-RdaPermanentRequestError' }, $true)
         if (-not $MpPermanentFn) { throw 'Get-RdaPermanentRequestError was not found in Functions/ResourceInventory.Functions.ps1.' }
         . ([scriptblock]::Create($MpPermanentFn.Extent.Text))
+        $MpDetailFn = $MpFnAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Get-RdaRequestErrorDetail' }, $true)
+        if (-not $MpDetailFn) { throw 'Get-RdaRequestErrorDetail was not found in Functions/ResourceInventory.Functions.ps1.' }
+        . ([scriptblock]::Create($MpDetailFn.Extent.Text))
     }
 
     BeforeEach {

@@ -1920,6 +1920,8 @@ function ExecuteInventoryProcessing()
                         $MpPermanentError = Get-RdaPermanentRequestError -ErrorRecord $_
                         if ($MpPermanentError)
                         {
+                            # Full unmasked detail (request URI, raw response with the service request ID) to the local debug log only.
+                            Write-Log -Message ('Marketplace request for {0} rejected permanently, not retried: {1}' -f $sub.Name, (Get-RdaRequestErrorDetail -ErrorRecord $_)) -Severity 'Warning' -NoConsole -ToDebugLog
                             throw ('Marketplace data is not available for this subscription, not retried ({0})' -f $MpPermanentError)
                         }
 
@@ -2937,7 +2939,18 @@ resources
                     else
                     {
                         $MarketplaceDeniedReason = 'MarketplaceProbeFailed'
-                        Write-Log -Message ("FoundryModelCoverage: Marketplace plane probe failed for {0}: {1}. Models will be marked Unknown-MarketplaceProbeFailed (NOT UNPRICED)." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                        # A permanent 4xx carries the service's reason (for example the offer-type 400 this
+                        # endpoint returns for subscriptions it does not serve); the SDK text only says 'BadRequest'.
+                        $FcProbeError = Get-RdaPermanentRequestError -ErrorRecord $_
+                        if ($FcProbeError)
+                        {
+                            Write-Log -Message ('FoundryModelCoverage: Marketplace probe for {0} rejected permanently: {1}' -f $sub.Name, (Get-RdaRequestErrorDetail -ErrorRecord $_)) -Severity 'Warning' -NoConsole -ToDebugLog
+                        }
+                        else
+                        {
+                            $FcProbeError = $_.Exception.Message
+                        }
+                        Write-Log -Message ("FoundryModelCoverage: Marketplace plane probe failed for {0}: {1}. Models will be marked Unknown-MarketplaceProbeFailed (NOT UNPRICED)." -f $sub.Name, $FcProbeError.TrimEnd('.')) -Severity 'Warning'
                     }
                 }
 

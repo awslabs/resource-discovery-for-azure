@@ -468,6 +468,19 @@ Describe 'GetFoundryModelCoverage source: the TokenProbeStatus column and no Azu
         $Commands | Should -Contain 'Get-RdaFoundryCoverageTokenFields'
         Get-Command Get-RdaFoundryTokenMetrics -ErrorAction SilentlyContinue | Should -BeNullOrEmpty -Because 'the separate coverage token probe is gone'
     }
+
+    It 'logs the service reason, not the SDK''s bare BadRequest, when the Marketplace probe fails' {
+        # The probe is one call with no retry. Its non-denial branch must read the service message the
+        # way the Marketplace collector does, or an offer-type 400 is logged as just 'BadRequest'.
+        $Tries = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.Body.Extent.Text -match 'Get-AzConsumptionMarketplace' }, $true))
+        $Tries.Count | Should -BeGreaterThan 0 -Because 'the coverage phase probes the Marketplace plane'
+        # The innermost try is the probe's own; the outer ones wrap the whole subscription.
+        $Probe = @($Tries | Sort-Object { $_.Body.Extent.Text.Length } | Select-Object -First 1)
+        @(Select-String -InputObject $Probe[0].Body.Extent.Text -Pattern 'Get-AzConsumptionMarketplace' -AllMatches).Matches.Count | Should -Be 1 -Because 'the probe calls the endpoint once per subscription'
+        $CatchText = $Probe[0].CatchClauses[0].Body.Extent.Text
+        $CatchText | Should -Match 'Get-RdaPermanentRequestError\s+-ErrorRecord\s+\$_'
+        $CatchText | Should -Match 'probe failed for \{0\}: \{1\}.*-f \$sub\.Name, \$FcProbeError' -Because 'the logged reason must be the classified message'
+    }
 }
 
 Describe 'Foundry token phase feeding the coverage CSV (the real collector bodies, offline)' {

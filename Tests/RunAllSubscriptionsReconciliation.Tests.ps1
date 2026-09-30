@@ -2402,3 +2402,58 @@ Describe 'Run-AllSubscriptions.ps1: subscriptions of a stream that failed to sta
         $R.FailedIds | Should -Contain 'sub-a'
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state while a subscription is still owed' {
+    # The owed-subscription check and the clean-run clear are lifted from the wrapper's parsed source.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $OwedAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $FindIf = {
+            param([string]$Condition, [string]$Contains)
+            $Found = @($OwedAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $Condition -and $args[0].Extent.Text.Contains($Contains) }, $true))
+            if ($Found.Count -ne 1) { throw ("expected exactly one 'if ({0})' containing '{1}' in Run-AllSubscriptions.ps1, found {2}" -f $Condition, $Contains, $Found.Count) }
+            $Found[0]
+        }
+        $script:OwedBlock = [scriptblock]::Create((& $FindIf -Condition '$ResumeFailedOnly' -Contains '$OwedOutsideRetry = @(').Extent.Text)
+        $ClearIf = & $FindIf -Condition '$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' -Contains 'Resume state cleared (clean run).'
+        $script:ClearBlock = [scriptblock]::Create($ClearIf.Extent.Text)
+
+        # A (completed earlier), B (failed, retried now and completed), C (never reached).
+        function Invoke-OwedCheck
+        {
+            param([string[]]$CompletedIds, [string[]]$EndIds)
+            $StateFile = Join-Path $TestDrive 'resume-state.json'
+            Set-Content -LiteralPath $StateFile -Value '{}'
+            Set-Variable -Name ResumeStateFile -Value $StateFile
+            Set-Variable -Name ResumeFailedOnly -Value $true
+            Set-Variable -Name EligibleBeforeRetryFilter -Value @(
+                [pscustomobject]@{ Id = 'sub-a'; Name = 'A' }
+                [pscustomobject]@{ Id = 'sub-b'; Name = 'B' }
+                [pscustomobject]@{ Id = 'sub-c'; Name = 'C' }
+            )
+            Set-Variable -Name RetriedIds -Value @('sub-b')
+            Set-Variable -Name CompletedIds -Value $CompletedIds
+            Set-Variable -Name EndIds -Value $EndIds
+            Set-Variable -Name FailedSubscriptions -Value @()
+            Set-Variable -Name FailedAttempts -Value @()
+            $Printed = @(& { . $script:OwedBlock; . $script:ClearBlock } 6>&1 | ForEach-Object { [string]$_ })
+            [pscustomobject]@{ StateKept = (Test-Path -LiteralPath $StateFile); Printed = $Printed }
+        }
+    }
+    It 'a subscription the interrupted run never reached keeps the state and is named' {
+        $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b') -EndIds @('sub-a', 'sub-b', 'sub-c')
+        $R.StateKept | Should -BeTrue
+        @($R.Printed | Where-Object { $_ -eq 'Never collected, and not retried by -ResumeFailedOnly (1): C (sub-c)' }).Count | Should -Be 1
+        @($R.Printed | Where-Object { $_ -like 'Resume state cleared*' }).Count | Should -Be 0
+    }
+    It 'the state is cleared once every eligible subscription is complete' {
+        $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b', 'sub-c') -EndIds @('sub-a', 'sub-b', 'sub-c')
+        $R.StateKept | Should -BeFalse
+        @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
+    }
+    It 'a subscription deleted since the start is not owed' {
+        $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b') -EndIds @('sub-a', 'sub-b')
+        $R.StateKept | Should -BeFalse
+    }
+}

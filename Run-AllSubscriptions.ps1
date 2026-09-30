@@ -888,9 +888,12 @@ if ($ResumeFailedOnly)
         Exit-Wrapper -Code 0
     }
     $FailedIds = @($FailedAttempts | ForEach-Object { $_.Id })
+    $EligibleBeforeRetryFilter = @($Subscriptions)
     $BeforeCount = $Subscriptions.Count
     $Subscriptions = @($Subscriptions | Where-Object { $FailedIds -contains $_.Id })
     Write-Host ("ResumeFailedOnly: filtered to {0} previously-failed subscription(s) (was {1})." -f $Subscriptions.Count, $BeforeCount) -ForegroundColor Cyan
+    # Kept here: in the sequential path the inner script's $Global:Subscriptions replaces $Subscriptions.
+    $RetriedIds = @($Subscriptions | ForEach-Object { [string]$_.Id })
     if ($Subscriptions.Count -eq 0)
     {
         Write-Host "WARNING: FailedAttempts list contained IDs but none are visible in the current subscription set. Verify access and -IncludeDisabled flag matches the prior run." -ForegroundColor Yellow
@@ -2342,7 +2345,22 @@ if ($CapacityPlan)
     }
 }
 
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
+# -ResumeFailedOnly retries only the failed set, so a subscription an interrupted run never reached is
+# still owed. Its record stays, and so do the completions the next -Resume needs to skip.
+$OwedOutsideRetry = @()
+if ($ResumeFailedOnly)
+{
+    $OwedOutsideRetry = @($EligibleBeforeRetryFilter | Where-Object {
+            $CompletedIds -notcontains $_.Id -and $RetriedIds -notcontains $_.Id -and ($null -eq $EndIds -or $EndIds -contains $_.Id)
+        })
+    if ($OwedOutsideRetry.Count -gt 0)
+    {
+        Write-Host ("Never collected, and not retried by -ResumeFailedOnly ({0}): {1}" -f $OwedOutsideRetry.Count, (($OwedOutsideRetry | Select-Object -First 10 | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
+        Write-Host ("Resume state kept at {0}. Re-run with -Resume to collect these." -f $ResumeStateFile) -ForegroundColor Yellow
+    }
+}
+
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 {
     try
     {

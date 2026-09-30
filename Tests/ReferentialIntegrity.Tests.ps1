@@ -121,9 +121,24 @@ Describe "SQL VM to VM Cross-Reference" {
 }
 
 Describe "Obfuscated ID Uniqueness" {
-    It "Every obfuscated ID should be unique across all resources" {
-        $IdCounts = $script:AllIds | Group-Object | Where-Object { $_.Count -gt 1 }
-        $IdCounts | Should -BeNullOrEmpty -Because "No two resources should share the same obfuscated ID"
+    It "Every obfuscated ID names exactly one resource across all resources" {
+        # Some collectors emit several rows for one resource, all carrying its ID: AvSet.ps1 one row per
+        # member VM, AKS.ps1 one row per agent pool. Repeated IDs are therefore legitimate. A collision is
+        # one token shared by two different resources, which shows up as one ID under two different
+        # (inventory key, Name) pairs.
+        $Owners = @{}
+        $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
+            $Key = $_.Name
+            @($_.Value) | ForEach-Object {
+                if ($null -ne $_ -and $null -ne $_.ID)
+                {
+                    if (-not $Owners.ContainsKey($_.ID)) { $Owners[$_.ID] = [System.Collections.Generic.HashSet[string]]::new() }
+                    [void]$Owners[$_.ID].Add(('{0}|{1}' -f $Key, $_.Name))
+                }
+            }
+        }
+        $Collisions = @($Owners.Keys | Where-Object { $Owners[$_].Count -gt 1 } | ForEach-Object { '{0} -> {1}' -f $_, (@($Owners[$_]) -join ', ') })
+        $Collisions | Should -BeNullOrEmpty -Because "No two resources should share the same obfuscated ID"
     }
 }
 
@@ -147,59 +162,48 @@ Describe "Consumption to Inventory Cross-Reference" {
 }
 
 Describe "ResourceGroup Consistency" {
-    It "Resources with the same obfuscated ResourceGroup should be grouped together" {
-        $RgGroups = @{}
+    It "Every ResourceGroup value is a prod_/nonprod_ pseudonym in an obfuscated run" {
+        if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "ResourceGroup values are only pseudonyms in an obfuscated run"; return }
+        $RgKeys = [System.Collections.Generic.HashSet[string]]::new()
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.ResourceGroup)
-                {
-                    if (-not $RgGroups.ContainsKey($_.ResourceGroup)) { $RgGroups[$_.ResourceGroup] = @() }
-                    $RgGroups[$_.ResourceGroup] += $_.ID
-                }
+                if ($null -ne $_ -and -not [string]::IsNullOrEmpty($_.ResourceGroup)) { [void]$RgKeys.Add($_.ResourceGroup) }
             }
         }
-        # When obfuscated, assert each RG key is a deterministic prod_/nonprod_
-        # pseudonym: a raw key would mean the RG dictionary failed to map it.
-        foreach ($rg in $RgGroups.Keys)
+        # A raw value would mean the RG dictionary failed to map it.
+        foreach ($rg in $RgKeys)
         {
-            if ($script:IsObfuscated -and -not [string]::IsNullOrEmpty($rg))
-            {
-                $rg | Should -Match '^(prod|nonprod)_' -Because "obfuscated ResourceGroup keys must be deterministic pseudonyms, not raw names"
-            }
+            $rg | Should -Match '^(prod|nonprod)_' -Because "obfuscated ResourceGroup keys must be deterministic pseudonyms, not raw names"
         }
     }
 }
 
+# Determinism: the inventory and the metrics are obfuscated separately, so the same resource must carry
+# the same Subscription and ResourceGroup token in both. A mapping that minted a fresh token per row
+# fails here. Rows whose ID is not in the inventory are left to the P8 absent-ID check below.
 Describe "Subscription Determinism" {
-    It "Resources sharing the same obfuscated Subscription should all have the same value" {
-        # Collect all subscription values
-        $SubValues = @{}
+    It "A resource carries the same Subscription value in the inventory and in its metric rows" {
+        $Inv = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.Subscription)
-                {
-                    $SubValues[$_.Subscription] = $true
-                }
-            }
+            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.ID -and $null -ne $_.Subscription -and -not $Inv.ContainsKey($_.ID)) { $Inv[$_.ID] = $_.Subscription } }
         }
-        # There should be fewer unique subscription values than total resources
-        # (deterministic = same real sub maps to same obfuscated sub)
-        $SubValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "Subscription values should be reused across resources in the same subscription"
+        $Pairs = @($script:MetricRows | Where-Object { -not [string]::IsNullOrEmpty($_.ID) -and $Inv.ContainsKey($_.ID) -and $null -ne $_.Subscription })
+        if ($Pairs.Count -eq 0) { Set-ItResult -Skipped -Because "no metric row names an inventory resource in this fixture"; return }
+        $Mismatch = @($Pairs | Where-Object { $_.Subscription -ne $Inv[$_.ID] } | ForEach-Object { '{0}: inventory {1}, metrics {2}' -f $_.ID, $Inv[$_.ID], $_.Subscription } | Sort-Object -Unique)
+        $Mismatch | Should -BeNullOrEmpty -Because "the same real subscription must map to the same value everywhere in a run"
     }
 }
 
 Describe "ResourceGroup Determinism" {
-    It "Fewer unique ResourceGroup values than total resources (deterministic mapping)" {
-        $RgValues = @{}
+    It "A resource carries the same ResourceGroup value in the inventory and in its metric rows" {
+        $Inv = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.ResourceGroup)
-                {
-                    $RgValues[$_.ResourceGroup] = $true
-                }
-            }
+            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.ID -and $null -ne $_.ResourceGroup -and -not $Inv.ContainsKey($_.ID)) { $Inv[$_.ID] = $_.ResourceGroup } }
         }
-        $RgValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "ResourceGroup values should be reused across resources in the same RG"
+        $Pairs = @($script:MetricRows | Where-Object { -not [string]::IsNullOrEmpty($_.ID) -and $Inv.ContainsKey($_.ID) -and $null -ne $_.ResourceGroup })
+        if ($Pairs.Count -eq 0) { Set-ItResult -Skipped -Because "no metric row names an inventory resource in this fixture"; return }
+        $Mismatch = @($Pairs | Where-Object { $_.ResourceGroup -ne $Inv[$_.ID] } | ForEach-Object { '{0}: inventory {1}, metrics {2}' -f $_.ID, $Inv[$_.ID], $_.ResourceGroup } | Sort-Object -Unique)
+        $Mismatch | Should -BeNullOrEmpty -Because "the same real resource group must map to the same value everywhere in a run"
     }
 }
 

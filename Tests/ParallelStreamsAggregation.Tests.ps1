@@ -47,11 +47,19 @@ BeforeAll {
     {
         $HtmlFile = Get-ChildItem -Path $SubDir -Filter 'ResourcesReport_*.html' | Select-Object -First 1
         $InvFile = Get-ChildItem -Path $SubDir -Filter 'Inventory_*.json'      | Select-Object -First 1
-        $MetFile = Get-ChildItem -Path $SubDir -Filter 'Metrics_*.json'        | Select-Object -First 1
+        # Extension/Metrics.ps1 writes one Metrics_<base>_<N>.json per batch, so a subscription can have
+        # several files. Count across all of them; the first file only serves as the presence check.
+        $MetFiles = @(Get-ChildItem -Path $SubDir -Filter 'Metrics_*.json' | Sort-Object -Property Name)
+        $MetFile = $MetFiles | Select-Object -First 1
         $ConFile = Get-ChildItem -Path $SubDir -Filter 'Consumption_*.csv'     | Select-Object -First 1
 
         $Inv = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
-        $Met = if ($MetFile) { Get-Content $MetFile.FullName -Raw | ConvertFrom-Json } else { $null }
+        $MetricsCount = 0
+        foreach ($Mf in $MetFiles)
+        {
+            $Met = Get-Content -LiteralPath $Mf.FullName -Raw | ConvertFrom-Json
+            if ($Met -and $Met.Metrics) { $MetricsCount += @($Met.Metrics).Count }
+        }
 
         $ConRows = 0
         if ($ConFile)
@@ -66,21 +74,20 @@ BeforeAll {
         {
             # "Populated" requires Count > 0, not just non-null: every collector
             # emits a possibly-empty array, so a non-null check would mark all ~57 types populated. Count>0 matches what the HTML report renders.
-            $PopulatedTypes = @(
-                $Inv.PSObject.Properties |
-                    Where-Object { $_.Name -ne 'Version' -and $null -ne $_.Value -and @($_.Value).Count -gt 0 } |
-                    ForEach-Object { $_.Name }
-                ) | Sort-Object
-            }
+            $TypeNames = $Inv.PSObject.Properties |
+                Where-Object { $_.Name -ne 'Version' -and $null -ne $_.Value -and @($_.Value).Count -gt 0 } |
+                ForEach-Object { $_.Name }
+            $PopulatedTypes = @($TypeNames) | Sort-Object
+        }
 
-            # Resource ID universe across every populated type
-            $AllIds = @()
-            if ($Inv)
-            {
-                $Inv.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
-                    ForEach-Object {
-                        @($_.Value) | ForEach-Object { if ($_ -and $_.ID) { $AllIds += $_.ID } }
-                    }
+        # Resource ID universe across every populated type
+        $AllIds = @()
+        if ($Inv)
+        {
+            $Inv.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } |
+                ForEach-Object {
+                    @($_.Value) | ForEach-Object { if ($_ -and $_.ID) { $AllIds += $_.ID } }
+                }
         }
 
         return [pscustomobject]@{
@@ -91,7 +98,7 @@ BeforeAll {
             PopulatedTypes  = $PopulatedTypes
             ResourceCount   = $AllIds.Count
             ResourceIds     = ($AllIds | Sort-Object -Unique)
-            MetricsCount    = if ($Met -and $Met.Metrics) { @($Met.Metrics).Count } else { 0 }
+            MetricsCount    = $MetricsCount
             ConsumptionRows = $ConRows
         }
     }

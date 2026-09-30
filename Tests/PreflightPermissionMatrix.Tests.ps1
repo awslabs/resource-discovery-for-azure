@@ -1,6 +1,7 @@
 #Requires -Version 7.0
 # Offline unit tests for the -Preflight permission matrix: Test-MetricsAccess (mocked Az) across all
-# outcome branches, and Format-PreflightMatrix's verdict - only a Denied on a REQUESTED phase blocks.
+# outcome branches, and Format-PreflightMatrix's verdict - a Denied probe or an unverifiable Reader blocks;
+# Skipped, NoResource and Unavailable results for the Cost Management and Monitoring phases do not.
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent

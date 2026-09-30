@@ -1,58 +1,59 @@
 # Validates the HTML report structure (service <details> sections keyed by id="svc-<slug>") and that every
 # inventory resource type with data gets a section. Column-level schema lives in the JSON-driven tests.
 
+# File-level setup, shared by both Describes, so either one can run on its own (e.g. -FullName '*HTML section*').
+BeforeAll {
+    $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
+    {
+        Get-ChildItem -Path $PSScriptRoot -Filter 'ResourcesReport_*.zip' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+
+    if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
+    {
+        throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
+    }
+
+    $script:ExtractPath = Join-Path ([System.IO.Path]::GetTempPath()) "ReportSchemaTest_$([guid]::NewGuid().ToString().Substring(0,8))"
+    New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
+    Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
+
+    $script:HtmlFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.html' | Select-Object -First 1
+    $script:HtmlContent = if ($script:HtmlFile) { Get-Content $script:HtmlFile.FullName -Raw } else { '' }
+
+    # Extract the service-section slugs the report emitted. Summary.ps1
+    # builds one <details class="service-section" id="svc-<slug>"> per
+    # populated service, where <slug> is the service/JSON key lowercased
+    # with non-alphanumerics replaced by '-'.
+    $script:SectionSlugs = @()
+    if ($script:HtmlContent)
+    {
+        $SvcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
+        $script:SectionSlugs = @($SvcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
+    }
+
+    # Helper mirroring Summary.ps1's slug rule so tests can map a service
+    # name to its expected section id.
+    function script:Get-ServiceSlug([string]$Name)
+    {
+        return ($Name -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
+    }
+
+    $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $script:InventoryJson = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
+
+    $script:ObfuscationSectionPattern = '^(prod|nonprod)-(databricks-|aks-|vmss-)?[0-9a-f]{8}-'
+}
+
+AfterAll {
+    if ($script:ExtractPath -and (Test-Path $script:ExtractPath))
+    {
+        Remove-Item -Path $script:ExtractPath -Recurse -Force
+    }
+}
+
 Describe 'Report Schema Validation' {
-    BeforeAll {
-        $ZipPath = if ($env:TEST_ZIP_PATH) { $env:TEST_ZIP_PATH } else
-        {
-            Get-ChildItem -Path $PSScriptRoot -Filter 'ResourcesReport_*.zip' |
-                Sort-Object LastWriteTime -Descending |
-                Select-Object -First 1 -ExpandProperty FullName
-        }
-
-        if ([string]::IsNullOrEmpty($ZipPath) -or -not (Test-Path $ZipPath))
-        {
-            throw "No test zip found. Copy a ResourcesReport_*.zip to Tests/ or set `$env:TEST_ZIP_PATH"
-        }
-
-        $script:ExtractPath = Join-Path ([System.IO.Path]::GetTempPath()) "ReportSchemaTest_$([guid]::NewGuid().ToString().Substring(0,8))"
-        New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
-        Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
-
-        $script:HtmlFile = Get-ChildItem -Path $script:ExtractPath -Filter '*.html' | Select-Object -First 1
-        $script:HtmlContent = if ($script:HtmlFile) { Get-Content $script:HtmlFile.FullName -Raw } else { '' }
-
-        # Extract the service-section slugs the report emitted. Summary.ps1
-        # builds one <details class="service-section" id="svc-<slug>"> per
-        # populated service, where <slug> is the service/JSON key lowercased
-        # with non-alphanumerics replaced by '-'.
-        $script:SectionSlugs = @()
-        if ($script:HtmlContent)
-        {
-            $SvcMatches = [regex]::Matches($script:HtmlContent, 'id="svc-([a-z0-9-]+)"')
-            $script:SectionSlugs = @($SvcMatches | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
-        }
-
-        # Helper mirroring Summary.ps1's slug rule so tests can map a service
-        # name to its expected section id.
-        function script:Get-ServiceSlug([string]$Name)
-        {
-            return ($Name -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
-        }
-
-        $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
-        $script:InventoryJson = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
-
-        $script:ObfuscationSectionPattern = '^(prod|nonprod)-(databricks-|aks-|vmss-)?[0-9a-f]{8}-'
-    }
-
-    AfterAll {
-        if ($script:ExtractPath -and (Test-Path $script:ExtractPath))
-        {
-            Remove-Item -Path $script:ExtractPath -Recurse -Force
-        }
-    }
-
     It 'Should contain an HTML report file in the zip' {
         $script:HtmlFile | Should -Not -BeNullOrEmpty
     }

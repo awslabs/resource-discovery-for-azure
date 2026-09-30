@@ -62,10 +62,10 @@ Describe "Prefix Format Validation" {
             if ($null -ne $r.ID)
             {
                 $Checked++
-                # Type-tagged variants (databricks_, aks_, vmss_) are legitimate
-                # output for resources whose IDs do not fit the standard ARM shape;
-                # see ResourceInventory.ps1 lines 961-969.
-                $r.ID | Should -Match '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-' -Because "ID should have valid prefix format"
+                # The orchestrator's dictionary build in ResourceInventory.ps1 makes every obfuscated ID
+                # '<prefix><guid>'. The databricks_/aks_/vmss_ type hints go on the obfuscated Name
+                # only, which the Type Hint Fidelity tests below assert.
+                $r.ID | Should -Match '^(prod|nonprod)_[0-9a-f]{8}-' -Because "ID should have valid prefix format"
             }
         }
         $Checked | Should -BeGreaterThan 0 -Because "at least one resource ID must be present to validate ID prefix format"
@@ -169,8 +169,8 @@ Describe "Classifier Fidelity — non-prod set and prod default (P7)" {
 
 Describe "Type Hint Fidelity — name only, never ID (P7 / Req 3.4)" {
     It "obfuscated IDs never carry a databricks/aks/vmss type hint" {
-        # Source L958 builds the ID as '<prefix><guid>' with no type hint; the
-        # hint is only ever appended to the obfuscated NAME (L961-969). Assert
+        # The dictionary build in ResourceInventory.ps1 makes the ID '<prefix><guid>' with no type
+        # hint; the hint is only ever added to the obfuscated NAME. Assert
         # the ID never picks one up. Runs across every resource regardless of
         # fixture composition.
         $Checked = 0

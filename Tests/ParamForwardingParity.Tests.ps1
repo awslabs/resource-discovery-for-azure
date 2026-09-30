@@ -73,6 +73,14 @@ Describe 'Sequential and parallel paths reach ResourceInventory.ps1 with the sam
         $OnlyParallel -join ', ' | Should -BeNullOrEmpty -Because 'an option honoured only in parallel mode is silently ignored in sequential mode'
     }
 
+    It 'supplies the worker every key the worker forwards to the inner script' {
+        # The worker can only re-forward what the wrapper hands it. Dropping, say, the wrapper's
+        # $WorkerArgs.CapacityPlan line leaves both passthrough lists identical, so the test above
+        # still passes while -CapacityPlan -ParallelStreams N is silently ignored.
+        $NotSupplied = @($script:StreamPassKeys | Where-Object { $_ -notin $script:WorkerArgKeys })
+        $NotSupplied -join ', ' | Should -BeNullOrEmpty -Because 'a key the worker forwards but the wrapper never sends it is always unset under -ParallelStreams'
+    }
+
     It 'forwards -Debug on both paths' {
         # Named explicitly because this is the flag that actually drifted.
         'Debug' | Should -BeIn $script:WrapperPassKeys -Because 'the sequential path must forward -Debug'

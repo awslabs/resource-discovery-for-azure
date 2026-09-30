@@ -25,7 +25,7 @@ BeforeAll {
     # confusing "command not found" mid-test.
     $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Invoke-RdaSupportLogCollectionInTranscript', 'Test-RdaFinalScreenClearable', 'Get-RdaFinalScreenLines', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
         'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
-        'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks')
+        'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks', 'Get-RunSummaryLogContent', 'Write-RdaHostLinesInTranscript')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -37,6 +37,17 @@ BeforeAll {
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
     $script:TestRoot = Join-Path $TmpBase ("RunAllSubsReconTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:TestRoot -Force | Out-Null
+
+    # True when THIS test's transcript file is still recording. Probing with Stop-Transcript instead
+    # would stop a transcript the caller's own session may have running. Redirected host output is
+    # still transcribed but not shown, so the probe line never reaches the console.
+    function script:Test-OwnTranscriptOpen
+    {
+        param([string]$Path)
+        $Marker = 'rda-transcript-probe-' + [guid]::NewGuid().ToString('N')
+        Write-Host $Marker 6>$null
+        return [bool]((Test-Path -LiteralPath $Path) -and (Get-Content -LiteralPath $Path -Raw).Contains($Marker))
+    }
 }
 
 AfterAll {
@@ -612,6 +623,10 @@ Describe 'Invoke-RdaSupportLogCollectionInTranscript (support-log lines reach th
     BeforeEach {
         $script:Tr = Join-Path $script:TestRoot ('transcript_{0}.txt' -f [guid]::NewGuid().ToString('N'))
     }
+    AfterEach {
+        # A helper that left the reopened transcript running would otherwise record the rest of the suite.
+        if (script:Test-OwnTranscriptOpen $script:Tr) { Stop-Transcript | Out-Null }
+    }
 
     It 'writes the held lines once, in order and colour, and appends them to the closed transcript' {
         Start-Transcript -LiteralPath $script:Tr -UseMinimalHeader -Force | Out-Null
@@ -632,7 +647,7 @@ Describe 'Invoke-RdaSupportLogCollectionInTranscript (support-log lines reach th
         $Text.IndexOf('last line before the stop') | Should -BeGreaterOrEqual 0
         $Text.IndexOf('last line before the stop') | Should -BeLessThan $Text.IndexOf('Support logs collected: /x/SupportLogs_Run.zip')
         $Text | Should -Match '  plain line'
-        { Stop-Transcript -ErrorAction Stop } | Should -Throw -Because 'the reopened transcript must be closed again before the run exits'
+        (script:Test-OwnTranscriptOpen $script:Tr) | Should -BeFalse -Because 'the reopened transcript must be closed again before the run exits'
     }
 
     It 'still writes the lines, and creates no transcript, when none was started' {
@@ -666,6 +681,9 @@ Describe 'Write-RdaHostLinesInTranscript (lines printed after the stop still rea
     BeforeEach {
         $script:Tr = Join-Path $script:TestRoot ('transcript_{0}.txt' -f [guid]::NewGuid().ToString('N'))
     }
+    AfterEach {
+        if (script:Test-OwnTranscriptOpen $script:Tr) { Stop-Transcript | Out-Null }
+    }
 
     It 'writes the lines in order and colour, appends them to the closed transcript, then closes it again' {
         Start-Transcript -LiteralPath $script:Tr -UseMinimalHeader -Force | Out-Null
@@ -686,7 +704,7 @@ Describe 'Write-RdaHostLinesInTranscript (lines printed after the stop still rea
         $Text.IndexOf('last line before the stop') | Should -BeGreaterOrEqual 0
         $Text.IndexOf('last line before the stop') | Should -BeLessThan $Text.IndexOf('RUN COMPLETE - EXIT CODE 0.')
         $Text | Should -Match '  plain line'
-        { Stop-Transcript -ErrorAction Stop } | Should -Throw -Because 'the reopened transcript must be closed again before the run exits'
+        (script:Test-OwnTranscriptOpen $script:Tr) | Should -BeFalse -Because 'the reopened transcript must be closed again before the run exits'
     }
 
     It 'still writes the lines, and creates no transcript, when none was kept' {
@@ -811,6 +829,11 @@ Describe 'Run-AllSubscriptions.ps1: the final screen comes last and the support-
         $FinalIdx = @(Get-CommandLine -Ast $script:WrapperAstForFinal -Name 'Get-RdaFinalScreenLines')
         $ExitIdx = ($script:WrapperLines | Select-String -Pattern '^exit \$WrapperExitCode\s*$' | Select-Object -Last 1).LineNumber
 
+        # A null index on the left of -BeLessThan passes ($null -ge N is false), so every anchor must be found first.
+        $StopIdx | Should -Not -BeNullOrEmpty -Because 'the normal-completion Stop-Transcript anchor must be found, or the ordering below is not checked'
+        $SupportIdx | Should -Not -BeNullOrEmpty -Because 'the support-log step must be found, or the ordering below is not checked'
+        $LastCodeIdx | Should -Not -BeNullOrEmpty
+        $ExitIdx | Should -Not -BeNullOrEmpty
         $ClearIdx.Count | Should -Be 1
         $FinalIdx.Count | Should -Be 1
         $StopIdx | Should -BeLessThan $SupportIdx
@@ -1484,11 +1507,9 @@ Describe 'Report-archive loss detection: source guards' {
 }
 
 Describe 'Report-archive loss detection: verification classification' {
-    # Faithful copy of the gate's two classification expressions from
-    # Run-AllSubscriptions.ps1. The gate is inline in the wrapper body (which
-    # cannot be dot-sourced), so this mirrors the production expressions the same
-    # way Tests/ResumeCycle.Tests.ps1 mirrors the wrapper's resume expressions,
-    # with the source guard above covering drift in the real file.
+    # The gate's two classification statements are inline in the wrapper body, which cannot be
+    # dot-sourced, so they are lifted from Run-AllSubscriptions.ps1's AST and executed as-is. A change
+    # to either statement in the wrapper is therefore what these tests run; there is no copy to drift.
     BeforeAll {
         $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
         $script:ZipRoot = Join-Path $TmpBase ("ArchiveVerifyTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
@@ -1497,16 +1518,24 @@ Describe 'Report-archive loss detection: verification classification' {
         Set-Content -LiteralPath $script:PresentZip -Value 'x' -Encoding utf8
         $script:AbsentZip = Join-Path $script:ZipRoot 'ResourcesReport_absent.zip'
 
-        # Calls the REAL shared predicate (Test-ReportArchiveUsable, dot-sourced by
-        # the BeforeAll at the top of this file and by both the wrapper and the
-        # stream worker at runtime); only the two Where-Object shapes around it are
-        # mirrored from the wrapper body, which cannot be dot-sourced.
+        $Tokens = $null
+        $ParseErrors = $null
+        $VerifyAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $script:VerifyStatements = foreach ($Var in @('$MissingSubs', '$UnverifiableSubs'))
+        {
+            $Found = @($VerifyAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq $Var }, $true))
+            if ($Found.Count -ne 1) { throw "Expected exactly one '$Var = ...' statement in Run-AllSubscriptions.ps1, found $($Found.Count)." }
+            $Found[0].Extent.Text
+        }
+
+        # Runs the REAL shared predicate (Test-ReportArchiveUsable, dot-sourced by the BeforeAll at the
+        # top of this file) through the wrapper's own two statements.
+        $script:SplitBlock = [scriptblock]::Create(
+            "param(`$SubResourceCounts)`n" + ($script:VerifyStatements -join "`n") + "`n@{ Missing = `$MissingSubs; Unverifiable = `$UnverifiableSubs }")
         function script:Split-VerificationRows
         {
             param($Rows)
-            $Missing = @($Rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Zip) -and -not (Test-ReportArchiveUsable -Path $_.Zip) })
-            $Unverifiable = @($Rows | Where-Object { [string]::IsNullOrWhiteSpace($_.Zip) })
-            return @{ Missing = $Missing; Unverifiable = $Unverifiable }
+            return (& $script:SplitBlock $Rows)
         }
     }
     AfterAll {
@@ -1845,30 +1874,30 @@ Describe 'Resume-state completed-ids seed array-ness (regression: null-collapse 
 # Marketplace phase must have full health-plumbing PARITY with Consumption/Metrics across
 # the wrapper+stream seam: MarketplaceRecords sum into the run-wide count and
 # MarketplaceFailedSubs concatenate across streams. The aggregation loop is inline in the
-# wrapper body (not dot-sourceable), so this mirrors the production merge expression the same
-# way the archive-loss suite mirrors the wrapper's verification gate, and exercises it against
-# in-memory stream summaries.
+# wrapper body (not dot-sourceable), so its two Marketplace statements are lifted from the
+# wrapper's AST and executed against in-memory stream summaries, with the run-wide globals
+# rebound to locals so the test leaves no global state behind.
 Describe 'Marketplace stream/wrapper health parity' {
     BeforeAll {
-        # Faithful mirror of the wrapper's per-stream merge: sum MarketplaceRecords into the
-        # run-wide count and concatenate MarketplaceFailedSubs, exactly as the inline loop does.
+        $Tokens = $null
+        $ParseErrors = $null
+        $MergeAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $MergeStatements = foreach ($Condition in @('$null -ne $StreamSummary.MarketplaceRecords', '$StreamSummary.MarketplaceFailedSubs -and $StreamSummary.MarketplaceFailedSubs.Count -gt 0'))
+        {
+            $Found = @($MergeAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $Condition }, $true))
+            if ($Found.Count -ne 1) { throw "Expected exactly one 'if ($Condition)' merge statement in Run-AllSubscriptions.ps1, found $($Found.Count)." }
+            $Found[0].Extent.Text -replace '\$Global:', '$'
+        }
+        $script:MergeBlock = [scriptblock]::Create(
+            "param(`$StreamSummaries)`n`$MarketplaceRecordCount = `$null`n`$MarketplaceFailedSubs = `$null`n" +
+            "foreach (`$StreamSummary in `$StreamSummaries)`n{`n" + ($MergeStatements -join "`n") + "`n}`n" +
+            "@{ RecordCount = [int]`$MarketplaceRecordCount; FailedSubs = @(if (`$null -ne `$MarketplaceFailedSubs) { `$MarketplaceFailedSubs }) }")
+
+        # Runs the wrapper's own per-stream Marketplace merge.
         function script:Merge-StreamMarketplace
         {
             param($StreamSummaries)
-            $RecordCount = 0
-            $FailedSubs = @()
-            foreach ($S in $StreamSummaries)
-            {
-                if ($null -ne $S.MarketplaceRecords)
-                {
-                    $RecordCount = [int]$RecordCount + [int]$S.MarketplaceRecords
-                }
-                if ($S.MarketplaceFailedSubs -and $S.MarketplaceFailedSubs.Count -gt 0)
-                {
-                    $FailedSubs += @($S.MarketplaceFailedSubs)
-                }
-            }
-            return @{ RecordCount = $RecordCount; FailedSubs = @($FailedSubs) }
+            return (& $script:MergeBlock $StreamSummaries)
         }
     }
 

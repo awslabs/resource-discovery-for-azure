@@ -48,7 +48,14 @@ BeforeAll {
                 continue
             }
             $Processed += $Id
-            if ($FailWhenId -contains $Id) { continue }   # failed sub: not marked complete
+            if ($FailWhenId -contains $Id)
+            {
+                # Failed sub: never marked complete, and a completion an earlier run recorded is revoked
+                # and persisted, exactly as the wrapper's two sequential failure paths do.
+                $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Id })
+                Save-CompletedSubscriptionIds -Path $StateFile -Tenant $script:Tenant -Ids $CompletedIds -FailedAttempts @()
+                continue
+            }
             if (-not ($CompletedIds -contains $Id))
             {
                 $CompletedIds += $Id
@@ -162,6 +169,36 @@ Describe 'Sequential -Resume cycle' {
         $Resumed = Invoke-SequentialResumeRun -StateFile $script:StateFile -SubIds $Subs -Resume
         $Resumed.Processed | Should -Be @('s2')
         ($Resumed.Skipped | Sort-Object) | Should -Be @('s1', 's3')
+    }
+
+    It 'a sub that completed earlier and then fails on a re-run is retried by the next -Resume' {
+        $Subs = @('s1', 's2')
+        $null = Invoke-SequentialResumeRun -StateFile $script:StateFile -SubIds $Subs
+        # A fresh (non -Resume) re-run where s1 now fails must revoke its earlier completion.
+        $Rerun = Invoke-SequentialResumeRun -StateFile $script:StateFile -SubIds $Subs -FailWhenId @('s1')
+        $Rerun.CompletedIds | Should -Be @('s2')
+        $Persisted = Get-Content -Path $script:StateFile -Raw | ConvertFrom-Json
+        @($Persisted.CompletedSubscriptionIds) | Should -Be @('s2') -Because 'the revocation must be persisted, not only held in memory'
+        $Resumed = Invoke-SequentialResumeRun -StateFile $script:StateFile -SubIds $Subs -Resume
+        $Resumed.Processed | Should -Be @('s1')
+        $Resumed.Skipped | Should -Be @('s2')
+    }
+
+    It 'every sequential failure path in the wrapper revokes and persists the completion (source guard)' {
+        # The harness above only mirrors the wrapper, so it cannot see the wrapper lose the revocation.
+        # Each Add-FailedAttempt in Run-AllSubscriptions.ps1 must be followed by the revoke and the save.
+        $WrapperPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
+        $Lines = @(Get-Content -Path $WrapperPath)
+        $FailSites = @(for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\s*\$FailedAttempts\s*=\s*Add-FailedAttempt\b') { $i } })
+        $FailSites.Count | Should -BeGreaterOrEqual 2 -Because 'the sequential loop has a collection failure path and a second failure path'
+        foreach ($Site in $FailSites)
+        {
+            $Window = @($Lines[$Site..([Math]::Min($Site + 6, $Lines.Count - 1))] | Where-Object { $_ -notmatch '^\s*#' })
+            $RevokeAt = [array]::FindIndex([string[]]$Window, [Predicate[string]] { param($L) $L -match '^\s*\$CompletedIds\s*=\s*@\(\$CompletedIds\s*\|\s*Where-Object\s*\{\s*\$_\s*-ne\s*\$Sub\.Id\s*\}\)' })
+            $RevokeAt | Should -BeGreaterThan -1 -Because "the failure path at line $($Site + 1) must drop the sub from the completed set"
+            $SaveAt = [array]::FindIndex([string[]]$Window, [Predicate[string]] { param($L) $L -match '^\s*Save-CompletedSubscriptionIds\b.*-Ids\s+\$CompletedIds' })
+            $SaveAt | Should -BeGreaterThan $RevokeAt -Because "the failure path at line $($Site + 1) must persist the revoked set"
+        }
     }
 
     It 'reconciliation reports no incomplete once the responsible set is fully completed' {

@@ -442,7 +442,8 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
         }
     }
 
-    It "the free-text tokens are present in the obfuscated ZIP (pre-reveal)" {
+    It "fixture precondition: the free-text tokens are present in the obfuscated staging inventory (pre-reveal)" {
+        # Checks this BeforeAll's own fixture, not obfuscator output; the reveal assertions below rely on it.
         $script:P3RawObfuscated | Should -Match ([regex]::Escape($script:P3TokShared))
         $script:P3RawObfuscated | Should -Match ([regex]::Escape($script:P3TokOther))
     }
@@ -459,10 +460,10 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
         }
     }
 
-    It "a real value seen more than once carries a single shared token in the obfuscated ZIP (Req 5.3)" {
-        # Read the pre-reveal obfuscated bundle content ($script:P3RawObfuscated),
-        # not the in-memory fixture: vmA and vmB shared one real free-text value,
-        # so the obfuscated ZIP must carry ONE shared token for both.
+    It "fixture precondition: a real value seen more than once carries a single shared token in the staging inventory" {
+        # The staging inventory is this BeforeAll's own fixture, with P3TokShared assigned to both
+        # vmA and vmB, so this confirms the reveal input rather than obfuscator determinism (Req 5.3),
+        # which Obfuscation.Tests.ps1 (P1) covers.
         $Obf = $script:P3RawObfuscated | ConvertFrom-Json
         $Obf.VirtualMachines[0].CreatedBy | Should -Be $Obf.VirtualMachines[1].CreatedBy
         $Obf.VirtualMachines[0].CreatedBy | Should -Be $script:P3TokShared
@@ -1054,7 +1055,7 @@ Describe "Reveal-Obfuscation input/dictionary resolution and failure paths (Task
 
         It "leaves no Reveal_* temp dir behind after a failed reveal (post-extraction failure)" {
             # A file that exists (so the input-zip guard passes) but is not a real
-            # archive, so Expand-Archive fails INSIDE the try block, exercising the
+            # archive, so ZipFile::ExtractToDirectory fails INSIDE the try block, exercising the
             # finally cleanup on the failure path.
             $CorruptZip = Join-Path $script:TmpDir ("corrupt_" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.zip')
             Set-Content -Path $CorruptZip -Value 'this is not a zip archive' -Encoding utf8

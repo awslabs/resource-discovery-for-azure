@@ -206,10 +206,10 @@ Describe 'Merge-RecoveryData -Service selection and fail-loud guards' {
         New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $GapCsv
         New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3' }) -ConsumptionCsv $RecCsv
 
-        $Result = $null
         { $script:NoThrowResult = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue } |
             Should -Not -Throw
         $Result = $script:NoThrowResult
+        Remove-Variable -Name NoThrowResult -Scope Script
 
         @($Result.MergedServiceKeys | Where-Object { $_ }) | Should -HaveCount 0 -Because 'an empty recovery inventory splices no service keys'
         $Result.ConsumptionSource | Should -Be 'recovery' -Because '-RecoverConsumption still rebuilds the consumption phase'

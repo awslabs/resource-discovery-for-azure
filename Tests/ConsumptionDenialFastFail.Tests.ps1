@@ -656,6 +656,14 @@ Describe 'The Marketplace pull gives an out-of-memory error one compacted retry,
         # load, and re-authentication must never open a real sign-in from an offline test.
         function Get-RdaRetryAfterSeconds { 0 }
         function Test-DataPlaneAuthReady { throw 'The re-authentication branch ran in an offline test.' }
+        # The loop also asks whether an error is a permanent 4xx. Define the REAL helper, lifted from its
+        # file, rather than a stub: the errors injected below carry no HTTP response, and the real check
+        # is what must answer "not permanent" for them.
+        $MpFnFile = Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1'
+        $MpFnAst = [System.Management.Automation.Language.Parser]::ParseFile($MpFnFile, [ref]$null, [ref]$null)
+        $MpPermanentFn = $MpFnAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Get-RdaPermanentRequestError' }, $true)
+        if (-not $MpPermanentFn) { throw 'Get-RdaPermanentRequestError was not found in Functions/ResourceInventory.Functions.ps1.' }
+        . ([scriptblock]::Create($MpPermanentFn.Extent.Text))
     }
 
     BeforeEach {

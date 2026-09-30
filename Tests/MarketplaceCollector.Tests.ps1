@@ -350,6 +350,66 @@ Describe 'Marketplace collector reuses the shared auth/retry decision helpers' {
     }
 }
 
+Describe 'Get-RdaPermanentRequestError: a 4xx that retrying cannot fix ends the pull at once' {
+    BeforeAll {
+        # Shaped like Microsoft.Azure.Management.Consumption.Models.ErrorResponseException, which is what
+        # Get-AzConsumptionMarketplace (Az.Billing 2.2.0) throws: Response.StatusCode, Response.Content,
+        # Body.Error.Message, and a generic Message that never says why.
+        function script:New-FakeServiceError
+        {
+            param([int]$Status, [string]$ServiceMessage)
+            $Code = if ([enum]::IsDefined([System.Net.HttpStatusCode], $Status)) { [System.Net.HttpStatusCode]$Status } else { $Status }
+            $Ex = [System.Exception]::new("Operation returned an invalid status code '$Code'")
+            $Response = [pscustomobject]@{ StatusCode = $Code; Content = (@{ error = @{ code = "$Status"; message = $ServiceMessage } } | ConvertTo-Json -Compress) }
+            $Body = [pscustomobject]@{ Error = [pscustomobject]@{ Code = "$Status"; Message = $ServiceMessage } }
+            $Ex | Add-Member -NotePropertyName Response -NotePropertyValue $Response
+            $Ex | Add-Member -NotePropertyName Body -NotePropertyValue $Body
+            return [System.Management.Automation.ErrorRecord]::new($Ex, 'Fake', 'NotSpecified', $null)
+        }
+        $script:OfferTypeMessage = 'Cost Management supports only Enterprise Agreement, Web direct and Microsoft Customer Agreement offer types. Subscription {0} is not associated with a valid offer type. (Request ID: {1})' -f [guid]::NewGuid(), [guid]::NewGuid()
+    }
+
+    It 'returns the service reason for the offer-type 400, with no id left in it' {
+        $Text = Get-RdaPermanentRequestError -ErrorRecord (script:New-FakeServiceError -Status 400 -ServiceMessage $script:OfferTypeMessage)
+        $Text | Should -Match '^HTTP 400: Cost Management supports only Enterprise Agreement'
+        $Text | Should -Match 'is not associated with a valid offer type\.$'
+        $Text | Should -Not -Match '[0-9a-f]{8}-[0-9a-f]{4}-' -Because 'the message reaches RunSummary.log, which is not dictionary-scrubbed'
+        $Text | Should -Not -Match 'Request ID'
+    }
+
+    It 'reads Response.Content when the exception carries no Body' {
+        $Er = script:New-FakeServiceError -Status 404 -ServiceMessage 'Resource not found'
+        $Er.Exception.PSObject.Properties.Remove('Body')
+        Get-RdaPermanentRequestError -ErrorRecord $Er | Should -Be 'HTTP 404: Resource not found'
+    }
+
+    It 'returns nothing for <Status>, which retry or its own branch still owns' -ForEach @(
+        @{ Status = 401 }, @{ Status = 403 }, @{ Status = 408 }, @{ Status = 409 }, @{ Status = 425 }, @{ Status = 429 }, @{ Status = 500 }, @{ Status = 503 }
+    ) {
+        Get-RdaPermanentRequestError -ErrorRecord (script:New-FakeServiceError -Status $Status -ServiceMessage 'x') | Should -BeNullOrEmpty
+    }
+
+    It 'returns nothing for an error with no HTTP response (network, timeout, out of memory)' {
+        $Er = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('The operation has timed out.'), 'Fake', 'NotSpecified', $null)
+        Get-RdaPermanentRequestError -ErrorRecord $Er | Should -BeNullOrEmpty
+    }
+
+    It 'is checked in the Marketplace retry loop before any retry is counted (source guard)' {
+        # The loop is inline in ResourceInventory.ps1, so pin the ORDER of the real statements:
+        # the permanent-error check must come after the denial branch and before the attempt counter.
+        $Lines = @(Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'))
+        $Call = @(for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\s*\$MpPermanentError\s*=\s*Get-RdaPermanentRequestError\s+-ErrorRecord\s+\$_') { $i } })
+        $Call.Count | Should -Be 1 -Because 'the Marketplace loop must classify permanent 4xx errors exactly once'
+        $Denial = @(for ($i = 0; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match 'Marketplace query DENIED') { $i } })[0]
+        $Counter = @(for ($i = $Call[0]; $i -lt $Lines.Count; $i++) { if ($Lines[$i] -match '^\s*\$MpAttempt\+\+') { $i; break } })[0]
+        $Denial | Should -Not -BeNullOrEmpty
+        $Counter | Should -Not -BeNullOrEmpty
+        $Call[0] | Should -BeGreaterThan $Denial
+        $Call[0] | Should -BeLessThan $Counter -Because 'a permanent error must not consume a retry or a backoff sleep'
+        ($Lines[($Call[0] + 1)..($Call[0] + 4)] -join "`n") | Should -Match 'throw' -Because 'a permanent error ends the pull'
+    }
+}
+
 Describe 'Confirmed-zero honest negative' {
 
     BeforeAll {

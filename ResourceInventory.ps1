@@ -1912,6 +1912,17 @@ function ExecuteInventoryProcessing()
                             throw
                         }
 
+                        # A 4xx that retrying cannot change - for example this endpoint's "Cost Management
+                        # supports only Enterprise Agreement, Web direct and Microsoft Customer Agreement
+                        # offer types" 400 - ends this subscription's Marketplace pull at once. Retrying it
+                        # cost 30 attempts and about 26 minutes per subscription. The service's own reason
+                        # is thrown so the failure line below says why instead of just 'BadRequest'.
+                        $MpPermanentError = Get-RdaPermanentRequestError -ErrorRecord $_
+                        if ($MpPermanentError)
+                        {
+                            throw ('Marketplace data is not available for this subscription, not retried ({0})' -f $MpPermanentError)
+                        }
+
                         # Read once into a local: the classifiers below take a string, and the
                         # out-of-memory branch reports the same text after a collection has run.
                         $MpErrorText = [string]$_.Exception.Message

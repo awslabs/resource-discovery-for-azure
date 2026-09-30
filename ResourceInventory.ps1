@@ -3700,7 +3700,7 @@ if ($Obfuscate.IsPresent)
 {
     $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -ConsumptionRowsFetchedCount $(if ($null -ne $script:ConsumptionRowsFetchedThisRun) { [int]$script:ConsumptionRowsFetchedThisRun } else { -1 }) -ConsumptionResourceGroupScoped (-not [string]::IsNullOrEmpty($ResourceGroup)) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
-    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -like "*_$($Global:CurrentDateTime)*" -and $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
     $CompressionOutput = @{
@@ -3723,7 +3723,7 @@ else
         Write-Log -Message ('  It carries real service/resource names and raw exception text. The report in this bundle is already non-obfuscated. Re-run with -Obfuscate to keep the debug log LOCAL.') -Severity 'Warning'
     }
 
-    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -like "*_$($Global:CurrentDateTime)*" -and $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
 
     $CompressionOutput = @{
         LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv, $Global:FoundryCoverageFileCsv) + $ShareableExtras + $JsonFiles

@@ -101,6 +101,19 @@ Describe "Zip File Contents" {
         $Leaked = $script:AllFiles | Where-Object { $_.Name -like 'ObfuscationDictionary_*' -or $_.Name -like 'Transcript_*' }
         $Leaked | Should -BeNullOrEmpty
     }
+
+    It "Should carry only this run's inventory and metrics JSON" {
+        # With -OutputDirectory, several runs share one report folder. A JSON file from another run
+        # there must never ride along: an earlier non-obfuscated run's Inventory_*.json in an
+        # obfuscated bundle ships every real name and id it holds. The run stamp is the last '_'
+        # segment of the report's own ResourcesReport_<stamp>.html name.
+        $Html = @($script:AllFiles | Where-Object { $_.Extension -eq '.html' }) | Select-Object -First 1
+        if (-not $Html) { Set-ItResult -Skipped -Because 'no HTML report to take the run stamp from'; return }
+        $Stamp = [regex]::Match($Html.BaseName, '_([^_]+)$').Groups[1].Value
+        $Stamp | Should -Not -BeNullOrEmpty -Because "the report name '$($Html.Name)' must end in a run stamp"
+        $Foreign = @($script:AllFiles | Where-Object { $_.Extension -eq '.json' -and $_.Name -notlike "*_$Stamp*" } | ForEach-Object Name)
+        $Foreign | Should -BeNullOrEmpty -Because "every JSON member must belong to run $Stamp"
+    }
 }
 
 Describe "Inventory JSON Structure" {

@@ -677,6 +677,38 @@ GetFoundryModelCoverage
         Should -Invoke Get-AzMetric -Times 0 -Exactly
         Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'TokenProbeStatus NotRun' }
     }
+
+    It 'judges only this run in its end-of-phase notices when a second subscription runs in the same process' {
+        # The wrapper calls ResourceInventory.ps1 once per subscription in one process: the $Global:
+        # counters carry over, and each call starts a fresh script scope, reset here by hand.
+        $SecondSubId = [guid]::NewGuid().ToString()
+        $PriorSubscriptions = $Global:Subscriptions
+        try
+        {
+            $Global:Subscriptions = @(
+                [pscustomobject]@{ Id = $script:E2ESubId; Name = 'Foundry test subscription' }
+                [pscustomobject]@{ Id = $SecondSubId; Name = 'Empty test subscription' }
+            )
+            # A readable catalog that prices none of the deployed models, so each one is UNPRICED.
+            Mock Get-RdaFoundryRetailCatalog { @([pscustomobject]@{ productName = 'Unrelated Model'; meterName = 'Unrelated Model Input Tokens'; skuName = 'Unrelated'; armSkuName = 'Unrelated'; retailPrice = 1 }) }
+            & $script:RunFoundryPhases -SubscriptionID $script:E2ESubId -Obfuscate ([pscustomobject]@{ IsPresent = $false }) -WithTokenPhase $false
+            Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'classified UNPRICED' }
+
+            $script:FoundryCoverageRecordsThisRun = $null
+            $script:FoundryCoverageUnpricedThisRun = $null
+            Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $SecondSubId } } }
+            Mock Invoke-AzGraphQuerySafe { [pscustomobject]@{ data = @() } } -ParameterFilter { @($Subscription) -contains $SecondSubId }
+            & $script:RunFoundryPhases -SubscriptionID $SecondSubId -Obfuscate ([pscustomobject]@{ IsPresent = $false }) -WithTokenPhase $false
+
+            Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'classified UNPRICED' } -Because 'the second subscription has no deployments, so it has no UNPRICED rows to point at'
+            Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'This is a CONFIRMED ZERO' } -Because 'the second subscription enumerated its accounts and found none'
+            $Global:FoundryCoverageUnpricedCount | Should -Be 3 -Because 'the run total still counts the first subscription'
+        }
+        finally
+        {
+            $Global:Subscriptions = $PriorSubscriptions
+        }
+    }
 }
 
 Describe 'Invoke-RdaFoundryTokenMetricQuery: series cap and outcome reporting' {

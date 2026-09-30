@@ -2784,6 +2784,10 @@ function ExecuteInventoryProcessing()
         if ($null -eq $Global:FoundryCoverageFailedSubs) { $Global:FoundryCoverageFailedSubs = @() }
         if ($null -eq $Global:FoundryCoverageUnpricedCount) { $Global:FoundryCoverageUnpricedCount = 0 }
         if ($null -eq $script:FoundryCoverageRecordsThisRun) { $script:FoundryCoverageRecordsThisRun = 0 }
+        # The notices at the end of this phase judge this run only. The $Global: counters are run
+        # totals under the wrapper, which calls this script once per subscription in one process.
+        if ($null -eq $script:FoundryCoverageUnpricedThisRun) { $script:FoundryCoverageUnpricedThisRun = 0 }
+        $FcFailedSubsAtStart = @($Global:FoundryCoverageFailedSubs).Count
 
         $DeploymentsApiVersion = '2024-10-01'  # single named constant; a future bump is one edit (the design spec section 3.3)
         $ProbeWindowStart = (Get-Date).AddDays(-31).Date
@@ -2912,6 +2916,7 @@ function ExecuteInventoryProcessing()
             Write-Log -Message ("Assessing Foundry model billing-plane coverage for: {0}" -f $sub.Name) -Severity 'Info'
 
             $FcRecordsThisSub = 0
+            $FcUnpricedThisSub = 0
             $FcFailedThisSub = $false
             $FcFailureMessage = $null
             $FcTokenSubFailed = ($null -ne $script:FoundryTokenFailedSubIds -and $script:FoundryTokenFailedSubIds.ContainsKey("$($sub.id)"))
@@ -3048,7 +3053,7 @@ resources
                         $MpRow = $MpMatch.Row
                         if ($null -ne $MpRow -and -not [string]::IsNullOrEmpty("$($MpRow.InstanceId)")) { $null = $MatchedMarketplaceRows.Add("$($MpRow.InstanceId)|$($MpRow.MeterId)") }
 
-                        if ($Coverage.CoverageStatus -eq 'UNPRICED') { $Global:FoundryCoverageUnpricedCount++ }
+                        if ($Coverage.CoverageStatus -eq 'UNPRICED') { $FcUnpricedThisSub++ }
 
                         # 4. Token usage for this deployment, taken from the token phase's results for
                         #    its account (Get-RdaFoundryCoverageTokenFields). A Marketplace/partner
@@ -3113,6 +3118,9 @@ resources
                 }
 
                 $FcRecordsThisSub = $ExportRows.Count
+                # Counted once its rows are in the CSV, which is where the UNPRICED notice sends the reader.
+                $Global:FoundryCoverageUnpricedCount += $FcUnpricedThisSub
+                $script:FoundryCoverageUnpricedThisRun += $FcUnpricedThisSub
                 Write-Log -Message ("FoundryModelCoverage records for {0}: {1} (deployed-model + coverage-gap rows)." -f $sub.Name, $FcRecordsThisSub) -Severity 'Info'
             }
             catch
@@ -3133,13 +3141,14 @@ resources
         # HONEST NEGATIVES (the design spec section 9). Zero deployed Foundry models is a CONFIRMED ZERO
         # (accounts were enumerated and none held deployments), NOT a silently-missing
         # section - log it explicitly so an empty file reads as "verified none".
-        if ($Global:FoundryCoverageRecordCount -eq 0 -and ($Global:FoundryCoverageFailedSubs | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
+        $FcFailedSubsThisRun = @($Global:FoundryCoverageFailedSubs | Select-Object -Skip $FcFailedSubsAtStart)
+        if ($script:FoundryCoverageRecordsThisRun -eq 0 -and ($FcFailedSubsThisRun | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
         {
             Write-Log -Message ('FoundryModelCoverage: 0 deployed Foundry/CognitiveServices model deployments found across all in-scope subscriptions. This is a CONFIRMED ZERO - accounts were enumerated and none held model deployments. It is NOT a missing/failed section.') -Severity 'Warning'
         }
-        if ($Global:FoundryCoverageUnpricedCount -gt 0)
+        if ($script:FoundryCoverageUnpricedThisRun -gt 0)
         {
-            Write-Log -Message ("FoundryModelCoverage: {0} deployed model(s) classified UNPRICED (found in NEITHER billing plane). These are LOUD coverage gaps that should be investigated - see the UNPRICED rows in the coverage CSV." -f $Global:FoundryCoverageUnpricedCount) -Severity 'Warning'
+            Write-Log -Message ("FoundryModelCoverage: {0} deployed model(s) classified UNPRICED (found in NEITHER billing plane). These are LOUD coverage gaps that should be investigated - see the UNPRICED rows in the coverage CSV." -f $script:FoundryCoverageUnpricedThisRun) -Severity 'Warning'
         }
     }
 

@@ -1583,7 +1583,7 @@ This runs once per discovered resource.
             $ObfuscatedID = $Prefix + [guid]::NewGuid().ToString()
             $ObfuscatedName = $Prefix + [guid]::NewGuid().ToString()
 
-            # Preserve resource type signal in obfuscated name for server-side matching
+            # Preserve resource type signal in obfuscated name for downstream matching
             # VMs/Disks managed by services have identifiable patterns in their resource ID
             if ($resourceItem.id -match 'databricks')
             {

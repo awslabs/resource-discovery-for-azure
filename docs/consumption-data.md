@@ -40,7 +40,7 @@ consumption phase (the rest of the inventory continues).
 ### Transient-failure retry
 
 Each page request is wrapped in a bounded retry (**30 attempts, exponential
-backoff**, or the server's `Retry-After`, capped at five minutes, when it sends one). A single transient
+backoff**, or a downstream cost tool's `Retry-After`, capped at five minutes, when it sends one). A single transient
 HTTP error - e.g. `Error while copying content to a stream`, a timeout, or
 429/503 throttling - retries the **same** page (the previous page's
 `ContinuationToken` is preserved), so no rows are duplicated or skipped. An
@@ -68,7 +68,7 @@ five are derived from the `AdditionalInfo` JSON on each record.
 
 | Column | Source | Meaning |
 |--------|--------|---------|
-| `AdditionalInfo` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. **This column was renamed from `InstanceData` so it binds to the server field of the same name** (the ingestion server reads VM Windows/AHB + SQL vCore licensing detail from `AdditionalInfo`). The raw Azure `Get-UsageAggregates` payload still names the source field `InstanceData`; RDA maps it onto this `AdditionalInfo` column at ingest. |
+| `AdditionalInfo` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. **This column was renamed from `InstanceData` so it binds to a downstream consumer field of the same name** (a downstream cost-analysis tool reads VM Windows/AHB + SQL vCore licensing detail from `AdditionalInfo`). The raw Azure `Get-UsageAggregates` payload still names the source field `InstanceData`; RDA maps it onto this `AdditionalInfo` column at ingest. |
 | `MeterCategory` | usage record | Top-level meter grouping, e.g. `Virtual Machines`, `Storage`, `Stream Analytics`. |
 | `MeterId` | usage record | Azure's global meter GUID. Same for every customer using that meter — **not** customer-specific. |
 | `MeterName` | usage record | Specific meter, e.g. `Standard Streaming Unit`, `P10 Disks`. |
@@ -280,9 +280,9 @@ For the parameters that turn these phases off (`-SkipConsumption`,
 
 ## Foundry fold — Claude/Anthropic usage folded into the Consumption CSV
 
-The ingestion server that consumes RDA output reads **only** `Consumption_*.csv`;
+a downstream cost-analysis tool that consumes RDA output reads **only** `Consumption_*.csv`;
 it has no reader for `Marketplace_*.csv`. So Claude/Anthropic usage collected by the
-Marketplace phase above would be silently dropped server-side. To close that gap,
+Marketplace phase above would be silently dropped downstream. To close that gap,
 RDA runs an **additive** *Foundry fold* step immediately after the Marketplace phase
 (under the **same** `-SkipConsumption` / `-SkipMarketplace` gate) that folds each
 Claude/Anthropic Marketplace row into the **same** `Consumption_*.csv`, tagged so the
@@ -292,11 +292,11 @@ semantics are untouched; folded rows are simply **appended** with the identical
 
 A folded row is a normal consumption row with:
 
-- `MeterCategory` = **`Foundry Models`** (the exact string the server keys the
+- `MeterCategory` = **`Foundry Models`** (the exact string a downstream cost tool keys the
   Foundry→Bedrock path on — Claude has no first-party Azure retail meter, so RDA sets
   this explicitly).
 - `MeterName` = the **Claude model identity** parsed from the Marketplace
-  `OfferName`/`PlanName` (e.g. `Claude Sonnet 4.5`), so the server can resolve the
+  `OfferName`/`PlanName` (e.g. `Claude Sonnet 4.5`), so a downstream cost tool can resolve the
   model. The model identity stays **readable** under `-Obfuscate` (it is product
   identity, not a customer secret), exactly like the Marketplace product fields.
 - `ResourceId` + `MeterId` are always **non-empty**: the Marketplace row's own ids are
@@ -311,7 +311,7 @@ A folded row is a normal consumption row with:
 
 The fold emits a **Tier 1 (CCU / cost)** row for every captured Claude Marketplace
 row, marked **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Marketplace
-unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The server attributes
+unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). a downstream consumer attributes
 the Azure cost but does **not** compute a token price from it.
 
 ### Tier 2 — per-model token counts folded into the Consumption CSV
@@ -339,7 +339,7 @@ consumption/Marketplace loops, so token usage is never cross-attributed):
   `Consumption_*.csv`, with:
   - `MeterName` = model identity + a role word + `Tkns` — `Phi-4 Inp Tkns` (input),
     `Phi-4 Outp Tkns` (output), `Phi-4 Cd Inp Tkns` (cached input / cache read),
-    `Phi-4 Cd Wr Tkns` (cache write) — so the server resolves both the model and the role.
+    `Phi-4 Cd Wr Tkns` (cache write) — so a downstream consumer resolves both the model and the role.
   - `Quantity` = the raw token count; `Unit` = **`Tokens`** (a unit-1 token unit, so
     `Quantity × server-multiplier` = the raw token count — never a `1M Tokens`-style unit
     that would misprice by 10⁶).

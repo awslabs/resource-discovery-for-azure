@@ -1,5 +1,5 @@
 # Scenario Matrix Runner: generates a fresh output zip for each supported flag combination against a LIVE Azure subscription, then runs the Pester suite against each zip with the correct per-scenario expectations. Standing regression protocol - run after any change affecting output (metrics, consumption, obfuscation, schema, packaging). Contains NO customer data; tenant/subscription come from parameters or the current Az context. Usage: pwsh ./Tests/Invoke-ScenarioMatrix.ps1 [-SubscriptionID <id> -TenantID <id>] [-Scenarios ...] [-KeepOutput].
-# The PII-leak / obfuscation tests only make sense on an -Obfuscate run: a non-obfuscated zip carries raw subscription paths/transcript by design, so those tests are EXPECTED to fail and are NOT attached to non-obfuscated scenarios. Only obfuscated zips are ever shared server-side, so this matches reality.
+# The PII-leak / obfuscation tests only make sense on an -Obfuscate run: a non-obfuscated zip carries raw subscription paths/transcript by design, so those tests are EXPECTED to fail and are NOT attached to non-obfuscated scenarios. Only obfuscated zips are ever shared downstream, so this matches reality.
 
 [CmdletBinding()]
 param(

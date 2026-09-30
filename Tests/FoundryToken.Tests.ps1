@@ -5,11 +5,11 @@
     Behavioral tests for the ADDITIVE Tier 2 Foundry TOKEN collector: discover Azure AI /
     Cognitive Services accounts + model deployments via ARM, read per-model token metrics via
     Get-AzMetric (split by the ModelDeploymentName dimension), and fold them into the SAME
-    first-party Consumption_*.csv the ingestion server reads as per-(model, role) "Foundry Models"
-    token rows so the server can price the Azure-hosted models against AWS Bedrock.
+    first-party Consumption_*.csv a downstream cost-analysis tool reads as per-(model, role) "Foundry Models"
+    token rows so a downstream cost tool can price the Azure-hosted models against AWS Bedrock.
 
     Covers the pure, unit-testable pieces and the collector wiring:
-      - Get-RdaFoundryTokenRole            (metric name -> server-recognizable role + MeterName word)
+      - Get-RdaFoundryTokenRole            (metric name -> recognizable role + MeterName word)
       - Get-RdaFoundryTokenSeriesTotals    (Get-AzMetric dimensioned result -> per-model totals)
       - ConvertTo-RdaFoldedFoundryTokenRow (one (account,model,role,tokens) -> a Consumption row)
       - GetFoundryTokenConsumption / Invoke-RdaFoundryTokenMetricQuery wiring, asserted via AST + source.
@@ -19,9 +19,9 @@
     2026-09-26) is encoded as faithful fakes of the Az.Monitor / Cognitive Services shapes, exercised
     against the REAL pure code paths. Fully offline.
 
-    SERVER CONTRACT ASSERTED (from the task's live-verified spec):
-      * MeterCategory == "Foundry Models" (exact - the server's Foundry->Bedrock gate).
-      * MeterName carries the model identity AND a role substring the server parser keys on
+    DOWNSTREAM FORMAT ASSERTED (from the task's live-verified spec):
+      * MeterCategory == "Foundry Models" (exact - a downstream cost tool's category gate).
+      * MeterName carries the model identity AND a role substring a downstream cost tool parser keys on
         (input<-"inp"; output<-"outp"/"out"; cached-input<-"cd inp"/"cache read"; cache-write<-"cd wr").
       * Unit == "Tokens" (unit-1) so Quantity x server-multiplier = the RAW token count (never "1M Tokens").
       * TotalTokens / ModelRequests / TotalCalls are NOT emitted as their own priced rows (no double-count),
@@ -127,7 +127,7 @@ Describe 'Get-RdaFoundryTokenRole: metric name -> server role + MeterName word' 
         (Get-RdaFoundryTokenRole -MetricName 'inputtokens').Role | Should -Be 'input'
         (Get-RdaFoundryTokenRole -MetricName 'OUTPUTTOKENS').Role | Should -Be 'output'
     }
-    It 'the emitted MeterName word contains the substring the server role parser keys on' {
+    It 'the emitted MeterName word contains the substring a downstream cost tool role parser keys on' {
         # input<-"inp"; output<-"outp"/"out"; cached-input<-"cd inp"/"cache read"; cache-write<-"cd wr".
         (Get-RdaFoundryTokenRole -MetricName 'InputTokens').MeterWord.ToLower() | Should -Match 'inp'
         (Get-RdaFoundryTokenRole -MetricName 'OutputTokens').MeterWord.ToLower() | Should -Match 'out'

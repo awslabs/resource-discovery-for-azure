@@ -156,7 +156,7 @@ The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
 assume obfuscated input. On a **non-obfuscated** zip the raw subscription paths
 and transcript are present *by design*, so those tests are EXPECTED to fail and
 are therefore not run for non-obfuscated scenarios. Only obfuscated zips are ever
-shared server-side, so this matches real usage.
+shared with the downstream tool, so this matches real usage.
 
 ### Live tenant reconciliation (`default` scenario)
 
@@ -195,7 +195,7 @@ rename/removal/emptying that breaks that join is silently dropped by the server
 won't catch it - only asserting the emitted zip against the contract does.
 
 The pinned contract lives in `schema-contract.json` (data, separate from logic)
-so the server-side owner can see/adjust the bound keys. It is deliberately
+so the downstream owner can see/adjust the bound keys. It is deliberately
 **narrow**: it pins only the identity/join-key fields of the server-bound
 inventory sections (VirtualMachines, VMDisk, Databricks, PostgreSQLflexible,
 MySQLflexible, SQLVM, SQLDB, SQLPOOL, SQLMI), the `AzureMetricRecord` identity

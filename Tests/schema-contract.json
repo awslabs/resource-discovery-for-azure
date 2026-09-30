@@ -1,22 +1,22 @@
 {
   "_comment": [
-    "The fields the server binds on, taken from its C# ingestion models and the",
+    "The fields a downstream cost tool binds on, taken from its C# ingestion models and the",
     "consumption CSV header written by ResourceInventory.ps1.",
     "",
     "Deliberately narrow: it pins only the identity and join-key fields that keep",
     "inventory, metrics, and consumption linkable. Descriptive fields (SKU, tier,",
     "state) are not pinned - many are not server-bound yet and are free to change.",
-    "If a key here drifts, the server silently drops the value and the files stop",
+    "If a key here drifts, a downstream cost tool silently drops the value and the files stop",
     "joining, which is what the gate exists to prevent.",
     "",
     "Data only, no logic. Tests/SchemaContract.Tests.ps1 reads identityFields, the",
     "serverBoundInventorySections names, the metrics block, and",
     "consumption.requiredColumns, and checks a generated zip against them. The",
     "top-level joinKeys block, consumption.joinKey, and each section's",
-    "serverModelKey / oneRowPerResource are documentation for the server-side owner",
+    "serverModelKey / oneRowPerResource are documentation for the downstream owner",
     "and are not read by the test.",
     "",
-    "Changing a key here changes the server contract, so it needs human approval",
+    "Changing a key here changes the expected consumption-row format, so it needs human approval",
     "under the no-json-schema-changes rule."
   ],
 

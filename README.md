@@ -414,7 +414,7 @@ How it works:
 
 **Collecting the shards:** each machine produces its own `AllSubscriptions_ResourcesReport_<timestamp>.zip` covering only its shard — a complete, self-contained report identical in shape to a single-machine run's output.
 
-- **Recommended — upload the shard zips separately.** The ingestion server accepts each shard zip exactly like any normal run's output, so the N uploads together cover the whole tenant once (the shards are disjoint), with no duplicates and no gaps. This spreads ingestion load across N smaller uploads and needs no local merge step.
+- **Recommended — upload the shard zips separately.** a downstream cost-analysis tool accepts each shard zip exactly like any normal run's output, so the N uploads together cover the whole tenant once (the shards are disjoint), with no duplicates and no gaps. This spreads ingestion load across N smaller uploads and needs no local merge step.
 - **Optional - merge locally into one MainSummary.** Only needed if you want a single combined `MainSummary.html` on your own machine. `Build-MainSummaryFromZip.ps1` rebuilds the summary from **one** already-consolidated outer zip (`-InputZip`); it does not combine multiple. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md) for the full command sequence.
   Extract each shard into its **own** subfolder rather than a shared one. Every shard's outer zip carries the same fixed root member names (`VMPlacement.csv`, `MainSummary.html`, `RunSummary.log`), so a shared destination has each shard overwrite the previous one's copies and keeps only the last. For `VMPlacement.csv` that is silent data loss - the tenant-wide AZ capacity view is the thing a sharded run is for. The command sequence in the doc extracts per shard, concatenates the shards' placement CSVs into one tenant-wide `VMPlacement.csv` (disjoint slices, identical headers), and includes it in the merged bundle root so the result matches the shape a single non-sharded run produces.
 
@@ -529,7 +529,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 
 `FindResource.ps1` answers one question against report output that has **already been generated**: *does resource type X exist anywhere in this estate, and how big is it?* It makes no Azure calls and writes nothing back into the scanned tree.
 
-You need it because a resource type can be collected into `Inventory_*.json` before the server-side ingestion handles it. When that happens the report bundle is the only copy of that data. You cannot search for it in the HTML report either, because **each per-subscription report covers exactly one subscription** - there is no single report spanning an estate to search. This walks the bundles instead.
+You need it because a resource type can be collected into `Inventory_*.json` before the downstream ingestion handles it. When that happens the report bundle is the only copy of that data. You cannot search for it in the HTML report either, because **each per-subscription report covers exactly one subscription** - there is no single report spanning an estate to search. This walks the bundles instead.
 
 ```powershell
 # How many Azure VMware Solution private clouds are there, and how many hosts?

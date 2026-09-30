@@ -24,7 +24,7 @@
         time-bounded background job so one pathological folder cannot stall the
         batch), and consolidates the revealed per-subscription zips into ONE
         outer zip with the same shape a normal multi-subscription run produces,
-        so the ingestion server consumes it exactly like an -Obfuscate outer zip
+        so a downstream cost-analysis tool consumes it exactly like an -Obfuscate outer zip
         - just with the chosen dimensions un-masked.
 
     Both modes reveal ONLY the dimensions you select (default: Subscription name
@@ -416,7 +416,7 @@ if ($null -eq $ConsolidationError -and $StagedZips.Count -gt 0 -and (Test-Path -
 {
     Write-Host ("Consolidated {0} revealed report(s) into:" -f $StagedZips.Count) -ForegroundColor Green
     Write-Host ("  {0}" -f $OutputZip) -ForegroundColor Green
-    Write-Host "Upload this single zip to the ingestion server." -ForegroundColor Green
+    Write-Host "Upload this single zip to a downstream cost-analysis tool." -ForegroundColor Green
 }
 elseif ($null -ne $ConsolidationError)
 {

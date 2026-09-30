@@ -373,7 +373,7 @@ zips**.
 
 Each shard zip is a complete, self-contained report artifact — identical in
 shape to what an ordinary single-machine run produces, just covering fewer
-subscriptions. So the ingestion server accepts each one exactly like any normal
+subscriptions. So a downstream cost-analysis tool accepts each one exactly like any normal
 run's output: uploading the 10 shard zips is simply 10 normal ingestions.
 
 Uploading them separately is usually the better choice:
@@ -553,7 +553,7 @@ az provider register -n Microsoft.ContainerRegistry
 az group create -n "$RG" -l "$LOC"
 az acr create -g "$RG" -n "$ACR" --sku Basic
 
-# 2. Build the worker image server-side (no local Docker needed). The
+# 2. Build the worker image downstream (no local Docker needed). The
 #    Dockerfile ships at deploy/Dockerfile; build from the REPO ROOT (the
 #    trailing '.') so the product files - INCLUDING Version.json - are in the
 #    build context. .dockerignore keeps local/dev content out of the image.

@@ -88,7 +88,7 @@ Otherwise it is `prod_`. The classification is computed independently per class:
 
 ### Resource-type hints in obfuscated names
 
-To allow server-side grouping of certain managed resources, the obfuscated
+To allow downstream grouping of certain managed resources, the obfuscated
 **name** (not the ID) embeds a type marker for a few cases:
 
 | Real ID contains | Obfuscated name becomes |
@@ -194,10 +194,10 @@ Delete the dictionary and transcript when they are no longer needed.
 
 ---
 
-## 5. Partial reveal for server-side ingestion (`Reveal.ps1`)
+## 5. Partial reveal for downstream ingestion (`Reveal.ps1`)
 
 The analytics pipeline is: **scan → obfuscated ZIP → reveal the dimensions you
-want → re-ingest into the server → graphs / reports / UI.** `Reveal.ps1`
+want → re-ingest into a downstream cost tool → graphs / reports / UI.** `Reveal.ps1`
 is the step that turns a fully-masked ZIP into one your server can ingest with
 real names in it.
 
@@ -213,7 +213,7 @@ In single-report mode it takes an obfuscated report ZIP + the matching
 dictionary and produces a NEW ZIP in which **only the dimensions you choose are
 un-obfuscated**, leaving everything else masked. The output keeps the **same
 filenames/structure** the `-Obfuscate` run produced, so it ingests exactly like
-an obfuscated ZIP — the server reads the same JSON members, just with (say) real
+an obfuscated ZIP — a downstream consumer reads the same JSON members, just with (say) real
 resource group and subscription names.
 
 It rewrites the selected dimensions' tokens across **every** text member of the
@@ -294,7 +294,7 @@ report ZIP and its matching dictionary. Run `Reveal.ps1` with no mode parameter
 (or an explicit `-InventoryRoot`) to walk those folders, reveal each report
 against the dictionary sitting next to it, and consolidate the revealed
 per-subscription ZIPs into **one** outer ZIP shaped exactly like a normal
-multi-subscription run — so the ingestion server consumes it the same way, just
+multi-subscription run — so a downstream cost-analysis tool consumes it the same way, just
 with the chosen dimensions un-masked.
 
 ```powershell
@@ -329,7 +329,7 @@ recoverable with `-Resume`.
    ```powershell
    ./Reveal.ps1 -InputZip ./ResourcesReport_2026....zip -DictionaryPath ./ObfuscationDictionary_2026....json
    ```
-   Upload that `_revealed.zip` to the ingestion server the same way you would an
+   Upload that `_revealed.zip` to a downstream cost-analysis tool the same way you would an
    obfuscated ZIP.
 4. Delete the dictionary, transcript, and any revealed ZIP once the engagement
    no longer needs them.

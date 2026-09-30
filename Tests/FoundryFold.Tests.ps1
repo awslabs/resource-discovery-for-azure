@@ -6,15 +6,15 @@
     rename (P2):
 
       P1 - fold Claude/Anthropic Marketplace usage into the SAME first-party
-           Consumption_*.csv the ingestion server reads, as "Foundry Models" rows,
-           so Claude usage is no longer dropped server-side. Covers:
+           Consumption_*.csv a downstream cost-analysis tool reads, as "Foundry Models" rows,
+           so Claude usage is no longer dropped downstream. Covers:
              - Test-RdaClaudeMarketplaceRow  (detection)
              - Get-RdaClaudeModelIdentity    (model identity from OfferName/PlanName)
              - ConvertTo-RdaFoldedFoundryRow  (Tier 1: CCU/cost, non-token)
            and the collector wiring (GetFoundryFoldConsumption in ResourceInventory.ps1)
            asserted against the source/AST.
 
-      P2 - the emitted Consumption CSV column is AdditionalInfo (the name the server
+      P2 - the emitted Consumption CSV column is AdditionalInfo (the name a downstream cost tool
            binds), NOT InstanceData.
 
     WHY MOCKED / SOURCE-ASSERTED. Exactly like MarketplaceCollector.Tests.ps1: the only
@@ -25,7 +25,7 @@
 
     UNVERIFIED-SPELLING CAVEAT (mirrored from the code). The exact Azure Foundry token-meter
     MeterName spellings and Unit strings are NOT yet verified against a live Claude-on-Foundry
-    deployment. These tests assert the CONTRACT the server documents (MeterCategory exact match;
+    deployment. These tests assert the CONTRACT a downstream cost tool documents (MeterCategory exact match;
     role substrings in MeterName; token Unit passed through as discovered), not a live spelling.
 #>
 
@@ -132,10 +132,10 @@ Describe 'ConvertTo-RdaFoldedFoundryRow: Tier 1 fold (CCU/cost, non-token)' {
 
     It 'sets MeterCategory to the EXACT server string "Foundry Models"' {
         $Out = ConvertTo-RdaFoldedFoundryRow -Row (script:New-FakeClaudeRow) -Obfuscate:$false
-        $Out.MeterCategory | Should -BeExactly 'Foundry Models' -Because 'the server admits a row into the Foundry->Bedrock path ONLY on this exact string'
+        $Out.MeterCategory | Should -BeExactly 'Foundry Models' -Because 'a downstream consumer admits a row into the Foundry cost-attribution path ONLY on this exact string'
     }
 
-    It 'carries the Claude model identity in MeterName so the server can resolve the model' {
+    It 'carries the Claude model identity in MeterName so a downstream cost tool can resolve the model' {
         $Out = ConvertTo-RdaFoldedFoundryRow -Row (script:New-FakeClaudeRow -Offer 'Claude Sonnet 4.5 offer') -Obfuscate:$false
         $Out.MeterName | Should -Be 'Claude Sonnet 4.5'
         $Out.MeterName | Should -Match '(?i)claude'
@@ -144,11 +144,11 @@ Describe 'ConvertTo-RdaFoldedFoundryRow: Tier 1 fold (CCU/cost, non-token)' {
     It 'carries the Azure cost (PretaxCost + Currency) inside AdditionalInfo' {
         $Out = ConvertTo-RdaFoldedFoundryRow -Row (script:New-FakeClaudeRow -PretaxCost 87.33 -Currency 'USD') -Obfuscate:$false
         $Ai = $Out.AdditionalInfo | ConvertFrom-Json
-        $Ai.'Microsoft.Resources'.additionalInfo.PretaxCost | Should -Be 87.33 -Because 'the server attributes this Azure cost for the folded Claude usage'
+        $Ai.'Microsoft.Resources'.additionalInfo.PretaxCost | Should -Be 87.33 -Because 'a downstream consumer attributes this Azure cost for the folded Claude usage'
         $Ai.'Microsoft.Resources'.additionalInfo.Currency | Should -Be 'USD'
     }
 
-    It 'marks the row NON-TOKEN so the server does not compute a bogus AWS token price' {
+    It 'marks the row NON-TOKEN so a downstream cost tool does not compute a bogus AWS token price' {
         $Out = ConvertTo-RdaFoldedFoundryRow -Row (script:New-FakeClaudeRow -Unit '1M Tokens') -Obfuscate:$false
         # A fixed neutral unit, never a token-shaped one, even when the Marketplace unit was token-like.
         $Out.Unit | Should -Be 'CCU'
@@ -236,7 +236,7 @@ Describe 'End-to-end: folded rows land in a Consumption CSV alongside a native r
     # CSV via Export-Csv -Append exactly as GetResourceConsumption + GetFoundryFoldConsumption do,
     # then read it back. Proves (a) the folded row is schema-compatible with -Append onto a file the
     # first-party path wrote, (b) the emitted header is AdditionalInfo, and (c) the folded row is
-    # findable by its exact MeterCategory the server keys on.
+    # findable by its exact MeterCategory a downstream cost tool keys on.
     BeforeAll {
         $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
         $script:FoldDir = Join-Path $TmpBase ('FoldE2E_' + [guid]::NewGuid().ToString().Substring(0, 8))

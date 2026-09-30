@@ -195,14 +195,54 @@ function Invoke-RdaReveal
         Write-Warning "One or more subscriptions had no friendly name in the dictionary (older -Obfuscate run); revealed the subscription GUID instead. Re-run the inventory with a current version to capture SubscriptionNameMap."
     }
 
+    $TokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
     if ($Replacements.Count -eq 0)
     {
-        throw "Nothing to reveal: the selected field(s) [$($Fields -join ', ')] produced no token mappings from this dictionary."
+        # An empty subscription's report carries no obfuscated values, so its
+        # dictionary is empty too. That report has nothing to reveal and is not
+        # a failure: write an unchanged copy so a revealed bundle keeps every
+        # subscription. A zip that DOES carry tokens with no mapping for the
+        # selected fields is still an error (wrong dictionary or field choice).
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $HasToken = $false
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($InputZip)
+        try
+        {
+            foreach ($Entry in $Archive.Entries)
+            {
+                $Reader = [System.IO.StreamReader]::new($Entry.Open())
+                try
+                {
+                    $HasToken = [regex]::IsMatch($Reader.ReadToEnd(), $TokenPattern)
+                }
+                finally
+                {
+                    $Reader.Dispose()
+                }
+                if ($HasToken) { break }
+            }
+        }
+        finally
+        {
+            $Archive.Dispose()
+        }
+
+        if ($HasToken)
+        {
+            throw "Nothing to reveal: the selected field(s) [$($Fields -join ', ')] produced no token mappings from this dictionary."
+        }
+
+        $OutputZipPartial = ($OutputZip -replace '\.zip$', '') + '.partial.zip'
+        [System.IO.File]::Copy($InputZip, $OutputZipPartial, $true)
+        [System.IO.File]::Move($OutputZipPartial, $OutputZip, $true)
+        Write-Host ""
+        Write-Host "Nothing to reveal: this report carries no obfuscated values (for example an empty subscription). Wrote an unchanged copy." -ForegroundColor Yellow
+        Write-Host ("Output: {0}" -f $OutputZip) -ForegroundColor Green
+        return
     }
 
     Write-Host ("Tokens to reveal: {0}" -f $Replacements.Count)
-
-    $TokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
     $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("Reveal_" + [guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $TmpRoot -Force | Out-Null

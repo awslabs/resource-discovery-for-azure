@@ -1042,6 +1042,62 @@ Describe "Reveal-Obfuscation input/dictionary resolution and failure paths (Task
         }
     }
 
+    Context "empty-subscription report (no tokens, empty dictionary)" {
+
+        BeforeAll {
+            # What an -Obfuscate run writes for a subscription with no resources:
+            # every dictionary map is empty and no member carries a token.
+            $script:EmptyDir = Join-Path $script:TmpDir ("emptysub_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $EmptyStage = Join-Path $script:EmptyDir 'stage'
+            New-Item -ItemType Directory -Path $EmptyStage -Force | Out-Null
+            '{"VirtualMachines":[]}' | Set-Content -Path (Join-Path $EmptyStage 'Inventory_Empty.json') -Encoding utf8
+            '<html><body><p>0 resources</p></body></html>' | Set-Content -Path (Join-Path $EmptyStage 'ResourcesReport_Empty.html') -Encoding utf8
+            $script:EmptyZip = Join-Path $script:EmptyDir 'ResourcesReport_Empty.zip'
+            Compress-Archive -Path (Join-Path $EmptyStage '*') -DestinationPath $script:EmptyZip -Force
+            $script:EmptyDict = Join-Path $script:EmptyDir 'ObfuscationDictionary_Empty.json'
+            [ordered]@{
+                GeneratedAt         = '2026-06-30 00:00:00'
+                SubscriptionMap     = [ordered]@{}
+                SubscriptionNameMap = [ordered]@{}
+                ResourceGroupMap    = [ordered]@{}
+                ResourceIdMap       = [ordered]@{}
+                ResourceNameMap     = [ordered]@{}
+                TagMap              = [ordered]@{}
+                FreeTextMap         = [ordered]@{}
+            } | ConvertTo-Json -Depth 6 | Set-Content -Path $script:EmptyDict -Encoding utf8
+        }
+
+        It "writes an unchanged copy instead of failing" {
+            $Out = Join-Path $script:EmptyDir 'empty_revealed.zip'
+            { & $script:RevealScript -InputZip $script:EmptyZip -DictionaryPath $script:EmptyDict -OutputZip $Out *>&1 | Out-Null } |
+                Should -Not -Throw
+            (Get-FileHash -Path $Out -Algorithm SHA256).Hash | Should -Be (Get-FileHash -Path $script:EmptyZip -Algorithm SHA256).Hash
+            Test-Path -Path (($Out -replace '\.zip$', '') + '.partial.zip') | Should -BeFalse
+        }
+
+        It "keeps the empty subscription in a bulk reveal and exits 0" {
+            $Root = Join-Path $script:EmptyDir 'root'
+            $FullSub = Join-Path $Root 'ResourcesReportFull'
+            $EmptySub = Join-Path $Root 'ResourcesReportEmpty'
+            New-Item -ItemType Directory -Path $FullSub, $EmptySub -Force | Out-Null
+            Copy-Item -LiteralPath $script:InputZip -Destination (Join-Path $FullSub 'ResourcesReport_Full.zip')
+            Copy-Item -LiteralPath $script:DictPath -Destination (Join-Path $FullSub 'ObfuscationDictionary_Full.json')
+            Copy-Item -LiteralPath $script:EmptyZip -Destination (Join-Path $EmptySub 'ResourcesReport_Empty.zip')
+            Copy-Item -LiteralPath $script:EmptyDict -Destination (Join-Path $EmptySub 'ObfuscationDictionary_Empty.json')
+            $Outer = Join-Path $script:EmptyDir 'AllSubscriptions_Revealed_Test.zip'
+
+            & $script:RevealScript -InventoryRoot $Root -OutputZip $Outer -RemoveStaging *>&1 | Out-Null
+            $LASTEXITCODE | Should -Be 0
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $Archive = [System.IO.Compression.ZipFile]::OpenRead($Outer)
+            try { $Names = @($Archive.Entries | ForEach-Object Name) } finally { $Archive.Dispose() }
+            $Names | Should -Contain 'ResourcesReport_Full.zip'
+            $Names | Should -Contain 'ResourcesReport_Empty.zip'
+            @(Get-ChildItem -LiteralPath $Root -Directory -Filter 'RevealedStaging_*') | Should -BeNullOrEmpty
+        }
+    }
+
     Context "temp extraction dir cleanup (Req 12.4)" {
 
         BeforeAll { $script:SysTemp = [System.IO.Path]::GetTempPath() }

@@ -77,6 +77,30 @@ AfterAll {
 
 Describe 'New-RdaAllSubHtmlSummary aggregate report' {
 
+    It 'shows the discovered total beside the report total only when every row has a discovery count' {
+        $Run = New-Run
+        $DirA = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1 } -SubName 'Sub A'
+        $DirB = New-SubFolder -Root $Run -Services @{ AppServices = 2 } -SubName 'Sub B'
+        # Discovery found more than the reports hold: types no collector covers.
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Sub A'; Id = 'id-a'; Count = 7; Zip = (Join-Path $DirA 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Sub B'; Id = 'id-b'; Count = 4; Zip = (Join-Path $DirB 'ResourcesReport_b.zip') }
+        )
+        $Out = Join-Path $Run 'main.html'
+        $Printed = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -ProcessedSubscriptions $Processed 6>&1 | ForEach-Object { [string]$_ })
+        $Html = Get-Content -Path $Out -Raw
+        (Get-Card $Html 'Total resources in the reports') | Should -Be '5'
+        (Get-Card $Html 'Discovered by Resource Graph') | Should -Be '11' -Because '7+4 is what the wrapper prints as Resources Discovered'
+        @($Printed | Where-Object { $_ -like '*5 resource(s) in the reports (11 discovered, all types)*' }).Count | Should -Be 1
+
+        # One row without a discovery count: a partial sum would be wrong, so no discovered total.
+        $Out2 = Join-Path $Run 'main2.html'
+        $Printed2 = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out2 -ProcessedSubscriptions @($Processed[0]) 6>&1 | ForEach-Object { [string]$_ })
+        $Html2 = Get-Content -Path $Out2 -Raw
+        $Html2 | Should -Not -Match 'Discovered by Resource Graph'
+        @($Printed2 | Where-Object { $_ -like '*5 resource(s) in the reports, *' }).Count | Should -Be 1
+    }
+
     It 'produces a self-contained HTML whose totals equal the sum of the fixtures' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1 } -SubName 'Sub A' | Out-Null

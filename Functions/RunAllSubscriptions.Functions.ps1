@@ -1411,6 +1411,8 @@ function Get-ConsumptionAccessOutcome
 
 function Test-ConsumptionAccess
 {
+    # Get-UsageAggregates: see the suppression note at the top of ResourceInventory.ps1.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingCmdletAliases', 'Get-UsageAggregates', Justification = 'Only name that exists on Az.Billing before and after 2.1.0')]
     param([Parameter(Mandatory = $true)][string]$SubscriptionId)
 
     try

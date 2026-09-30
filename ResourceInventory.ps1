@@ -1,4 +1,7 @@
 #!/usr/bin/env pwsh
+# Get-UsageAggregates is an alias of Get-AzUsageAggregate from Az.Billing 2.1.0 on, and the cmdlet itself
+# before that, so the alias name is the one spelling that works on every Az.Billing version.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingCmdletAliases', 'Get-UsageAggregates', Justification = 'Only name that exists on Az.Billing before and after 2.1.0')]
 [CmdletBinding()]
 param ($TenantID,
     $Appid,

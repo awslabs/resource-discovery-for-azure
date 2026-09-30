@@ -267,6 +267,14 @@ function New-RdaAllSubHtmlSummary
     $RunTotalResources = [int](($SubReports | Measure-Object -Property Total -Sum).Sum)
     $SubCount = $SubReports.Count
     $EmptyCount = @($SubReports | Where-Object { $null -ne $_.Discovered -and $_.Discovered -eq 0 }).Count
+    # Discovery counts every resource Resource Graph returned, the wrapper's "Resources Discovered"; the
+    # reports list only the types a collector covers, so the two totals differ. The discovered total is
+    # shown only when the wrapper supplied a discovery count for every row (not on a rebuild from a zip).
+    $RunDiscovered = $null
+    if ($SubReports.Count -gt 0 -and @($SubReports | Where-Object { $_.Folder -and $FolderDiscoveredCount.ContainsKey($_.Folder) }).Count -eq $SubReports.Count)
+    {
+        $RunDiscovered = [int](($SubReports | Measure-Object -Property Discovered -Sum).Sum)
+    }
 
     $Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
     $TenantSafe = if ($IsObfuscated -or [string]::IsNullOrWhiteSpace([string]$TenantId)) { '' } else { ConvertTo-HtmlSafe ([string]$TenantId) }
@@ -451,7 +459,8 @@ footer{color:var(--muted);font-size:12px;margin-top:20px}
 $PrivacyBanner
 $($Banners.ToString())
 <div class="cards">
-  <div class="card"><div class="n">$($RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture))</div><div class="l">Total resources</div></div>
+  <div class="card"><div class="n">$($RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture))</div><div class="l">Total resources in the reports</div></div>
+$(if ($null -ne $RunDiscovered) { '  <div class="card"><div class="n">{0}</div><div class="l">Discovered by Resource Graph (all types)</div></div>' -f $RunDiscovered.ToString('N0', [cultureinfo]::InvariantCulture) })
   <div class="card"><div class="n">$SubCount</div><div class="l">Subscriptions</div></div>
   <div class="card"><div class="n">$EmptyCount</div><div class="l">Empty (0 resources)</div></div>
   <div class="card"><div class="n">$($FailedList.Count)</div><div class="l">Failed</div></div>
@@ -465,7 +474,8 @@ $ChartsHtml
 
     $Html | Out-File -LiteralPath $HtmlFile -Encoding utf8
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
-    Write-Host ("  {0} subscription(s), {1} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
+    $DiscoveredNote = if ($null -ne $RunDiscovered) { ' ({0} discovered, all types)' -f $RunDiscovered.ToString('N0', [cultureinfo]::InvariantCulture) } else { '' }
+    Write-Host ("  {0} subscription(s), {1} resource(s) in the reports{5}, {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $EmptyCount, $FailedList.Count, $ObfuscationStatus, $DiscoveredNote) -ForegroundColor DarkGray
 }
 
 function New-RdaAllSubHtmlSummaryFromZip

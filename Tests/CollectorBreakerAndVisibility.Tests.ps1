@@ -873,6 +873,8 @@ function Write-Host { }
 $TenantID = 't'
 $StartIds = @('sub-a', 'sub-gone')
 $Subscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-gone' })
+# The reconciliation reads the copy taken before processing, not $Subscriptions.
+$ResponsibleSubscriptions = $Subscriptions
 $CompletedIds = @()
 $FailedAttempts = @($FailedIds | ForEach-Object { [pscustomobject]@{ Id = $_ } })
 $FailedSubscriptions = @($FailedNames)

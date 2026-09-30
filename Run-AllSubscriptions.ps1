@@ -1703,6 +1703,7 @@ else
             }
 
             $UnreportedStreams = @()
+            $FailedToStartRecorded = $false
             foreach ($S in $StreamSummaries)
             {
                 if (-not (Test-Path -LiteralPath $S.SummaryPath -PathType Leaf))
@@ -1752,6 +1753,13 @@ else
                     {
                         $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $S.StreamId, $f.Reason)
                         $FailedSubscriptionIds += $(if ($f.Id) { [string]$f.Id } else { "stream-{0}" -f $S.StreamId })
+                        # A worker that failed to start wrote no stream state, so its subscriptions are
+                        # recorded here, or -ResumeFailedOnly finds nothing to retry.
+                        if ($StreamSummary.Status -eq 'failed-to-start' -and $f.Id -and [string]$f.Id -ne '<unknown>')
+                        {
+                            $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$f.Id) -Name ([string]$f.Name) -Reason ([string]$f.Reason)
+                            $FailedToStartRecorded = $true
+                        }
                     }
                 }
 
@@ -1907,7 +1915,7 @@ else
                     Where-Object { $CompletedThisRun -notcontains $_ })
             $CompletedIds = @($CompletedIds | Where-Object { $FailedThisRun -notcontains $_ })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
-            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
+            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $FailedToStartRecorded)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts @StateSaveArgs
             }

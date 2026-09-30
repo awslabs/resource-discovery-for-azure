@@ -2350,3 +2350,55 @@ Describe 'Run-AllSubscriptions.ps1: a consolidated bundle that cannot be built i
         $WrapperExitCode | Should -Be 4
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: subscriptions of a stream that failed to start can be retried' {
+    # The stream-summary fold and the save that follows are lifted from the wrapper's parsed source.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $FoldAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $FindIf = {
+            param([string]$Condition)
+            $Found = @($FoldAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $Condition }, $true))
+            if ($Found.Count -ne 1) { throw ("expected exactly one 'if ({0})' in Run-AllSubscriptions.ps1, found {1}" -f $Condition, $Found.Count) }
+            $Found[0]
+        }
+        $script:FailedFoldBlock = [scriptblock]::Create((& $FindIf -Condition '$StreamSummary.Failed').Extent.Text)
+        $script:StreamSaveBlock = [scriptblock]::Create((& $FindIf -Condition '$AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $FailedToStartRecorded').Extent.Text)
+
+        # Folds one stream summary the way the wrapper does, then runs the save decision.
+        function Invoke-FailedFold
+        {
+            param([string]$Status, [object[]]$Failed)
+            Set-Variable -Name S -Value ([pscustomobject]@{ StreamId = 0 })
+            Set-Variable -Name StreamSummary -Value ([pscustomobject]@{ Status = $Status; Failed = $Failed })
+            Set-Variable -Name FailedSubscriptions -Value @()
+            Set-Variable -Name FailedSubscriptionIds -Value @()
+            Set-Variable -Name FailedAttempts -Value @()
+            Set-Variable -Name FailedToStartRecorded -Value $false
+            Set-Variable -Name AllCompletedFromStreams -Value @()
+            Set-Variable -Name AllFailedFromStreams -Value @()
+            $script:Saved = $null
+            function Save-CompletedSubscriptionIds { param($Path, $Tenant, $Ids, $FailedAttempts) $script:Saved = @($FailedAttempts) }
+            . $script:FailedFoldBlock
+            . $script:StreamSaveBlock
+            [pscustomobject]@{ FailedAttempts = @($FailedAttempts); FailedIds = @($FailedSubscriptionIds); Saved = $script:Saved }
+        }
+    }
+    It 'a stream that failed to start records each named subscription as a failed attempt and saves it' {
+        $R = Invoke-FailedFold -Status 'failed-to-start' -Failed @(
+            [pscustomobject]@{ Id = 'sub-a'; Name = 'A'; Reason = 'stream did not start: Az context import failed' }
+            [pscustomobject]@{ Id = '<unknown>'; Name = 'B'; Reason = 'stream did not start: SubscriptionIds/SubscriptionNames length mismatch' }
+        )
+        @($R.FailedAttempts | ForEach-Object { $_.Id }) | Should -Be @('sub-a')
+        $R.FailedAttempts[0].Reason | Should -Be 'stream did not start: Az context import failed'
+        @($R.Saved | ForEach-Object { $_.Id }) | Should -Be @('sub-a')
+        $R.FailedIds | Should -Contain 'sub-a'
+    }
+    It 'a stream that started leaves failed attempts to its own state file, so nothing is counted twice' {
+        $R = Invoke-FailedFold -Status 'partial-failure' -Failed @([pscustomobject]@{ Id = 'sub-a'; Name = 'A'; Reason = 'inner exit 1' })
+        @($R.FailedAttempts).Count | Should -Be 0
+        $R.Saved | Should -BeNullOrEmpty
+        $R.FailedIds | Should -Contain 'sub-a'
+    }
+}

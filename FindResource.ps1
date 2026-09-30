@@ -206,10 +206,14 @@ if ($CsvPath)
     if ($Rows.Count -gt 0)
     {
         $Union = Get-RdaRowField -Rows $Rows
+        # Select-Object matches property names case-insensitively, and collectors emit both 'Sku' and
+        # 'SKU', so the projection keeps one name per case-insensitive key; both values land in it.
+        $SeenColumns = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $Columns = @($Union | Where-Object { $SeenColumns.Add($_) })
         try
         {
-            $Rows | Select-Object -Property $Union | Export-Csv -LiteralPath $CsvPath -NoTypeInformation -Encoding UTF8
-            Write-Host ('  Wrote {0} row(s), {1} column(s) to {2}' -f $Rows.Count, @($Union).Count, $CsvPath) -ForegroundColor Cyan
+            $Rows | Select-Object -Property $Columns | Export-Csv -LiteralPath $CsvPath -NoTypeInformation -Encoding UTF8
+            Write-Host ('  Wrote {0} row(s), {1} column(s) to {2}' -f $Rows.Count, @($Columns).Count, $CsvPath) -ForegroundColor Cyan
         }
         catch
         {

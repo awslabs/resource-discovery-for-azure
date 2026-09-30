@@ -582,6 +582,31 @@ Describe 'FindResource.ps1 entry point' {
         $Header | Should -Match 'Size'
     }
 
+    It 'writes a CSV when rows mix the Sku and SKU field names, with both values in one column' {
+        # ComputeSnapshots emits 'Sku' and VMWare emits 'SKU'; Select-Object treats them as one name.
+        $CaseRoot = Join-Path $Script:TestRoot 'sku-case'
+        $Staging = Join-Path $Script:TestRoot 'sku-case-staging'
+        New-Item -ItemType Directory -Path $CaseRoot, $Staging -Force | Out-Null
+        $Stamp = '202601010000000000071'
+        [ordered]@{
+            Version          = '9.9.9'
+            VMWare           = @([ordered]@{ Name = 'obfuscated_avs0'; Location = 'switzerlandnorth'; SKU = 'AV36'; ClusterSize = 3 })
+            ComputeSnapshots = @([ordered]@{ Name = 'obfuscated_snap0'; Location = 'westeurope'; Sku = 'standard_lrs' })
+        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Staging ('Inventory_ResourcesReport_{0}.json' -f $Stamp)) -Encoding UTF8
+        Compress-Archive -Path (Join-Path $Staging '*') -DestinationPath (Join-Path $CaseRoot ('ResourcesReport_{0}.zip' -f $Stamp)) -Force
+
+        $Csv = Join-Path $Script:TestRoot 'sku-case.csv'
+        $Cmd = '& "{0}" -Path "{1}" -ResourceType VMWare,ComputeSnapshots -CsvPath "{2}"' -f $Script:EntryPoint, $CaseRoot, $Csv
+        pwsh -NoProfile -Command $Cmd > $null 2>&1
+        $LASTEXITCODE | Should -Be 0
+
+        $Written = @(Import-Csv -LiteralPath $Csv)
+        $Written.Count | Should -Be 2
+        $SkuColumns = @($Written[0].PSObject.Properties.Name | Where-Object { $_ -eq 'sku' })
+        $SkuColumns.Count | Should -Be 1
+        @($Written | ForEach-Object { $_.($SkuColumns[0]) } | Sort-Object) | Should -Be @('AV36', 'standard_lrs')
+    }
+
     It 'writes JSON as an array even for a single match, so the shape is stable' {
         $Json = Join-Path $Script:TestRoot 'out.json'
         pwsh -NoProfile -File $Script:EntryPoint -Path $Script:EntryRoot -ResourceType 'VMWare' -JsonPath $Json > $null 2>&1

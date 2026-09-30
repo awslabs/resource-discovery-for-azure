@@ -924,6 +924,67 @@ function Write-RdaShareableDiagnosticsLog
     }
 }
 
+function Get-RdaPermanentRequestError
+{
+    <#
+    .SYNOPSIS
+        Describes an HTTP client error that retrying cannot fix, or returns $null.
+    .DESCRIPTION
+        Walks the exception chain (the same shape Get-RdaRetryAfterSeconds reads) for a
+        Response.StatusCode. A 4xx other than 401 (token refresh), 403 (denial, classified
+        separately), 408, 409, 425 and 429 (transient by definition) is permanent: the same
+        request will get the same answer. The service's own message is returned, because the
+        Az SDK's text ("Operation returned an invalid status code 'BadRequest'") never says why.
+        GUIDs and the request-id suffix are removed: the message reaches RunSummary.log, which
+        is not dictionary-scrubbed, and the Consumption service names the subscription id in it.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord
+    )
+
+    $Transient = @(401, 403, 408, 409, 425, 429)
+    try
+    {
+        $Ex = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ErrorRecord.Exception } else { $ErrorRecord }
+        $Depth = 0
+        while ($null -ne $Ex -and $Depth -lt 5)
+        {
+            $ResponseProp = $Ex.PSObject.Properties['Response']
+            if ($ResponseProp -and $null -ne $ResponseProp.Value -and $ResponseProp.Value.PSObject.Properties['StatusCode'])
+            {
+                $Status = [int]$ResponseProp.Value.StatusCode
+                if ($Status -lt 400 -or $Status -gt 499 -or $Transient -contains $Status) { return $null }
+
+                $ServiceMessage = $null
+                $BodyProp = $Ex.PSObject.Properties['Body']
+                if ($BodyProp -and $null -ne $BodyProp.Value -and $BodyProp.Value.PSObject.Properties['Error'] -and $null -ne $BodyProp.Value.Error)
+                {
+                    $ServiceMessage = [string]$BodyProp.Value.Error.Message
+                }
+                if ([string]::IsNullOrWhiteSpace($ServiceMessage) -and $ResponseProp.Value.PSObject.Properties['Content'])
+                {
+                    try { $ServiceMessage = [string](([string]$ResponseProp.Value.Content | ConvertFrom-Json -ErrorAction Stop).error.message) }
+                    catch { $ServiceMessage = $null }
+                }
+                if ([string]::IsNullOrWhiteSpace($ServiceMessage)) { $ServiceMessage = [string]$Ex.Message }
+
+                $ServiceMessage = $ServiceMessage -replace '\s*\(Request ID:[^)]*\)', ''
+                $ServiceMessage = $ServiceMessage -replace '(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<id>'
+                return ('HTTP {0}: {1}' -f $Status, $ServiceMessage.Trim())
+            }
+            $Ex = $Ex.InnerException
+            $Depth++
+        }
+    }
+    catch
+    {
+        Write-Verbose ('Get-RdaPermanentRequestError could not read the error: {0}' -f $_.Exception.Message)
+    }
+    return $null
+}
+
 function Get-RdaRetryAfterSeconds
 {
     param(

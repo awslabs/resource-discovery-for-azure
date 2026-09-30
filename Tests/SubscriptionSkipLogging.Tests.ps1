@@ -47,7 +47,7 @@ BeforeAll {
     # parameters, and $Reached records which subscriptions got past the guard.
     $script:InvAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
     $script:PhaseBlocks = @{}
-    foreach ($FnName in 'GetResourceConsumption', 'GetMarketplaceConsumption')
+    foreach ($FnName in 'GetResourceConsumption', 'GetMarketplaceConsumption', 'GetFoundryTokenConsumption', 'GetFoundryModelCoverage')
     {
         $Fn = $script:InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $FnName }, $true)
         if (-not $Fn) { throw ('{0} was not found in ResourceInventory.ps1.' -f $FnName) }
@@ -103,6 +103,8 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
     It '<FnName>: prints nothing, logs one count line naming only the target, and still collects only the target' -ForEach @(
         @{ FnName = 'GetResourceConsumption'; Data = 'Consumption data' }
         @{ FnName = 'GetMarketplaceConsumption'; Data = 'Marketplace data' }
+        @{ FnName = 'GetFoundryTokenConsumption'; Data = 'Foundry token data' }
+        @{ FnName = 'GetFoundryModelCoverage'; Data = 'Foundry model coverage data' }
     ) {
         $TargetId = [guid]::NewGuid().ToString()
         $OtherA = [guid]::NewGuid().ToString()
@@ -163,6 +165,8 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
     It '<FnName>: counts a subscription listed twice once' -ForEach @(
         @{ FnName = 'GetResourceConsumption'; Data = 'Consumption data' }
         @{ FnName = 'GetMarketplaceConsumption'; Data = 'Marketplace data' }
+        @{ FnName = 'GetFoundryTokenConsumption'; Data = 'Foundry token data' }
+        @{ FnName = 'GetFoundryModelCoverage'; Data = 'Foundry model coverage data' }
     ) {
         $TargetId = [guid]::NewGuid().ToString()
         $OtherA = [guid]::NewGuid().ToString()
@@ -183,6 +187,8 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
     It '<FnName>: without -SubscriptionID, passes over nothing, logs nothing and reaches every subscription in order' -ForEach @(
         @{ FnName = 'GetResourceConsumption' }
         @{ FnName = 'GetMarketplaceConsumption' }
+        @{ FnName = 'GetFoundryTokenConsumption' }
+        @{ FnName = 'GetFoundryModelCoverage' }
     ) {
         $Ids = @([guid]::NewGuid().ToString(), [guid]::NewGuid().ToString(), [guid]::NewGuid().ToString())
         $Global:Subscriptions = @(
@@ -203,6 +209,8 @@ Describe 'ResourceInventory.ps1: the subscriptions a phase passes over are count
     It '<FnName>: logs nothing when the target is the only visible subscription' -ForEach @(
         @{ FnName = 'GetResourceConsumption' }
         @{ FnName = 'GetMarketplaceConsumption' }
+        @{ FnName = 'GetFoundryTokenConsumption' }
+        @{ FnName = 'GetFoundryModelCoverage' }
     ) {
         $TargetId = [guid]::NewGuid().ToString()
         $Global:Subscriptions = @(

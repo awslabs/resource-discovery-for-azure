@@ -2348,13 +2348,25 @@ function ExecuteInventoryProcessing()
             if (-not $script:FoundryTokenNameCache) { $script:FoundryTokenNameCache = @{} }
         }
 
+        # One debug-log line for the phase, never one per subscription passed over (see the
+        # same block in GetResourceConsumption): the others are counted, never named.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $FtTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $FtTargetSubLabel = if ($FtTargetSub) { "'{0}'" -f $FtTargetSub.Name } else { $SubscriptionID }
+            $FtPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
+            if ($FtPassedOverCount -gt 0)
+            {
+                Write-Log -Message ("Foundry token data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $FtPassedOverCount, $FtTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+        }
+
         foreach ($sub in $Global:Subscriptions)
         {
             if (![string]::IsNullOrEmpty($SubscriptionID))
             {
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Skipping (Foundry tokens): {0}" -f $sub.Name) -Severity 'Info'
                     continue
                 }
             }
@@ -2857,13 +2869,25 @@ function ExecuteInventoryProcessing()
             if (-not $script:FoundryNameCache) { $script:FoundryNameCache = @{} }
         }
 
+        # One debug-log line for the phase, never one per subscription passed over (see the
+        # same block in GetResourceConsumption): the others are counted, never named.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $FcTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $FcTargetSubLabel = if ($FcTargetSub) { "'{0}'" -f $FcTargetSub.Name } else { $SubscriptionID }
+            $FcPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
+            if ($FcPassedOverCount -gt 0)
+            {
+                Write-Log -Message ("Foundry model coverage data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $FcPassedOverCount, $FcTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+        }
+
         foreach ($sub in $Global:Subscriptions)
         {
             if (![string]::IsNullOrEmpty($SubscriptionID))
             {
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Skipping (FoundryModelCoverage): {0}" -f $sub.Name) -Severity 'Info'
                     continue
                 }
             }

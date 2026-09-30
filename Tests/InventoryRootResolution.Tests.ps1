@@ -334,4 +334,14 @@ Describe 'Output-root wiring (source guards)' {
         $script:InvSrc | Should -Match '(?s)New-Item -Type Directory -Force -Path \$DefaultPath -ErrorAction Stop[\s\S]{0,400}?catch'
         $script:InvSrc | Should -Match 'Could not create the report folder'
     }
+
+    It 'no path in the inner script ends with a bare exit, which pwsh reports as exit code 0' {
+        # A bare exit after "No report can be written" made a failed run look successful, standalone and
+        # to the wrapper, which then recorded the subscription as complete.
+        $Tokens = $null
+        $ParseErrors = $null
+        $InnerAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $BareExits = @($InnerAst.FindAll({ $args[0] -is [System.Management.Automation.Language.ExitStatementAst] -and $null -eq $args[0].Pipeline }, $true))
+        @($BareExits | ForEach-Object { $_.Extent.StartLineNumber }) | Should -BeNullOrEmpty
+    }
 }

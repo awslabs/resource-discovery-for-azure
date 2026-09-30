@@ -214,7 +214,7 @@ function RunInventorySetup()
                 {
                     Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
                     Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                    exit
+                    exit 1
                 }
             }
         }
@@ -227,7 +227,7 @@ function RunInventorySetup()
         if (-not $RootForRun.Ok)
         {
             Write-Log -Message $RootForRun.Message -Severity 'Error'
-            exit
+            exit 1
         }
         if ($RootForRun.IsFallback)
         {
@@ -244,7 +244,7 @@ function RunInventorySetup()
             catch
             {
                 Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
-                exit
+                exit 1
             }
         }
 
@@ -403,7 +403,7 @@ function RunInventorySetup()
                     Write-Log -Message ("You are trying to use Service Principal Authentication Method in a wrong way.") -Severity 'Error'
                     Write-Log -Message ("It's Mandatory to specify Application ID, Secret and Tenant ID in Azure Resource Inventory") -Severity 'Error'
                     Write-Log -Message (".\ResourceInventory.ps1 -appid <SP AppID> -secret <SP Secret> -tenant <TenantID>") -Severity 'Error'
-                    exit
+                    exit 1
                 }
             }
 
@@ -433,7 +433,7 @@ function RunInventorySetup()
             {
                 Write-Log -Message ("Could not create the report folder {0}: {1}" -f $DefaultPath, $_.Exception.Message) -Severity 'Error'
                 Write-Log -Message ("No report can be written for this run. Verify the location is writable, or pass -OutputDirectory with a writable path.") -Severity 'Error'
-                exit
+                exit 1
             }
         }
 
@@ -446,7 +446,7 @@ function RunInventorySetup()
         {
             Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
             Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            exit
+            exit 1
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup))

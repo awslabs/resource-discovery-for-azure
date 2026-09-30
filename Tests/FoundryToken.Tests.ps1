@@ -651,4 +651,19 @@ Describe 'GetFoundryFoldConsumption: a null captured row must not abort the phas
             if (Test-Path -LiteralPath $Global:ConsumptionFileCsv) { Remove-Item -LiteralPath $Global:ConsumptionFileCsv -Force }
         }
     }
+
+    It 'reports a confirmed zero, not one row, when the Marketplace phase captured nothing' {
+        # The capture list is only created when a Claude row is seen, so a run with none leaves it $null.
+        $script:FoldLog = [System.Collections.Generic.List[string]]::new()
+        function Write-Log { param($Message, $Severity) $script:FoldLog.Add([string]$Message) }
+        $Global:FoundryFoldRecordCount = $null
+        $script:FoundryFoldRecordsThisRun = $null
+        $Obfuscate = [pscustomobject]@{ IsPresent = $false }
+        $script:FoundryFoldClaudeRows = $null
+
+        GetFoundryFoldConsumption
+
+        @($script:FoldLog | Where-Object { $_ -like 'Foundry fold: folding*' }).Count | Should -Be 0
+        @($script:FoldLog | Where-Object { $_ -like '*This is a CONFIRMED ZERO*' }).Count | Should -Be 1
+    }
 }

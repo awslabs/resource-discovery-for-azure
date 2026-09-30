@@ -2195,7 +2195,8 @@ function ExecuteInventoryProcessing()
         if ($null -eq $Global:FoundryFoldRecordCount) { $Global:FoundryFoldRecordCount = 0 }
         if ($null -eq $script:FoundryFoldRecordsThisRun) { $script:FoundryFoldRecordsThisRun = 0 }
 
-        $ClaudeRows = @($script:FoundryFoldClaudeRows)
+        # Filtered: nothing captured leaves the list $null, and @($null) counts one row.
+        $ClaudeRows = @($script:FoundryFoldClaudeRows | Where-Object { $null -ne $_ })
         if ($ClaudeRows.Count -eq 0)
         {
             # CONFIRMED ZERO, not a silent skip: the Marketplace phase ran and found no Claude/

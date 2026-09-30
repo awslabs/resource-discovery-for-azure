@@ -2416,7 +2416,7 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
             $Found[0]
         }
         $script:OwedBlock = [scriptblock]::Create((& $FindIf -Condition '$ResumeFailedOnly' -Contains '$OwedOutsideRetry = @(').Extent.Text)
-        $ClearIf = & $FindIf -Condition '$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' -Contains 'Resume state cleared (clean run).'
+        $ClearIf = & $FindIf -Condition '$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and ((Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) -or $StateBlobArgs.Count -gt 0)' -Contains 'Resume state cleared (clean run).'
         $script:ClearBlock = [scriptblock]::Create($ClearIf.Extent.Text)
 
         # A (completed earlier), B (failed, retried now and completed), C (never reached).
@@ -2426,6 +2426,7 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
             $StateFile = Join-Path $TestDrive 'resume-state.json'
             Set-Content -LiteralPath $StateFile -Value '{}'
             Set-Variable -Name ResumeStateFile -Value $StateFile
+            Set-Variable -Name StateBlobArgs -Value @{}
             Set-Variable -Name ResumeFailedOnly -Value $true
             Set-Variable -Name EligibleBeforeRetryFilter -Value @(
                 [pscustomobject]@{ Id = 'sub-a'; Name = 'A' }
@@ -2455,6 +2456,64 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
     It 'a subscription deleted since the start is not owed' {
         $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b') -EndIds @('sub-a', 'sub-b')
         $R.StateKept | Should -BeFalse
+    }
+}
+
+Describe 'Run-AllSubscriptions.ps1: a clean run clears the resume state blob as well as the local file' {
+    # The next run seeds its state from the blob first, so a blob left behind makes -Resume skip every
+    # subscription this run collected. The clean-run clear is lifted from the wrapper's parsed source.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $ClearAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $Found = @($ClearAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text.StartsWith('$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0') -and $args[0].Extent.Text.Contains('Resume state cleared (clean run).') }, $true))
+        if ($Found.Count -ne 1) { throw ("expected exactly one clean-run clear in Run-AllSubscriptions.ps1, found {0}" -f $Found.Count) }
+        $script:BlobClearBlock = [scriptblock]::Create($Found[0].Extent.Text)
+
+        # -RemoveError: $null removes the blob; otherwise the message Remove-AzStorageBlob throws.
+        function Invoke-BlobClear
+        {
+            param([bool]$WithLocalFile, [AllowNull()][string]$RemoveError)
+            $StateFile = Join-Path $TestDrive ('state-{0}.json' -f [guid]::NewGuid().ToString('N'))
+            if ($WithLocalFile) { Set-Content -LiteralPath $StateFile -Value '{}' }
+            $Removed = [System.Collections.Generic.List[string]]::new()
+            function Remove-AzStorageBlob
+            {
+                param($Container, $Blob, $Context, [switch]$Force)
+                if ($RemoveError) { throw $RemoveError }
+                $Removed.Add(('{0}/{1}' -f $Container, $Blob))
+            }
+            Set-Variable -Name ResumeStateFile -Value $StateFile
+            Set-Variable -Name StateBlobArgs -Value @{ BlobContext = 'ctx'; BlobContainer = 'rdastate'; BlobName = '_state/.resume-state-t.json' }
+            Set-Variable -Name FailedSubscriptions -Value @()
+            Set-Variable -Name FailedAttempts -Value @()
+            Set-Variable -Name OwedOutsideRetry -Value @()
+            $Printed = @(& { . $script:BlobClearBlock } 6>&1 | ForEach-Object { [string]$_ })
+            [pscustomobject]@{ LocalKept = (Test-Path -LiteralPath $StateFile); Removed = @($Removed); Printed = $Printed }
+        }
+    }
+    It 'removes the main state blob and the local file, then reports the state cleared' {
+        $R = Invoke-BlobClear -WithLocalFile $true -RemoveError $null
+        $R.LocalKept | Should -BeFalse
+        $R.Removed.Count | Should -Be 1
+        $R.Removed[0] | Should -Be 'rdastate/_state/.resume-state-t.json'
+        @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
+    }
+    It 'removes the blob even when no local state file exists' {
+        $R = Invoke-BlobClear -WithLocalFile $false -RemoveError $null
+        $R.Removed.Count | Should -Be 1
+        $R.Removed[0] | Should -Be 'rdastate/_state/.resume-state-t.json'
+        @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
+    }
+    It 'a blob that is already gone counts as cleared' {
+        $R = Invoke-BlobClear -WithLocalFile $true -RemoveError 'The specified blob does not exist. HTTP Status Code: 404 - HTTP Error Message: The specified blob does not exist. ErrorCode: BlobNotFound'
+        @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
+        @($R.Printed | Where-Object { $_ -like 'WARNING: Could not remove resume state blob*' }).Count | Should -Be 0
+    }
+    It 'a blob that could not be removed is named, and the state is not reported cleared' {
+        $R = Invoke-BlobClear -WithLocalFile $true -RemoveError 'This request is not authorized to perform this operation using this permission. HTTP Status Code: 403 - ErrorCode: AuthorizationPermissionMismatch'
+        @($R.Printed | Where-Object { $_ -like 'WARNING: Could not remove resume state blob rdastate/_state/.resume-state-t.json:*' }).Count | Should -Be 1
+        @($R.Printed | Where-Object { $_ -like 'Resume state cleared*' }).Count | Should -Be 0
     }
 }
 

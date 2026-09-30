@@ -2363,16 +2363,43 @@ if ($ResumeFailedOnly)
     }
 }
 
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
+# The state blob is cleared with the local file: the next run seeds from the blob first, so a blob left
+# behind makes -Resume skip every subscription this run collected, and carries this run's start snapshot.
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and ((Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) -or $StateBlobArgs.Count -gt 0))
 {
-    try
+    $StateCleared = $true
+    if (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
     {
-        Remove-Item -LiteralPath $ResumeStateFile -Force
-        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        try
+        {
+            Remove-Item -LiteralPath $ResumeStateFile -Force -ErrorAction Stop
+        }
+        catch
+        {
+            $StateCleared = $false
+            Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+        }
     }
-    catch
+    if ($StateBlobArgs.Count -gt 0)
     {
-        Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+        try
+        {
+            Remove-AzStorageBlob -Container $StateBlobArgs.BlobContainer -Blob $StateBlobArgs.BlobName -Context $StateBlobArgs.BlobContext -Force -ErrorAction Stop
+        }
+        catch
+        {
+            # A blob or container that is already gone holds no state (measured live: Az.Storage reports
+            # 'ErrorCode: BlobNotFound' / 'ErrorCode: ContainerNotFound' with HTTP 404).
+            if ($_.Exception.Message -notmatch 'ErrorCode: (BlobNotFound|ContainerNotFound)')
+            {
+                $StateCleared = $false
+                Write-Host ("WARNING: Could not remove resume state blob {0}/{1}: {2}. The next -Resume on this container reads it and skips the subscriptions it lists; delete it before re-running." -f $StateBlobArgs.BlobContainer, $StateBlobArgs.BlobName, $_.Exception.Message) -ForegroundColor Yellow
+            }
+        }
+    }
+    if ($StateCleared)
+    {
+        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
     }
 }
 
@@ -2399,7 +2426,7 @@ $UnknownSubs = @()
 if ($SubResourceCounts.Count -gt 0)
 {
     $TotalRes = ($SubResourceCounts | Measure-Object -Property Count -Sum).Sum
-    Write-Host ("Total Resources:         {0:N0} across {1} subscription(s)" -f $TotalRes, $NonEmptySubs.Count) -ForegroundColor Green
+    Write-Host ("Resources Discovered:    {0:N0} across {1} subscription(s)" -f $TotalRes, $NonEmptySubs.Count) -ForegroundColor Green
 }
 if ($EmptySubs.Count -gt 0)
 {

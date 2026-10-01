@@ -2676,11 +2676,16 @@ function ExecuteInventoryProcessing()
                 # verified dimension). AggregationType Total over the window gives the per-model token
                 # total. WarningAction SilentlyContinue keeps Azure Monitor's "metric not found for
                 # this resource" noise off the console - a model/account with no data returns empty.
+                # TimeGrain one day: only the window total is used, and the default one-minute grain
+                # returns 43,200 points per deployment per metric (measured: 85-136 MB held for one
+                # query on a two-deployment account, against 2 MB at one day, with identical totals).
+                # The window is whole days, so the daily buckets cover it exactly.
                 $FtArgs = @{
                     ResourceId      = $AccountResourceId
                     MetricName      = $MetricName
                     StartTime       = $StartTime
                     EndTime         = $EndTime
+                    TimeGrain       = [TimeSpan]::FromDays(1)
                     AggregationType = 'Total'
                     MetricFilter    = "ModelDeploymentName eq '*'"
                     ErrorAction     = 'Stop'
@@ -2835,7 +2840,7 @@ function ExecuteInventoryProcessing()
             $RetailProbed = $RetailCatalog.Count -gt 0
             if ($RetailProbed)
             {
-                Write-Log -Message ("FoundryModelCoverage: pulled {0} Retail Prices catalog item(s) for serviceName 'Foundry Models'." -f $RetailCatalog.Count) -Severity 'Info'
+                Write-Log -Message ("FoundryModelCoverage: pulled {0} distinct Retail Prices meter(s) for serviceName 'Foundry Models'." -f $RetailCatalog.Count) -Severity 'Info'
             }
             else
             {

@@ -744,6 +744,9 @@ if ($Task -eq 'Processing')
     }
 
     $MetricTimeoutSeconds = 120
+    # How long the phase end waits for every pool worker to finish before deciding whether the pool
+    # can be released. An idle pool passes at once; only a call still blocked in a network read waits.
+    $MetricPoolReleaseGraceSeconds = 10
     $MetricMaxRetries = 3
     $MetricMaxThrottleRetries = 6
     $MetricMaxRetryAfterSeconds = 120
@@ -1313,10 +1316,60 @@ if ($Task -eq 'Processing')
                 # the runspaces, and the walk below is best-effort bookkeeping. A throw in the walk must
                 # not be what skips the close, or the per-subscription leak is back with the failure
                 # swallowed by the catch below.
-                [void]$MetricCallPool.BeginClose($null, $null)
+                # Before closing, give every worker a bounded chance to finish. The pool itself is the
+                # authority on that: while it is open, every runspace is free exactly when
+                # GetAvailableRunspaces equals GetMaxRunspaces. That also covers a call the batch loop
+                # holds no handle to, such as one left in flight when a stop or a throw interrupted the
+                # batch. Thread.Sleep rather than Start-Sleep, so the wait still runs while a pipeline
+                # stop is unwinding through this finally.
+                $PoolGraceClock = [System.Diagnostics.Stopwatch]::StartNew()
+                $PoolIdle = $false
+                while ($true)
+                {
+                    # GetAvailableRunspaces is only valid on an open pool; a broken pool is never idle.
+                    if ($MetricCallPool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
+                    {
+                        $PoolIdle = $false
+                        break
+                    }
+                    $PoolIdle = ($MetricCallPool.GetAvailableRunspaces() -eq $MetricCallPool.GetMaxRunspaces())
+                    $AbandonedOutstanding = @($MetricAbandonedCalls | Where-Object { -not $_.Handle.IsCompleted }).Count
+                    if (($PoolIdle -and $AbandonedOutstanding -eq 0) -or $PoolGraceClock.Elapsed.TotalSeconds -ge $MetricPoolReleaseGraceSeconds)
+                    {
+                        break
+                    }
+                    [System.Threading.Thread]::Sleep(100)
+                }
+
+                $PoolCloseHandle = $MetricCallPool.BeginClose($null, $null)
                 foreach ($Abandoned in $MetricAbandonedCalls)
                 {
                     if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
+                }
+
+                # Closing alone is not enough: an opened pool registers a cleanup timer in the
+                # process-wide timer queue, and only Dispose removes it. Until then the timer keeps the
+                # pool reachable, and with it a runspace holding the Az modules and its last results, so
+                # every subscription under the wrapper added one to the heap for the life of the process.
+                # Dispose runs only once it is PROVEN that every worker has ended: the close has finished
+                # (it does not finish while any runspace still runs a call), the pool reports Closed, and
+                # no abandoned call is still running. Otherwise the pool is kept and the debug log says so:
+                # that costs one pool of memory for this subscription, never a hang or a torn-down worker.
+                $PoolCloseRemainingMs = [int][math]::Max(0, ($MetricPoolReleaseGraceSeconds * 1000) - $PoolGraceClock.ElapsedMilliseconds)
+                $PoolClosed = $false
+                if ($PoolIdle -and $MetricAbandonedRunning -eq 0 -and $null -ne $PoolCloseHandle)
+                {
+                    $PoolClosed = $PoolCloseHandle.AsyncWaitHandle.WaitOne($PoolCloseRemainingMs) -and $MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed
+                }
+
+                if ($PoolClosed)
+                {
+                    $MetricCallPool.Dispose()
+                    Write-MetricsDiag ("Metric worker pool released: every worker had finished (waited {0} ms)." -f $PoolGraceClock.ElapsedMilliseconds)
+                }
+                else
+                {
+                    Write-MetricsDiag ("WARNING: metric worker pool NOT released after {0}s - idle={1}, abandoned calls still running={2}, pool state={3}. It stays in memory until the process ends; the run itself is unaffected." -f $MetricPoolReleaseGraceSeconds, $PoolIdle, $MetricAbandonedRunning, $MetricCallPool.RunspacePoolStateInfo.State)
                 }
             }
             catch

@@ -402,3 +402,241 @@ Describe 'Write-RdaMemorySnapshot: one reading, to the local debug log only' {
         $Lines[0] | Should -Match ('\[Memory\] Unit test phase: managed heap \d+(\.\d)? MB, process working set \d+(\.\d)? MB, memory available to the runtime \d+ MB{0}\.$' -f [regex]::Escape($Suffix))
     }
 }
+
+Describe 'Extension/Metrics.ps1 releases its runspace pool when the phase ends' {
+    BeforeAll {
+        # The teardown is lifted out of the shipped finally by AST and run against a real pool, so the
+        # assertions read what Metrics.ps1 does rather than a model of it.
+        $MetricsAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
+        $Teardown = @($MetricsAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $null -ne $N.Finally -and $N.Finally.Extent.Text -match 'MetricCallPool\.BeginClose' }, $true))
+        if ($Teardown.Count -ne 1) { throw ('Expected one finally that tears the metrics pool down; found {0}.' -f $Teardown.Count) }
+        $script:PoolTeardown = [scriptblock]::Create((@(
+                    'param($MetricCallPool, $MetricAbandonedCalls, $MetricPoolReleaseGraceSeconds = 10)'
+                    '$MetricAbandonedDrained = 0'
+                    '$MetricAbandonedRunning = 0'
+                    '$TeardownDiag = [System.Collections.Generic.List[string]]::new()'
+                    'function Write-MetricsDiag { param($Message) $TeardownDiag.Add([string]$Message) }'
+                    ('. ' + $Teardown[0].Finally.Extent.Text)
+                    '[pscustomobject]@{ Running = $MetricAbandonedRunning; Count = $MetricAbandonedCount; Released = [bool]$PoolClosed; Diag = @($TeardownDiag) }'
+                ) -join [Environment]::NewLine))
+        $script:InternalPoolField = [System.Management.Automation.Runspaces.RunspacePool].GetField('_internalPool', [System.Reflection.BindingFlags]'NonPublic,Instance')
+
+        function New-OpenTestPool
+        {
+            $Pool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+            [void]$Pool.SetMaxRunspaces(2)
+            $Pool.Open()
+            return $Pool
+        }
+    }
+
+    It 'leaves nothing that keeps the pool reachable once the phase has ended' {
+        # Built and torn down in a child scope, so only the weak reference outlives it.
+        $Weak = & {
+            $Pool = New-OpenTestPool
+            $Call = [powershell]::Create()
+            $Call.RunspacePool = $Pool
+            [void]$Call.AddScript('1').Invoke()
+            $Call.Dispose()
+            $Ref = [System.WeakReference]::new($script:InternalPoolField.GetValue($Pool))
+            $null = & $script:PoolTeardown $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new())
+            $Ref
+        }
+        # BeginClose finishes on a worker thread, so the pool can stay reachable for a moment after the
+        # teardown returns even when nothing leaks. Collect until it is gone, for up to 10 seconds: a
+        # pool that is only closed stays registered and is still alive when the wait runs out.
+        $Waited = [System.Diagnostics.Stopwatch]::StartNew()
+        do
+        {
+            [System.GC]::Collect()
+            [System.GC]::WaitForPendingFinalizers()
+            [System.GC]::Collect()
+            if (-not $Weak.IsAlive) { break }
+            Start-Sleep -Milliseconds 100
+        } while ($Waited.Elapsed.TotalSeconds -lt 10)
+        $Weak.IsAlive | Should -BeFalse -Because 'a pool that is only closed stays registered in the process-wide timer queue, which kept one pool, a runspace and its Az modules per subscription for the life of the process'
+    }
+
+    It 'releases an idle pool at once and says so in the debug log' {
+        $Pool = New-OpenTestPool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        [void]$Call.AddScript('1').Invoke()
+        $Call.Dispose()
+
+        $Timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $Result = & $script:PoolTeardown $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new())
+        $Timer.Stop()
+
+        $Result.Released | Should -BeTrue
+        $Timer.Elapsed.TotalSeconds | Should -BeLessThan 1 -Because 'an idle pool has no worker to wait for'
+        $Pool.RunspacePoolStateInfo.State | Should -Be 'Closed'
+        @($Result.Diag | Where-Object { $_ -like 'Metric worker pool released:*' }).Count | Should -Be 1
+    }
+
+    It 'waits for a stuck worker that finishes inside the grace window, then releases the pool' {
+        $Pool = New-OpenTestPool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        # Thread.Sleep does not answer a pipeline stop, like a call blocked in a network read.
+        [void]$Call.AddScript('[System.Threading.Thread]::Sleep(2000)')
+        $Handle = $Call.BeginInvoke()
+        try
+        {
+            $Started = [System.Diagnostics.Stopwatch]::StartNew()
+            # The first runspace of a fresh pool can take several seconds to start on a slow host; a call
+            # that never reached Running would be stopped at once and prove nothing.
+            while ($Call.InvocationStateInfo.State -ne 'Running' -and $Started.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+            $Call.InvocationStateInfo.State | Should -Be 'Running'
+            [void]$Call.BeginStop($null, $null)
+            $Bag = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+            $Bag.Add([pscustomobject]@{ Call = $Call; Handle = $Handle })
+
+            $Timer = [System.Diagnostics.Stopwatch]::StartNew()
+            $Result = & $script:PoolTeardown $Pool $Bag 10
+            $Timer.Stop()
+
+            $Handle.IsCompleted | Should -BeTrue -Because 'the pool is released only after its last worker has ended'
+            $Result.Released | Should -BeTrue
+            $Result.Running | Should -Be 0
+            $Timer.Elapsed.TotalSeconds | Should -BeLessThan 5 -Because 'the wait ends as soon as the worker does, not at the end of the grace window'
+            $Pool.RunspacePoolStateInfo.State | Should -Be 'Closed'
+        }
+        finally
+        {
+            $Call.Dispose()
+        }
+    }
+
+    It 'keeps the pool, does not hang, and logs a warning when a worker outlasts the grace window' {
+        $Pool = New-OpenTestPool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        [void]$Call.AddScript('[System.Threading.Thread]::Sleep(4000)')
+        $Handle = $Call.BeginInvoke()
+        try
+        {
+            $Started = [System.Diagnostics.Stopwatch]::StartNew()
+            # The first runspace of a fresh pool can take several seconds to start on a slow host; a call
+            # that never reached Running would be stopped at once and prove nothing.
+            while ($Call.InvocationStateInfo.State -ne 'Running' -and $Started.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+            $Call.InvocationStateInfo.State | Should -Be 'Running'
+            [void]$Call.BeginStop($null, $null)
+            $Bag = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+            $Bag.Add([pscustomobject]@{ Call = $Call; Handle = $Handle })
+
+            $Timer = [System.Diagnostics.Stopwatch]::StartNew()
+            $Result = & $script:PoolTeardown $Pool $Bag 1
+            $Timer.Stop()
+
+            $Timer.Elapsed.TotalSeconds | Should -BeLessThan 2.5 -Because 'the grace window bounds the wait; Close or an early Dispose would wait for the blocked call'
+            $Result.Released | Should -BeFalse -Because 'a worker was still running, so it was not proven safe to release the pool'
+            $Result.Running | Should -Be 1
+            $Result.Count | Should -Be 1
+            @($Result.Diag | Where-Object { $_ -like 'WARNING: metric worker pool NOT released*' }).Count | Should -Be 1
+
+            # The worker still ends normally afterwards, and the closing pool follows it.
+            $Waited = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $Handle.IsCompleted -and $Waited.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 100 }
+            $Handle.IsCompleted | Should -BeTrue
+            while ($Pool.RunspacePoolStateInfo.State -ne 'Closed' -and $Waited.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 100 }
+            $Pool.RunspacePoolStateInfo.State | Should -Be 'Closed'
+        }
+        finally
+        {
+            $Call.Dispose()
+            $Pool.Dispose()
+        }
+    }
+
+    It 'does not release the pool while a worker nobody holds a handle to is still running' {
+        # A stop or a throw mid-batch can leave a call in flight that never reached the abandoned bag.
+        # Only the pool's own count of free runspaces can see it.
+        $Pool = New-OpenTestPool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        [void]$Call.AddScript('[System.Threading.Thread]::Sleep(3000)')
+        $Handle = $Call.BeginInvoke()
+        try
+        {
+            $Started = [System.Diagnostics.Stopwatch]::StartNew()
+            # The first runspace of a fresh pool can take several seconds to start on a slow host; a call
+            # that never reached Running would be stopped at once and prove nothing.
+            while ($Call.InvocationStateInfo.State -ne 'Running' -and $Started.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+            $Call.InvocationStateInfo.State | Should -Be 'Running'
+
+            $Result = & $script:PoolTeardown $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new()) 1
+
+            $Result.Released | Should -BeFalse -Because 'the pool reported a busy runspace, so not every worker had ended'
+            @($Result.Diag | Where-Object { $_ -like '*idle=False*' }).Count | Should -Be 1
+        }
+        finally
+        {
+            $Waited = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $Handle.IsCompleted -and $Waited.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 100 }
+            $Call.Dispose()
+            $Pool.Dispose()
+        }
+    }
+}
+
+Describe 'Get-RdaFoundryRetailCatalog holds only what the coverage match reads' {
+    BeforeAll {
+        # Shaped like prices.azure.com Items[] entries. The catalog repeats a meter once per region.
+        function New-TestCatalogItem
+        {
+            param([string]$Product, [string]$Meter, [string]$Sku, [string]$Region)
+            [pscustomobject]@{
+                currencyCode = 'USD'; tierMinimumUnits = 0.0; retailPrice = 0.0025; unitPrice = 0.0025; armRegionName = $Region; location = $Region
+                effectiveStartDate = '2026-01-01T00:00:00Z'; meterId = [guid]::NewGuid().ToString(); meterName = $Meter; productId = 'DZH318Z0BQ4K'; skuId = 'DZH318Z0BQ4K/0001'
+                productName = $Product; skuName = $Sku; serviceName = 'Foundry Models'; serviceId = 'DZH318Z0BQ4K'; serviceFamily = 'AI + Machine Learning'
+                unitOfMeasure = '1K'; type = 'Consumption'; isPrimaryMeterRegion = $true; armSkuName = $Sku
+            }
+        }
+        $script:CatalogPages = @(
+            [pscustomobject]@{
+                Items        = @(
+                    (New-TestCatalogItem -Product 'Azure OpenAI' -Meter 'gpt 4o 0806 Inp regnl Tokens' -Sku 'gpt 4o 0806 Inp regnl' -Region 'eastus')
+                    (New-TestCatalogItem -Product 'Azure OpenAI' -Meter 'gpt 4o 0806 Inp regnl Tokens' -Sku 'gpt 4o 0806 Inp regnl' -Region 'westeurope')
+                    (New-TestCatalogItem -Product 'Mistral Large' -Meter 'Mistral Large Input Tokens' -Sku 'Mistral Large Input' -Region 'eastus')
+                )
+                NextPageLink = 'https://prices.example.invalid/api/retail/prices?page=2'
+            }
+            [pscustomobject]@{
+                Items        = @(
+                    (New-TestCatalogItem -Product 'Azure OpenAI' -Meter 'gpt 4o 0806 Inp regnl Tokens' -Sku 'gpt 4o 0806 Inp regnl' -Region 'swedencentral')
+                    (New-TestCatalogItem -Product 'Phi-4' -Meter 'Phi-4 Input Tokens' -Sku 'Phi-4 Input' -Region 'eastus')
+                )
+                NextPageLink = $null
+            }
+        )
+        $script:FullCatalog = @($script:CatalogPages | ForEach-Object { $_.Items })
+    }
+    BeforeEach {
+        Mock Invoke-RestMethod { if ($Uri -like '*page=2*') { $script:CatalogPages[1] } else { $script:CatalogPages[0] } }
+    }
+
+    It 'keeps the first item of each product, meter and SKU, in catalog order, with only the four fields the match reads' {
+        $Catalog = @(Get-RdaFoundryRetailCatalog)
+        $Catalog.Count | Should -Be 3 -Because 'the regional copies of a meter carry the same four fields'
+        ($Catalog | ForEach-Object { $_.meterName }) -join '|' | Should -Be 'gpt 4o 0806 Inp regnl Tokens|Mistral Large Input Tokens|Phi-4 Input Tokens'
+        foreach ($Item in $Catalog)
+        {
+            ($Item.PSObject.Properties.Name -join ',') | Should -Be 'productName,meterName,skuName,armSkuName' -Because 'each full item holds some twenty properties the coverage phase never reads'
+        }
+    }
+
+    It 'gives the coverage match the same answer as the full catalog for <ModelName>' -ForEach @(
+        @{ ModelName = 'gpt-4o'; ModelFormat = 'OpenAI'; ShouldMatch = $true }
+        @{ ModelName = 'Mistral-Large'; ModelFormat = 'Mistral AI'; ShouldMatch = $true }
+        @{ ModelName = 'Phi-4'; ModelFormat = 'Microsoft'; ShouldMatch = $false }
+        @{ ModelName = 'Llama-3.3-70B'; ModelFormat = 'Meta'; ShouldMatch = $false }
+    ) {
+        $Model = [pscustomobject]@{ ModelName = $ModelName; ModelFormat = $ModelFormat }
+        $Expected = Test-RdaRetailPriceMatch -Model $Model -CatalogItems $script:FullCatalog
+        $Actual = Test-RdaRetailPriceMatch -Model $Model -CatalogItems @(Get-RdaFoundryRetailCatalog)
+        $Expected.Matched | Should -Be $ShouldMatch -Because 'the fixture has both a matching and a non-matching case, so the comparison is not vacuous'
+        $Actual.Matched | Should -Be $Expected.Matched
+        $Actual.RetailMatch | Should -Be $Expected.RetailMatch
+    }
+}

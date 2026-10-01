@@ -241,8 +241,11 @@ Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
         $script:MetricsSrc | Should -Match '(?s)elseif \(Wait-RdaMetricCall -Handle \$CallHandle -TimeoutSeconds \$CallTimeoutSeconds\).*?finally\s*\{\s*\$Call\.Dispose\(\)\s*\}\s*\}\s*else\s*\{\s*\$TimedOut = \$true\s*\$LastError = \("Timed out after \{0\}s" -f \$CallTimeoutSeconds\).*?\[void\]\$Call\.BeginStop\(\$null, \$null\)\s*\$AbandonedCalls\.Add'
     }
     It 'closes the pool after the last batch without waiting on abandoned calls' {
-        $script:MetricsSrc | Should -Match '\[void\]\$MetricCallPool\.BeginClose\(\$null, \$null\)'
-        $script:MetricsSrc | Should -Not -Match '\$MetricCallPool\.(Close|Dispose)\(\)' -Because 'both wait for a call that is still blocked'
+        $script:MetricsSrc | Should -Match '\$PoolCloseHandle = \$MetricCallPool\.BeginClose\(\$null, \$null\)'
+        $script:MetricsSrc | Should -Not -Match '\$MetricCallPool\.Close\(\)' -Because 'Close waits for a call that is still blocked'
+        # Dispose on an open pool also waits for a blocked call. It is allowed only after BeginClose, and
+        # only once the close has finished and the pool reports Closed, i.e. every worker has ended.
+        $script:MetricsSrc | Should -Match '(?s)\$PoolCloseHandle = \$MetricCallPool\.BeginClose\(\$null, \$null\).*?if \(\$PoolClosed\)\s*\{\s*\$MetricCallPool\.Dispose\(\)'
     }
 
     It 'Wait-RdaMetricCall returns true as soon as a quick call completes' {
@@ -417,10 +420,20 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         $Logged | Should -Not -Contain 'Write-Verbose' -Because 'Write-Verbose is discarded at the default preference, losing the only trace of a leaked pool'
     }
 
-    It 'still uses BeginClose, never Close or Dispose, on the pool' {
-        # Both wait for a call blocked in a network read.
-        $Bad = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -in @('Close', 'Dispose') }, $true))
+    It 'still uses BeginClose, never Close, and disposes the pool only once every worker has ended' {
+        # Close waits for a call blocked in a network read, and so does Dispose on a pool still open.
+        $Bad = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -eq 'Close' }, $true))
         $Bad.Count | Should -Be 0
+        $Dispose = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -eq 'Dispose' }, $true))
+        $Dispose.Count | Should -Be 1 -Because 'one place releases the pool'
+        # Its nearest enclosing if must test the proof, and the proof must require a finished close on a
+        # pool that reports Closed, with the pool idle and no abandoned call still running.
+        $Node = $Dispose[0].Parent
+        while ($null -ne $Node -and $Node -isnot [System.Management.Automation.Language.IfStatementAst]) { $Node = $Node.Parent }
+        $Node | Should -Not -BeNullOrEmpty
+        $Node.Clauses[0].Item1.Extent.Text | Should -Be '$PoolClosed'
+        $script:MetricsSrc | Should -Match '(?s)if \(\$PoolIdle -and \$MetricAbandonedRunning -eq 0 -and \$null -ne \$PoolCloseHandle\)\s*\{\s*\$PoolClosed = \$PoolCloseHandle\.AsyncWaitHandle\.WaitOne\(\$PoolCloseRemainingMs\) -and \$MetricCallPool\.RunspacePoolStateInfo\.State -eq \[System\.Management\.Automation\.Runspaces\.RunspacePoolState\]::Closed'
+        $script:MetricsSrc | Should -Match '\$PoolIdle = \(\$MetricCallPool\.GetAvailableRunspaces\(\) -eq \$MetricCallPool\.GetMaxRunspaces\(\)\)'
     }
 
     It 'drains the abandoned calls after every batch, not only at phase end' {

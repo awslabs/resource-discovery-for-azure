@@ -511,7 +511,7 @@ Describe 'Foundry token phase feeding the coverage CSV (the real collector bodie
             function Get-AzMetric
             {
                 [CmdletBinding()]
-                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top)
+                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top, [Nullable[timespan]]$TimeGrain)
                 throw 'stub - should be mocked'
             }
         }
@@ -724,7 +724,7 @@ Describe 'Invoke-RdaFoundryTokenMetricQuery: series cap and outcome reporting' {
             function Get-AzMetric
             {
                 [CmdletBinding()]
-                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top)
+                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top, [Nullable[timespan]]$TimeGrain)
                 throw 'stub - should be mocked'
             }
         }
@@ -749,6 +749,11 @@ Describe 'Invoke-RdaFoundryTokenMetricQuery: series cap and outcome reporting' {
         $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs -Top 10
         $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs
         Should -Invoke Get-AzMetric -Times 2 -Exactly -ParameterFilter { $null -eq $Top }
+    }
+
+    It 'asks for one-day buckets, so the window total does not arrive as one point per minute' {
+        $null = Invoke-RdaFoundryTokenMetricQuery @script:QueryArgs
+        Should -Invoke Get-AzMetric -Times 1 -Exactly -ParameterFilter { $TimeGrain -eq [TimeSpan]::FromDays(1) } -Because 'only the window total is used; at the default one-minute grain a 30-day query returns 43,200 points per deployment, which held 85-136 MB per query on a two-deployment account'
     }
 
     It 'reports Collected, Denied and NotSupported to the caller' {

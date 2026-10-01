@@ -1221,14 +1221,35 @@ function Global:Get-RdaFoundryRetailCatalog
     $Base = 'https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview'
     $Filter = [uri]::EscapeDataString("serviceName eq '$ServiceName'")
     $Uri = $Base + '&$filter=' + $Filter
-    $Items = [System.Collections.ArrayList]::new()
+    # Test-RdaRetailPriceMatch reads only productName, meterName, skuName and armSkuName, and the
+    # catalog repeats each meter once per region (about 35,000 full items, roughly 290 MB, for some
+    # 1,900 distinct combinations). Keep the first item of each combination, in catalog order, with
+    # only those four fields, so the held catalog is a few MB. Each page is dropped after it is read.
+    $Items = [System.Collections.Generic.List[object]]::new()
+    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $Page = 0
 
     while (-not [string]::IsNullOrEmpty($Uri) -and $Page -lt $MaxPages)
     {
         $Resp = Invoke-RestMethod -Uri $Uri -Method GET -ErrorAction Stop
-        if ($null -ne $Resp.Items) { foreach ($It in $Resp.Items) { $null = $Items.Add($It) } }
+        if ($null -ne $Resp.Items)
+        {
+            foreach ($It in $Resp.Items)
+            {
+                $Key = '{0}|{1}|{2}|{3}' -f "$($It.productName)", "$($It.meterName)", "$($It.skuName)", "$($It.armSkuName)"
+                if ($Seen.Add($Key))
+                {
+                    $Items.Add([pscustomobject]@{
+                            productName = $It.productName
+                            meterName   = $It.meterName
+                            skuName     = $It.skuName
+                            armSkuName  = $It.armSkuName
+                        })
+                }
+            }
+        }
         $Uri = $Resp.NextPageLink
+        $Resp = $null
         $Page++
     }
 

@@ -981,8 +981,18 @@ function Resolve-TenantId
     $GuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     if ($Value -match $GuidPattern) { return $Value }
 
-    $Url = "https://login.microsoftonline.com/$Value/v2.0/.well-known/openid-configuration"
-    Write-Host ("Resolving tenant '{0}' via OIDC discovery..." -f $Value) -ForegroundColor Cyan
+    # An email / UPN (user@domain) is not a valid tenant path for OIDC discovery -
+    # login.microsoftonline.com rejects it with 400. Take the domain after the '@',
+    # which IS a valid tenant identifier when it is a verified domain on the tenant.
+    $Lookup = $Value
+    if ($Value -match '^[^@]+@(.+)$')
+    {
+        $Lookup = $Matches[1]
+        Write-Host ("Interpreting '{0}' as an email; using its domain '{1}' as the tenant." -f $Value, $Lookup) -ForegroundColor Cyan
+    }
+
+    $Url = "https://login.microsoftonline.com/$Lookup/v2.0/.well-known/openid-configuration"
+    Write-Host ("Resolving tenant '{0}' via OIDC discovery..." -f $Lookup) -ForegroundColor Cyan
     try
     {
         $Config = Invoke-RestMethod -Uri $Url -Method Get -ErrorAction Stop

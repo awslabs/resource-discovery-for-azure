@@ -55,8 +55,9 @@ param (
 if ([string]::IsNullOrWhiteSpace($TenantID))
 {
     Write-Host "ERROR: -TenantID is required." -ForegroundColor Red
-    Write-Host "Supply the tenant to inventory, either its GUID or its domain name:" -ForegroundColor Yellow
+    Write-Host "Supply the tenant to inventory as its GUID, its domain name, or an email on that domain:" -ForegroundColor Yellow
     Write-Host "    ./Run-AllSubscriptions.ps1 -TenantID contoso.onmicrosoft.com" -ForegroundColor Yellow
+    Write-Host "    ./Run-AllSubscriptions.ps1 -TenantID you@contoso.com" -ForegroundColor Yellow
     Write-Host "To read it from an existing signed-in session: (Get-AzContext).Tenant.Id" -ForegroundColor Yellow
     exit 1
 }

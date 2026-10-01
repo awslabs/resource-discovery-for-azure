@@ -56,9 +56,10 @@ reference.
 
 For contributors and anyone tracing behaviour back to the source.
 
-- [architecture-two-scripts.md](architecture-two-scripts.md) — why RDA is split
+- [architecture-two-scripts.md](architecture-two-scripts.md) - why RDA is split
   into an inner per-subscription worker and a tenant-wide wrapper (the
-  process-global Az context constraint behind safe parallelism).
+  process-global Az context constraint behind safe parallelism), and how the
+  metrics phase's worker pool runs inside one process without leaking memory.
 - [ResourceInventory-line-by-line.md](ResourceInventory-line-by-line.md) — a
   plain-English, top-to-bottom walkthrough of `ResourceInventory.ps1`.
 - [contributing-collectors.md](contributing-collectors.md) — orientation for

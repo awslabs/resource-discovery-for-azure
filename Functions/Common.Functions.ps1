@@ -570,6 +570,47 @@ function Test-RdaPermanentRequestError
     return [bool]($ErrorMessage -match $PermanentPattern)
 }
 
+function Close-RdaMetricWorkerPool
+{
+    # Releases the metric worker pool that Extension/Metrics.ps1 keeps open across subscriptions under
+    # the wrappers ($Global:MetricCallPool), once, at the end of the run. The phase end hands a pool on
+    # only when every worker has finished, so nothing should still be running here; the same proof is
+    # still required before Dispose. BeginClose, never Close, and Dispose only once the close has
+    # finished on a pool that reports Closed. A pool that fails that proof is left alone rather than
+    # torn down under a running call. Returns what happened, for the caller to log.
+    param([int]$GraceSeconds = 10)
+
+    $Pool = $Global:MetricCallPool
+    $Global:MetricCallPool = $null
+    if ($null -eq $Pool)
+    {
+        return 'none'
+    }
+
+    try
+    {
+        if ($Pool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
+        {
+            return ('not released: pool state {0}' -f $Pool.RunspacePoolStateInfo.State)
+        }
+        if ($Pool.GetAvailableRunspaces() -ne $Pool.GetMaxRunspaces())
+        {
+            return 'not released: a worker is still busy'
+        }
+        $CloseHandle = $Pool.BeginClose($null, $null)
+        if ($CloseHandle.AsyncWaitHandle.WaitOne([math]::Max(0, $GraceSeconds) * 1000) -and $Pool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed)
+        {
+            $Pool.Dispose()
+            return 'released'
+        }
+        return ('not released: close did not finish within {0}s' -f $GraceSeconds)
+    }
+    catch
+    {
+        return ('not released: {0}' -f $_.Exception.Message)
+    }
+}
+
 function Write-RdaMemorySnapshot
 {
     [CmdletBinding()]

@@ -15,7 +15,10 @@ param(
     [switch]$SkipDiskMetrics,
     [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     [switch]$MetricsDetailed,
-    [switch]$UseMetricsBatch
+    [switch]$UseMetricsBatch,
+    # Set by ResourceInventory.ps1 under the wrappers (-RunAllSubs): keep the worker pool open in
+    # $Global:MetricCallPool for the next subscription in this process instead of releasing it.
+    [switch]$ReuseWorkerPool
 )
 
 if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
@@ -767,9 +770,27 @@ if ($Task -eq 'Processing')
     $MetricAbandonedCalls = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
     if ($MetricCount -gt 0)
     {
-        $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
-        [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
-        $MetricCallPool.Open()
+        # Under the wrappers one pool serves every subscription in the process. A runspace that loads
+        # the Az modules leaves its type table behind in PowerShell's process-wide member-lookup cache
+        # (up to about 128 of them, roughly 0.8 MB each), so a new pool per subscription adds about six
+        # to that cache every time. Reusing the pool loads Az once per worker for the whole run. Only an
+        # open pool is reused; one left in any other state is dropped and a fresh one is built.
+        if ($ReuseWorkerPool -and $null -ne $Global:MetricCallPool -and $Global:MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
+        {
+            $MetricCallPool = $Global:MetricCallPool
+            [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
+            Write-MetricsDiag "Metric worker pool reused from the previous subscription in this process."
+        }
+        else
+        {
+            $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+            [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
+            $MetricCallPool.Open()
+            if ($ReuseWorkerPool)
+            {
+                $Global:MetricCallPool = $MetricCallPool
+            }
+        }
     }
 
     $MetricAbandonedCount = 0
@@ -1341,35 +1362,56 @@ if ($Task -eq 'Processing')
                     [System.Threading.Thread]::Sleep(100)
                 }
 
-                $PoolCloseHandle = $MetricCallPool.BeginClose($null, $null)
+                $PoolKept = ($ReuseWorkerPool -and $PoolIdle -and $AbandonedOutstanding -eq 0)
+                if ($PoolKept)
+                {
+                    # Every worker has finished, so the pool stays open for the next subscription in this
+                    # process. The wrappers release it once, at the end of the run
+                    # (Close-RdaMetricWorkerPool).
+                    Write-MetricsDiag ("Metric worker pool kept open for the next subscription: every worker had finished (waited {0} ms)." -f $PoolGraceClock.ElapsedMilliseconds)
+                }
+                else
+                {
+                    # A pool with a worker still busy is never handed to the next subscription: it is
+                    # retired here and released only if the checks below prove every worker has ended.
+                    if ($ReuseWorkerPool -and [object]::ReferenceEquals($Global:MetricCallPool, $MetricCallPool))
+                    {
+                        $Global:MetricCallPool = $null
+                    }
+
+                    $PoolCloseHandle = $MetricCallPool.BeginClose($null, $null)
+                }
                 foreach ($Abandoned in $MetricAbandonedCalls)
                 {
                     if ($Abandoned.Handle.IsCompleted) { $Abandoned.Call.Dispose() } else { $MetricAbandonedRunning++ }
                 }
 
-                # Closing alone is not enough: an opened pool registers a cleanup timer in the
-                # process-wide timer queue, and only Dispose removes it. Until then the timer keeps the
-                # pool reachable, and with it a runspace holding the Az modules and its last results, so
-                # every subscription under the wrapper added one to the heap for the life of the process.
-                # Dispose runs only once it is PROVEN that every worker has ended: the close has finished
-                # (it does not finish while any runspace still runs a call), the pool reports Closed, and
-                # no abandoned call is still running. Otherwise the pool is kept and the debug log says so:
-                # that costs one pool of memory for this subscription, never a hang or a torn-down worker.
-                $PoolCloseRemainingMs = [int][math]::Max(0, ($MetricPoolReleaseGraceSeconds * 1000) - $PoolGraceClock.ElapsedMilliseconds)
-                $PoolClosed = $false
-                if ($PoolIdle -and $MetricAbandonedRunning -eq 0 -and $null -ne $PoolCloseHandle)
+                if (-not $PoolKept)
                 {
-                    $PoolClosed = $PoolCloseHandle.AsyncWaitHandle.WaitOne($PoolCloseRemainingMs) -and $MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed
-                }
+                    # Closing alone is not enough: an opened pool registers a cleanup timer in the
+                    # process-wide timer queue, and only Dispose removes it. Until then the timer keeps the
+                    # pool reachable, and with it a runspace holding the Az modules and its last results, so
+                    # every subscription under the wrapper added one to the heap for the life of the process.
+                    # Dispose runs only once it is PROVEN that every worker has ended: the close has finished
+                    # (it does not finish while any runspace still runs a call), the pool reports Closed, and
+                    # no abandoned call is still running. Otherwise the pool is kept and the debug log says so:
+                    # that costs one pool of memory for this subscription, never a hang or a torn-down worker.
+                    $PoolCloseRemainingMs = [int][math]::Max(0, ($MetricPoolReleaseGraceSeconds * 1000) - $PoolGraceClock.ElapsedMilliseconds)
+                    $PoolClosed = $false
+                    if ($PoolIdle -and $MetricAbandonedRunning -eq 0 -and $null -ne $PoolCloseHandle)
+                    {
+                        $PoolClosed = $PoolCloseHandle.AsyncWaitHandle.WaitOne($PoolCloseRemainingMs) -and $MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed
+                    }
 
-                if ($PoolClosed)
-                {
-                    $MetricCallPool.Dispose()
-                    Write-MetricsDiag ("Metric worker pool released: every worker had finished (waited {0} ms)." -f $PoolGraceClock.ElapsedMilliseconds)
-                }
-                else
-                {
-                    Write-MetricsDiag ("WARNING: metric worker pool NOT released after {0}s - idle={1}, abandoned calls still running={2}, pool state={3}. It stays in memory until the process ends; the run itself is unaffected." -f $MetricPoolReleaseGraceSeconds, $PoolIdle, $MetricAbandonedRunning, $MetricCallPool.RunspacePoolStateInfo.State)
+                    if ($PoolClosed)
+                    {
+                        $MetricCallPool.Dispose()
+                        Write-MetricsDiag ("Metric worker pool released: every worker had finished (waited {0} ms)." -f $PoolGraceClock.ElapsedMilliseconds)
+                    }
+                    else
+                    {
+                        Write-MetricsDiag ("WARNING: metric worker pool NOT released after {0}s - idle={1}, abandoned calls still running={2}, pool state={3}. It stays in memory until the process ends; the run itself is unaffected." -f $MetricPoolReleaseGraceSeconds, $PoolIdle, $MetricAbandonedRunning, $MetricCallPool.RunspacePoolStateInfo.State)
+                    }
                 }
             }
             catch

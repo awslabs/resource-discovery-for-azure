@@ -3110,5 +3110,6 @@ else
 $FinalBundleFile = if ($FinalBundleBuilt) { $OuterZipFile } else { '' }
 $FinalLines = Get-RdaFinalScreenLines -ExitCode $WrapperExitCode -HasWarnings $FinalHasWarnings -TranscriptFile $WrapperTranscriptFile -TranscriptKept $FinalTranscriptKept -BundleFile $FinalBundleFile -InventoryFolderName (Split-Path -Path $InventoryRoot -Leaf) -ShardIndex $ShardIndex -ShardCount $ShardCount -SupportBundleListed ($SupportLogOutcome['Listed'] -and -not $FinalScreenCleared)
 Write-RdaHostLinesInTranscript -Lines $FinalLines -TranscriptStarted:$FinalTranscriptKept -TranscriptFile $WrapperTranscriptFile
+Write-Verbose ("Metric worker pool at wrapper exit: {0}" -f (Close-RdaMetricWorkerPool))
 exit $WrapperExitCode
 

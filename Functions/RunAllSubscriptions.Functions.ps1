@@ -129,6 +129,12 @@ function Invoke-RdaSupportLogCollectionInTranscript
 function Exit-Wrapper
 {
     param([int]$Code = 0)
+    # The metric worker pool is shared by every subscription of the run; release it before leaving,
+    # so a run started from an interactive session does not leave it in that session.
+    if (Get-Command -Name 'Close-RdaMetricWorkerPool' -CommandType Function -ErrorAction SilentlyContinue)
+    {
+        Write-Verbose ("Metric worker pool at wrapper exit: {0}" -f (Close-RdaMetricWorkerPool))
+    }
     if ($WrapperTranscriptStarted)
     {
         try { Stop-Transcript | Out-Null }

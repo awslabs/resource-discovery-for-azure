@@ -580,6 +580,158 @@ Describe 'Extension/Metrics.ps1 releases its runspace pool when the phase ends' 
     }
 }
 
+Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions of a wrapper run' {
+    BeforeAll {
+        # Lifted out of the shipped script by AST, as above, so the tests run what Metrics.ps1 does.
+        $MetricsAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
+        $Create = @($MetricsAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$MetricCount -gt 0' -and $N.Extent.Text -match 'CreateRunspacePool' }, $true))
+        if ($Create.Count -ne 1) { throw ('Expected one block that builds the metrics pool; found {0}.' -f $Create.Count) }
+        $script:PoolCreate = [scriptblock]::Create((@(
+                    'param($ReuseWorkerPool, $MetricCount = 1, $ConcurrencyLimit = 2, $MetricMaxRetries = 0)'
+                    '$MetricCallPool = $null'
+                    '$CreateDiag = [System.Collections.Generic.List[string]]::new()'
+                    'function Write-MetricsDiag { param($Message) $CreateDiag.Add([string]$Message) }'
+                    $Create[0].Extent.Text
+                    '[pscustomobject]@{ Pool = $MetricCallPool; Diag = @($CreateDiag) }'
+                ) -join [Environment]::NewLine))
+        $Teardown = @($MetricsAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $null -ne $N.Finally -and $N.Finally.Extent.Text -match 'MetricCallPool\.BeginClose' }, $true))
+        $script:PoolTeardownShared = [scriptblock]::Create((@(
+                    'param($MetricCallPool, $MetricAbandonedCalls, $MetricPoolReleaseGraceSeconds = 10, $ReuseWorkerPool)'
+                    '$MetricAbandonedDrained = 0'
+                    '$MetricAbandonedRunning = 0'
+                    '$TeardownDiag = [System.Collections.Generic.List[string]]::new()'
+                    'function Write-MetricsDiag { param($Message) $TeardownDiag.Add([string]$Message) }'
+                    ('. ' + $Teardown[0].Finally.Extent.Text)
+                    '[pscustomobject]@{ Running = $MetricAbandonedRunning; Released = [bool]$PoolClosed; Diag = @($TeardownDiag) }'
+                ) -join [Environment]::NewLine))
+        $script:InvSrc = Get-Content -Raw -LiteralPath $script:InvPath
+        $script:WrapperSrc = Get-Content -Raw -LiteralPath $script:WrapperPath
+        $script:WrapperFnSrc = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1')
+    }
+
+    BeforeEach {
+        $script:PriorPool = $Global:MetricCallPool
+        $Global:MetricCallPool = $null
+    }
+
+    AfterEach {
+        if ($null -ne $Global:MetricCallPool) { $null = Close-RdaMetricWorkerPool }
+        $Global:MetricCallPool = $script:PriorPool
+    }
+
+    It 'reuses the open pool for the next subscription under the wrappers' {
+        $First = & $script:PoolCreate $true
+        $Second = & $script:PoolCreate $true
+        [object]::ReferenceEquals($First.Pool, $Second.Pool) | Should -BeTrue -Because 'one pool serves every subscription of the run'
+        [object]::ReferenceEquals($Global:MetricCallPool, $First.Pool) | Should -BeTrue
+        $First.Diag.Count | Should -Be 0
+        @($Second.Diag | Where-Object { $_ -like 'Metric worker pool reused*' }).Count | Should -Be 1
+    }
+
+    It 'builds a fresh pool per run, and keeps nothing in the global, outside the wrappers' {
+        $First = & $script:PoolCreate $false
+        $Second = & $script:PoolCreate $false
+        try
+        {
+            [object]::ReferenceEquals($First.Pool, $Second.Pool) | Should -BeFalse
+            $Global:MetricCallPool | Should -BeNullOrEmpty
+        }
+        finally
+        {
+            foreach ($P in @($First.Pool, $Second.Pool)) { [void]$P.BeginClose($null, $null).AsyncWaitHandle.WaitOne(10000); $P.Dispose() }
+        }
+    }
+
+    It 'does not reuse a pool that is no longer open' {
+        $First = & $script:PoolCreate $true
+        [void]$First.Pool.BeginClose($null, $null).AsyncWaitHandle.WaitOne(10000)
+        $First.Pool.Dispose()
+        $Second = & $script:PoolCreate $true
+        [object]::ReferenceEquals($First.Pool, $Second.Pool) | Should -BeFalse
+        $Second.Pool.RunspacePoolStateInfo.State | Should -Be 'Opened'
+        [object]::ReferenceEquals($Global:MetricCallPool, $Second.Pool) | Should -BeTrue
+    }
+
+    It 'keeps an idle pool open at phase end under the wrappers, and the wrapper releases it once at the end' {
+        $Pool = (& $script:PoolCreate $true).Pool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        [void]$Call.AddScript('1').Invoke()
+        $Call.Dispose()
+
+        $Result = & $script:PoolTeardownShared $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new()) 10 $true
+        $Result.Released | Should -BeFalse
+        $Pool.RunspacePoolStateInfo.State | Should -Be 'Opened'
+        [object]::ReferenceEquals($Global:MetricCallPool, $Pool) | Should -BeTrue
+        @($Result.Diag | Where-Object { $_ -like 'Metric worker pool kept open for the next subscription*' }).Count | Should -Be 1
+
+        Close-RdaMetricWorkerPool | Should -Be 'released'
+        $Pool.RunspacePoolStateInfo.State | Should -Be 'Closed'
+        $Global:MetricCallPool | Should -BeNullOrEmpty
+        Close-RdaMetricWorkerPool | Should -Be 'none'
+    }
+
+    It 'retires a pool whose worker outlasts the grace window instead of handing it to the next subscription' {
+        $Pool = (& $script:PoolCreate $true).Pool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        [void]$Call.AddScript('[System.Threading.Thread]::Sleep(3000)')
+        $Handle = $Call.BeginInvoke()
+        try
+        {
+            $Started = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($Call.InvocationStateInfo.State -ne 'Running' -and $Started.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+            $Call.InvocationStateInfo.State | Should -Be 'Running'
+
+            $Result = & $script:PoolTeardownShared $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new()) 1 $true
+
+            $Result.Released | Should -BeFalse -Because 'a worker was still running'
+            $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a busy pool is never reused'
+            @($Result.Diag | Where-Object { $_ -like 'WARNING: metric worker pool NOT released*' }).Count | Should -Be 1
+            $Next = (& $script:PoolCreate $true).Pool
+            [object]::ReferenceEquals($Next, $Pool) | Should -BeFalse
+        }
+        finally
+        {
+            $Waited = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $Handle.IsCompleted -and $Waited.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 100 }
+            $Call.Dispose()
+            $Pool.Dispose()
+        }
+    }
+
+    It 'Close-RdaMetricWorkerPool leaves a pool with a busy worker alone' {
+        $Pool = (& $script:PoolCreate $true).Pool
+        $Call = [powershell]::Create()
+        $Call.RunspacePool = $Pool
+        [void]$Call.AddScript('[System.Threading.Thread]::Sleep(3000)')
+        $Handle = $Call.BeginInvoke()
+        try
+        {
+            $Started = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($Call.InvocationStateInfo.State -ne 'Running' -and $Started.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+            $Timer = [System.Diagnostics.Stopwatch]::StartNew()
+            Close-RdaMetricWorkerPool | Should -Be 'not released: a worker is still busy'
+            $Timer.Elapsed.TotalSeconds | Should -BeLessThan 1 -Because 'it never waits on a running call'
+            $Pool.RunspacePoolStateInfo.State | Should -Be 'Opened'
+        }
+        finally
+        {
+            $Waited = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $Handle.IsCompleted -and $Waited.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 100 }
+            $Call.Dispose()
+            [void]$Pool.BeginClose($null, $null).AsyncWaitHandle.WaitOne(10000)
+            $Pool.Dispose()
+        }
+    }
+
+    It 'is switched on only by the wrappers, which release the pool on every exit path' {
+        $script:InvSrc | Should -Match '-ReuseWorkerPool:\$RunAllSubs\.IsPresent'
+        $script:WrapperFnSrc | Should -Match '(?s)function Exit-Wrapper\s*\{.*?Close-RdaMetricWorkerPool.*?exit \$Code'
+        $script:WrapperSrc | Should -Match 'Close-RdaMetricWorkerPool\)\)\s*\r?\nexit \$WrapperExitCode'
+    }
+}
+
 Describe 'Get-RdaFoundryRetailCatalog holds only what the coverage match reads' {
     BeforeAll {
         # Shaped like prices.azure.com Items[] entries. The catalog repeats a meter once per region.

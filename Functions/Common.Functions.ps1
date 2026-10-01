@@ -780,3 +780,37 @@ function Get-RdaMemoryReadingLines
 
     return $Lines.ToArray()
 }
+
+# A context container scoped to ONE subscription, built from the signed-in context, for use as
+# -DefaultProfile or through $PSDefaultParameterValues['*:DefaultProfile']. Set-AzContext moves the
+# process's current context, which every runspace in the process shares, and with context autosave
+# it also rewrites the saved default subscription the operator's next session starts on. This changes
+# neither: it copies the current context and swaps only its subscription. Throws when the subscription
+# cannot be read with the signed-in identity, as Set-AzContext did, so callers keep their skip path.
+function Get-RdaSubscriptionProfile
+{
+    param([Parameter(Mandatory = $true)][string]$SubscriptionId)
+
+    $ContextType = 'Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext' -as [type]
+    $AbstractContextType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.IAzureContext' -as [type]
+    $ContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type]
+    if ($null -eq $ContextType -or $null -eq $AbstractContextType -or $null -eq $ContainerType)
+    {
+        throw 'the Az.Accounts context types are not loaded, so the Azure calls cannot be scoped to one subscription'
+    }
+
+    $Current = Get-AzContext -ErrorAction Stop
+    if ($null -eq $Current -or $null -eq $Current.Account)
+    {
+        throw 'there is no signed-in Azure context to scope from'
+    }
+    $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -TenantId $Current.Tenant.Id -ErrorAction Stop -WarningAction SilentlyContinue
+    if ($null -eq $Subscription)
+    {
+        throw ('subscription {0} is not visible to the signed-in identity' -f $SubscriptionId)
+    }
+
+    $Scoped = $ContextType::new([System.Management.Automation.LanguagePrimitives]::ConvertTo($Current, $AbstractContextType))
+    $Scoped.Subscription = @($Subscription)[0]
+    return [System.Management.Automation.LanguagePrimitives]::ConvertTo($Scoped, $ContainerType)
+}

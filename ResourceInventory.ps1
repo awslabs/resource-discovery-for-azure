@@ -741,6 +741,12 @@ function ExecuteInventoryProcessing()
 
     function Test-DataPlaneAuthReady([string]$Phase)
     {
+        # Runs against the process's own context, exactly as before the phases scoped their Az calls:
+        # a reconnect must land in the process profile, not in the per-subscription copy a phase
+        # passes through $PSDefaultParameterValues['*:DefaultProfile']. The caller re-pins afterwards.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+        $PSDefaultParameterValues.Remove('*:DefaultProfile')
+
         $TokenOk = {
             $Ctx = $null
             try { $Ctx = Get-AzContext -ErrorAction Stop } catch { return $false }
@@ -1141,6 +1147,11 @@ function ExecuteInventoryProcessing()
 
     function GetResourceConsumption()
     {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         $DebugPreference = "SilentlyContinue"
 
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
@@ -1227,7 +1238,7 @@ function ExecuteInventoryProcessing()
             $ContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                 $ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch
@@ -1237,7 +1248,7 @@ function ExecuteInventoryProcessing()
 
             if (-not $ContextOk)
             {
-                $SkipMessage = ("Consumption SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(if ($ContextSwitchError) { " ($ContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                $SkipMessage = ("Consumption SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(if ($ContextSwitchError) { " ($ContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
                 Write-Log -Message ("Consumption: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
 
                 if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
@@ -1393,7 +1404,7 @@ function ExecuteInventoryProcessing()
                                     $RepinError = $null
                                     try
                                     {
-                                        $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                                        $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                                         $RepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
                                     }
                                     catch
@@ -1416,7 +1427,7 @@ function ExecuteInventoryProcessing()
                                     }
                                     else
                                     {
-                                        Write-Log -Message ("Consumption: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's consumption to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($RepinError) { " ($RepinError)" } else { ' (context did not match the target after Set-AzContext)' })) -Severity 'Error'
+                                        Write-Log -Message ("Consumption: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's consumption to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($RepinError) { " ($RepinError)" } else { ' (context did not match the target after scoping)' })) -Severity 'Error'
                                         throw
                                     }
                                 }
@@ -1675,6 +1686,11 @@ function ExecuteInventoryProcessing()
 
     function GetMarketplaceConsumption()
     {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         # ADDITIVE Marketplace consumption collector.
         #
         # WHY THIS EXISTS. The first-party consumption collector above uses
@@ -1839,7 +1855,7 @@ function ExecuteInventoryProcessing()
             $MpContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                 $MpContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch
@@ -1849,7 +1865,7 @@ function ExecuteInventoryProcessing()
 
             if (-not $MpContextOk)
             {
-                $SkipMessage = ("Marketplace SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's Marketplace billing data to this one." -f $(if ($MpContextSwitchError) { " ($MpContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                $SkipMessage = ("Marketplace SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's Marketplace billing data to this one." -f $(if ($MpContextSwitchError) { " ($MpContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
                 Write-Log -Message ("Marketplace: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
                 $Global:MarketplaceFailedSubs += [pscustomobject]@{
                     Name             = $sub.Name
@@ -1999,7 +2015,7 @@ function ExecuteInventoryProcessing()
                                 $MpRepinError = $null
                                 try
                                 {
-                                    $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                                    $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                                     $MpRepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
                                 }
                                 catch
@@ -2017,7 +2033,7 @@ function ExecuteInventoryProcessing()
                                 }
                                 else
                                 {
-                                    Write-Log -Message ("Marketplace: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's Marketplace data to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($MpRepinError) { " ($MpRepinError)" } else { ' (context did not match the target after Set-AzContext)' })) -Severity 'Error'
+                                    Write-Log -Message ("Marketplace: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's Marketplace data to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($MpRepinError) { " ($MpRepinError)" } else { ' (context did not match the target after scoping)' })) -Severity 'Error'
                                     throw
                                 }
                             }
@@ -2251,6 +2267,11 @@ function ExecuteInventoryProcessing()
 
     function GetFoundryTokenConsumption()
     {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         # TIER 2 FOUNDRY TOKEN COLLECTOR (per-model token counts).
         #
         # WHY THIS EXISTS. RDA's inventory is Azure-Resource-Graph-based, and Resource Graph does
@@ -2288,7 +2309,7 @@ function ExecuteInventoryProcessing()
         # ROLE / RETRY / CONTEXT REUSE. Reuses the SAME Monitoring Reader requirement the metrics
         # phase needs, and the SAME per-subscription context re-pin+verify and per-call
         # retry/Retry-After/denial/auth-expiry envelope the consumption + Marketplace loops use
-        # (Test-DataPlaneAuthReady, Set-AzContext + verify, Test-RdaConsumptionDenial,
+        # (Test-DataPlaneAuthReady, Get-RdaSubscriptionProfile + verify, Test-RdaConsumptionDenial,
         # Test-RdaAuthExpiry, Get-RdaRetryAfterSeconds), deliberately mirrored rather than reinvented.
         #
         # OUTPUT. Appends per-(account, model, role) token rows onto the existing Consumption_*.csv
@@ -2381,7 +2402,7 @@ function ExecuteInventoryProcessing()
             $FtContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                 $FtContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch
@@ -2391,7 +2412,7 @@ function ExecuteInventoryProcessing()
 
             if (-not $FtContextOk)
             {
-                $SkipMessage = ("Foundry tokens SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's token usage to this one." -f $(if ($FtContextSwitchError) { " ($FtContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                $SkipMessage = ("Foundry tokens SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's token usage to this one." -f $(if ($FtContextSwitchError) { " ($FtContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
                 Write-Log -Message ("Foundry tokens: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
                 $Global:FoundryTokenFailedSubs += [pscustomobject]@{
                     Name             = $sub.Name
@@ -2753,6 +2774,11 @@ function ExecuteInventoryProcessing()
 
     function GetFoundryModelCoverage()
     {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         # ADDITIVE Azure AI Foundry model billing-plane coverage collector.
         #
         # WHY THIS EXISTS. A downstream downstream pricing pipeline ingests ONLY the Azure
@@ -2913,14 +2939,14 @@ function ExecuteInventoryProcessing()
             $FcContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                 $FcContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch { $FcContextSwitchError = $_.Exception.Message }
 
             if (-not $FcContextOk)
             {
-                $SkipMessage = ("FoundryModelCoverage SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped rather than reporting zero deployed models." -f $(if ($FcContextSwitchError) { " ($FcContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                $SkipMessage = ("FoundryModelCoverage SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped rather than reporting zero deployed models." -f $(if ($FcContextSwitchError) { " ($FcContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
                 Write-Log -Message ("FoundryModelCoverage: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
                 $Global:FoundryCoverageFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $SkipMessage; Complete = $false; RecordsCollected = 0 }
                 continue

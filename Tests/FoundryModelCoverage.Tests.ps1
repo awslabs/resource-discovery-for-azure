@@ -523,9 +523,9 @@ Describe 'Foundry token phase feeding the coverage CSV (the real collector bodie
         {
             function Invoke-AzRestMethod { [CmdletBinding()] param([string]$Method, [string]$Path) throw 'stub - should be mocked' }
         }
-        if (-not (Get-Command Set-AzContext -ErrorAction SilentlyContinue))
+        if (-not (Get-Command Get-RdaSubscriptionProfile -ErrorAction SilentlyContinue))
         {
-            function Set-AzContext { [CmdletBinding()] param([string]$Subscription) throw 'stub - should be mocked' }
+            function Get-RdaSubscriptionProfile { [CmdletBinding()] param([string]$SubscriptionId) throw 'stub - should be mocked' }
         }
         if (-not (Get-Command Get-AzContext -ErrorAction SilentlyContinue))
         {
@@ -563,7 +563,7 @@ Describe 'Foundry token phase feeding the coverage CSV (the real collector bodie
         # TotalTokens; every metric on acct-b is denied.
         Mock Write-Log { }
         Mock Test-DataPlaneAuthReady { $true }
-        Mock Set-AzContext { }
+        Mock Get-RdaSubscriptionProfile { $null }
         Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $script:E2ESubId } } }
         Mock Get-AzCognitiveServicesAccount {
             @(

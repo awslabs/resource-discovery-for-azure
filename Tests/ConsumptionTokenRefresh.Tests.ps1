@@ -170,12 +170,12 @@ Describe 'A mid-loop reconnect must re-pin the subscription scope before retryin
     # context on the identity's default subscription. Get-UsageAggregates reads
     # the context's subscription, so retrying the page without re-pinning would
     # write ANOTHER subscription's usage rows into this one's Consumption_*.csv -
-    # a cross-subscription billing-data leak. The per-sub loop already pins with
-    # Set-AzContext -Subscription $sub.id and verifies the match before its first
-    # page; the reconnect path must restore that same scope.
+    # a cross-subscription billing-data leak. The per-sub loop already scopes its
+    # Az calls to $sub.id (Get-RdaSubscriptionProfile through $PSDefaultParameterValues)
+    # and verifies the match before its first page; the reconnect path must restore that same scope.
 
     It 're-pins the context to $sub.id after a successful reconnect' {
-        $script:InvSrc | Should -Match 'Set-AzContext -Subscription \$sub\.id' -Because 'the reconnect can reset the context to the identity default subscription, so the loop must re-pin to the current subscription before retrying'
+        $script:InvSrc | Should -Match "\`$PSDefaultParameterValues\['\*:DefaultProfile'\] = Get-RdaSubscriptionProfile -SubscriptionId \`$sub\.id" -Because 'the reconnect can reset the context to the identity default subscription, so the loop must re-pin to the current subscription before retrying'
     }
 
     It 're-verifies the context actually matched $sub.id after re-pinning' {
@@ -185,11 +185,11 @@ Describe 'A mid-loop reconnect must re-pin the subscription scope before retryin
     It 'the re-pin happens INSIDE the auth-expiry refresh branch (after the reconnect helper)' {
         # The re-pin must sit after the Test-DataPlaneAuthReady success check, so
         # it corrects the scope that the reconnect may have moved. If the ONLY
-        # Set-AzContext re-pin were the one at the top of the per-sub loop, a
+        # re-pin were the one at the top of the per-sub loop, a
         # reconnect could still silently move the scope for the rest of the page's
         # retries.
         $RefreshIdx = $script:InvSrc.IndexOf("Test-DataPlaneAuthReady -Phase 'Consumption'")
-        $RepinAfter = $script:InvSrc.IndexOf('Set-AzContext -Subscription $sub.id', $RefreshIdx)
+        $RepinAfter = $script:InvSrc.IndexOf("`$PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId `$sub.id", $RefreshIdx)
         $RefreshIdx | Should -BeGreaterThan -1
         $RepinAfter | Should -BeGreaterThan $RefreshIdx -Because 'the scope re-pin must follow the reconnect it is correcting for'
     }
@@ -336,5 +336,88 @@ Describe 'A token that lapses AGAIN mid-loop is refreshed a second time (intra-p
             $Result.Reconnects | Should -Be 1
             $Result.RefreshCount | Should -Be 1
         }
+    }
+}
+
+Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
+    # Set-AzContext moves the context every runspace in the process shares, and with context autosave
+    # it rewrites the saved default subscription the operator's next session starts on. The billing,
+    # Marketplace and Foundry phases now pass a per-subscription profile through a FUNCTION-LOCAL
+    # $PSDefaultParameterValues instead, and the wrapper's consumption probe does the same.
+    BeforeAll {
+        $Repo = Split-Path $PSScriptRoot -Parent
+        $script:InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Repo 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $script:WrapFnAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Repo 'Functions/RunAllSubscriptions.Functions.ps1'), [ref]$null, [ref]$null)
+        . (Join-Path $Repo 'Functions/Common.Functions.ps1')
+        function Get-SetAzContextCalls($Ast)
+        {
+            @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Set-AzContext' }, $true))
+        }
+        function Get-Fn($Ast, [string]$Name)
+        {
+            $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $Name }, $true)
+        }
+    }
+
+    It 'no longer calls Set-AzContext in ResourceInventory.ps1 or the wrapper functions' {
+        (Get-SetAzContextCalls $script:InvAst).Count | Should -Be 0
+        (Get-SetAzContextCalls $script:WrapFnAst).Count | Should -Be 0
+    }
+
+    It 'gives each scoping phase a function-local PSDefaultParameterValues before it sets the profile' {
+        foreach ($Name in 'GetResourceConsumption', 'GetMarketplaceConsumption', 'GetFoundryTokenConsumption', 'GetFoundryModelCoverage')
+        {
+            $Fn = Get-Fn $script:InvAst $Name
+            $Fn | Should -Not -BeNullOrEmpty -Because $Name
+            $Text = $Fn.Body.Extent.Text
+            $Local = $Text.IndexOf('$PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)')
+            $Scope = $Text.IndexOf("`$PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId `$sub.id")
+            $Local | Should -BeGreaterThan -1 -Because "$Name must copy PSDefaultParameterValues into its own scope"
+            $Scope | Should -BeGreaterThan $Local -Because "$Name must scope only after the copy, so the scope cannot leak to the caller"
+        }
+        $Probe = (Get-Fn $script:WrapFnAst 'Test-ConsumptionAccess').Body.Extent.Text
+        $Probe.IndexOf('$PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)') | Should -BeLessThan $Probe.IndexOf("`$PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile")
+    }
+
+    It 'reconnects against the process context, not the per-subscription copy' {
+        $Text = (Get-Fn $script:InvAst 'Test-DataPlaneAuthReady').Body.Extent.Text
+        $Text | Should -Match ([regex]::Escape("`$PSDefaultParameterValues.Remove('*:DefaultProfile')"))
+        $Text.IndexOf("Remove('*:DefaultProfile')") | Should -BeLessThan $Text.IndexOf('Connect-AzAccount')
+    }
+
+    It 'keeps a function-local scope out of its caller and reaches nested calls' {
+        # PSDefaultParameterValues reaches cmdlets and advanced functions, which is what the Az commands are.
+        function Read-Profile { [CmdletBinding()] [OutputType([string])] param($DefaultProfile) "$DefaultProfile" }
+        function Invoke-Scoped
+        {
+            $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+            $PSDefaultParameterValues['*:DefaultProfile'] = 'sub-B'
+            function Inner { Read-Profile }
+            '{0}/{1}' -f (Read-Profile), (Inner)
+        }
+        Invoke-Scoped | Should -Be 'sub-B/sub-B'
+        Read-Profile | Should -Be '' -Because 'the scope must vanish when the phase function returns'
+    }
+
+    It 'builds a profile for the target subscription and leaves the current context as it was' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        Import-Module Az.Accounts -ErrorAction Stop
+        $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+        $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+        $HomeSub = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new(); $HomeSub.Id = [guid]::NewGuid().ToString()
+        $Target = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new(); $Target.Id = [guid]::NewGuid().ToString()
+        $Current.Subscription = $HomeSub
+        Mock Get-AzContext { $Current }
+        Mock Get-AzSubscription { $Target }
+        $Built = Get-RdaSubscriptionProfile -SubscriptionId $Target.Id
+        ($Built -is ('Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type])) | Should -BeTrue
+        $Built.DefaultContext.Subscription.Id | Should -Be $Target.Id
+        $Current.Subscription.Id | Should -Be $HomeSub.Id -Because 'the signed-in context must not be modified'
+    }
+
+    It 'throws when there is no signed-in context, so the phase takes its skip path' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        Import-Module Az.Accounts -ErrorAction Stop
+        Mock Get-AzContext { $null }
+        { Get-RdaSubscriptionProfile -SubscriptionId 'x' } | Should -Throw '*no signed-in Azure context*'
     }
 }

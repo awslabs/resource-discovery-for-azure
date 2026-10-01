@@ -1437,15 +1437,18 @@ function Test-ConsumptionAccess
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingCmdletAliases', 'Get-UsageAggregates', Justification = 'Only name that exists on Az.Billing before and after 2.1.0')]
     param([Parameter(Mandatory = $true)][string]$SubscriptionId)
 
+    # Scoped to the probe subscription for this function only (Get-RdaSubscriptionProfile), so the
+    # probe moves neither the process's current context nor the operator's saved default subscription.
+    $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
     try
     {
-        $null = Set-AzContext -Subscription $SubscriptionId -ErrorAction Stop
+        $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId
     }
     catch
     {
         return [pscustomobject]@{
             Outcome = 'Unavailable'
-            Detail  = ('could not switch Az context to the probe subscription: {0}' -f $_.Exception.Message)
+            Detail  = ('could not scope the Az calls to the probe subscription: {0}' -f $_.Exception.Message)
         }
     }
 

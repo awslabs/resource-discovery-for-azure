@@ -435,6 +435,106 @@ Describe 'Get-RdaFoundryDeploymentModelMap: resolves deployment + model names vi
     }
 }
 
+Describe 'Model deployment discovery: the cmdlet writes the whole list as ONE pipeline object' {
+    # Az.CognitiveServices 1.16.0 Get-AzCognitiveServicesAccountDeployment writes an account's
+    # deployments as a single List[Deployment] object rather than one object per deployment. Wrapped
+    # in @() alone that list is ONE element whatever the real count, so an account with no
+    # deployments slipped past the no-deployments guard, and an account with two or more reached
+    # Get-RdaFoundryDeploymentModelMap as one $Dep whose .Name joined every name into one bogus key,
+    # leaving each token row named after its deployment instead of its model.
+    #
+    # These tests run the REAL discovery statement (lifted verbatim from GetFoundryTokenConsumption via
+    # the AST) against a fake cmdlet that writes its list the same way (Write-Output -NoEnumerate),
+    # built from the real SDK types when Az.CognitiveServices is installed.
+
+    BeforeAll {
+        $script:HasCogSdk = $null -ne (Import-Module Az.CognitiveServices -PassThru -ErrorAction SilentlyContinue)
+
+        function script:New-CogDeployment([string]$Name, [string]$Model)
+        {
+            if ($script:HasCogSdk)
+            {
+                $Props = [Microsoft.Azure.Management.CognitiveServices.Models.DeploymentProperties]::new()
+                $Props.Model = [Microsoft.Azure.Management.CognitiveServices.Models.DeploymentModel]::new()
+                $Props.Model.Name = $Model
+                # Name has no setter on the SDK type (the service sets it), so it goes through the constructor.
+                return [Microsoft.Azure.Management.CognitiveServices.Models.Deployment]::new($null, $Name, $null, $null, $null, $null, $null, $Props)
+            }
+            [pscustomobject]@{ Name = $Name; Properties = [pscustomobject]@{ Model = [pscustomobject]@{ Name = $Model } } }
+        }
+
+        function script:New-CogDeploymentList([object[]]$Items)
+        {
+            # Assigned inside each branch: an if-expression would enumerate the new empty list to $null.
+            if ($script:HasCogSdk) { $List = [System.Collections.Generic.List[Microsoft.Azure.Management.CognitiveServices.Models.Deployment]]::new() }
+            else { $List = [System.Collections.Generic.List[object]]::new() }
+            foreach ($Item in $Items) { $List.Add($Item) }
+            # The comma keeps the list whole on the way out of this helper.
+            , $List
+        }
+
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
+        $Collector = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'GetFoundryTokenConsumption' }, $true)
+        if (-not $Collector) { throw 'GetFoundryTokenConsumption was not found in ResourceInventory.ps1.' }
+
+        $Discovery = @($Collector.FindAll({ param($N)
+                    $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $N.Left.Extent.Text -eq '$FtDeployments' -and
+                    $N.Right.Extent.Text -match 'Get-AzCognitiveServicesAccountDeployment' }, $true))
+        if ($Discovery.Count -ne 1) { throw ('expected one $FtDeployments discovery statement, found {0}' -f $Discovery.Count) }
+        $DiscoveryText = $Discovery[0].Extent.Text
+
+        $SeriesTop = @($Collector.FindAll({ param($N)
+                    $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FtSeriesTop' }, $true))
+        if ($SeriesTop.Count -ne 1) { throw ('expected one $FtSeriesTop statement, found {0}' -f $SeriesTop.Count) }
+        # Each runs the lifted statement(s) for one $Account and returns the variable they set.
+        $script:Discover = [scriptblock]::Create("param(`$Account)`n$DiscoveryText`n, `$FtDeployments")
+        $script:DiscoverSeriesTop = [scriptblock]::Create("param(`$Account)`n$DiscoveryText`n$($SeriesTop[0].Extent.Text)`n`$FtSeriesTop")
+
+        # Shadows the real cmdlet (a function wins command lookup) and writes the list as one object.
+        function script:Get-AzCognitiveServicesAccountDeployment
+        {
+            [CmdletBinding()]
+            param([string]$ResourceGroupName, [string]$AccountName)
+            Write-Output $script:FakeDeploymentList -NoEnumerate
+        }
+
+        $script:FakeAccount = [pscustomobject]@{ ResourceGroupName = 'rg-ai'; AccountName = 'acct-a' }
+    }
+
+    AfterAll {
+        # The fake must not shadow the real cmdlet for the rest of this file.
+        Remove-Item -Path Function:\Get-AzCognitiveServicesAccountDeployment -ErrorAction SilentlyContinue
+    }
+
+    It 'an account with no deployments yields zero elements, so the no-deployments guard applies' {
+        $script:FakeDeploymentList = script:New-CogDeploymentList @()
+        $script:FakeDeploymentList.GetType().Name | Should -Be 'List`1' -Because 'the fake must write a real (empty) list object'
+        $FtDeployments = & $script:Discover $script:FakeAccount
+
+        @($FtDeployments).Count | Should -Be 0 -Because 'an empty deployment list is zero deployments, not one'
+    }
+
+    It 'an account with two deployments maps each deployment to its own model' {
+        $script:FakeDeploymentList = script:New-CogDeploymentList @(
+            (script:New-CogDeployment 'phi4-test' 'Phi-4'),
+            (script:New-CogDeployment 'phi4-mini-test' 'Phi-4-mini-instruct'))
+        $script:FakeDeploymentList.Count | Should -Be 2 -Because 'the fake must write one list holding both deployments'
+        $FtDeployments = & $script:Discover $script:FakeAccount
+
+        @($FtDeployments).Count | Should -Be 2
+        $Map = Get-RdaFoundryDeploymentModelMap -Deployments $FtDeployments
+        $Map.Count | Should -Be 2 -Because 'each deployment is its own key, not one joined name'
+        $Map['phi4-test'] | Should -Be 'Phi-4'
+        $Map['phi4-mini-test'] | Should -Be 'Phi-4-mini-instruct'
+    }
+
+    It 'asks the metric query for one series per deployment when an account has more than 10' {
+        $script:FakeDeploymentList = script:New-CogDeploymentList @(1..12 | ForEach-Object { script:New-CogDeployment ('dep-{0}' -f $_) 'Phi-4' })
+        & $script:DiscoverSeriesTop $script:FakeAccount | Should -Be 12
+    }
+}
+
 Describe 'GetFoundryTokenConsumption collector wiring (ResourceInventory.ps1)' {
 
     BeforeAll {

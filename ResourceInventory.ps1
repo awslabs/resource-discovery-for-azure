@@ -2469,7 +2469,11 @@ function ExecuteInventoryProcessing()
                     $FtDeployments = $null
                     try
                     {
-                        $FtDeployments = @(Get-AzCognitiveServicesAccountDeployment -ResourceGroupName $Account.ResourceGroupName -AccountName $Account.AccountName -ErrorAction Stop)
+                        # Az.CognitiveServices writes the account's whole deployment list as ONE pipeline
+                        # object (a List[Deployment]), so @() alone holds one element whatever the real
+                        # count. ForEach-Object unrolls it so each deployment is its own element: an
+                        # empty list then counts as zero, and every deployment maps to its own model.
+                        $FtDeployments = @(Get-AzCognitiveServicesAccountDeployment -ResourceGroupName $Account.ResourceGroupName -AccountName $Account.AccountName -ErrorAction Stop | ForEach-Object { $_ })
                     }
                     catch
                     {

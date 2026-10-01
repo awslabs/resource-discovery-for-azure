@@ -1119,8 +1119,13 @@ function Get-StartSnapshot
 
 function Save-CompletedSubscriptionIds
 {
+    # -Reports is the report each completed subscription recorded, as { Name, Id, Count, Zip }. A
+    # -Resume run skips those subscriptions and ships these archives in their place, so the state keeps
+    # one per completed id (the last one given wins) and none for an id that is no longer completed.
+    # Omitted, the state carries no Reports at all.
     param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @(),
         $StartSnapshot = $null,
+        $Reports = $null,
         $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null)
 
     $StateMap = [ordered]@{
@@ -1130,6 +1135,17 @@ function Save-CompletedSubscriptionIds
         LastUpdated              = (Get-Date).ToString('o')
     }
     if ($null -ne $StartSnapshot) { $StateMap['EnumeratedAtStart'] = $StartSnapshot }
+    if ($null -ne $Reports)
+    {
+        $LatestReport = @{}
+        foreach ($Report in @($Reports | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) }))
+        {
+            # Read only once a Count property is confirmed: without one PowerShell reports its intrinsic count of 1.
+            $ReportCount = if ($null -ne $Report.PSObject.Properties['Count']) { [int]$Report.Count } else { 0 }
+            $LatestReport[[string]$Report.Id] = [pscustomobject]@{ Name = [string]$Report.Name; Id = [string]$Report.Id; Count = $ReportCount; Zip = [string]$Report.Zip }
+        }
+        $StateMap['Reports'] = @(foreach ($Id in @($Ids)) { if ($LatestReport.ContainsKey([string]$Id)) { $LatestReport[[string]$Id] } })
+    }
     $State = [pscustomobject]$StateMap
     try
     {
@@ -1750,6 +1766,126 @@ function Select-RdaShippableReports
         Archives = $Archives
         Folders  = $Folders
         LeftOut  = $LeftOut
+    }
+}
+
+function Get-RdaReportArchiveMode
+{
+    # Whether a per-subscription report archive is obfuscated, read from the first line of the
+    # Diagnostics_*.log inside it, which Write-RdaShareableDiagnosticsLog
+    # (Functions/ResourceInventory.Functions.ps1) writes as the header for its mode. Returns
+    # 'Obfuscated' or 'Default', or $null when the archive cannot be read or holds no header this
+    # recognises, so the caller refuses rather than guesses.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $Header = $null
+    try
+    {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        try
+        {
+            # Top level only: the report writes its diagnostics log beside the inventory, not in a folder.
+            $DiagEntries = @($Archive.Entries | Where-Object { $_.FullName -notmatch '[\\/]' -and $_.Name -like 'Diagnostics_*.log' })
+            if ($DiagEntries.Count -ne 1) { return $null }
+            $Reader = [System.IO.StreamReader]::new($DiagEntries[0].Open())
+            try { $Header = $Reader.ReadLine() }
+            finally { $Reader.Dispose() }
+        }
+        finally
+        {
+            $Archive.Dispose()
+        }
+    }
+    catch
+    {
+        Write-Verbose ("Could not read the diagnostics header of {0}: {1}" -f $Path, $_.Exception.Message)
+        return $null
+    }
+
+    $Header = ([string]$Header).Trim()
+    if ($Header -ceq 'Resource Discovery for Azure - shareable diagnostics (obfuscated run)') { return 'Obfuscated' }
+    if ($Header -ceq 'Resource Discovery for Azure - diagnostics (default/non-obfuscated run)') { return 'Default' }
+    return $null
+}
+
+function Get-RdaResumeCarriedReports
+{
+    # What a -Resume run ships for the subscriptions it skipped because an earlier run completed them:
+    # the archive that run recorded for each one in the resume state (Save-CompletedSubscriptionIds
+    # -Reports). Only the skipped subscriptions are looked up, so a subscription outside this run's
+    # scope never ships, and only the one archive recorded per subscription, so an older copy never
+    # does. An archive is carried only when it is usable, its report folder has no aborted-collection
+    # marker, and its diagnostics header shows the same privacy mode as this run. Anything else is
+    # returned under Missing with the reason, so the caller can say which reports the bundle lacks
+    # instead of shipping a mixed or silently incomplete bundle. Test-ReportArchiveUsable and
+    # Test-RdaCollectionAborted come from Functions/Common.Functions.ps1.
+    [CmdletBinding()]
+    param(
+        [object[]]$SkippedSubscriptions = @(),
+        [object[]]$Reports = @(),
+        [bool]$Obfuscated = $false
+    )
+
+    $LatestReport = @{}
+    foreach ($Report in @($Reports | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) }))
+    {
+        $LatestReport[[string]$Report.Id] = $Report
+    }
+    $WantedMode = if ($Obfuscated) { 'Obfuscated' } else { 'Default' }
+    $ModeText = @{ Obfuscated = 'obfuscated'; Default = 'not obfuscated' }
+
+    $Carried = @()
+    $Missing = @()
+    foreach ($Sub in @($SkippedSubscriptions | Where-Object { $null -ne $_ }))
+    {
+        $Id = [string]$Sub.Id
+        $Report = if ($LatestReport.ContainsKey($Id)) { $LatestReport[$Id] } else { $null }
+        $Zip = if ($null -ne $Report) { [string]$Report.Zip } else { '' }
+        $Reason = $null
+        if ([string]::IsNullOrWhiteSpace($Zip))
+        {
+            $Reason = 'the resume state records no report archive for it (state written by an older version of this tool)'
+        }
+        elseif (-not (Test-ReportArchiveUsable -Path $Zip))
+        {
+            $Reason = 'the archive recorded for it is missing or empty: {0}' -f $Zip
+        }
+        elseif (Test-RdaCollectionAborted -Folder ([System.IO.Path]::GetDirectoryName($Zip)))
+        {
+            $Reason = 'its report folder holds an aborted-collection marker: {0}' -f [System.IO.Path]::GetDirectoryName($Zip)
+        }
+        else
+        {
+            $Mode = Get-RdaReportArchiveMode -Path $Zip
+            if ($null -eq $Mode)
+            {
+                $Reason = 'its archive does not show whether it is obfuscated, so it cannot be matched to this run: {0}' -f $Zip
+            }
+            elseif ($Mode -ne $WantedMode)
+            {
+                $Reason = 'its archive is {0} and this run is {1}, and one bundle never mixes the two: {2}' -f $ModeText[$Mode], $ModeText[$WantedMode], $Zip
+            }
+        }
+
+        if ($null -eq $Reason)
+        {
+            $ReportCount = if ($null -ne $Report.PSObject.Properties['Count']) { [int]$Report.Count } else { 0 }
+            $Carried += [pscustomobject]@{ Name = [string]$Sub.Name; Id = $Id; Count = $ReportCount; Zip = $Zip }
+        }
+        else
+        {
+            $Missing += [pscustomobject]@{ Name = [string]$Sub.Name; Id = $Id; Reason = $Reason }
+        }
+    }
+
+    return [pscustomobject]@{
+        Carried = $Carried
+        Missing = $Missing
     }
 }
 

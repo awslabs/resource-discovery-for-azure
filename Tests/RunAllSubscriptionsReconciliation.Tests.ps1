@@ -2544,3 +2544,141 @@ Describe 'Run-AllSubscriptions.ps1: the reconciliation judges only the subscript
         $Loops[0].Condition.Extent.Text | Should -Be '$ResponsibleSubscriptions'
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: a -Resume bundle carries the reports of the subscriptions it skipped' {
+    # A -Resume run skips what an earlier run completed. The earlier run was interrupted before it built
+    # a bundle, so the skipped subscriptions' reports are shipped only through this run's bundle.
+    # The selection statements are lifted from the wrapper's AST and run as written, beside the real
+    # shared functions dot-sourced at the top of this file.
+    BeforeAll {
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+        $script:CarryRoot = Join-Path $TmpBase ("ResumeCarryTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:CarryRoot -Force | Out-Null
+
+        # A report folder and its archive as the inner script leaves them, with a Diagnostics header
+        # for the given mode, or none at all.
+        function script:New-CarryReport
+        {
+            param([string]$Stamp, [string]$Header)
+            $Folder = Join-Path $script:CarryRoot ('ResourcesReport' + $Stamp)
+            $Stage = Join-Path $script:CarryRoot ('stage-' + $Stamp)
+            New-Item -ItemType Directory -Path $Folder, $Stage -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $Stage ('Inventory_ResourcesReport_{0}.json' -f $Stamp)) -Value '{}' -Encoding utf8
+            if ($Header) { Set-Content -LiteralPath (Join-Path $Stage ('Diagnostics_ResourcesReport_{0}.log' -f $Stamp)) -Value @($Header, 'Tool version    : 0.0.0') -Encoding utf8 }
+            $Zip = Join-Path $Folder ('ResourcesReport_{0}.zip' -f $Stamp)
+            Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+            Remove-Item -LiteralPath $Stage -Recurse -Force
+            return $Zip
+        }
+        $script:DefaultHeader = 'Resource Discovery for Azure - diagnostics (default/non-obfuscated run)'
+        $script:ObfuscatedHeader = 'Resource Discovery for Azure - shareable diagnostics (obfuscated run)'
+
+        # The earlier run's report for sub-a, written well before this run started.
+        $script:EarlierZip = script:New-CarryReport -Stamp '20260101000000000aaaa' -Header $script:DefaultHeader
+        $Past = (Get-Date).AddHours(-3)
+        (Get-Item -LiteralPath $script:EarlierZip).LastWriteTime = $Past
+        (Get-Item -LiteralPath (Split-Path -Path $script:EarlierZip -Parent)).LastWriteTime = $Past
+        $script:Since = (Get-Date).AddMinutes(-1)
+        # This run's report for sub-b.
+        $script:ThisRunZip = script:New-CarryReport -Stamp '20260101000000000bbbb' -Header $script:DefaultHeader
+
+        $Tokens = $null
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $script:CarryAst = $Ast
+        $Select = @($Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$Shippable' -and $args[0].Right.Extent.Text -match 'Select-RdaShippableReports' }, $true))
+        if ($Select.Count -ne 1) { throw "Expected exactly one '`$Shippable = Select-RdaShippableReports ...' statement in Run-AllSubscriptions.ps1, found $($Select.Count)." }
+        # The statements that work out what is carried and the records that ship, in source order,
+        # then the selection.
+        $Carry = @($Ast.EndBlock.Statements | Where-Object {
+                ($_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -in @('$ResumeCarry', '$CarriedReports', '$UncarriedSkipped', '$ShippedRecords')) -or
+                ($_ -is [System.Management.Automation.Language.ForEachStatementAst] -and $_.Variable.Extent.Text -eq '$Carried')
+            } | ForEach-Object { $_.Extent.Text })
+        $script:SelectionBlock = [scriptblock]::Create(
+            "param(`$InventoryRoot, `$RunStartTime, `$SubResourceCounts, `$SkippedSubscriptions, `$CompletedReports, `$Obfuscate)`n" +
+            ($Carry -join "`n") + "`n" + $Select[0].Extent.Text + "`n" +
+            "[pscustomobject]@{ Archives = @(`$Shippable.Archives); Folders = @(`$Shippable.Folders | ForEach-Object { `$_.Name }); Uncarried = @(`$UncarriedSkipped) }")
+
+        $script:SubA = [pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a' }
+        $script:ThisRun = @([pscustomobject]@{ Name = 'Sub B'; Id = 'sub-b'; Count = 2; Zip = $script:ThisRunZip })
+        function script:Invoke-CarrySelection
+        {
+            param($Reports, [bool]$Obfuscate = $false)
+            return (& $script:SelectionBlock $script:CarryRoot $script:Since $script:ThisRun @($script:SubA) @($Reports) $Obfuscate)
+        }
+    }
+    AfterAll {
+        if ($script:CarryRoot -and (Test-Path $script:CarryRoot)) { Remove-Item -Path $script:CarryRoot -Recurse -Force }
+    }
+
+    It 'the resume state keeps the archive each completed subscription recorded, and only theirs' {
+        $StatePath = Join-Path $script:CarryRoot '.resume-state-t.json'
+        $Reports = @(
+            [pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 5; Zip = 'old.zip' },
+            [pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 5; Zip = $script:EarlierZip },
+            [pscustomobject]@{ Name = 'Sub X'; Id = 'sub-x'; Count = 1; Zip = 'x.zip' })
+        Save-CompletedSubscriptionIds -Path $StatePath -Tenant 't' -Ids @('sub-a') -Reports $Reports
+        $Saved = Get-ResumeStateObject -Path $StatePath -Tenant 't'
+        @($Saved.Reports).Count | Should -Be 1 -Because 'one record per completed id, none for an id that is not completed'
+        @($Saved.Reports)[0].Zip | Should -Be $script:EarlierZip -Because 'the last record given for a subscription wins'
+        @($Saved.Reports)[0].Count | Should -Be 5
+    }
+
+    It 'the bundle selection, run as written, ships the skipped subscription''s earlier archive beside this run''s' {
+        $Reports = @([pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 5; Zip = $script:EarlierZip })
+        $Sel = script:Invoke-CarrySelection -Reports $Reports
+        $Sel.Archives | Should -Contain $script:ThisRunZip
+        $Sel.Archives | Should -Contain $script:EarlierZip -Because 'a subscription skipped as completed must not drop out of the bundle'
+        @($Sel.Archives).Count | Should -Be 2
+        $Sel.Folders | Should -Contain (Split-Path -Path (Split-Path -Path $script:EarlierZip -Parent) -Leaf) -Because 'its HTML report and the main summary read the shipped folders'
+        @($Sel.Uncarried).Count | Should -Be 0
+    }
+
+    It 'an -Obfuscate resume does not carry a non-obfuscated archive, and names it instead' {
+        $Reports = @([pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 5; Zip = $script:EarlierZip })
+        $Sel = script:Invoke-CarrySelection -Reports $Reports -Obfuscate $true
+        $Sel.Archives | Should -Not -Contain $script:EarlierZip -Because 'one bundle never mixes obfuscated and real identifiers'
+        @($Sel.Uncarried).Count | Should -Be 1
+        $Sel.Uncarried[0].Id | Should -Be 'sub-a'
+        $Sel.Uncarried[0].Reason | Should -Match 'not obfuscated'
+    }
+
+    It 'an archive whose privacy mode cannot be read is not carried, and is named' {
+        $NoHeaderZip = script:New-CarryReport -Stamp '20260101000000000cccc' -Header $null
+        $Reports = @([pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 5; Zip = $NoHeaderZip })
+        $Sel = script:Invoke-CarrySelection -Reports $Reports
+        $Sel.Archives | Should -Not -Contain $NoHeaderZip
+        @($Sel.Uncarried).Count | Should -Be 1
+        $Sel.Uncarried[0].Reason | Should -Match 'does not show whether it is obfuscated'
+    }
+
+    It 'a skipped subscription with no recorded or no surviving archive is named, never shipped silently' {
+        $Gone = Join-Path $script:CarryRoot 'ResourcesReport20260101000000000dddd/ResourcesReport_20260101000000000dddd.zip'
+        foreach ($Reports in @(@(), @([pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 5; Zip = $Gone })))
+        {
+            $Sel = script:Invoke-CarrySelection -Reports $Reports
+            @($Sel.Archives) | Should -Be @($script:ThisRunZip)
+            @($Sel.Uncarried).Count | Should -Be 1
+            $Sel.Uncarried[0].Id | Should -Be 'sub-a'
+        }
+    }
+
+    It 'both skip paths record the subscription they skip' {
+        $Skips = @($script:CarryAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$Resume -and ($CompletedIds -contains $Sub.Id)' }, $true))
+        $Skips.Count | Should -Be 2 -Because 'the sequential loop and the parallel pre-slice each skip completed subscriptions'
+        foreach ($Skip in $Skips)
+        {
+            $Skip.Clauses[0].Item2.Extent.Text | Should -Match '\$SkippedSubscriptions \+= @\(\$Sub\)'
+        }
+    }
+
+    It 'a report that cannot be carried sets exit code 2 and has a banner printed before the transcript stops' {
+        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+        $Src | Should -Match '(?s)if \(@\(\$UncarriedSkipped\)\.Count -gt 0\)\s*\{\s*\$WrapperExitCode = 2\s*\}'
+        $Lines = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1')
+        $BannerIdx = ($Lines | Select-String -SimpleMatch 'FAILED (earlier report not carried)' | Select-Object -First 1).LineNumber
+        $StopIdx = ($Lines | Select-String -SimpleMatch 'Stop-Transcript on normal completion failed' | Select-Object -First 1).LineNumber
+        $BannerIdx | Should -Not -BeNullOrEmpty
+        $BannerIdx | Should -BeLessThan $StopIdx
+    }
+}

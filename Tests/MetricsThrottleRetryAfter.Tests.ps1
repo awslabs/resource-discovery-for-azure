@@ -551,3 +551,63 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         finally { $Pool.Close(); $Pool.Dispose() }
     }
 }
+
+Describe 'Az context - converted once in the main session, not per call in each worker' {
+    # Get-AzMetric -DefaultProfile is typed IAzureContextContainer. Passing the raw PSAzureContext
+    # made every pool worker convert it at binding, and that conversion intermittently failed
+    # ('Cannot convert PSAzureContext to IAzureContextContainer') once the process had seen many Az
+    # runspaces. The phase now converts once, before dispatch, and keeps the raw context on failure.
+    BeforeAll {
+        $script:ConvAst = $script:Ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and
+                $args[0].Clauses[0].Item1.Extent.Text -eq '$null -ne $MetricAzContext' -and
+                $args[0].Extent.Text -match 'IAzureContextContainer'
+            }, $true) | Select-Object -First 1
+        if (Get-Module -ListAvailable -Name Az.Accounts) { Import-Module Az.Accounts -ErrorAction Stop }
+        $script:ContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer'
+
+        function Invoke-ContextConversion($Context)
+        {
+            $script:Diag = [System.Collections.Generic.List[string]]::new()
+            function Write-MetricsDiag([string]$Message) { $script:Diag.Add($Message) }
+            $MetricAzContext = $Context
+            . ([scriptblock]::Create($script:ConvAst.Extent.Text))
+            $MetricAzContext
+        }
+    }
+
+    It 'converts the context before the batches are dispatched' {
+        $script:ConvAst | Should -Not -BeNullOrEmpty
+        $UseAt = $script:MetricsSrc.IndexOf('$using:MetricAzContext')
+        $UseAt | Should -BeGreaterThan 0
+        $script:ConvAst.Extent.StartOffset | Should -BeLessThan $UseAt
+    }
+
+    It 'hands the workers an IAzureContextContainer, which a fresh runspace binds as-is' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        $Raw = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Converted = Invoke-ContextConversion $Raw
+        ($Converted -is ($script:ContainerType -as [type])) | Should -BeTrue
+        $script:Diag.Count | Should -Be 0
+
+        $Rs = [runspacefactory]::CreateRunspace([initialsessionstate]::CreateDefault2())
+        $Rs.Open()
+        try
+        {
+            $P = [powershell]::Create()
+            $P.Runspace = $Rs
+            [void]$P.AddCommand('Get-AzContext').AddParameter('DefaultProfile', $Converted).AddParameter('ErrorAction', 'Stop')
+            [void]$P.Invoke()
+            $P.HadErrors | Should -BeFalse
+            $P.Dispose()
+        }
+        finally { $Rs.Dispose() }
+    }
+
+    It 'keeps the raw context and logs a WARNING when the conversion fails' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        $Unconvertible = [pscustomobject]@{ Name = 'not-a-context' }
+        $Result = Invoke-ContextConversion $Unconvertible
+        $Result | Should -Be $Unconvertible
+        $script:Diag.Count | Should -Be 1
+        $script:Diag[0] | Should -Match '^WARNING: could not convert the Az context'
+    }
+}

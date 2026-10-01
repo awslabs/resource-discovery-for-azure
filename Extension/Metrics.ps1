@@ -746,6 +746,33 @@ if ($Task -eq 'Processing')
         Write-MetricsDiag "WARNING: could not capture Az context for parallel runspaces; metric calls will rely on per-runspace context autosave."
     }
 
+    # Get-AzMetric's -DefaultProfile is typed IAzureContextContainer, and Get-AzContext returns a
+    # PSAzureContext. Left as-is, every pool worker converts it at parameter binding through the
+    # type converter Az.Accounts registers in that worker's own runspace, and that conversion
+    # intermittently fails ('Cannot convert PSAzureContext to IAzureContextContainer') once the
+    # process has seen many Az runspaces. Convert once here, in the main session, so the workers
+    # receive an object that already has the parameter's type and bind it without any conversion.
+    # If the conversion is unavailable or fails, keep the raw context: that is the previous behaviour.
+    if ($null -ne $MetricAzContext)
+    {
+        $ContextContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type]
+        if ($null -eq $ContextContainerType)
+        {
+            Write-MetricsDiag "WARNING: the Az context container type was not found; metric calls pass the raw Az context and convert it per call."
+        }
+        else
+        {
+            try
+            {
+                $MetricAzContext = [System.Management.Automation.LanguagePrimitives]::ConvertTo($MetricAzContext, $ContextContainerType)
+            }
+            catch
+            {
+                Write-MetricsDiag ("WARNING: could not convert the Az context for the metric workers ({0}); metric calls pass the raw Az context and convert it per call." -f $_.Exception.Message)
+            }
+        }
+    }
+
     $MetricTimeoutSeconds = 120
     # How long the phase end waits for every pool worker to finish before deciding whether the pool
     # can be released. An idle pool passes at once; only a call still blocked in a network read waits.

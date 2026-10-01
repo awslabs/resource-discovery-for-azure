@@ -276,10 +276,10 @@ function Global:ConvertTo-RdaFoldedFoundryRow
 {
     # TIER 1 FOLD (CCU / cost, always available). Maps ONE Claude/Anthropic Marketplace row
     # (PSMarketplace shape, as returned by Get-AzConsumptionMarketplace) to a row shaped like
-    # the FIRST-PARTY Consumption CSV, so the deployed downstream cost-analysis tool - which reads ONLY
+    # the FIRST-PARTY Consumption CSV, so a downstream cost-analysis tool - which reads ONLY
     # Consumption_*.csv and has NO reader for Marketplace_*.csv - actually sees Claude usage.
     #
-    # WHY. a downstream cost tool's Foundry cost-attribution path admits a consumption row ONLY when its
+    # WHY. a downstream cost tool admits a consumption row ONLY when its
     # MeterCategory == "Foundry Models" (exact string). Claude has no first-party Azure retail
     # meter, so Claude usage arrives only on the Marketplace endpoint and is silently dropped
     # downstream. Folding it into the Consumption CSV with MeterCategory="Foundry Models" and
@@ -298,7 +298,7 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     # ReservationId, ReservationOrderId) so the collector can Select-Object + Export-Csv -Append
     # it straight onto the existing Consumption_*.csv with no schema change.
     #   - MeterCategory = "Foundry Models" (exact, expected consumption-row format).
-    #   - MeterName     = the Claude model identity (server resolves the model from it).
+    #   - MeterName     = the Claude model identity (downstream consumer resolves the model from it).
     #   - Quantity      = the Marketplace ConsumedQuantity (usage quantity, mirrors first-party).
     #   - Unit          = the Marketplace UnitOfMeasure, or a neutral cost unit; NEVER a token unit.
     #   - AdditionalInfo = a JSON blob shaped like the first-party path's
@@ -350,7 +350,7 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     # are stable for a given offer identity across runs.
     $SynthGuid = ("{0}-{1}-{2}-{3}-{4}" -f $HashHex.Substring(0, 8), $HashHex.Substring(8, 4), $HashHex.Substring(12, 4), $HashHex.Substring(16, 4), $HashHex.Substring(20, 12))
 
-    # MeterId: prefer the row's own, else the synthetic (server requires non-empty).
+    # MeterId: prefer the row's own, else the synthetic (downstream consumer requires non-empty).
     $MeterId = if (-not [string]::IsNullOrEmpty($Row.MeterId)) { $Row.MeterId } else { ("foundryfold-{0}" -f $SynthGuid) }
 
     # ResourceId: prefer the row's InstanceId, else a synthetic SaaS-shaped ARM URI so a downstream cost tool
@@ -386,7 +386,7 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     # --- AdditionalInfo JSON blob (mirror the first-party {"Microsoft.Resources":{...}} shape) ---
     # Cost lives here because the Consumption CSV carries no dedicated cost column; the first-party
     # path likewise stows per-resource licensing detail inside this same blob. The fold markers let
-    # a downstream cost tool (and a human reading the CSV) tell a folded Claude cost row from a native one.
+    # a downstream consumer (and a human reading the CSV) tell a folded Claude cost row from a native one.
     $AdditionalInfoObject = [PSCustomObject]@{
         'Microsoft.Resources' = [PSCustomObject]@{
             resourceUri    = $OutResourceId
@@ -418,7 +418,7 @@ function Global:ConvertTo-RdaFoldedFoundryRow
         MeterId            = $MeterId
         MeterName          = $ModelIdentity
         MeterRegion        = $ResourceLocation
-        # Carry the readable model identity as the sub-category too, a second place a downstream cost tool can
+        # Carry the readable model identity as the sub-category too, a second place a downstream consumer can
         # read the model from, mirroring how the product identity is preserved on Marketplace rows.
         MeterSubCategory   = $ModelIdentity
         # Usage quantity, mirroring the first-party path (NOT a token count - this is the CCU/cost row).
@@ -545,12 +545,12 @@ function Global:Test-RdaFoundryMetricPermanentFailure
 function Global:Get-RdaFoundryTokenRole
 {
     # TIER 2 (per-model TOKEN counts). Maps ONE Azure AI Foundry / Cognitive Services token
-    # METRIC NAME to the recognizable token ROLE and the MeterName word that encodes it,
+    # METRIC NAME to a recognizable token ROLE and the MeterName word that encodes it,
     # or $null when the metric is NOT a per-role billable token count and must not be emitted as
     # its own priced row.
     #
-    # WHY. a downstream cost-analysis tool's Foundry cost-attribution path resolves a token role by scanning MeterName
-    # for a role substring (verified in a downstream cost tool's role parser):
+    # WHY. a downstream cost-analysis tool Foundry cost-attribution path resolves a token role by scanning MeterName
+    # for a role substring (verified in the downstream consumer role parser):
     #     input        <- "inp" / "input"
     #     output       <- "outp" / "out" / "output"
     #     cached-input <- "cd inp" / "cached inp" / "cache read"
@@ -613,14 +613,14 @@ function Global:ConvertTo-RdaFoldedFoundryTokenRow
     # ModelDeploymentName dimension. Those token counts never reach the first-party consumption
     # endpoint, so without this fold a downstream consumer sees the account but no token quantities to price.
     # This emits one "Foundry Models" consumption row per (account, model, role) carrying the token
-    # count as Quantity and a token Unit, exactly the shape a downstream cost tool's token-pricing path expects.
+    # count as Quantity and a token Unit, exactly the shape the downstream consumer token-pricing path expects.
     #
     # OUTPUT SHAPE. Returns an object carrying EXACTLY the first-party Consumption CSV columns
     # (AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity,
     # Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter,
     # ReservationId, ReservationOrderId) so the collector can Select-Object + Export-Csv -Append it
     # straight onto the existing Consumption_*.csv with no schema change.
-    #   - MeterCategory = "Foundry Models" (exact, expected consumption-row format - the category gate).
+    #   - MeterCategory = "Foundry Models" (exact, expected consumption-row format).
     #   - MeterName     = "<ModelName> <RoleWord> Tkns" (e.g. "Phi-4 Inp Tkns", "Phi-4 Outp Tkns",
     #                     "Phi-4 Cd Inp Tkns", "Phi-4 Cd Wr Tkns"). Carries BOTH the model identity
     #                     (so BedrockModelFamilies aliases resolve it) AND the role substring the
@@ -634,7 +634,7 @@ function Global:ConvertTo-RdaFoldedFoundryTokenRow
     #                     shared dictionary like every other row).
     #   - MeterId       = a STABLE synthesized id per (account, model, role) - SHA256 over the
     #                     account id + model + role - so the same tuple maps to the same id across runs.
-    #   - MeterSubCategory = the model name (a second place a downstream cost tool can read the model from).
+    #   - MeterSubCategory = the model name (a second place a downstream consumer can read the model from).
     #   - ResourceLocation = the account location.
     #   - AdditionalInfo   = JSON {"Microsoft.Resources":{resourceUri,location,additionalInfo:{...}}}
     #                        carrying the fold markers (IsFoundryFold, FoldTier=2, IsTokenMeter=$true),
@@ -671,7 +671,7 @@ function Global:ConvertTo-RdaFoldedFoundryTokenRow
         [hashtable]$NameCache = $null
     )
 
-    # --- MeterName: model identity + role word + "Tkns" (server reads model AND role from it) ---
+    # --- MeterName: model identity + role word + "Tkns" (downstream consumer reads model AND role from it) ---
     $MeterName = ("{0} {1} Tkns" -f $ModelName, $RoleMeterWord)
 
     # --- Stable synthetic MeterId per (account, model, role) ---

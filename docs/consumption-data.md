@@ -40,7 +40,7 @@ consumption phase (the rest of the inventory continues).
 ### Transient-failure retry
 
 Each page request is wrapped in a bounded retry (**30 attempts, exponential
-backoff**, or a downstream cost tool's `Retry-After`, capped at five minutes, when it sends one). A single transient
+backoff**, or the server's `Retry-After`, capped at five minutes, when it sends one). A single transient
 HTTP error - e.g. `Error while copying content to a stream`, a timeout, or
 429/503 throttling - retries the **same** page (the previous page's
 `ContinuationToken` is preserved), so no rows are duplicated or skipped. An

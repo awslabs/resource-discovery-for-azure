@@ -1211,7 +1211,7 @@ function ExecuteInventoryProcessing()
                 # Measured on a live subscription: an unscoped run wrote 480 rows across
                 # 29 resource groups, and the same run with -ResourceGroup wrote the 180
                 # rows belonging to that one group. Get-UsageAggregates has no
-                # downstream resource-group filter, so the narrowing is applied per
+                # server-side resource-group filter, so the narrowing is applied per
                 # usage record instead - which is why an unattributed meter cannot
                 # satisfy it and is excluded.
                 if (![string]::IsNullOrEmpty($ResourceGroup))
@@ -1288,7 +1288,7 @@ function ExecuteInventoryProcessing()
                         # Canonical parameter name. 'ShowDetails' is a declared alias
                         # that binds identically, but depending on an alias is a
                         # needless fragility for a value this load-bearing: it selects
-                        # instance-level detail over downstream aggregation, and the
+                        # instance-level detail over server-side aggregation, and the
                         # whole consumption-to-resource attribution below depends on
                         # the instance-level InstanceData it returns.
                         ShowDetail             = $true
@@ -1451,7 +1451,7 @@ function ExecuteInventoryProcessing()
                         }
                     }
                     # The Get-UsageAggregates payload names the per-resource licensing/instance JSON
-                    # blob "InstanceData". The deployed downstream cost-analysis tool reads that same blob
+                    # blob "InstanceData". a downstream cost-analysis tool reads that same blob
                     # from a Consumption CSV column named "AdditionalInfo" (VM Windows/AHB + SQL vCore
                     # detection bind to AdditionalInfo, not InstanceData), so a column literally named
                     # InstanceData arrives empty downstream and that detection silently degrades. Map
@@ -2052,7 +2052,7 @@ function ExecuteInventoryProcessing()
                 {
                     if ($null -eq $Row) { continue }
 
-                    # FOUNDRY FOLD CAPTURE (P1). The deployed downstream cost-analysis tool reads ONLY
+                    # FOUNDRY FOLD CAPTURE (P1). a downstream cost-analysis tool reads ONLY
                     # Consumption_*.csv and has NO reader for this Marketplace_*.csv, so Claude/
                     # Anthropic usage collected here is invisible downstream unless it is ALSO
                     # folded into the Consumption CSV as a "Foundry Models" row. Capture the RAW
@@ -2174,7 +2174,7 @@ function ExecuteInventoryProcessing()
     function GetFoundryFoldConsumption()
     {
         # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
-        # the deployed downstream cost-analysis tool - which reads ONLY Consumption_*.csv and has NO reader for
+        # a downstream cost-analysis tool - which reads ONLY Consumption_*.csv and has NO reader for
         # Marketplace_*.csv - actually sees it. Runs AFTER GetMarketplaceConsumption (it consumes the
         # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
         # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
@@ -2204,7 +2204,7 @@ function ExecuteInventoryProcessing()
             return
         }
 
-        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so a downstream cost tool's Foundry cost-attribution path sees them." -f $ClaudeRows.Count) -Severity 'Info'
+        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so a downstream cost tool can attribute them." -f $ClaudeRows.Count) -Severity 'Info'
 
         # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
         # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
@@ -2253,11 +2253,11 @@ function ExecuteInventoryProcessing()
         # NOT index Cognitive Services model DEPLOYMENTS, and RDA had no metrics path that reached
         # per-model TOKEN telemetry (the metrics phase never queried the Cognitive Services account
         # token metrics). So Azure AI Foundry models that DO expose token usage (Phi / OpenAI /
-        # DeepSeek / etc.) were collected NOWHERE: the deployed downstream cost-analysis tool saw the account but
+        # DeepSeek / etc.) were collected NOWHERE: a downstream cost-analysis tool saw the account but
         # had no token quantities to price against AWS Bedrock. This phase closes that gap by
         # discovering the accounts + deployments via ARM and reading the per-model token metrics,
         # then folding them into the SAME first-party Consumption_*.csv a downstream consumer reads as
-        # "Foundry Models" rows (MeterCategory exact string = a downstream cost tool's category gate).
+        # "Foundry Models" rows (MeterCategory exact string = the cost tool's category gate).
         #
         # RELATIONSHIP TO TIER 1 (GetFoundryFoldConsumption, above). Tier 1 folds Claude/Anthropic
         # MARKETPLACE cost rows (CCU, no token telemetry) as non-token "Foundry Models" rows. Tier 2
@@ -3115,7 +3115,7 @@ resources
         }
         if ($Global:FoundryCoverageUnpricedCount -gt 0)
         {
-            Write-Log -Message ("FoundryModelCoverage: {0} deployed model(s) classified UNPRICED (found in NEITHER billing plane). These are LOUD coverage gaps the should be investigated - see the UNPRICED rows in the coverage CSV." -f $Global:FoundryCoverageUnpricedCount) -Severity 'Warning'
+            Write-Log -Message ("FoundryModelCoverage: {0} deployed model(s) classified UNPRICED (found in NEITHER billing plane). These are LOUD coverage gaps that should be investigated - see the UNPRICED rows in the coverage CSV." -f $Global:FoundryCoverageUnpricedCount) -Severity 'Warning'
         }
     }
 
@@ -3253,7 +3253,7 @@ resources
         # TIER 2 FOUNDRY TOKEN COLLECTOR. Discovers Azure AI / Cognitive Services accounts + model
         # deployments via ARM and reads per-model token metrics via Get-AzMetric, folding them into
         # the SAME first-party Consumption_*.csv as per-(model, role) 'Foundry Models' token rows so
-        # a downstream cost tool can price the Azure-hosted models against Bedrock. Gated additively:
+        # a downstream consumer can price the Azure-hosted models against Bedrock. Gated additively:
         #   - inside this -SkipConsumption block (it writes to the Consumption CSV and needs context);
         #   - honours -SkipMetrics (it uses Get-AzMetric, the metrics data plane / Monitoring Reader);
         #   - skippable on its own with -SkipFoundryTokens.

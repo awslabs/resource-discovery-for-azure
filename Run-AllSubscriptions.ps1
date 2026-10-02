@@ -2117,11 +2117,22 @@ else
 
 # === Moving-target subscription reconciliation: another team can create/delete subs DURING a long run, so the start-of-run Get-AzSubscription is stale by now. Re-enumerate and classify the delta against the ORIGINAL start snapshot ($StartSnapshot, preserved across resume) - subs deleted mid-run (Vanished) must NOT be reported as failures, and subs created mid-run (New) would otherwise be SILENTLY MISSING from the report.
 $StartIds = if ($StartSnapshot -and $StartSnapshot.SubscriptionIds) { @($StartSnapshot.SubscriptionIds) } else { @() }
+# Set by the catch below when the re-enumeration cannot be trusted, so the last block of the run reports a warning instead of a plain "RUN COMPLETE".
+$ReconciliationSkipped = $false
 if ($StartIds.Count -gt 0)
 {
     try
     {
-        $EndSubs = @(Get-AzSubscription -TenantId $TenantID -WarningAction SilentlyContinue)
+        $EndSubs = @(Get-AzSubscription -TenantId $TenantID -ErrorAction Stop -WarningVariable EndSubWarnings -WarningAction SilentlyContinue)
+        # Az.Accounts reports a token it cannot acquire as a warning and an empty listing, not as an error,
+        # so an empty listing says nothing about which subscriptions still exist: skip the reconciliation
+        # instead of acting on it. -ErrorAction Stop does the same for an error part-way through the listing.
+        if ($EndSubs.Count -eq 0)
+        {
+            $EmptyListingReason = "Get-AzSubscription returned no subscriptions for this tenant, although the start-of-run snapshot listed {0} subscription(s)." -f $StartIds.Count
+            if (@($EndSubWarnings).Count -gt 0) { $EmptyListingReason += ' ' + ((@($EndSubWarnings) | ForEach-Object { $_.Message } | Select-Object -Unique) -join ' ') }
+            throw $EmptyListingReason
+        }
         $EndIds = @($EndSubs | ForEach-Object { $_.Id })
         $Delta = Get-SubscriptionDelta -StartIds $StartIds -EndIds $EndIds -CompletedIds $CompletedIds
         $ResponsibleSet = @{}
@@ -2185,7 +2196,9 @@ if ($StartIds.Count -gt 0)
     }
     catch
     {
+        $ReconciliationSkipped = $true
         Write-Host ("WARNING: subscription reconciliation skipped (re-enumeration failed): {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Write-Host "    The check for subscriptions created or deleted during the run did not finish. A subscription created during the run may be missing from this report, and a failure recorded for one deleted during the run may still be listed." -ForegroundColor Yellow
     }
 }
 
@@ -3223,7 +3236,7 @@ if (@($UncarriedSkipped).Count -gt 0)
 # transcript reopened, so the transcript ends on the same outcome the screen does.
 $FinalBundleBuilt = Test-ReportArchiveUsable -Path $OuterZipFile
 $FinalTranscriptKept = $WrapperTranscriptStarted -and (Test-ReportArchiveUsable -Path $WrapperTranscriptFile)
-$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0)
+$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0) -or $ReconciliationSkipped
 $FinalScreenCleared = $false
 if (Test-RdaFinalScreenClearable -BundleBuilt $FinalBundleBuilt -TranscriptKept $FinalTranscriptKept)
 {

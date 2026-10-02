@@ -867,7 +867,7 @@ Describe 'The wrapper reports every missing report, and never exits 0 over one' 
         # $StartIds is set directly here; its derivation from the start snapshot is the line above the block.
         $Run = [scriptblock]::Create(@'
 param($ReconText, $OverrideText, [string[]]$FailedIds, [string[]]$FailedNames, [string[]]$Aborted, [string[]]$StillThere, [string[]]$Archive = @(), [string[]]$ShippedIds = @())
-function Get-AzSubscription { param($TenantId, $WarningAction) $StillThere | ForEach-Object { [pscustomobject]@{ Id = $_ } } }
+function Get-AzSubscription { [CmdletBinding()] param($TenantId) $StillThere | ForEach-Object { [pscustomobject]@{ Id = $_ } } }
 function Save-CompletedSubscriptionIds { }
 function Write-Host { }
 $TenantID = 't'
@@ -933,6 +933,151 @@ finally
         $Dead = & $Run $Recon.Extent.Text $Override.Extent.Text @('stream-1') @('stream-1 (no summary)') @() @('sub-a')
         $Dead.Exit | Should -Be 2 -Because 'a dead stream is never explained by a deletion'
         $Dead.Names | Should -Be @('stream-1 (no summary)')
+    }
+
+    Context 'the end-of-run subscription listing' {
+        BeforeAll {
+            # The reconciliation and the override again, run as written, with the listing failing the two
+            # ways Az.Accounts fails it. A token it cannot acquire gives no subscriptions and one warning,
+            # and no error even under -ErrorAction Stop. An ARM or network error is non-terminating, so it
+            # can follow part of a listing. Neither says which subscriptions still exist, so the
+            # reconciliation must not run on either. A warning beside a listing that did return
+            # subscriptions is a listing that can be trusted, and the reconciliation must still run on it.
+            # The token stand-in also puts an unrelated notice first and repeats it, so the message has to
+            # carry every distinct warning Az gave, each once.
+            $script:ListingRecon = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$StartIds.Count -gt 0' }, $true)
+            $script:ListingOverride = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '@($FailedSubscriptionIds).Count -gt 0' }, $true)
+            if (-not $script:ListingRecon -or -not $script:ListingOverride) { throw 'The reconciliation or the exit override was not found in Run-AllSubscriptions.ps1.' }
+            $script:ListingRun = [scriptblock]::Create(@'
+param($ReconText, $OverrideText, [string]$Fault, [string[]]$Listed)
+# The wrapper sets no error preference, so production runs at the default. Pin it here so the error cases
+# cannot be satisfied by a caller whose own preference is Stop.
+$ErrorActionPreference = 'Continue'
+function Get-AzSubscription
+{
+    [CmdletBinding()]
+    param($TenantId)
+    $Listed | ForEach-Object { [pscustomobject]@{ Id = $_ } }
+    if ($Fault -eq 'Token')
+    {
+        Write-Warning 'A different notice comes first.'
+        Write-Warning 'A different notice comes first.'
+        Write-Warning ("Unable to acquire token for tenant '{0}' with error 'SharedTokenCacheCredential authentication failed: '" -f $TenantId)
+    }
+    if ($Fault -eq 'Error') { Write-Error -Message 'Connection refused (127.0.0.1:9)' }
+}
+$Saves = [System.Collections.Generic.List[object]]::new()
+function Save-CompletedSubscriptionIds { $Saves.Add($args) }
+$Shown = [System.Collections.Generic.List[string]]::new()
+function Write-Host { param($Object, $ForegroundColor, $NoNewline) $Shown.Add([string]$Object) }
+$TenantID = 't'
+# sub-a completed and its report ships, sub-b's collection was aborted, sub-c's archive was not written.
+$StartIds = @('sub-a', 'sub-b', 'sub-c')
+$Subscriptions = @($StartIds | ForEach-Object { [pscustomobject]@{ Id = $_ } })
+# The reconciliation reads the copy taken before processing, not $Subscriptions.
+$ResponsibleSubscriptions = $Subscriptions
+$CompletedIds = @('sub-a')
+$FailedAttempts = @([pscustomobject]@{ Id = 'sub-b' }, [pscustomobject]@{ Id = 'sub-c' })
+$FailedSubscriptions = @('B', 'C')
+$FailedSubscriptionIds = @('sub-b', 'sub-c')
+$CollectionAbortedSubs = @('B (sub-b)')
+$ArchiveWriteFailures = @('C (sub-c)')
+$ResumeStateFile = 'unused'
+$StateSaveArgs = @{}
+$WrapperExitCode = 0
+$SubResourceCounts = @([pscustomobject]@{ Id = 'sub-a' })
+$ReconciliationSkipped = $false
+$Held = @($Global:CollectorFailures, $Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:MarketplaceFailedSubs)
+$Global:CollectorFailures = @([pscustomobject]@{ Id = 'sub-b'; Module = 'VMSS'; Message = 'm' }, [pscustomobject]@{ Id = 'sub-a'; Module = 'AKS'; Message = 'm' })
+$Global:MetricsFailedSubs = @([pscustomobject]@{ Name = 'C'; Id = 'sub-c'; Message = 'm' })
+$Global:ConsumptionFailedSubs = @([pscustomobject]@{ Name = 'C'; Id = 'sub-c'; Message = 'm' })
+$Global:MarketplaceFailedSubs = @([pscustomobject]@{ Name = 'B'; Id = 'sub-b'; Message = 'm' })
+try
+{
+    . ([scriptblock]::Create($ReconText))
+    . ([scriptblock]::Create($OverrideText))
+    $Health = [pscustomobject]@{
+        Collector   = @($Global:CollectorFailures | ForEach-Object { $_.Id })
+        Metrics     = @($Global:MetricsFailedSubs | ForEach-Object { $_.Id })
+        Consumption = @($Global:ConsumptionFailedSubs | ForEach-Object { $_.Id })
+        Marketplace = @($Global:MarketplaceFailedSubs | ForEach-Object { $_.Id })
+    }
+}
+finally
+{
+    $Global:CollectorFailures, $Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:MarketplaceFailedSubs = $Held
+}
+[pscustomobject]@{ Exit = $WrapperExitCode; Names = @($FailedSubscriptions); Ids = @($FailedSubscriptionIds); Aborted = @($CollectionAbortedSubs); Archive = @($ArchiveWriteFailures); Retry = @($FailedAttempts | ForEach-Object { $_.Id }); Health = $Health; Saves = $Saves.Count; Shown = @($Shown); Skipped = $ReconciliationSkipped }
+'@)
+        }
+
+        It 'a listing that fails with <Label> leaves every failure list as it was, and still exits 2' -ForEach @(
+            @{ Label = 'the token warning after a repeated notice, and nothing listed'; Fault = 'Token'; Listed = @(); Reason = "A different notice comes first\..*Unable to acquire token for tenant 't'" }
+            @{ Label = 'an error and nothing listed'; Fault = 'Error'; Listed = @(); Reason = 'Connection refused \(127\.0\.0\.1:9\)' }
+            @{ Label = 'an error after part of the listing'; Fault = 'Error'; Listed = @('sub-a'); Reason = 'Connection refused \(127\.0\.0\.1:9\)' }
+        ) {
+            . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
+            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text $Fault $Listed 2>&1)
+            $Leaked = @($Out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
+            $Results = @($Out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+            $Results.Count | Should -Be 1
+            $Result = $Results[0]
+            $Result.Exit | Should -Be 2 -Because 'both failures still stand, so the run must not exit 0'
+            $Result.Names | Should -Be @('B', 'C') -Because 'the summary still lists both failures'
+            $Result.Ids | Should -Be @('sub-b', 'sub-c')
+            $Result.Retry | Should -Be @('sub-b', 'sub-c') -Because 'the retry list is what -ResumeFailedOnly works from'
+            $Result.Aborted | Should -Be @('B (sub-b)')
+            $Result.Archive | Should -Be @('C (sub-c)')
+            $Result.Health.Collector | Should -Be @('sub-b', 'sub-a')
+            $Result.Health.Metrics | Should -Be @('sub-c')
+            $Result.Health.Consumption | Should -Be @('sub-c')
+            $Result.Health.Marketplace | Should -Be @('sub-b')
+            $Result.Saves | Should -Be 0 -Because 'the resume state keeps the retry list it already holds'
+            @($Result.Shown | Where-Object { $_ -match 'sub-[abc]' }) | Should -BeNullOrEmpty -Because 'a listing that failed says nothing about any one subscription'
+            ($Result.Shown -join "`n") | Should -Match ('reconciliation skipped.*' + $Reason) -Because 'the operator is told the reconciliation did not run, and why, with every warning Az gave'
+            if ($Fault -eq 'Token') { [regex]::Matches(($Result.Shown -join "`n"), 'A different notice comes first').Count | Should -Be 1 -Because 'a warning Az repeats is reported once' }
+            ($Result.Shown -join "`n") | Should -Match 'did not finish' -Because 'the operator is told what the skip costs, not only that it happened'
+            $Result.Skipped | Should -BeTrue -Because 'the last block of the run reads this to report a warning'
+            $Leaked | Should -BeNullOrEmpty -Because 'the listing error is reported once, by the reconciliation'
+        }
+
+        It 'a warning beside a listing that returned subscriptions does not skip the reconciliation' {
+            . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
+            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text 'Token' @('sub-a') 2>&1)
+            $Results = @($Out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+            $Results.Count | Should -Be 1
+            $Result = $Results[0]
+            $Result.Skipped | Should -BeFalse -Because 'the listing names the subscriptions that still exist, so it can be trusted'
+            $Result.Exit | Should -Be 0 -Because 'sub-b and sub-c are missing from a listing that can be trusted, so their failures are expected'
+            $Result.Names.Count | Should -Be 0
+            $Result.Retry.Count | Should -Be 0
+            ($Result.Shown -join "`n") | Should -Match 'Deleted mid-run \(2\)'
+            ($Result.Shown -join "`n") | Should -Not -Match 'reconciliation skipped'
+        }
+
+        It 'the last block of the run has warnings = <Expected> when the reconciliation skipped = <Skipped>' -ForEach @(
+            @{ Skipped = $true; Expected = $true }
+            @{ Skipped = $false; Expected = $false }
+        ) {
+            $Assign = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FinalHasWarnings' }, $true)
+            $Assign | Should -Not -BeNullOrEmpty
+            @($script:WrapAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FinalHasWarnings' }, $true)).Count | Should -Be 1 -Because 'one statement decides it, so the lifted one is the one that runs'
+            $script:WrapSrc | Should -Match 'Get-RdaFinalScreenLines -ExitCode \$WrapperExitCode -HasWarnings \$FinalHasWarnings ' -Because 'the last block of the run is built from this value'
+            # Every other condition in the statement is held at "nothing wrong", so only the skip can move it.
+            $Run = [scriptblock]::Create(@'
+param($AssignText, [bool]$Skipped)
+$RunHadFailures = $false
+$BlobUploadProblem = $false
+$MissingMembers = @()
+$ReconciliationSkipped = $Skipped
+$Held = $Global:MarketplaceFailedSubs
+$Global:MarketplaceFailedSubs = @()
+try { . ([scriptblock]::Create($AssignText)) }
+finally { $Global:MarketplaceFailedSubs = $Held }
+[bool]$FinalHasWarnings
+'@)
+            (& $Run $Assign.Extent.Text $Skipped) | Should -Be $Expected
+        }
     }
 
     It 'the missing-report banners have one owner, printed at the normal end AND before the hard stop' {

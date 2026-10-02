@@ -614,8 +614,11 @@ function Enter-StreamAdmission
     # release wakes them at once. Everything is decided and recorded under the state's lock; the waiting line is
     # written without it, from what was read under it. The check sees the memory that is free when a subscription
     # starts, not what the subscription will need.
-    # -FreeMemoryReader is called with $true for the full reading. Returns the reason the subscription was
-    # admitted, how long it waited, and the free memory this call read, if it read any.
+    # -FreeMemoryReader is called with $true for the full reading. Neither it nor -Log may use break or continue:
+    # in PowerShell, loop control in a script block reaches the loops of the function that runs it. A thread that
+    # already holds the state's lock is refused, because the lock is let go while the waiting line is written.
+    # Returns the reason the subscription was admitted, how long it waited, and the free memory this call read, if
+    # it read any.
     param(
         [Parameter(Mandatory = $true)][hashtable]$State,
         [Parameter(Mandatory = $true)][string]$Holder,
@@ -625,6 +628,7 @@ function Enter-StreamAdmission
     )
     $Lock = $State['Lock']
     if ($null -eq $Lock) { throw [System.InvalidOperationException]::new('The admission state has no lock: create it with New-StreamAdmissionState.') }
+    if ([System.Threading.Monitor]::IsEntered($Lock)) { throw [System.InvalidOperationException]::new('Enter-StreamAdmission must not be called while holding the admission lock.') }
     $Culture = [cultureinfo]::InvariantCulture
     $FloorGB = [double]$State['FloorGB']
     $PollSeconds = [double]$State['PollSeconds']
@@ -719,8 +723,8 @@ function Enter-StreamAdmission
                     $FreeText = if ($null -ne $ShownGB) { [string]::Format($Culture, '{0:0.0} GB free', $ShownGB) } else { 'free memory not read yet' }
                     $WaitingLine = [string]::Format($Culture, 'waiting for free memory before starting {0}: {1}, floor {2} GB (-StreamMemoryGB), {3} other subscription(s) in progress, {4} stream(s) ahead of it', $Subscription, $FreeText, $FloorGB, $InProgress, $Waiting.IndexOf($Holder))
                     # The line is made from what was read under the lock and written without it, so a slow host write
-                    # holds up no other stream. A release while the lock is free wakes no one, so look again before
-                    # the first sleep.
+                    # holds up no other stream. A release while the lock is free cannot wake this stream, which is not
+                    # asleep yet, so look again before the first sleep.
                     [System.Threading.Monitor]::Exit($Lock)
                     & $Log $WaitingLine 'Yellow'
                     [System.Threading.Monitor]::Enter($Lock)
@@ -737,8 +741,8 @@ function Enter-StreamAdmission
     }
     finally
     {
-        # Asked of the lock itself, because a stop can land between letting the lock go and taking it back. The
-        # streams call this function without holding the lock, so a held lock here is this call's own.
+        # Asked of the lock itself, because a stop can land between letting the lock go and taking it back. A
+        # caller that holds the lock is refused on entry, so a held lock here is this call's own.
         if ($null -eq $Admission)
         {
             # Stopped or failed while queued: leave the queue, and let the next stream re-check at once. A failure

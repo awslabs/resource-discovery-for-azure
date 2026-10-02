@@ -273,8 +273,10 @@ Step 5 makes each stream ask for admission before every subscription.
 - **Release.** Before each subscription the worker makes a token, and its `finally` block always passes it to `Exit-StreamAdmission`, whether the subscription was admitted, failed or was stopped; a token that is not recorded is left alone.
   A stream stopped while it waits leaves the queue in `Enter-StreamAdmission`'s own `finally` block.
 - **Logging.** A stream logs once when it starts waiting (the subscription, free GB, the floor, the other subscriptions in progress and the streams ahead of it) and once when it is admitted, with the seconds it waited, through its usual `[stream-N]` console lines.
-  The waiting line is made from what was read under the lock and written with the lock let go, so a slow host write holds up no other stream.
-  A release in that gap wakes no one, so the stream looks again before its first sleep, and a stop or a failed write there still leaves the queue.
+  The waiting line is made from what was read under the lock and written with the lock let go, so a slow log sink cannot hold up the other streams.
+  A release in that gap cannot wake this stream, which is not asleep yet, so it looks again before its first sleep, and a stop or a failed write there still leaves the queue.
+  With the wrapper's own sink the gain is small: in a thread job started the way the wrapper starts a stream, one `Write-Host` of this line took a median of 27-48 us and at most 9.2 ms, over 32,000 timed calls in two runs on the Mac, whether the parent was idle or relaying every 1.5 s or every 5 ms.
+  The first write of a thread job took 85-131 ms, but a stream writes its `processing` line before it asks for admission, so the waiting line never pays it.
   Nothing is added to the Inventory, Metrics or Consumption output.
 - **Process mode.** The wrapper creates no state and the worker gets none, so `-StreamIsolation Process` runs as before.
 - **Parameters.** `-StreamIsolation` and `-StreamMemoryGB` are declared after every parameter `main`'s wrapper has, so a positional call binds as it does on `main`.
@@ -320,12 +322,14 @@ So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on
 
 ### Tests
 
-`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` has 26 tests for the check, and each runs the code:
+`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` has 28 tests for the check, and each runs the code:
 
 - `Enter-StreamAdmission` with an injected free-memory reader and log: it admits at once above the floor, admits below it when nothing else is in progress, waits and is admitted when memory recovers (one full collection before the first wait, gen-0 readings after), skips the full collection when one ran within the poll interval, is admitted after the longest wait with a warning, never waits with a floor of 0, and admits with a warning when the reading throws.
 - A release wakes the waiting stream at once: with a 30 s poll interval it was admitted within 0.5 s of the release.
-- The waiting line is written without the lock, from the values read under it.
-  A release that lands while it is being written still admits the stream at once, before its first 1 s sleep, and a write that throws still leaves the queue, so the stream behind it is admitted.
+- The waiting line is written without the lock.
+  A release that lands while it is being written still admits the stream at once, before its first 1 s sleep.
+  A write that throws, or a stop of the stream's thread job during the write, still leaves the queue and the lock, so the stream behind it is admitted.
+  A caller that already holds the lock is refused, and its hold is left alone.
 - While the test holds the lock, a stream neither queues nor is admitted, and it is admitted once the lock is free.
 - Two thread jobs that always read memory below the floor, through 25 rounds that start together: one is admitted at a time, and the other only after the first releases.
 - `Exit-StreamAdmission` releases only the token it is given.
@@ -350,10 +354,13 @@ The rest of that file fails the same 3 tests with and without the change, as in 
 
 When the waiting line moved outside the lock, the line test and the release test failed on the code before it, on what they check: the lock was held during the write, and the stream waited 1.002 s.
 The failed-write test passes there too, because with the line written under the lock the old cleanup already left the queue; it guards the new code, where the line is written with the lock let go.
-Three mutations of the new code were each caught by exactly one test: writing the line under the lock again, sleeping without looking again first, and leaving the queue only while holding the lock.
-On macOS `RunAllSubscriptionsReconciliation` passed 262 of 262, with the four files above as before.
-The branch now sits on the colour and snapshot test fixes, so on the Windows box the whole file passed under Pester 5.7.1 and 6.2.0, with 261 passed and the positions test skipped each time, and the check's 26 tests gave 25 passed and 1 skipped in 3 of 3 runs.
+The stop test, the probe the review of that change asked for, also passes on 63c9f86, which already took the lock back; the refusal test fails there, because the call returned instead of throwing.
+Four mutations of the new code were each caught: writing the line under the lock again, sleeping without looking again first, and dropping the refusal by one test each, and leaving the queue only while holding the lock by both the failed-write and the stop test.
+On macOS `RunAllSubscriptionsReconciliation` passed 264 of 264, with the four files above as before.
+The branch now sits on the colour and snapshot test fixes, so on the Windows box the whole file passed under Pester 5.7.1 and 6.2.0, with 263 passed and only the positions test skipped each time, and the check's 28 tests gave 27 passed and 1 skipped in 3 of 3 runs.
 A live run with `-StreamIsolation Runspace -StreamMemoryGB 64` on the Mac wrote the same waiting and admission lines as the code before, in the same order, and a consolidated bundle with the same 29 entries and row counts.
+The same run with the refusal against 63c9f86, both after midnight so the billing window was the same, again gave the same lines and a bundle with no differences.
+Runs on either side of midnight are not comparable on consumption rows: the window is 31 local days ending at local midnight, so it moves a day.
 
 ### Live runs on macOS
 

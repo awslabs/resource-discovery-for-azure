@@ -2962,13 +2962,13 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         }
         $Admission.Reason | Should -Be 'alone'
         $HandoffSeconds = ($AdmittedTick - $ReleaseTick) / [double][System.Diagnostics.Stopwatch]::Frequency
-        $HandoffSeconds | Should -BeLessThan 0.5 -Because ('the release wakes the waiting stream at once; it took {0:N3} s' -f $HandoffSeconds)
+        $HandoffSeconds | Should -BeLessThan 0.5 -Because ([string]::Format([cultureinfo]::InvariantCulture, 'the release wakes the waiting stream at once; it took {0:N3} s', $HandoffSeconds))
         @($State.Holders) | Should -Be @('sub-c') -Because 'the other subscription left and this one entered'
         $Logs.Count | Should -Be 2
         $Logs[1].Message | Should -Match '^admitted Sub C \(sub-c\) after waiting \d+ s: no other subscription in progress$'
     }
 
-    It 'writes the waiting line without holding the lock, from the values read under it' {
+    It 'writes the waiting line without holding the lock' {
         $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
         [void]$State.Holders.Add('other')
         $Lock = $State['Lock']
@@ -2995,7 +2995,7 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         $LogBlock = { param([string]$Message, [string]$Color) if ($Message -like 'waiting*') { & $Release -State $State -Holder 'other' } }.GetNewClosure()
         $Admission = Enter-StreamAdmission -State $State -Holder 'sub-g' -Subscription 'Sub G (sub-g)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log $LogBlock
         $Admission.Reason | Should -Be 'alone'
-        $Admission.WaitedSeconds | Should -BeLessThan 0.9 -Because ('a check before the first 1 s sleep admits it at once; it waited {0:N3} s' -f $Admission.WaitedSeconds)
+        $Admission.WaitedSeconds | Should -BeLessThan 0.9 -Because ([string]::Format([cultureinfo]::InvariantCulture, 'a check before the first 1 s sleep admits it at once; it waited {0:N3} s', $Admission.WaitedSeconds))
         @($State.Holders) | Should -Be @('sub-g')
         $State.Waiting.Count | Should -Be 0
     }
@@ -3012,6 +3012,60 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         Exit-StreamAdmission -State $State -Holder 'other'
         $Next = Enter-StreamAdmission -State $State -Holder 'sub-i' -Subscription 'Sub I (sub-i)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log { param([string]$Message, [string]$Color) }
         $Next.Reason | Should -Be 'alone'
+    }
+
+    It 'leaves the queue and the lock when its stream is stopped while it writes its waiting line' {
+        # The stop lands while the lock is let go for the line, so the finally block has to take it back to leave the queue.
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 30 -MaxWaitSeconds 60
+        [void]$State.Holders.Add('other')
+        $Lock = $State['Lock']
+        $Writing = [System.Threading.ManualResetEventSlim]::new($false)
+        $Job = Start-ThreadJob -ScriptBlock {
+            param([string]$FunctionsPath, [hashtable]$State, [System.Threading.ManualResetEventSlim]$Writing)
+            . $FunctionsPath
+            $LogBlock = { param([string]$Message, [string]$Color) if ($Message -like 'waiting*') { $Writing.Set(); Start-Sleep -Seconds 30 } }.GetNewClosure()
+            Enter-StreamAdmission -State $State -Holder 'sub-j' -Subscription 'Sub J (sub-j)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log $LogBlock
+        } -ArgumentList $script:FunctionsPath, $State, $Writing
+        $Taken = $false
+        try
+        {
+            $Writing.Wait(30000) | Should -BeTrue
+            $State.Waiting.Count | Should -Be 1 -Because 'the stream stays queued while it writes'
+            Stop-Job -Job $Job
+            $null = Wait-Job -Job $Job -Timeout 30
+            $Job.State | Should -Be 'Stopped'
+            $State.Waiting.Count | Should -Be 0 -Because 'a token left at the head of the queue would hold every later stream'
+            @($State.Holders) | Should -Be @('other')
+            $Taken = [System.Threading.Monitor]::TryEnter($Lock, 1000)
+            $Taken | Should -BeTrue -Because 'a stopped stream must not leave the lock held'
+        }
+        finally
+        {
+            if ($Taken) { [System.Threading.Monitor]::Exit($Lock) }
+            $Job | Remove-Job -Force
+            $Writing.Dispose()
+        }
+    }
+
+    It 'refuses a caller that already holds the lock, and leaves that hold alone' {
+        # The lock is let go while the waiting line is written, so a call made under the caller's own hold would give
+        # that hold away; it is refused before anything is queued.
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        $Lock = $State['Lock']
+        $LockTaken = $false
+        try
+        {
+            [System.Threading.Monitor]::Enter($Lock, [ref]$LockTaken)
+            { Enter-StreamAdmission -State $State -Holder 'sub-k' -Subscription 'Sub K (sub-k)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log { param([string]$Message, [string]$Color) } } | Should -Throw '*must not be called while holding the admission lock*'
+            [System.Threading.Monitor]::IsEntered($Lock) | Should -BeTrue -Because 'the caller''s own hold is left alone'
+            $State.Waiting.Count | Should -Be 0
+            $State.Holders.Count | Should -Be 0
+        }
+        finally
+        {
+            if ($LockTaken) { [System.Threading.Monitor]::Exit($Lock) }
+        }
+        [System.Threading.Monitor]::IsEntered($Lock) | Should -BeFalse
     }
 
     It 'is admitted with a warning once it has waited the longest wait, when memory never recovers' {
@@ -3146,7 +3200,7 @@ if ([System.GC].GetMethod('GetConfigurationVariables')) { $Limit = [double][Syst
             $env:DOTNET_GCHeapHardLimit = $Saved
         }
         $Limited.Limit | Should -Be 2147483648 -Because 'the child process must run under the 2 GiB heap limit'
-        $Limited.Free | Should -BeGreaterThan 0 -Because ('the heap has room under its limit; the figure was {0:N2} GB' -f $Limited.Free)
+        $Limited.Free | Should -BeGreaterThan 0 -Because ([string]::Format([cultureinfo]::InvariantCulture, 'the heap has room under its limit; the figure was {0:N2} GB', $Limited.Free))
         $Limited.Free | Should -BeLessOrEqual 2.0 -Because 'no more than the heap''s own limit can be free to it'
         if ($Plain.Limit -eq 0)
         {
@@ -3167,7 +3221,7 @@ if ([System.GC].GetMethod('GetConfigurationVariables')) { $Limit = [double][Syst
         $CommittedBefore = [double][System.GC]::GetGCMemoryInfo().TotalCommittedBytes / 1MB
         $null = Get-GcFreeMemoryGB -Full
         $CommittedAfter = [double][System.GC]::GetGCMemoryInfo().TotalCommittedBytes / 1MB
-        ($CommittedBefore - $CommittedAfter) | Should -BeGreaterOrEqual 225 -Because ('300 MB of arrays were dropped; the heap held {0:N0} MB committed before and {1:N0} MB after' -f $CommittedBefore, $CommittedAfter)
+        ($CommittedBefore - $CommittedAfter) | Should -BeGreaterOrEqual 225 -Because ([string]::Format([cultureinfo]::InvariantCulture, '300 MB of arrays were dropped; the heap held {0:N0} MB committed before and {1:N0} MB after', $CommittedBefore, $CommittedAfter))
     }
 
     It 'two streams below the floor with nothing else in progress: one is admitted at a time, the other only after it releases' {
@@ -3580,7 +3634,7 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
             $Overrides.Count | Should -Be 2
             $Decisions.Count | Should -Be 2 -Because 'each of the two waiters is let in by its own override decision, and each decision stamps LastOverride'
             $Gap = ($Decisions[1] - $Decisions[0]) / [double][System.Diagnostics.Stopwatch]::Frequency
-            $Gap | Should -BeGreaterOrEqual 1 -Because ('the second waiter may be let in only a full longest wait (1 s) after the first; the two decisions were {0:N3} s apart' -f $Gap)
+            $Gap | Should -BeGreaterOrEqual 1 -Because ([string]::Format([cultureinfo]::InvariantCulture, 'the second waiter may be let in only a full longest wait (1 s) after the first; the two decisions were {0:N3} s apart', $Gap))
             $State.Holders.Count | Should -Be 0
         }
     }

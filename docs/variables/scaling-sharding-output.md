@@ -176,9 +176,10 @@ small host such as Cloud Shell.
 
 **What `Runspace` gives up.**
 
-- **Crash isolation.** An out-of-memory error or a crash in one stream ends every
-  stream. A stream process dies alone, and the wrapper still ships the reports
-  it had finished.
+- **Crash isolation.** An out-of-memory error or a crash in one stream ends every stream.
+  A stream process dies alone, and the wrapper still ships the reports it had finished.
+  To make that less likely, a stream starts each subscription only when enough memory is free (see [`-StreamMemoryGB`](#-streammemorygb)).
+  That lowers the risk but does not remove it: a subscription that has started can still grow past the memory that was free.
 - **Separate .NET runtimes.** The streams share one garbage-collected heap, so a
   forced full collection (the billing phases and the memory readings trigger
   them) pauses every stream at once. The memory readings in `RunSummary.log` and
@@ -197,6 +198,49 @@ must not stop the others.
 **Fallback.** If thread jobs cannot be started in the session, the wrapper warns
 and falls back to the sequential path, as `Process` does when `Start-Job` is
 blocked.
+
+### `-StreamMemoryGB`
+
+| | |
+|---|---|
+| **Type** | `double`, `[ValidateRange(0, 1024)]` |
+| **Declared on** | `Run-AllSubscriptions.ps1` - **wrapper only** |
+| **Default** | `2` |
+
+**What it does.** It is the memory one parallel stream is allowed, in GB, and it is used in two places.
+When `-ParallelStreams` is auto-tuned, the wrapper starts no more streams than `floor((AvailableGB - 1) / StreamMemoryGB)`, keeping 1 GB back for the wrapper itself and the operating system.
+It has no effect on the count when `-ParallelStreams` is passed, and a value of `0` is read as the default `2` there.
+Under `-StreamIsolation Runspace` it is also the memory one stream may need for a subscription.
+Before each subscription a stream asks for admission, and it is admitted when at least this much memory is free.
+While less is free, the stream waits and reads free memory again every 15 seconds.
+It is admitted anyway when no other subscription is in progress, so one subscription always runs and the streams cannot all wait on each other.
+It is also admitted, with a warning, once it has waited 30 minutes.
+The decision and the count of subscriptions in progress change together under one lock, so the count stays exact, and when memory is short two streams cannot both be admitted as the only one running.
+The check reads the memory that is free when a subscription starts, not what the subscription will need, so streams that start at the same moment are all admitted on the same free memory.
+`0` turns the check off.
+It has no effect under `-StreamIsolation Process` or with one stream.
+
+**How free memory is read.** The figure is the one the .NET garbage collector records: the memory the process may use (physical memory, or a container limit the runtime detects) less the memory in use, refreshed by a gen-0 collection that takes about a millisecond.
+No OS command is run, so the same code runs on every platform.
+The runtime records the memory in use in whole percent of the total, so the figure moves in steps of 1% of it.
+Before a stream first waits, one aggressive full collection hands back the memory the process holds only as garbage, which any stream can have left in the shared heap.
+On Windows a default full collection keeps that memory committed, so the figure would not move.
+Step 5 of `docs/experiments/one-process-streams.md` compares the figure with the operating system's own on macOS and Windows.
+
+**What it logs.** A stream that has to wait prints one line when it starts waiting, with the subscription, the free memory, the floor and how many other subscriptions are in progress.
+It prints one more line when it is admitted, with the seconds it waited, or a warning when it is admitted because it waited 30 minutes.
+Nothing is added to the report files.
+
+**Why it exists.** The stream count used to be sized at 1.5 GB per stream against total RAM, so a machine that was already busy, or a stream with a large billing download, could run out of memory.
+Sizing from the memory that is free at the start of the run, with an allowance you can change, keeps the stream count inside what the machine can actually give.
+The streams of a `Runspace` run also share one process, so one out-of-memory error ends every stream.
+The billing download of a single subscription can take several GB.
+Starting a subscription only when there is room for it keeps the streams from running out of memory together.
+
+**When to change it.** Raise it (for example `-StreamMemoryGB 4`) for tenants with very large billing data per subscription, where a stream's working set grows past 2 GB.
+The `Memory` block in `RunSummary.log` of a `Process` or sequential run shows how much one subscription used; under `Runspace` it measures the whole process.
+Lower it on a machine with plenty of memory when you want more streams, or pass `-ParallelStreams` to choose the count yourself.
+Under `Runspace`, pass `0` when the waiting costs more than the risk it avoids.
 
 ### `-HeadRoom`
 
@@ -229,33 +273,6 @@ validation already bounds the CLI surface to 0–90; the container entrypoint
 environment. `-HeadRoom` is not forwarded as a flag; it *mutates*
 `-ConcurrencyLimit` before forwarding, which is why the run's diagnostics label
 the concurrency source as e.g. `auto, -HeadRoom 20` (line ~1079).
-
-### `-StreamMemoryGB`
-
-| | |
-|---|---|
-| **Type** | `double`, `[ValidateRange(0.25, 64)]` |
-| **Declared on** | `Run-AllSubscriptions.ps1`, **wrapper only** |
-| **Default** | `2` |
-
-**What it does.** The memory one parallel stream is allowed, in GB. When
-`-ParallelStreams` is auto-tuned, the wrapper starts no more streams than
-`floor((AvailableGB - 1) / StreamMemoryGB)`, keeping 1 GB back for the wrapper
-itself and the operating system. It has no effect when `-ParallelStreams` is
-passed.
-
-**Why it exists.** The previous rule assumed 1.5 GB per stream against TOTAL
-RAM, so a machine that was already busy, or a stream with a large billing
-download, could run out of memory. Sizing from the memory that is free at the
-start of the run, with an allowance you can change, keeps the stream count
-inside what the machine can actually give.
-
-**When to change it.** Raise it (for example `-StreamMemoryGB 4`) for tenants
-with very large billing data per subscription, where a stream's working set
-grows past 2 GB; the per-subscription `Memory` block in `RunSummary.log` shows
-how much each stream really used. Lower it on a machine with plenty of memory
-when you want more streams, or pass `-ParallelStreams` to choose the count
-yourself.
 
 ---
 

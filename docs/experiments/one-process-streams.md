@@ -19,6 +19,8 @@ The scripts that produced every number below are in `experiments/one-process-str
 - Step 4 puts the one-process design into the real wrapper behind `-StreamIsolation Runspace`, with `Process` (separate `pwsh` processes) staying the default.
   On macOS, 3 runs of each mode produced identical bundles; the runspace mode used 65% fewer threads, 32% less peak memory and 14% less CPU, for a median wall time 6% longer.
 - On the 2-vCPU Windows test box, with the stamp fix, the one-process prototype was better on every measure (at least 20% faster, 20-30% less CPU, at least 40% less peak memory), and the real wrapper produced the same bundle contents in both modes.
+- Step 5 adds a free-memory admission check under `Runspace`: before each subscription a stream waits until `-StreamMemoryGB` (default 2) GB is free, unless no other subscription is in progress.
+  The reading comes from the .NET garbage collector, with no OS command, and matched the OS's own figure on macOS and Windows; on Windows only an aggressive collection hands a dropped heap back.
 
 ## Step 1: what `Set-AzContext` does to the saved default
 
@@ -249,10 +251,89 @@ The same prototype on the Step 4 code: 3 runs per design in the order processes,
   Three are the two `Write-RdaHostLinesInTranscript` tests that check the colours and the transcript (`appends them to the closed transcript`) and `keeps the markers and retries when the snapshot cannot be removed`; the fourth is named in `e2e\pester.json` on the box.
   Their cause was not established; they involve the host's transcript and a file that cannot be removed, which may well behave differently when PowerShell runs as SYSTEM under SSM with its output redirected.
 
+## Step 5: free-memory admission under `Runspace`
+
+Under `-StreamIsolation Runspace` the streams share one process, so one out-of-memory error ends every stream, and the billing download of a single subscription can take several GB.
+Step 5 makes each stream ask for admission before every subscription.
+
+### The check
+
+- **State.** The wrapper creates one admission state, in the `Runspace` branch only (`New-StreamAdmissionState`, a synchronized hashtable), and passes that same instance to every thread job through the worker's new `-AdmissionState` parameter, which the worker uses only with `-SharedProcess`.
+  It holds the floor (`-StreamMemoryGB`, default 2 GB, `0` turns the check off), the poll interval (15 seconds), the longest wait (30 minutes) and the count of subscriptions in progress.
+- **Decision.** `Enter-StreamAdmission` decides and counts under a `System.Threading.Monitor` lock on the hashtable's `SyncRoot`.
+  It admits a subscription when free memory is at least the floor, when no other subscription is in progress (so one always runs and the streams cannot wait on each other forever), or after 30 minutes of waiting, with a warning.
+  A free-memory reading that throws admits the subscription with a warning instead of failing it.
+- **Release.** The worker takes the subscription off the count in a `finally` block, so a subscription that throws does not keep its place.
+- **Logging.** A stream logs once when it starts waiting (the subscription, free GB, the floor and the other subscriptions in progress) and once when it is admitted, with the seconds it waited, through its usual `[stream-N]` console lines.
+  Nothing is added to the Inventory, Metrics or Consumption output.
+- **Process mode.** The wrapper creates no state and the worker gets none, so `-StreamIsolation Process` runs as before.
+- **Limit.** The check reads the memory free when a subscription starts, not what the subscription will need, so streams that start together are all admitted on the same free memory.
+  It stops a stream from starting new work while memory is short; it cannot stop two subscriptions that are already running from growing together.
+
+### Reading free memory
+
+The reading is `[GC]::GetGCMemoryInfo()`, `TotalAvailableMemoryBytes - MemoryLoadBytes`, refreshed by `[GC]::Collect(0)`, which took 1-3 ms here.
+The runtime keeps the load in whole percent of the total, so the reading moves in steps of 1%: 184 MB on the 18 GB Mac and about 80 MB on the 8 GB Windows box.
+`Step5-MemoryReading.ps1` reads it before, while and after holding 400 MB from `Marshal.AllocHGlobal` filled with random bytes, beside the OS's own figure, and answers each check by its exit status.
+The tolerance is one reading step plus 150 MB, and a check over several cycles uses the median.
+
+| Check | macOS 26.6, .NET 10.0.5 | Windows Server 2022, PowerShell 7 |
+|---|---|---|
+| A gen-0 collection alone records the new load | yes: the OS figure fell 369 MB, and the gen-0 reading matched the full collection after it | yes |
+| The reading drops by the allocation | yes: median 368 MB over 16 cycles of 400 MB (single cycles from 0 to 922 MB on a busy host) | yes, in a single cycle and as the median of 5 |
+| It rises again when the block is freed | yes, within the tolerance: median 277 MB over 16 cycles | yes, in a single cycle and as the median of 5 |
+| It matches the OS figure | yes: equal to `kern.memorystatus_level` of `hw.memsize` in 16 of the 18 phases of a 6-cycle run, one step apart in the other 2 | yes, against `Win32_OperatingSystem.FreePhysicalMemory` |
+| Negative control: a 4,000 MB drop claimed for the 400 MB block | - | no, as it must be |
+
+The streams share one heap, so memory a finished subscription left as garbage counts as used until a full collection.
+A stream runs one full collection before it first waits, not on every poll.
+With 400 MB of managed byte arrays dropped:
+
+- On macOS a default full collection (`[GC]::Collect()`) gave the reading back within 2.3 seconds (the GC's committed memory fell from 410 to 137 MB), and an aggressive one did too (410 to 10 MB).
+- On Windows a default full collection did not: the check failed in both of its runs.
+  One-off probes (not kept) found that the reading did not rise even by 80 MB within 30 seconds, that the GC's committed memory did not fall by 200 MB, and that a compacting collection of the large object heap did not help either.
+  An aggressive collection (`GCCollectionMode.Aggressive`, .NET 7 and later) gave it back on the first reading after it.
+
+So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on a runtime without that mode.
+
+### Tests
+
+`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` gains 16 tests, and each runs the code:
+
+- `Enter-StreamAdmission` with an injected free-memory reader and log: it admits at once above the floor, admits below it when nothing else is in progress, waits and is admitted when memory recovers (one full collection before the first wait, gen-0 readings after), is admitted when the count reaches 0 and after the longest wait with a warning, never waits with a floor of 0, and admits with a warning when the reading throws.
+- `Exit-StreamAdmission` never takes the count below 0, and `Get-GcFreeMemoryGB` reads a figure within bounds and, with `-Full`, hands 300 MB of dropped arrays back to the OS.
+- Two thread jobs that always read memory below the floor, through 25 rounds that start together: one is admitted at a time, and the other only after the first releases.
+  With the locks taken out of `Enter-StreamAdmission`, this test failed in 3 of 3 runs.
+- The wrapper's parameter (default 2, accepts 0 to 1024) and its two `Runspace` blocks, lifted from the parsed source: under `Runspace` every thread job gets the one state by reference; under `Process` there is no state and the stream process gets none.
+- The real worker with `-SharedProcess` against a stub inventory that fails one of three subscriptions: each ran as the only subscription admitted, and the count was 0 afterwards.
+
+All 16 fail against the previous commit.
+On macOS, `RunAllSubscriptionsReconciliation` passed 252 of 252, `ParamForwardingParity` 12, `StampCollision` 5, `MemoryRelease` 51 and `CollectorBreakerAndVisibility` 97 (`ParallelStreamsAggregation` skips its 13 without a report zip).
+On the Windows box the 16 pass, and they all fail against the previous wrapper, worker and functions file.
+The rest of that file fails the same 3 tests with and without the change: 2 whose names mention the transcript (at least one of them under `Invoke-RdaSupportLogCollectionInTranscript`) and `keeps the markers and retries when the snapshot cannot be removed`.
+`ParamForwardingParity` and `StampCollision` pass.
+
+### Live runs on macOS
+
+The real wrapper against the 3 sandbox subscriptions with `-ParallelStreams 3 -ConcurrencyLimit 6 -AllowPartialAccess`, one run each, on a busy host (load about 1.2 per core).
+
+| Run | Wall time (s) | Peak memory (MB) | Waits |
+|---|---|---|---|
+| `Runspace -StreamMemoryGB 0` | 113 | 616 | none, and no reading |
+| `Runspace -StreamMemoryGB 64` | 184 | 511 | 2 streams waited, 60 and 105 s, each admitted when no other subscription was in progress |
+| `Runspace` (default 2 GB) | 98 | 605 | none |
+| `Process` | 145 | - | no check |
+
+- All 4 exited 0, and their bundles had the same 29 entries with the same row counts as in Step 4 (Consumption 623 / 12 / 0, 34 metric records).
+- The `RunSummary.log` files differed only in the parameter lines and the memory readings.
+- Every run printed the same warnings as the Step 4 runs before this change (Marketplace `BadRequest` and an unsupported Foundry metric for 2 subscriptions each, and the unreadable tenant-root management group).
+- The 64 GB floor serialized the streams: each started its subscription after the previous one ended, and the run held the least memory of the three runspace runs, for 63-88% more wall time.
+- Peak memory is the wrapper process's maximum resident set; under `Process` that leaves out the stream processes, so it is not shown.
+
 ## Next steps
 
 1. Review step 2 on its own (it is on `fix/memory-per-sub`): it fixes the saved-default side effect and removes the only reason streams must be processes.
    Its user docs still describe `Set-AzContext` there (`docs/architecture-two-scripts.md`, `docs/variables/scaling-sharding-output.md`, `docs/ResourceInventory-line-by-line.md`); this branch updates the first two.
-2. Before `Runspace` could become the default: check free memory before each subscription (one stream's out-of-memory error now ends every stream), and measure it on a tenant with real data volume.
+2. Before `Runspace` could become the default: measure the Step 5 admission check on a tenant with real billing volume, and decide whether it should also hold memory back for subscriptions that have just started, which it does not do.
 3. Then the parts of the design not in Step 4: a shared work queue instead of the round-robin slices, `SetMinRunspaces` on the metrics pool, and one metrics pool for all streams.
 4. Look into the 3 tests that fail on the Windows box with and without this work.

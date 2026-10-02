@@ -40,13 +40,16 @@ param (
     [ValidateSet('Process', 'Runspace')]
     [string]$StreamIsolation = 'Process',
 
+    # Memory one parallel stream is allowed, in GB. It is used two ways. With the memory available at
+    # start-up it decides how many streams the auto-tuning starts (no effect when -ParallelStreams is
+    # passed; a value of 0 is read as the default 2 there). Under -StreamIsolation Runspace it is also
+    # the free memory a stream waits for before it starts a subscription while another subscription is
+    # in progress; 0 turns that check off.
+    [ValidateRange(0, 1024)]
+    [double]$StreamMemoryGB = 2,
+
     [ValidateRange(0, 90)]
     [int]$HeadRoom = 0,
-
-    # Memory one parallel stream may use, in GB. With available memory it decides how many streams
-    # the auto-tuning starts; it has no effect when -ParallelStreams is passed.
-    [ValidateRange(0.25, 64)]
-    [double]$StreamMemoryGB = 2,
 
     [int]$ShardIndex = 0,
     [int]$ShardCount = 1,
@@ -1484,6 +1487,14 @@ else
         if ($StreamIsolation -eq 'Runspace')
         {
             Write-Host "-StreamIsolation Runspace: each stream is a runspace in this pwsh process, sharing its signed-in Az context, with its own resume-state file." -ForegroundColor DarkGray
+            if ($StreamMemoryGB -gt 0)
+            {
+                Write-Host ("Before each subscription a stream checks free memory: while another subscription is in progress, it waits until {0} GB is free (-StreamMemoryGB)." -f $StreamMemoryGB.ToString([cultureinfo]::InvariantCulture)) -ForegroundColor DarkGray
+            }
+            else
+            {
+                Write-Host "-StreamMemoryGB 0: streams start their subscriptions without checking free memory." -ForegroundColor DarkGray
+            }
         }
         else
         {
@@ -1643,6 +1654,13 @@ else
                 Write-Host "Stream split: round-robin (per-subscription work estimates could not be read from Resource Graph)." -ForegroundColor DarkGray
             }
 
+            if ($StreamIsolation -eq 'Runspace')
+            {
+                # The streams share this process, so one out-of-memory error would end them all. Each asks this one
+                # state, passed to it by reference, for admission before every subscription (Enter-StreamAdmission).
+                $StreamAdmission = New-StreamAdmissionState -FloorGB $StreamMemoryGB
+            }
+
             for ($S = 0; $S -lt $StreamCount; $S++)
             {
                 $SliceList = $Slices[$S]
@@ -1702,6 +1720,7 @@ else
                 if ($StreamIsolation -eq 'Runspace')
                 {
                     $WorkerArgs.SharedProcess = $true
+                    $WorkerArgs.AdmissionState = $StreamAdmission
                     # The same worker, as a thread job in this process. Thread jobs share one process-wide
                     # throttle (5 by default), so it is raised to the stream count: a stream over it would wait
                     # NotStarted until another ended. A stream's metrics worker pool lives in its runspace's

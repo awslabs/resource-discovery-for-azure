@@ -2847,3 +2847,370 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
         }
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream starts a subscription only when free memory allows' {
+    # Enter-StreamAdmission runs directly here, with an injected free-memory reader and log, and from thread
+    # jobs that share one state. The real worker runs with -SharedProcess and a state against stub inventories,
+    # and the wrapper blocks that create the state and hand it to each stream are lifted from its parsed source
+    # and run, as in the Describe above.
+    BeforeAll {
+        $script:AdRoot = Split-Path $PSScriptRoot -Parent
+    }
+
+    It 'admits at once when free memory is at the floor, after one gen-0 reading, and counts the subscription in progress' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        $State.InProgress = 1
+        $Calls = [System.Collections.Generic.List[bool]]::new()
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $Reader = { param([bool]$Full) $Calls.Add($Full); 2.0 }.GetNewClosure()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log $LogBlock
+        $Admission.Reason | Should -Be 'memory'
+        $State.InProgress | Should -Be 2
+        @($Calls) | Should -Be @($false) -Because 'no full collection is needed when the gen-0 reading already clears the floor'
+        $Logs.Count | Should -Be 0 -Because 'only a wait is logged'
+    }
+
+    It 'admits below the floor when no other subscription is in progress, without reading memory' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        $Calls = [System.Collections.Generic.List[bool]]::new()
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $Reader = { param([bool]$Full) $Calls.Add($Full); 0.1 }.GetNewClosure()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log $LogBlock
+        $Admission.Reason | Should -Be 'alone'
+        $State.InProgress | Should -Be 1
+        $Calls.Count | Should -Be 0
+        $Logs.Count | Should -Be 0
+    }
+
+    It 'below the floor it runs one full collection, waits on gen-0 readings, and is admitted once memory recovers' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        $State.InProgress = 1
+        $Calls = [System.Collections.Generic.List[bool]]::new()
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $Readings = [System.Collections.Generic.Queue[double]]::new([double[]]@(1.0, 1.5, 1.0, 1.0, 3.0))
+        $Reader = { param([bool]$Full) $Calls.Add($Full); $Readings.Dequeue() }.GetNewClosure()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log $LogBlock
+        $Admission.Reason | Should -Be 'memory'
+        $Admission.FreeGB | Should -Be 3.0
+        $Admission.WaitedSeconds | Should -BeGreaterOrEqual 0.15 -Because 'three polls of 0.05 s came before the reading that cleared the floor'
+        $State.InProgress | Should -Be 2
+        @($Calls) | Should -Be @($false, $true, $false, $false, $false) -Because 'one full collection before the first wait, then gen-0 readings only'
+        $Logs.Count | Should -Be 2 -Because 'one line when the wait starts and one on admission'
+        $Logs[0].Message | Should -Be 'waiting for free memory before starting Sub A (sub-a): 1.5 GB free, floor 2 GB (-StreamMemoryGB), 1 other subscription(s) in progress'
+        $Logs[0].Color | Should -Be 'Yellow'
+        $Logs[1].Message | Should -Match '^admitted Sub A \(sub-a\) after waiting \d+ s: 3\.0 GB free$'
+    }
+
+    It 'is admitted once no other subscription is in progress, even though memory never recovers' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 60
+        $State.InProgress = 1
+        $Started = [System.Threading.ManualResetEventSlim]::new($false)
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }); if ($Message -like 'waiting*') { $Started.Set() } }.GetNewClosure()
+        # The other stream finishes its subscription once this one is waiting.
+        $Other = Start-ThreadJob -ScriptBlock {
+            param([string]$FunctionsPath, [hashtable]$State, [System.Threading.ManualResetEventSlim]$Started)
+            . $FunctionsPath
+            if ($Started.Wait(30000))
+            {
+                Start-Sleep -Milliseconds 200
+                Exit-StreamAdmission -State $State
+            }
+        } -ArgumentList $script:FunctionsPath, $State, $Started
+        try
+        {
+            $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub C (sub-c)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log $LogBlock
+        }
+        finally
+        {
+            $null = $Other | Wait-Job -Timeout 60
+            $Other | Remove-Job -Force
+            $Started.Dispose()
+        }
+        $Admission.Reason | Should -Be 'alone'
+        $Admission.WaitedSeconds | Should -BeGreaterOrEqual 0.2
+        $State.InProgress | Should -Be 1 -Because 'the other subscription left and this one entered'
+        $Logs.Count | Should -Be 2
+        $Logs[1].Message | Should -Match '^admitted Sub C \(sub-c\) after waiting \d+ s: no other subscription in progress$'
+    }
+
+    It 'is admitted with a warning once it has waited the longest wait, when memory never recovers' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 0.3
+        $State.InProgress = 2
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub D (sub-d)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log $LogBlock
+        $Admission.Reason | Should -Be 'max-wait'
+        $Admission.WaitedSeconds | Should -BeGreaterOrEqual 0.3
+        $State.InProgress | Should -Be 3
+        $Logs.Count | Should -Be 2
+        $Logs[1].Color | Should -Be 'Yellow'
+        $Logs[1].Message | Should -Match '^WARNING: starting Sub D \(sub-d\) after waiting \d+ s for free memory: 0\.5 GB free, floor 2 GB \(-StreamMemoryGB\), 2 other subscription\(s\) in progress\.$'
+    }
+
+    It 'with a floor of 0 it never reads memory or waits' {
+        $State = New-StreamAdmissionState -FloorGB 0 -PollSeconds 5 -MaxWaitSeconds 30
+        $State.InProgress = 5
+        $Calls = [System.Collections.Generic.List[bool]]::new()
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $Reader = { param([bool]$Full) $Calls.Add($Full); 0.0 }.GetNewClosure()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }) }.GetNewClosure()
+        $Watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub E (sub-e)' -FreeMemoryReader $Reader -Log $LogBlock
+        $Watch.Elapsed.TotalSeconds | Should -BeLessThan 2 -Because 'a single poll would take 5 s'
+        $Admission.Reason | Should -Be 'disabled'
+        $Calls.Count | Should -Be 0
+        $Logs.Count | Should -Be 0
+    }
+
+    It 'a free-memory reading that fails admits the subscription with a warning instead of failing it' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        $State.InProgress = 1
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; Color = $Color }) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Subscription 'Sub F (sub-f)' -FreeMemoryReader { param([bool]$Full) throw 'no reading' } -Log $LogBlock
+        $Admission.Reason | Should -Be 'unreadable'
+        $State.InProgress | Should -Be 2
+        @($Logs.Message) | Should -Be @('WARNING: could not read free memory before starting Sub F (sub-f): no reading. Starting it without the check.')
+    }
+
+    It 'Exit-StreamAdmission takes one subscription off the count and never goes below zero' {
+        $State = New-StreamAdmissionState
+        $State.InProgress = 1
+        Exit-StreamAdmission -State $State
+        $State.InProgress | Should -Be 0
+        Exit-StreamAdmission -State $State
+        $State.InProgress | Should -Be 0
+    }
+
+    It 'Get-GcFreeMemoryGB reads a positive figure no larger than the memory the runtime may use' {
+        $TotalGB = [double][System.GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes / 1GB
+        foreach ($FreeGB in @((Get-GcFreeMemoryGB), (Get-GcFreeMemoryGB -Full)))
+        {
+            $FreeGB | Should -BeGreaterThan 0
+            $FreeGB | Should -BeLessOrEqual $TotalGB
+        }
+    }
+
+    It 'Get-GcFreeMemoryGB -Full hands the memory of dropped arrays back to the OS, not only to the heap' {
+        # On Windows a default full collection keeps the freed memory committed, so the free figure would not
+        # move; the aggressive collection decommits it.
+        $Arrays = [System.Collections.Generic.List[byte[]]]::new()
+        for ($N = 0; $N -lt 300; $N++)
+        {
+            $Arrays.Add([byte[]]::new(1MB))
+            [System.Array]::Fill($Arrays[$N], [byte]7)
+        }
+        $Arrays = $null
+        [System.GC]::Collect(0)
+        $CommittedBefore = [double][System.GC]::GetGCMemoryInfo().TotalCommittedBytes / 1MB
+        $null = Get-GcFreeMemoryGB -Full
+        $CommittedAfter = [double][System.GC]::GetGCMemoryInfo().TotalCommittedBytes / 1MB
+        ($CommittedBefore - $CommittedAfter) | Should -BeGreaterOrEqual 225 -Because ('300 MB of arrays were dropped; the heap held {0:N0} MB committed before and {1:N0} MB after' -f $CommittedBefore, $CommittedAfter)
+    }
+
+    It 'two streams below the floor with nothing else in progress: one is admitted at a time, the other only after it releases' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.01 -MaxWaitSeconds 60
+        $Barrier = [System.Threading.Barrier]::new(2)
+        $Events = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        $Rounds = 25
+        # Both streams reach Enter-StreamAdmission together in every round, through the barrier.
+        $Worker = {
+            param([string]$FunctionsPath, [hashtable]$State, [System.Threading.Barrier]$Barrier, $Events, [string]$Name, [int]$Rounds)
+            . $FunctionsPath
+            for ($Round = 0; $Round -lt $Rounds; $Round++)
+            {
+                $null = $Barrier.SignalAndWait(30000)
+                $Admission = Enter-StreamAdmission -State $State -Subscription $Name -FreeMemoryReader { param([bool]$Full) 0.5 } -Log { param([string]$Message, [string]$Color) }
+                $Events.Enqueue([pscustomobject]@{ Tick = [System.Diagnostics.Stopwatch]::GetTimestamp(); Name = $Name; Kind = 'admit'; Reason = $Admission.Reason; InProgress = [int]$State.InProgress })
+                Start-Sleep -Milliseconds 20
+                $Events.Enqueue([pscustomobject]@{ Tick = [System.Diagnostics.Stopwatch]::GetTimestamp(); Name = $Name; Kind = 'release'; Reason = ''; InProgress = -1 })
+                Exit-StreamAdmission -State $State
+            }
+        }
+        $Jobs = @('stream-a', 'stream-b' | ForEach-Object { Start-ThreadJob -ThrottleLimit 2 -ScriptBlock $Worker -ArgumentList $script:FunctionsPath, $State, $Barrier, $Events, $_, $Rounds })
+        try
+        {
+            $null = $Jobs | Wait-Job -Timeout 120
+            @($Jobs | Where-Object { $_.State -ne 'Completed' }).Count | Should -Be 0
+        }
+        finally
+        {
+            $Jobs | Remove-Job -Force
+            $Barrier.Dispose()
+        }
+        $Ordered = @($Events.ToArray() | Sort-Object -Property Tick)
+        $Ordered.Count | Should -Be (4 * $Rounds)
+        for ($k = 0; $k -lt $Ordered.Count; $k += 2)
+        {
+            $Ordered[$k].Kind | Should -Be 'admit' -Because ('event {0} must be an admission: the previous one was released before it' -f $k)
+            $Ordered[$k].InProgress | Should -Be 1 -Because 'the admitted subscription is the only one in progress'
+            $Ordered[$k].Reason | Should -Be 'alone'
+            $Ordered[$k + 1].Kind | Should -Be 'release'
+            $Ordered[$k + 1].Name | Should -Be $Ordered[$k].Name
+        }
+        $State.InProgress | Should -Be 0
+    }
+
+    Context 'the wrapper' {
+        BeforeAll {
+            $AdAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:AdRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+            $FindAdBlock = {
+                param([string]$Contains)
+                $Found = @($AdAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq "`$StreamIsolation -eq 'Runspace'" -and $args[0].Extent.Text.Contains($Contains) }, $true))
+                if ($Found.Count -ne 1) { throw ("expected one Runspace block containing '{0}' in Run-AllSubscriptions.ps1, found {1}" -f $Contains, $Found.Count) }
+                [scriptblock]::Create($Found[0].Extent.Text)
+            }
+            $script:AdCreateBlock = & $FindAdBlock 'New-StreamAdmissionState'
+            $script:AdLaunchBlock = & $FindAdBlock '$Jobs += Start-ThreadJob'
+            # The wrapper's own param block, run on its own, so the declared default and range are what is tested.
+            $script:AdParamBlock = [scriptblock]::Create($AdAst.ParamBlock.Extent.Text + ' $StreamMemoryGB')
+
+            # A worker that takes one admission in the state it was given, under the state's lock, and reports
+            # whether it got one.
+            $script:AdStubWorker = Join-Path $TestDrive 'admission-stub-worker.ps1'
+            Set-Content -LiteralPath $script:AdStubWorker -Value @'
+param([string]$Probe, [switch]$SharedProcess, [hashtable]$AdmissionState)
+if ($null -ne $AdmissionState)
+{
+    [System.Threading.Monitor]::Enter($AdmissionState.SyncRoot)
+    try { $AdmissionState.InProgress = [int]$AdmissionState.InProgress + 1 }
+    finally { [System.Threading.Monitor]::Exit($AdmissionState.SyncRoot) }
+}
+[pscustomobject]@{ ProcessId = $PID; HasState = ($null -ne $AdmissionState) } | ConvertTo-Json | Set-Content -LiteralPath $Probe
+'@
+            $script:AdStubCommon = Join-Path $TestDrive 'admission-stub-common.ps1'
+            Set-Content -LiteralPath $script:AdStubCommon -Value 'function Close-RdaMetricWorkerPool { }'
+        }
+
+        It '-StreamMemoryGB defaults to 2 GB and accepts 0 (off) to 1024' {
+            (& $script:AdParamBlock) | Should -Be 2
+            (& $script:AdParamBlock -StreamMemoryGB 0) | Should -Be 0
+            (& $script:AdParamBlock -StreamMemoryGB 0.5) | Should -Be 0.5
+            (& $script:AdParamBlock -StreamMemoryGB 1024) | Should -Be 1024
+            { & $script:AdParamBlock -StreamMemoryGB 1025 } | Should -Throw
+            { & $script:AdParamBlock -StreamMemoryGB -1 } | Should -Throw
+        }
+
+        It 'Runspace: the wrapper creates one state from -StreamMemoryGB and every stream thread job gets that same instance' {
+            Set-Variable -Name StreamIsolation -Value 'Runspace'
+            Set-Variable -Name StreamMemoryGB -Value 3.5
+            . $script:AdCreateBlock
+            $Created = $StreamAdmission
+            $Created.IsSynchronized | Should -BeTrue
+            $Created.FloorGB | Should -Be 3.5
+            $Created.InProgress | Should -Be 0
+            Set-Variable -Name StreamCount -Value 2
+            Set-Variable -Name WorkerScript -Value $script:AdStubWorker
+            Set-Variable -Name CommonFunctionsFile -Value $script:AdStubCommon
+            $Jobs = @()
+            $Probes = @()
+            foreach ($N in 0..1)
+            {
+                $Probe = Join-Path $TestDrive ('admission-runspace-{0}.json' -f $N)
+                $Probes += $Probe
+                $WorkerArgs = @{ Probe = $Probe }
+                . $script:AdLaunchBlock
+                [object]::ReferenceEquals($WorkerArgs.AdmissionState, $Created) | Should -BeTrue
+            }
+            $null = $Jobs | Wait-Job -Timeout 60
+            @($Jobs | Where-Object { $_.State -ne 'Completed' }).Count | Should -Be 0
+            $Jobs | Remove-Job -Force
+            $Created.InProgress | Should -Be 2 -Because 'each stream changed the one live state, not a copy of it'
+            foreach ($Probe in $Probes)
+            {
+                (Get-Content -Raw -LiteralPath $Probe | ConvertFrom-Json).HasState | Should -BeTrue
+            }
+        }
+
+        It 'Process (default): the wrapper creates no state, and its stream processes get none' {
+            Set-Variable -Name StreamIsolation -Value 'Process'
+            Set-Variable -Name StreamMemoryGB -Value 2
+            . $script:AdCreateBlock
+            Get-Variable -Name StreamAdmission -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+            Set-Variable -Name StreamCount -Value 2
+            Set-Variable -Name WorkerScript -Value $script:AdStubWorker
+            Set-Variable -Name CommonFunctionsFile -Value $script:AdStubCommon
+            $Probe = Join-Path $TestDrive 'admission-process.json'
+            $WorkerArgs = @{ Probe = $Probe }
+            $Jobs = @()
+            . $script:AdLaunchBlock
+            $Jobs[0].PSJobTypeName | Should -Be 'BackgroundJob'
+            $null = $Jobs | Wait-Job -Timeout 120
+            $Jobs | Remove-Job -Force
+            $WorkerArgs.ContainsKey('AdmissionState') | Should -BeFalse
+            $Seen = Get-Content -Raw -LiteralPath $Probe | ConvertFrom-Json
+            $Seen.ProcessId | Should -Not -Be $PID
+            $Seen.HasState | Should -BeFalse
+        }
+    }
+
+    Context 'the worker, run as a stream in this process' {
+        BeforeAll {
+            $script:AdWorkerPath = Join-Path $script:AdRoot 'Run-AllSubscriptions.Stream.ps1'
+            # An inventory that records the in-progress count it ran under, and fails for sub-2.
+            $script:AdStubTree = Join-Path $TestDrive 'admission-tree'
+            New-Item -ItemType Directory -Path $script:AdStubTree -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $script:AdStubTree 'ResourceInventory.ps1') -Value @'
+param($TenantID, $SubscriptionID, [switch]$RunAllSubs, $ConcurrencyLimit)
+$Global:AdmissionSeen += @([int]$Global:AdmissionProbeState.InProgress)
+if ($SubscriptionID -eq 'sub-2') { throw 'stub inventory failure' }
+$Global:ResourceCount = 3
+$Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
+'@
+            function script:Invoke-AdStream
+            {
+                param([string]$Root, [hashtable]$State, [switch]$SharedProcess)
+                New-Item -ItemType Directory -Path $Root -Force | Out-Null
+                $WorkerArgs = @{
+                    TenantID           = 'tenant-x'
+                    StreamId           = '0'
+                    InventoryRoot      = $Root
+                    ScriptRoot         = $script:AdStubTree
+                    AzContextPath      = (Join-Path $Root 'snapshot.json')
+                    StreamSummaryPath  = (Join-Path $Root 'summary.json')
+                    StreamFailuresPath = (Join-Path $Root 'failures.log')
+                    SubscriptionIds    = @('sub-1', 'sub-2', 'sub-3')
+                    SubscriptionNames  = @('Sub One', 'Sub Two', 'Sub Three')
+                    AdmissionState     = $State
+                }
+                if ($SharedProcess) { $WorkerArgs.SharedProcess = $true }
+                $null = & $script:AdWorkerPath @WorkerArgs 6>&1
+                Get-Content -Raw -LiteralPath (Join-Path $Root 'summary.json') | ConvertFrom-Json
+            }
+        }
+
+        AfterEach {
+            Remove-Variable -Name AdmissionSeen, AdmissionProbeState -Scope Global -ErrorAction SilentlyContinue
+        }
+
+        It 'with -SharedProcess every subscription runs admitted and is released after, the failed one too' {
+            $State = New-StreamAdmissionState -FloorGB 1024 -PollSeconds 0.05 -MaxWaitSeconds 30
+            $Global:AdmissionProbeState = $State
+            $Global:AdmissionSeen = @()
+            $Summary = script:Invoke-AdStream -Root (Join-Path $TestDrive 'admission-shared') -State $State -SharedProcess
+            @($Global:AdmissionSeen) | Should -Be @(1, 1, 1) -Because 'each subscription ran as the one admitted, so the failed one did not keep its place'
+            $State.InProgress | Should -Be 0
+            @($Summary.Completed) | Should -Be @('sub-1', 'sub-3')
+            @($Summary.Failed.Id) | Should -Be @('sub-2')
+        }
+
+        It 'without -SharedProcess the worker leaves the admission state alone' {
+            Mock Import-Module { }
+            Mock Disable-AzContextAutosave { }
+            Mock Import-AzContext { }
+            $State = New-StreamAdmissionState -FloorGB 1024 -PollSeconds 0.05 -MaxWaitSeconds 30
+            $Global:AdmissionProbeState = $State
+            $Global:AdmissionSeen = @()
+            $DirectoryBefore = [System.Environment]::CurrentDirectory
+            try { $Summary = script:Invoke-AdStream -Root (Join-Path $TestDrive 'admission-process-worker') -State $State }
+            finally { [System.Environment]::CurrentDirectory = $DirectoryBefore }
+            @($Global:AdmissionSeen) | Should -Be @(0, 0, 0)
+            $State.InProgress | Should -Be 0
+            @($Summary.Completed) | Should -Be @('sub-1', 'sub-3')
+        }
+    }
+}

@@ -36,7 +36,10 @@ param (
     [int]    $ConcurrencyLimit = 6,
     # Set by the wrapper under -StreamIsolation Runspace, where this worker runs as a thread job in the
     # wrapper's own process instead of in a pwsh process of its own.
-    [switch] $SharedProcess
+    [switch] $SharedProcess,
+    # Also only under -StreamIsolation Runspace: the run's one admission state (New-StreamAdmissionState),
+    # shared by reference with every other stream. Used only with -SharedProcess.
+    [hashtable] $AdmissionState
 )
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
@@ -247,8 +250,16 @@ for ($i = 0; $i -lt $PairCount; $i++)
 
     Write-Stream ("processing ({0} of {1}): {2} ({3})" -f ($i + 1), $PairCount, $SubName, $SubId) 'Cyan'
 
+    $Admitted = $false
     try
     {
+        if ($SharedProcess -and $null -ne $AdmissionState)
+        {
+            # The streams share this process, so one out-of-memory error would end them all: a subscription
+            # starts only once the shared check admits it, and the finally below always releases it.
+            $null = Enter-StreamAdmission -State $AdmissionState -Subscription ("{0} ({1})" -f $SubName, $SubId)
+            $Admitted = $true
+        }
         $global:LASTEXITCODE = 0
         $Global:ZipOutputFile = $null
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
@@ -321,6 +332,13 @@ for ($i = 0; $i -lt $PairCount; $i++)
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
             -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $ResourceCounts @StreamBlobArgs
+    }
+    finally
+    {
+        if ($Admitted)
+        {
+            Exit-StreamAdmission -State $AdmissionState
+        }
     }
 }
 

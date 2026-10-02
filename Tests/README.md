@@ -5,11 +5,14 @@ Pester tests to validate that the obfuscation feature works correctly and no PII
 ## Prerequisites
 
 - PowerShell 7+
-- Pester module (v5+)
+- Pester module 5.7.1
 
 ```powershell
-Install-Module -Name Pester -Force -Scope CurrentUser
+Install-Module -Name Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser
 ```
+
+The suite is verified on 5.7.1.
+When a newer Pester is also installed, `Invoke-Pester` loads the newest one, so every run below imports 5.7.1 first.
 
 ## How to Run
 
@@ -28,7 +31,7 @@ cp /path/to/ResourcesReport_*.zip ./Tests/
 ### 3. Run the tests
 
 ```powershell
-pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
 
 Or set environment variables to avoid editing the test file:
@@ -40,6 +43,8 @@ $env:TEST_USER_EMAIL = "user@example.com"
 pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
 
+In this variant, put `Import-Module Pester -RequiredVersion 5.7.1;` in front of `Invoke-Pester` as well.
+
 ### 4. Run skip-mode tests (no Azure needed)
 
 Generate skip-mode output:
@@ -50,7 +55,7 @@ pwsh ./ResourceInventory.ps1 -SubscriptionID <your-sub-id> -SkipMetrics -SkipCon
 Then run:
 ```powershell
 $env:TEST_ZIP_PATH = "./Tests/ResourcesReport_skip.zip"
-pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
 
 ## Outer Bundle Membership Tests
@@ -73,7 +78,7 @@ This is a **human/wrapper-run-only** suite: it is not part of
 ```powershell
 pwsh ./Run-AllSubscriptions.ps1 -TenantID <tenant> -Obfuscate
 $env:TEST_ALLSUB_BUNDLE = "~/InventoryReports/AllSubscriptions_<timestamp>.zip"
-pwsh -Command "Invoke-Pester ./Tests/OuterBundleMembership.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/OuterBundleMembership.Tests.ps1 -Output Detailed"
 ```
 
 If `TEST_ALLSUB_BUNDLE` is unset the whole suite is **skipped** (not failed), so it
@@ -106,7 +111,7 @@ Both runs land an `AllSubscriptions_*.zip` bundle under `~/InventoryReports/`.
 ```powershell
 $env:TEST_SEQUENTIAL_BUNDLE = "~/InventoryReports/AllSubscriptions_<seq-timestamp>.zip"
 $env:TEST_PARALLEL_BUNDLE   = "~/InventoryReports/AllSubscriptions_<par-timestamp>.zip"
-pwsh -Command "Invoke-Pester ./Tests/ParallelStreamsAggregation.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/ParallelStreamsAggregation.Tests.ps1 -Output Detailed"
 ```
 
 If either env var is unset the entire suite is **skipped** (not failed) so the

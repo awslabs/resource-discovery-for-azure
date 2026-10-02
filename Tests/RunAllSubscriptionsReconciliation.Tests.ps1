@@ -626,7 +626,8 @@ Describe 'Invoke-RdaSupportLogCollectionInTranscript (support-log lines reach th
 
         @($Records | ForEach-Object { [string]$_.MessageData.Message }) | Should -Be @('Support logs collected: /x/SupportLogs_Run.zip', '  plain line')
         $Records[0].MessageData.ForegroundColor | Should -Be 'Cyan'
-        [int]$Records[1].MessageData.ForegroundColor | Should -Be -1
+        $Plain = @(Write-Host 'x' 6>&1)[0].MessageData.ForegroundColor
+        $Records[1].MessageData.ForegroundColor | Should -Be $Plain -Because 'Write-Host without -ForegroundColor records the host colour: -1 on macOS and Linux, the console colour on Windows'
         $Text = Get-Content -LiteralPath $script:Tr -Raw
         $Text.IndexOf('last line before the stop') | Should -BeGreaterOrEqual 0
         $Text.IndexOf('last line before the stop') | Should -BeLessThan $Text.IndexOf('Support logs collected: /x/SupportLogs_Run.zip')
@@ -679,7 +680,8 @@ Describe 'Write-RdaHostLinesInTranscript (lines printed after the stop still rea
 
         @($Records | ForEach-Object { [string]$_.MessageData.Message }) | Should -Be @('RUN COMPLETE - EXIT CODE 0.', '  plain line')
         $Records[0].MessageData.ForegroundColor | Should -Be 'Green'
-        [int]$Records[1].MessageData.ForegroundColor | Should -Be -1
+        $Plain = @(Write-Host 'x' 6>&1)[0].MessageData.ForegroundColor
+        $Records[1].MessageData.ForegroundColor | Should -Be $Plain -Because 'Write-Host without -ForegroundColor records the host colour: -1 on macOS and Linux, the console colour on Windows'
         $Text = Get-Content -LiteralPath $script:Tr -Raw
         $Text.IndexOf('last line before the stop') | Should -BeGreaterOrEqual 0
         $Text.IndexOf('last line before the stop') | Should -BeLessThan $Text.IndexOf('RUN COMPLETE - EXIT CODE 0.')
@@ -2090,6 +2092,9 @@ Describe 'Az context snapshot lifecycle: it leaves the disk once every stream ha
         It 'keeps the markers and retries when the snapshot cannot be removed, warning once' {
             $script:ImportMarkerPaths | ForEach-Object { Set-Content -LiteralPath $_ -Value 'x' }
             $script:Jobs = @([pscustomobject]@{ State = 'Running' }, [pscustomobject]@{ State = 'Running' })
+            # Pester 6 no longer falls through to the real command when no -ParameterFilter matches (Pester 5 did),
+            # so a default mock does the real removal for every other Remove-Item call here: the markers, AfterEach.
+            Mock Remove-Item { & (Get-Command -Name Remove-Item -CommandType Cmdlet) @PesterBoundParameters }
             Mock Remove-Item { throw 'The process cannot access the file because it is being used by another process.' } -ParameterFilter { $script:LockSnapshot -and $LiteralPath -eq $script:Snapshot }
             $script:LockSnapshot = $true
             $First = @(& $script:ReleaseBlock 6>&1 | ForEach-Object { [string]$_ })

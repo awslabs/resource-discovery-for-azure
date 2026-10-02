@@ -239,3 +239,20 @@ Describe 'Protect-RdaMetrics survives a mismatched seeded dictionary set' {
         $Metrics[0].Name | Should -Be 'prod_name' -Because 'a casing difference must not fall through to the sentinel'
     }
 }
+
+Describe 'The consumption branch does not grow $ResourceIdDictionary' {
+
+    # The consumption obfuscate branch reads $ResourceIdDictionary and otherwise calls
+    # Build-ObfuscatedResourceUri for a URI inventory never saw. A write-back of the rebuilt URI
+    # (`$ResourceIdDictionary[$RawUri] = $ObfuscatedUri`) would pollute the exported ResourceIdMap
+    # (obfuscated full id -> real id) with consumption fragments. The builder's read-only behaviour
+    # is pinned in ObfuscationUri.Tests.ps1; this pins that the write-back stays gone from source.
+
+    It 'the write-back into $ResourceIdDictionary is gone from the main script and the shared functions' {
+        $Sources = @($script:InvSrc) + @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions') -Filter '*.ps1' | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw })
+        foreach ($Src in $Sources)
+        {
+            $Src | Should -Not -Match '\$ResourceIdDictionary\[\$RawUri\]\s*=' -Because 'writing rebuilt consumption URIs back into the ID dictionary pollutes the exported ResourceIdMap that Reveal reads'
+        }
+    }
+}

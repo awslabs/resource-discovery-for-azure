@@ -79,11 +79,20 @@ concurrent ARM calls across the whole tenant is roughly
 
 **Auto-tuning caveat (wrapper only).** On `Run-AllSubscriptions.ps1`, if you do
 **not** pass `-ConcurrencyLimit` explicitly, the wrapper overrides the `6`
-default with a host-sized value (`VCpu × 2`, clamped to 6–16) from
-`Get-RecommendedParallelism` (`Run-AllSubscriptions.ps1` line ~1063–1067;
-`Functions/RunAllSubscriptions.Functions.ps1` line ~106–109). Passing the flag —
-even `-ConcurrencyLimit 6` — pins it and disables the auto-override. The run
-prints which source won (`auto` vs `explicit`) at startup (line ~1081).
+default with a host-sized value: `VCpu x 2` per stream, clamped to 6-16
+(`Get-ParallelismForHost` in `Functions/RunAllSubscriptions.Functions.ps1`). A
+metric call is latency-bound (about 0.2 s of CPU for several seconds of wall
+time) and Azure Monitor throttles per subscription, so streams on different
+subscriptions do not compete. The per-stream figure is cut back only when the
+streams together would pass a host-wide cap of 48 calls in flight
+(`Get-PerStreamConcurrency`, an equal share of the cap, never below 2). So 8 vCPU
+with 4 streams gives 12 per stream (48 in total, was 64), and 32 vCPU with 6
+streams gives 8 per stream (48, was 96). The count uses the streams that will
+actually run, including an explicit `-ParallelStreams` and, under `-Resume`, only
+the subscriptions still to process. Passing `-ConcurrencyLimit` (even
+`-ConcurrencyLimit 6`) pins it per stream and disables the auto-override. The
+run prints which source won (`auto` vs `explicit`) at startup, and a `Sizing:`
+line with the per-stream figure and the host-wide cap.
 
 ### `-ParallelStreams`
 
@@ -96,9 +105,15 @@ prints which source won (`auto` vs `explicit`) at startup (line ~1081).
 **What it does.** The number of subscriptions processed **concurrently on one
 machine**. Each stream is a separate `pwsh` background job (`Start-Job`) running
 `Run-AllSubscriptions.Stream.ps1`. The wrapper splits the in-scope subscriptions
-across the streams **round-robin** — subscription *i* goes to stream
-`i % StreamCount` (`Run-AllSubscriptions.ps1` line ~1413–1419) — so heavy and
-light subscriptions are interleaved rather than clumped.
+across the streams **by estimated work**: it reads each subscription's
+metric-query volume from Resource Graph (the same `Get-PlanSubscriptionWeights`
+query `-Plan` uses), costs each subscription the way `-Plan` does, and hands the
+largest first to whichever stream has the least work so far
+(`Get-WeightedStreamSlices`). Each stream keeps its subscriptions in their
+original order, and the split is deterministic. If the weights cannot be read,
+it falls back to the round-robin split (subscription *i* to stream
+`i % StreamCount`). The run prints which split it used and the busiest stream's
+share of the estimated total.
 
 **Why it exists.** `-ConcurrencyLimit` parallelises *within* one subscription;
 `-ParallelStreams` parallelises *across* subscriptions. On a tenant with many
@@ -117,9 +132,13 @@ otherwise.
 
 **Auto-tuning + fallback caveats.** Like `-ConcurrencyLimit`, if you do not pass
 `-ParallelStreams`, the `1` default is overridden by the host-sized recommendation
-(`floor(VCpu / 2)`, capped at 6, further capped by RAM as `floor((RamGB-2)/1.5)`;
-`Functions/RunAllSubscriptions.Functions.ps1` line ~95–104, applied at
-`Run-AllSubscriptions.ps1` line ~1066). Separately, if the host blocks
+(`Get-ParallelismForHost`): `floor(VCpu / 2)`, capped at 6, then capped by the
+memory **available right now** as `floor((AvailableGB - 1) / StreamMemoryGB)`
+(see `-StreamMemoryGB`), then capped at the number of subscriptions. Available
+memory comes from `Win32_OperatingSystem.FreePhysicalMemory` on Windows,
+`MemAvailable` in `/proc/meminfo` on Linux and `kern.memorystatus_level` on
+macOS, and is capped by a container memory limit (Cloud Shell, Kubernetes). If
+it cannot be read, total RAM is used as `floor((RamGB - 2) / StreamMemoryGB)`. Separately, if the host blocks
 `Start-Job` (WDAC/AppLocker language-mode policy), the wrapper falls back to the
 sequential path and forces `ParallelStreams = 1` with a warning
 (line ~1083–1096) — the report content is identical, only slower.
@@ -155,6 +174,33 @@ validation already bounds the CLI surface to 0–90; the container entrypoint
 environment. `-HeadRoom` is not forwarded as a flag; it *mutates*
 `-ConcurrencyLimit` before forwarding, which is why the run's diagnostics label
 the concurrency source as e.g. `auto, -HeadRoom 20` (line ~1079).
+
+### `-StreamMemoryGB`
+
+| | |
+|---|---|
+| **Type** | `double`, `[ValidateRange(0.25, 64)]` |
+| **Declared on** | `Run-AllSubscriptions.ps1`, **wrapper only** |
+| **Default** | `2` |
+
+**What it does.** The memory one parallel stream is allowed, in GB. When
+`-ParallelStreams` is auto-tuned, the wrapper starts no more streams than
+`floor((AvailableGB - 1) / StreamMemoryGB)`, keeping 1 GB back for the wrapper
+itself and the operating system. It has no effect when `-ParallelStreams` is
+passed.
+
+**Why it exists.** The previous rule assumed 1.5 GB per stream against TOTAL
+RAM, so a machine that was already busy, or a stream with a large billing
+download, could run out of memory. Sizing from the memory that is free at the
+start of the run, with an allowance you can change, keeps the stream count
+inside what the machine can actually give.
+
+**When to change it.** Raise it (for example `-StreamMemoryGB 4`) for tenants
+with very large billing data per subscription, where a stream's working set
+grows past 2 GB; the per-subscription `Memory` block in `RunSummary.log` shows
+how much each stream really used. Lower it on a machine with plenty of memory
+when you want more streams, or pass `-ParallelStreams` to choose the count
+yourself.
 
 ---
 

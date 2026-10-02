@@ -172,7 +172,7 @@ The building never throws a toolbox away, so every toolbox that is brought in st
   The same few workers take one job after another, so a toolbox is bought once per worker, not once per job.
 - **One team for the whole run (the current design under the wrappers).**
   The next subscription reuses the team the previous one used.
-  The building holds about six toolboxes in total, however many subscriptions the run processes.
+  The building holds one toolbox per worker in total, however many subscriptions the run processes.
 
 Two rules keep this safe.
 The foreman only sends the team home once everyone has put their tools down, so nobody is cut off in the middle of a job.
@@ -206,8 +206,10 @@ $Output = $Call.EndInvoke($Handle)
 [void]$Call.BeginStop($null, $null)
 ```
 
-Normally 6 workers run at once (`-ConcurrencyLimit`).
-The pool may grow to 6 x 4 = 24 only while calls keep timing out, because a stopped call holds its worker until its network read returns.
+The number of calls in flight is `-ConcurrencyLimit`.
+A standalone run defaults to 6.
+Under `Run-AllSubscriptions.ps1` each stream gets 2 per vCPU, between 6 and 16, cut back only when the streams together would pass 48 calls in flight, unless you pass `-ConcurrencyLimit`.
+The pool may grow to 4 times that only while calls keep timing out, because a stopped call holds its worker until its network read returns.
 
 ### Why this does not break the process-global context rule
 
@@ -236,7 +238,7 @@ In the workshop picture, the building keeps a visitor book.
 Every worker who ever came in signs it, and the book keeps their toolbox labels on file, even after the worker has gone home.
 
 The cache holds at most about 128 entries per member name, so this growth stops at roughly 100 MB per process.
-A 21-subscription stream with 6 workers per subscription reaches that ceiling.
+A 21-subscription stream with 6 workers per subscription reaches that ceiling, and a higher `-ConcurrencyLimit` reaches it sooner.
 PowerShell has no supported way for a local runspace pool to share one type table, so the only clean fix is to stop creating new runspaces, which is what reusing the pool does.
 
 ### Who owns the pool

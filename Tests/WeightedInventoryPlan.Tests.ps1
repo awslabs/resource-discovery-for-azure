@@ -220,3 +220,72 @@ Describe 'Get-WeightedInventoryPlan' {
         $OneHr.ShardCount | Should -BeGreaterOrEqual $TwoHr.ShardCount
     }
 }
+
+Describe 'Get-WeightedStreamSlices' {
+    BeforeAll {
+        function New-Sub([string]$Id) { [pscustomobject]@{ Id = $Id; Name = "Sub $Id" } }
+        function Get-Ids($Slice) { @($Slice | ForEach-Object { $_.Id }) }
+    }
+
+    It 'separates the heavy subscriptions that round-robin would put in the same stream' {
+        # Round-robin over 2 streams puts a and c (both heavy) in stream 0.
+        $Subs = @((New-Sub 'a'), (New-Sub 'b'), (New-Sub 'c'), (New-Sub 'd'))
+        $Weights = @{
+            a = [pscustomobject]@{ Total = 1000; Batch = 0 }
+            b = [pscustomobject]@{ Total = 10; Batch = 0 }
+            c = [pscustomobject]@{ Total = 1000; Batch = 0 }
+            d = [pscustomobject]@{ Total = 10; Batch = 0 }
+        }
+        $R = Get-WeightedStreamSlices -Subscriptions $Subs -StreamCount 2 -Weights $Weights
+        $R.Slices.Count | Should -Be 2
+        (Get-Ids $R.Slices[0]) | Should -Be @('a', 'b')
+        (Get-Ids $R.Slices[1]) | Should -Be @('c', 'd')
+        [math]::Abs($R.Loads[0] - $R.Loads[1]) | Should -BeLessThan 1
+    }
+
+    It 'assigns every subscription exactly once and keeps each stream in the original order' {
+        $Subs = @(1..23 | ForEach-Object { New-Sub ('s{0:d2}' -f $_) })
+        $Weights = @{}
+        foreach ($S in $Subs) { $Weights[$S.Id] = [pscustomobject]@{ Total = (Get-Random -Minimum 0 -Maximum 500 -SetSeed ([int]$S.Id.Substring(1))); Batch = 0 } }
+        $R = Get-WeightedStreamSlices -Subscriptions $Subs -StreamCount 4 -Weights $Weights
+        $All = @($R.Slices | ForEach-Object { Get-Ids $_ })
+        $All.Count | Should -Be 23
+        @($All | Sort-Object -Unique).Count | Should -Be 23
+        foreach ($Slice in $R.Slices)
+        {
+            $Ids = Get-Ids $Slice
+            ($Ids -join ',') | Should -Be ((@($Ids | Sort-Object)) -join ',')
+        }
+    }
+
+    It 'costs a subscription without a weight at the fixed part only, so empty subscriptions still spread out' {
+        $Subs = @((New-Sub 'a'), (New-Sub 'b'), (New-Sub 'c'), (New-Sub 'd'))
+        $R = Get-WeightedStreamSlices -Subscriptions $Subs -StreamCount 2 -Weights @{}
+        (Get-Ids $R.Slices[0]).Count | Should -Be 2
+        (Get-Ids $R.Slices[1]).Count | Should -Be 2
+        $R.TotalSeconds | Should -Be 360
+    }
+
+    It 'is deterministic for the same input' {
+        $Subs = @(1..10 | ForEach-Object { New-Sub "x$_" })
+        $Weights = @{}
+        foreach ($S in $Subs) { $Weights[$S.Id] = [pscustomobject]@{ Total = 50; Batch = 0 } }
+        $A = Get-WeightedStreamSlices -Subscriptions $Subs -StreamCount 3 -Weights $Weights
+        $B = Get-WeightedStreamSlices -Subscriptions $Subs -StreamCount 3 -Weights $Weights
+        (@($A.Slices | ForEach-Object { (Get-Ids $_) -join ',' }) -join '|') | Should -Be (@($B.Slices | ForEach-Object { (Get-Ids $_) -join ',' }) -join '|')
+    }
+
+    It 'returns one slice holding everything for a single stream' {
+        $Subs = @((New-Sub 'a'), (New-Sub 'b'))
+        $R = Get-WeightedStreamSlices -Subscriptions $Subs -StreamCount 1 -Weights @{}
+        $R.Slices.Count | Should -Be 1
+        (Get-Ids $R.Slices[0]) | Should -Be @('a', 'b')
+    }
+
+    It 'is what the wrapper uses, with the round-robin split kept as the fallback' {
+        $WrapSrc = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1')
+        $WrapSrc | Should -Match '\$SliceWeights = Get-PlanSubscriptionWeights -SubscriptionIds @\(\$ParallelSubscriptions'
+        $WrapSrc | Should -Match '(?s)if \(\$null -ne \$SliceWeights\)\s*\{\s*\$WeightedSplit = Get-WeightedStreamSlices -Subscriptions @\(\$ParallelSubscriptions\) -StreamCount \$StreamCount -Weights \$SliceWeights'
+        $WrapSrc | Should -Match '(?s)else\s*\{\s*for \(\$i = 0; \$i -lt \$ParallelSubscriptions\.Count; \$i\+\+\)\s*\{\s*\$Slices\[\$i % \$StreamCount\]\.Add'
+    }
+}

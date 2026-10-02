@@ -40,6 +40,11 @@ param (
     [ValidateRange(0, 90)]
     [int]$HeadRoom = 0,
 
+    # Memory one parallel stream may use, in GB. With available memory it decides how many streams
+    # the auto-tuning starts; it has no effect when -ParallelStreams is passed.
+    [ValidateRange(0.25, 64)]
+    [double]$StreamMemoryGB = 2,
+
     [int]$ShardIndex = 0,
     [int]$ShardCount = 1,
 
@@ -528,12 +533,12 @@ if ($Excluded.Count -gt 0)
 
 if ($Plan)
 {
-    $PlanRec = Get-RecommendedParallelism
+    $PlanRec = Get-RecommendedParallelism -StreamMemoryGB $StreamMemoryGB -SubscriptionCount $Subscriptions.Count
     $PlanStreamsExplicit = $PSBoundParameters.ContainsKey('ParallelStreams')
     $PlanConcurrencyExplicit = $PSBoundParameters.ContainsKey('ConcurrencyLimit')
     $PlanStreams = if ($PlanStreamsExplicit) { $ParallelStreams } else { $PlanRec.Streams }
-    $PlanConcurrency = if ($PlanConcurrencyExplicit) { $ConcurrencyLimit } else { $PlanRec.Concurrency }
     if ($Subscriptions.Count -gt 0 -and $PlanStreams -gt $Subscriptions.Count) { $PlanStreams = $Subscriptions.Count }
+    $PlanConcurrency = if ($PlanConcurrencyExplicit) { $ConcurrencyLimit } else { Get-PerStreamConcurrency -PerStreamConcurrency $PlanRec.PerStreamConcurrency -Streams $PlanStreams -TotalCap $PlanRec.TotalConcurrencyCap }
 
     $FmtDur = {
         param([long]$Seconds)
@@ -1159,11 +1164,18 @@ if ($UploadToBlobContainerUri)
     }
 }
 
-$AutoTune = Get-RecommendedParallelism
+# Size for the subscriptions this run will actually process: under -Resume the completed ones are
+# skipped before the streams start, so counting them would start too many streams and cut each
+# stream's calls for work that is already done.
+$SubscriptionsToRun = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }).Count } else { $Subscriptions.Count }
+$AutoTune = Get-RecommendedParallelism -StreamMemoryGB $StreamMemoryGB -SubscriptionCount $SubscriptionsToRun
 $StreamsAuto = -not $PSBoundParameters.ContainsKey('ParallelStreams')
 $ConcurrencyAuto = -not $PSBoundParameters.ContainsKey('ConcurrencyLimit')
 if ($StreamsAuto) { $ParallelStreams = $AutoTune.Streams }
-if ($ConcurrencyAuto) { $ConcurrencyLimit = $AutoTune.Concurrency }
+# Each stream gets the per-stream figure, cut back only when the streams that will actually run,
+# including an explicit -ParallelStreams, would together pass the host-wide cap.
+$ConcurrencyStreams = [math]::Max(1, [math]::Min($ParallelStreams, [math]::Max(1, $SubscriptionsToRun)))
+if ($ConcurrencyAuto) { $ConcurrencyLimit = Get-PerStreamConcurrency -PerStreamConcurrency $AutoTune.PerStreamConcurrency -Streams $ConcurrencyStreams -TotalCap $AutoTune.TotalConcurrencyCap }
 
 if ($HeadRoom -gt 0)
 {
@@ -1177,6 +1189,8 @@ $StreamsSrc = if ($StreamsAuto) { 'auto' } else { 'explicit' }
 $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
 if ($HeadRoom -gt 0) { $ConcurrencySrc = '{0}, -HeadRoom {1}' -f $ConcurrencySrc, $HeadRoom }
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
+$AvailableLabel = if ($AutoTune.MemoryBasis -eq 'available') { '{0} GB available' -f $AutoTune.AvailableGB.ToString([cultureinfo]::InvariantCulture) } elseif ($AutoTune.MemoryBasis -eq 'total') { 'available memory unreadable, sized from total RAM' } else { 'memory undetected' }
+Write-Host ("Sizing: {0}, {1} GB per stream (-StreamMemoryGB) -> up to {2} stream(s) by memory; auto streams limited by {3}; up to {4} metric call(s) per stream, at most {5} across the host for {6} stream(s)." -f $AvailableLabel, $StreamMemoryGB.ToString([cultureinfo]::InvariantCulture), $AutoTune.StreamsByMemory, $AutoTune.StreamsLimitedBy, $AutoTune.PerStreamConcurrency, $AutoTune.TotalConcurrencyCap, $ConcurrencyStreams) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
 if ($ParallelStreams -gt 1 -and -not (Test-BackgroundJobSupport))
@@ -1190,6 +1204,13 @@ if ($ParallelStreams -gt 1 -and -not (Test-BackgroundJobSupport))
     Write-Host "         explicitly to select the sequential path up front and silence this notice." -ForegroundColor Yellow
     Write-Host ""
     $ParallelStreams = 1
+    if ($ConcurrencyAuto)
+    {
+        # The per-stream figure may have been cut for streams that can no longer run; one stream is never cut.
+        $ConcurrencyLimit = Get-PerStreamConcurrency -PerStreamConcurrency $AutoTune.PerStreamConcurrency -Streams 1 -TotalCap $AutoTune.TotalConcurrencyCap
+        if ($HeadRoom -gt 0) { $ConcurrencyLimit = Get-HeadroomAdjustedConcurrency -Concurrency $ConcurrencyLimit -HeadRoomPercent $HeadRoom }
+        Write-Host ("Sequential path: -ConcurrencyLimit {0} (one stream is never cut back by the host-wide cap)." -f $ConcurrencyLimit) -ForegroundColor DarkGray
+    }
 }
 
 $Service = Expand-ServiceFilter -Service $Service
@@ -1577,9 +1598,23 @@ else
             {
                 $Slices += , (New-Object 'System.Collections.Generic.List[object]')
             }
-            for ($i = 0; $i -lt $ParallelSubscriptions.Count; $i++)
+            # Balance the streams by estimated work. The weights come from the same Resource Graph
+            # query -Plan uses; if it cannot be read, fall back to the round-robin split.
+            $SliceWeights = Get-PlanSubscriptionWeights -SubscriptionIds @($ParallelSubscriptions | ForEach-Object { [string]$_.Id }) -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:(-not $IncludeStorageMetrics) -WarningAction SilentlyContinue
+            if ($null -ne $SliceWeights)
             {
-                $Slices[$i % $StreamCount].Add($ParallelSubscriptions[$i])
+                $WeightedSplit = Get-WeightedStreamSlices -Subscriptions @($ParallelSubscriptions) -StreamCount $StreamCount -Weights $SliceWeights
+                $Slices = $WeightedSplit.Slices
+                $BusiestShare = if ($WeightedSplit.TotalSeconds -gt 0) { [math]::Round(100.0 * ($WeightedSplit.Loads | Measure-Object -Maximum).Maximum / $WeightedSplit.TotalSeconds) } else { 0 }
+                Write-Host ("Stream split: balanced by estimated work (metric-query volume per subscription); busiest stream ~{0}% of the estimated total (an even split is {1}%)." -f $BusiestShare, [math]::Round(100.0 / $StreamCount)) -ForegroundColor DarkGray
+            }
+            else
+            {
+                for ($i = 0; $i -lt $ParallelSubscriptions.Count; $i++)
+                {
+                    $Slices[$i % $StreamCount].Add($ParallelSubscriptions[$i])
+                }
+                Write-Host "Stream split: round-robin (per-subscription work estimates could not be read from Resource Graph)." -ForegroundColor DarkGray
             }
 
             for ($S = 0; $S -lt $StreamCount; $S++)

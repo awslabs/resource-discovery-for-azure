@@ -237,6 +237,10 @@ function Get-RdaFinalScreenLines
 
 function Get-RecommendedParallelism
 {
+    param(
+        [double]$StreamMemoryGB = 2,
+        [int]$SubscriptionCount = 0
+    )
     $VCpu = [int][Environment]::ProcessorCount
     if ($VCpu -lt 1) { $VCpu = 1 }
 
@@ -264,26 +268,193 @@ function Get-RecommendedParallelism
         $RamGB = 0.0
     }
 
+    $AvailableGB = Get-AvailableMemoryGB
+
+    Get-ParallelismForHost -VCpu $VCpu -RamGB $RamGB -AvailableGB $AvailableGB -StreamMemoryGB $StreamMemoryGB -SubscriptionCount $SubscriptionCount
+}
+
+# Memory the OS reports as available to new work right now, in GB, or 0 when it cannot be read.
+# A container memory limit (Cloud Shell, Kubernetes) caps it, because the host's free memory is
+# not available to a process inside a smaller container.
+function Get-AvailableMemoryGB
+{
+    $Bytes = 0.0
+    try
+    {
+        if ($IsWindows)
+        {
+            # FreePhysicalMemory is in KB and counts memory available for reuse, as Task Manager's 'Available' does.
+            $Kb = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory
+            if ($Kb) { $Bytes = [double]$Kb * 1KB }
+        }
+        elseif ($IsLinux)
+        {
+            $MemLine = Select-String -LiteralPath '/proc/meminfo' -Pattern '^MemAvailable:\s+(\d+)\s+kB' -ErrorAction Stop | Select-Object -First 1
+            if ($MemLine) { $Bytes = [double]$MemLine.Matches[0].Groups[1].Value * 1KB }
+        }
+        elseif ($IsMacOS)
+        {
+            # kern.memorystatus_level is the percentage of memory the kernel's memory-pressure system
+            # counts as available. Same sysctl shell-out as the hw.memsize read above: plain
+            # arguments, no shell metacharacters, and no .NET API exposes this on macOS.
+            $Level = [double](& sysctl -n kern.memorystatus_level 2>$null)
+            $Total = [double](& sysctl -n hw.memsize 2>$null)
+            if ($Level -gt 0 -and $Total -gt 0) { $Bytes = $Total * $Level / 100.0 }
+        }
+    }
+    catch
+    {
+        $Bytes = 0.0
+    }
+
+    $Limit = [double][System.GC]::GetGCMemoryInfo().TotalAvailableMemoryBytes
+    if ($Bytes -gt 0 -and $Limit -gt 0 -and $Limit -lt $Bytes) { $Bytes = $Limit }
+
+    return [math]::Round($Bytes / 1GB, 1)
+}
+
+# The sizing rules, kept free of host reads so they can be tested with any machine shape.
+# Streams: half the vCPUs (1-6), capped by memory - available memory less 1 GB for the wrapper and
+# the OS, divided by the memory one stream may use - and by the number of subscriptions.
+# Concurrency: each stream gets 2 metric calls in flight per vCPU (6-16), as a single stream always
+# has. A metric call is latency-bound (about 0.2 s of CPU for several seconds of wall time) and Azure
+# Monitor throttles per subscription, so streams on different subscriptions do not compete for CPU or
+# for one throttle; the per-stream figure is cut back only when streams x calls would pass
+# $TotalConcurrencyCap across the host (48, the docs' "under about 50 per tenant" guidance).
+function Get-ParallelismForHost
+{
+    param(
+        [int]$VCpu = 1,
+        [double]$RamGB = 0,
+        [double]$AvailableGB = 0,
+        [double]$StreamMemoryGB = 2,
+        [int]$SubscriptionCount = 0,
+        [int]$TotalConcurrencyCap = 48
+    )
+    if ($VCpu -lt 1) { $VCpu = 1 }
+    if ($StreamMemoryGB -le 0) { $StreamMemoryGB = 2 }
+
     $Streams = [int][math]::Floor($VCpu / 2)
     if ($Streams -lt 1) { $Streams = 1 }
     if ($Streams -gt 6) { $Streams = 6 }
+    $LimitedBy = 'vCPU'
 
-    if ($RamGB -gt 0)
+    $MemoryBasis = 'none'
+    $StreamsByMemory = 0
+    if ($AvailableGB -gt 0)
     {
-        $StreamsByRam = [int][math]::Floor(($RamGB - 2) / 1.5)
-        if ($StreamsByRam -lt 1) { $StreamsByRam = 1 }
-        if ($StreamsByRam -lt $Streams) { $Streams = $StreamsByRam }
+        $MemoryBasis = 'available'
+        $StreamsByMemory = [int][math]::Floor(($AvailableGB - 1) / $StreamMemoryGB)
+    }
+    elseif ($RamGB -gt 0)
+    {
+        $MemoryBasis = 'total'
+        $StreamsByMemory = [int][math]::Floor(($RamGB - 2) / $StreamMemoryGB)
+    }
+    if ($MemoryBasis -ne 'none')
+    {
+        if ($StreamsByMemory -lt 1) { $StreamsByMemory = 1 }
+        if ($StreamsByMemory -lt $Streams)
+        {
+            $Streams = $StreamsByMemory
+            $LimitedBy = 'memory'
+        }
     }
 
-    $Concurrency = $VCpu * 2
-    if ($Concurrency -lt 6) { $Concurrency = 6 }
-    if ($Concurrency -gt 16) { $Concurrency = 16 }
+    if ($SubscriptionCount -gt 0 -and $Streams -gt $SubscriptionCount)
+    {
+        $Streams = $SubscriptionCount
+        $LimitedBy = 'subscriptions'
+    }
+
+    $PerStreamConcurrency = $VCpu * 2
+    if ($PerStreamConcurrency -lt 6) { $PerStreamConcurrency = 6 }
+    if ($PerStreamConcurrency -gt 16) { $PerStreamConcurrency = 16 }
 
     [pscustomobject]@{
-        VCpu        = $VCpu
-        RamGB       = $RamGB
-        Streams     = [int]$Streams
-        Concurrency = [int]$Concurrency
+        VCpu                 = $VCpu
+        RamGB                = $RamGB
+        AvailableGB          = $AvailableGB
+        StreamMemoryGB       = $StreamMemoryGB
+        MemoryBasis          = $MemoryBasis
+        StreamsByMemory      = [int]$StreamsByMemory
+        Streams              = [int]$Streams
+        StreamsLimitedBy     = $LimitedBy
+        PerStreamConcurrency = [int]$PerStreamConcurrency
+        TotalConcurrencyCap  = [int]$TotalConcurrencyCap
+        Concurrency          = [int](Get-PerStreamConcurrency -PerStreamConcurrency $PerStreamConcurrency -Streams $Streams -TotalCap $TotalConcurrencyCap)
+    }
+}
+
+# A stream's metric calls in flight: the per-stream figure, cut to an equal share of the host-wide cap
+# only when the streams together would pass it, and never below 2 so a stream still overlaps its
+# network round-trips.
+function Get-PerStreamConcurrency
+{
+    param(
+        [int]$PerStreamConcurrency = 6,
+        [int]$Streams = 1,
+        [int]$TotalCap = 48
+    )
+    if ($Streams -lt 1) { $Streams = 1 }
+    if ($PerStreamConcurrency -lt 1) { $PerStreamConcurrency = 1 }
+    if ($TotalCap -lt 1) { $TotalCap = 1 }
+    $Share = [int][math]::Floor($TotalCap / $Streams)
+    if ($Share -lt 2) { $Share = 2 }
+    return [int][math]::Min($PerStreamConcurrency, $Share)
+}
+
+# Splits the subscriptions between the streams so each stream gets a similar amount of work, instead
+# of dealing them out round-robin by list position. A subscription's cost is estimated the way -Plan
+# estimates it: a fixed 90 s plus 9.5 s per metric query with a 1.3 safety factor, from the
+# per-subscription metric-query weights Get-PlanSubscriptionWeights reads from Resource Graph. A
+# subscription without a weight costs the fixed part only. Largest first, each to the stream with the
+# least work so far; ties go to the earlier subscription and the lower stream, so the split is
+# deterministic. Each stream keeps its subscriptions in their original order.
+function Get-WeightedStreamSlices
+{
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Subscriptions,
+        [Parameter(Mandatory = $true)][int]$StreamCount,
+        [Parameter(Mandatory = $true)][hashtable]$Weights,
+        [double]$BaseSeconds = 90.0,
+        [double]$SecondsPerQuery = 12.35
+    )
+    if ($StreamCount -lt 1) { $StreamCount = 1 }
+
+    $Items = for ($i = 0; $i -lt $Subscriptions.Count; $i++)
+    {
+        $Key = [string]$Subscriptions[$i].Id
+        $Queries = if ($Weights.ContainsKey($Key)) { [double]$Weights[$Key].Total } else { 0.0 }
+        [pscustomobject]@{ Index = $i; Cost = $BaseSeconds + ($SecondsPerQuery * $Queries) }
+    }
+
+    $Loads = [double[]]::new($StreamCount)
+    $Assigned = @(for ($Stream = 0; $Stream -lt $StreamCount; $Stream++) { , [System.Collections.Generic.List[int]]::new() })
+    $Ordered = @($Items | Sort-Object -Property @{ Expression = 'Cost'; Descending = $true }, @{ Expression = 'Index'; Descending = $false })
+    foreach ($Item in $Ordered)
+    {
+        $Target = 0
+        for ($Stream = 1; $Stream -lt $StreamCount; $Stream++)
+        {
+            if ($Loads[$Stream] -lt $Loads[$Target]) { $Target = $Stream }
+        }
+        $Assigned[$Target].Add($Item.Index)
+        $Loads[$Target] += $Item.Cost
+    }
+
+    $Slices = @()
+    for ($Stream = 0; $Stream -lt $StreamCount; $Stream++)
+    {
+        $Slice = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($Index in ($Assigned[$Stream] | Sort-Object)) { $Slice.Add($Subscriptions[$Index]) }
+        $Slices += , $Slice
+    }
+
+    [pscustomobject]@{
+        Slices       = $Slices
+        Loads        = $Loads
+        TotalSeconds = [double]($Loads | Measure-Object -Sum).Sum
     }
 }
 

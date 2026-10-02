@@ -525,15 +525,19 @@ function Test-ThreadJobSupport
 
 function Get-GcFreeMemoryGB
 {
-    # Free memory in GB as the .NET garbage collector records it: the memory this process may use (physical
-    # memory, or a container limit the runtime detects) less the memory load, both as of the last collection.
-    # The gen-0 collection run here takes about a millisecond and records a fresh load. -Full first runs an
-    # aggressive full collection, which also hands the memory it frees back to the OS, so memory this process
-    # holds only as garbage counts as free: on Windows a default full collection keeps that memory committed
-    # and the figure does not move. Runtimes before .NET 7 have no aggressive mode and get a default one.
-    # The runtime keeps the load in whole percent of the total, so the figure moves in steps of 1% of it.
-    # No OS command is run; Step 5 of docs/experiments/one-process-streams.md compares the figure with the
-    # OS's own on macOS and Windows.
+    # Free memory in GB as the .NET garbage collector sees it, refreshed by [GC]::Collect(0). That collects at
+    # least generation 0, and the runtime can choose a higher generation; it usually takes a millisecond or two.
+    # The memory in use (MemoryLoadBytes) is measured against the machine's memory, or a container's limit, whose
+    # size is recovered from the high-load threshold: HighMemoryLoadThresholdBytes is GCHighMemPercent percent of it.
+    # TotalAvailableMemoryBytes is that same size only while the heap has no hard limit. Under one, such as the
+    # default inside a memory-limited container (75% of the container's memory), it is the heap limit itself, so
+    # the figure is the smaller of the memory not in use and the heap's own room under its limit. Without the
+    # configuration variables (before .NET 7) it is TotalAvailableMemoryBytes less the memory in use.
+    # -Full first runs an aggressive full collection, which also hands the memory it frees back to the OS, so
+    # memory this process holds only as garbage counts as free: on Windows a default full collection keeps that
+    # memory committed and the figure does not move. Runtimes before .NET 7 have no aggressive mode and get a
+    # default one. The memory in use is kept in whole percent of the total, so the figure moves in steps of 1%.
+    # No OS command is run; Step 5 of docs/experiments/one-process-streams.md compares the figure with the OS's own.
     param([switch]$Full)
     if ($Full)
     {
@@ -549,159 +553,243 @@ function Get-GcFreeMemoryGB
     }
     [System.GC]::Collect(0)
     $Info = [System.GC]::GetGCMemoryInfo()
-    return [double]($Info.TotalAvailableMemoryBytes - $Info.MemoryLoadBytes) / 1GB
+    $FreeBytes = [double]$Info.TotalAvailableMemoryBytes - [double]$Info.MemoryLoadBytes
+    $HighPercent = 0.0
+    if ([System.GC].GetMethod('GetConfigurationVariables'))
+    {
+        $Variables = [System.GC]::GetConfigurationVariables()
+        if ($Variables.ContainsKey('GCHighMemPercent')) { $HighPercent = [double]$Variables['GCHighMemPercent'] }
+    }
+    if ($HighPercent -gt 0 -and $Info.HighMemoryLoadThresholdBytes -gt 0)
+    {
+        $TotalBytes = [double]$Info.HighMemoryLoadThresholdBytes * 100 / $HighPercent
+        $FreeBytes = [math]::Min($TotalBytes - [double]$Info.MemoryLoadBytes, [double]$Info.TotalAvailableMemoryBytes - [double]$Info.TotalCommittedBytes)
+    }
+    return $FreeBytes / 1GB
 }
 
 function New-StreamAdmissionState
 {
     # The one admission state of a -StreamIsolation Runspace run, passed by reference to every stream: the
-    # free-memory floor in GB (-StreamMemoryGB; 0 turns the check off), how often a waiting stream reads free
-    # memory again, how long it waits at most, and how many subscriptions the streams have in progress. It is
-    # read and changed only under its SyncRoot, by Enter-StreamAdmission and Exit-StreamAdmission.
+    # free-memory floor in GB (-StreamMemoryGB; 0 turns the check off), how often the stream at the head of the
+    # queue reads free memory, how long a stream waits before it may be let in anyway, the tokens of the
+    # subscriptions admitted and not yet released (Holders: their count is the number in progress), the tokens of
+    # the waiting subscriptions in arrival order (Waiting), when a waiter was last let in anyway, when the last
+    # full collection ran, and the last free-memory reading. It is read and changed only under its lock, by
+    # Enter-StreamAdmission and Exit-StreamAdmission. The lock is the table's own SyncRoot, read here once, on one
+    # thread, and kept under the key Lock, which the streams read with the indexer: read by two runspaces at the
+    # same moment, $State.PSBase.SyncRoot came back $null in 36 of 80 reads, where the key never did.
     param(
         [double]$FloorGB = 2,
         [double]$PollSeconds = 15,
         [double]$MaxWaitSeconds = 1800
     )
-    return [hashtable]::Synchronized(@{
-            FloorGB        = $FloorGB
-            PollSeconds    = $PollSeconds
-            MaxWaitSeconds = $MaxWaitSeconds
-            InProgress     = 0
+    $Table = [hashtable]::Synchronized(@{
+            FloorGB            = $FloorGB
+            PollSeconds        = $PollSeconds
+            MaxWaitSeconds     = $MaxWaitSeconds
+            Holders            = [System.Collections.Generic.HashSet[string]]::new()
+            Waiting            = [System.Collections.Generic.List[string]]::new()
+            LastOverride       = $null
+            LastFullCollection = $null
+            LastFreeGB         = $null
         })
+    $Table['Lock'] = $Table.PSBase.SyncRoot
+    return $Table
 }
 
 function Enter-StreamAdmission
 {
-    # Blocks until this stream may start a subscription, then counts the subscription in progress;
-    # Exit-StreamAdmission takes it off again. The streams of a -StreamIsolation Runspace run share one process,
-    # so one out-of-memory error ends them all. A subscription is admitted when free memory is at least the
-    # floor, when no other subscription is in progress (so one always runs and the streams never all wait on
-    # each other), or once it has waited MaxWaitSeconds, with a warning. The decision and the count change are
-    # made together under the state's lock, so the count stays exact and, when memory is short, two streams
-    # cannot both be admitted as the only one running. The check sees the memory free when a subscription
-    # starts, not what it will need, so streams that start together are admitted on the same free memory.
-    # The heap is shared, so before a stream first waits it runs one aggressive full collection
-    # (Get-GcFreeMemoryGB -Full) to give back garbage any stream left; each later poll takes only a gen-0
-    # reading. -FreeMemoryReader is called with $true for that full reading.
-    # Returns the reason it was admitted, how long it waited, and the free memory it read, if any.
+    # Blocks until this stream may start a subscription, then records -Holder, the token the stream made for the
+    # subscription, as admitted. Exit-StreamAdmission removes it again, and the stream calls it whenever the
+    # subscription ends, however it ends, so the subscriptions in progress are exactly the tokens recorded.
+    # The streams of a -StreamIsolation Runspace run share one process, so one out-of-memory error ends them all.
+    # Waiting streams queue in arrival order, and only the one at the head may be admitted: when no other
+    # subscription is in progress (so one always runs and the streams never wait on each other forever), when free
+    # memory is at least the floor, or once it has waited MaxWaitSeconds, which lets in at most one stream per
+    # MaxWaitSeconds, with a warning. Only the head reads free memory, at most every PollSeconds. The first time
+    # its reading is below the floor it runs one aggressive full collection (Get-GcFreeMemoryGB -Full), to give
+    # back garbage any stream left in the shared heap, unless another stream ran one within PollSeconds.
+    # Waiters sleep in Monitor.Wait slices of at most a second, so a stop lands quickly, and an admission or a
+    # release wakes them at once. Everything is decided and recorded under the state's lock. The check sees the
+    # memory that is free when a subscription starts, not what the subscription will need.
+    # -FreeMemoryReader is called with $true for the full reading. Returns the reason the subscription was
+    # admitted, how long it waited, and the free memory this call read, if it read any.
     param(
         [Parameter(Mandatory = $true)][hashtable]$State,
+        [Parameter(Mandatory = $true)][string]$Holder,
         [string]$Subscription = '',
         [scriptblock]$FreeMemoryReader = { param([bool]$Full) Get-GcFreeMemoryGB -Full:$Full },
         [scriptblock]$Log = { param([string]$Message, [string]$Color) Write-Stream $Message $Color }
     )
+    $Lock = $State['Lock']
+    if ($null -eq $Lock) { throw [System.InvalidOperationException]::new('The admission state has no lock: create it with New-StreamAdmissionState.') }
     $Culture = [cultureinfo]::InvariantCulture
-    $FloorGB = [double]$State.FloorGB
-    $PollMs = [int][math]::Max(1, [double]$State.PollSeconds * 1000)
-    $MaxWaitSeconds = [double]$State.MaxWaitSeconds
+    $FloorGB = [double]$State['FloorGB']
+    $PollSeconds = [double]$State['PollSeconds']
+    $MaxWaitSeconds = [double]$State['MaxWaitSeconds']
+    $SliceMs = [int][math]::Max(10, [math]::Min(1000, $PollSeconds * 1000))
+    $Frequency = [double][System.Diagnostics.Stopwatch]::Frequency
+    $Holders = $State['Holders']
+    $Waiting = $State['Waiting']
     $Watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $Admission = $null
+    $Logged = $false
+    $LastRead = $null
     $Collected = $false
-    $Waiting = $false
-    while ($true)
+    $ShownGB = $null
+    $InProgress = 0
+    $ReadError = $null
+    $LockTaken = $false
+    try
     {
-        $Reason = $null
-        $FreeGB = $null
-        $ReadError = $null
-        $Lock = $State.SyncRoot
-        [System.Threading.Monitor]::Enter($Lock)
-        try
+        [System.Threading.Monitor]::Enter($Lock, [ref]$LockTaken)
+        $Waiting.Add($Holder)
+        while ($null -eq $Admission)
         {
-            $InProgress = [int]$State.InProgress
+            $Reason = $null
+            $FreeGB = $null
+            $InProgress = $Holders.Count
             if ($FloorGB -le 0)
             {
                 $Reason = 'disabled'
             }
-            elseif ($InProgress -eq 0)
+            elseif ($Waiting.Count -gt 0 -and $Waiting[0] -eq $Holder)
             {
-                $Reason = 'alone'
+                $Now = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                if ($InProgress -eq 0)
+                {
+                    $Reason = 'alone'
+                }
+                elseif ($null -eq $LastRead -or ($Now - $LastRead) / $Frequency -ge $PollSeconds)
+                {
+                    $LastRead = $Now
+                    try
+                    {
+                        $FreeGB = [double](& $FreeMemoryReader $false)
+                        if ($FreeGB -lt $FloorGB -and -not $Collected)
+                        {
+                            $Collected = $true
+                            $LastFull = $State['LastFullCollection']
+                            if ($null -eq $LastFull -or ($Now - $LastFull) / $Frequency -ge $PollSeconds)
+                            {
+                                $FreeGB = [double](& $FreeMemoryReader $true)
+                                $State['LastFullCollection'] = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                            }
+                        }
+                        $State['LastFreeGB'] = $FreeGB
+                        if ($FreeGB -ge $FloorGB)
+                        {
+                            $Reason = 'memory'
+                        }
+                    }
+                    catch
+                    {
+                        $ReadError = $_.Exception.Message
+                        $Reason = 'unreadable'
+                    }
+                }
+                if (-not $Reason -and $Watch.Elapsed.TotalSeconds -ge $MaxWaitSeconds)
+                {
+                    $LastOverride = $State['LastOverride']
+                    if ($null -eq $LastOverride -or ($Now - $LastOverride) / $Frequency -ge $MaxWaitSeconds)
+                    {
+                        $State['LastOverride'] = $Now
+                        $Reason = 'max-wait'
+                    }
+                }
+            }
+            $ShownGB = if ($null -ne $FreeGB) { $FreeGB } else { $State['LastFreeGB'] }
+            if ($Reason)
+            {
+                [void]$Waiting.Remove($Holder)
+                [void]$Holders.Add($Holder)
+                [System.Threading.Monitor]::PulseAll($Lock)
+                $Admission = [pscustomobject]@{
+                    Reason        = $Reason
+                    WaitedSeconds = $Watch.Elapsed.TotalSeconds
+                    FreeGB        = $FreeGB
+                }
             }
             else
             {
-                try
+                if (-not $Logged)
                 {
-                    $FreeGB = [double](& $FreeMemoryReader $false)
-                    if ($FreeGB -lt $FloorGB -and -not $Collected)
-                    {
-                        $Collected = $true
-                        $FreeGB = [double](& $FreeMemoryReader $true)
-                    }
+                    $Logged = $true
+                    $FreeText = if ($null -ne $ShownGB) { [string]::Format($Culture, '{0:0.0} GB free', $ShownGB) } else { 'free memory not read yet' }
+                    & $Log ([string]::Format($Culture, 'waiting for free memory before starting {0}: {1}, floor {2} GB (-StreamMemoryGB), {3} other subscription(s) in progress, {4} stream(s) ahead of it', $Subscription, $FreeText, $FloorGB, $InProgress, $Waiting.IndexOf($Holder))) 'Yellow'
                 }
-                catch
-                {
-                    $ReadError = $_.Exception.Message
-                }
-                if ($null -ne $ReadError)
-                {
-                    $Reason = 'unreadable'
-                }
-                elseif ($FreeGB -ge $FloorGB)
-                {
-                    $Reason = 'memory'
-                }
-                elseif ($Watch.Elapsed.TotalSeconds -ge $MaxWaitSeconds)
-                {
-                    $Reason = 'max-wait'
-                }
-            }
-            if ($Reason)
-            {
-                $State.InProgress = $InProgress + 1
+                $null = [System.Threading.Monitor]::Wait($Lock, $SliceMs)
             }
         }
-        finally
+    }
+    catch
+    {
+        # A failed .NET call only ends its own statement in PowerShell; rethrown, it ends the admission instead.
+        throw
+    }
+    finally
+    {
+        if ($LockTaken)
         {
+            if ($null -eq $Admission)
+            {
+                # Stopped or failed while queued: leave the queue, and let the next stream re-check at once.
+                [void]$Waiting.Remove($Holder)
+                [System.Threading.Monitor]::PulseAll($Lock)
+            }
             [System.Threading.Monitor]::Exit($Lock)
         }
-
-        $WaitedSeconds = [math]::Round($Watch.Elapsed.TotalSeconds)
-        if ($Reason)
-        {
-            if ($Reason -eq 'unreadable')
-            {
-                & $Log ([string]::Format($Culture, 'WARNING: could not read free memory before starting {0}: {1}. Starting it without the check.', $Subscription, $ReadError)) 'Yellow'
-            }
-            elseif ($Reason -eq 'max-wait')
-            {
-                & $Log ([string]::Format($Culture, 'WARNING: starting {0} after waiting {1} s for free memory: {2:0.0} GB free, floor {3} GB (-StreamMemoryGB), {4} other subscription(s) in progress.', $Subscription, $WaitedSeconds, $FreeGB, $FloorGB, $InProgress)) 'Yellow'
-            }
-            elseif ($Waiting)
-            {
-                $Why = if ($Reason -eq 'memory') { [string]::Format($Culture, '{0:0.0} GB free', $FreeGB) } else { 'no other subscription in progress' }
-                & $Log ([string]::Format($Culture, 'admitted {0} after waiting {1} s: {2}', $Subscription, $WaitedSeconds, $Why)) 'DarkGray'
-            }
-            return [pscustomobject]@{
-                Reason        = $Reason
-                WaitedSeconds = $Watch.Elapsed.TotalSeconds
-                FreeGB        = $FreeGB
-            }
-        }
-        if (-not $Waiting)
-        {
-            $Waiting = $true
-            & $Log ([string]::Format($Culture, 'waiting for free memory before starting {0}: {1:0.0} GB free, floor {2} GB (-StreamMemoryGB), {3} other subscription(s) in progress', $Subscription, $FreeGB, $FloorGB, $InProgress)) 'Yellow'
-        }
-        Start-Sleep -Milliseconds $PollMs
     }
+
+    $WaitedSeconds = [math]::Round($Admission.WaitedSeconds)
+    $FreeText = if ($null -ne $ShownGB) { [string]::Format($Culture, '{0:0.0} GB free', $ShownGB) } else { 'free memory not read yet' }
+    if ($Admission.Reason -eq 'unreadable')
+    {
+        & $Log ([string]::Format($Culture, 'WARNING: could not read free memory before starting {0}: {1}. Starting it without the check.', $Subscription, $ReadError)) 'Yellow'
+    }
+    elseif ($Admission.Reason -eq 'max-wait')
+    {
+        & $Log ([string]::Format($Culture, 'WARNING: starting {0} after waiting {1} s for free memory: {2}, floor {3} GB (-StreamMemoryGB), {4} other subscription(s) in progress.', $Subscription, $WaitedSeconds, $FreeText, $FloorGB, $InProgress)) 'Yellow'
+    }
+    elseif ($Logged)
+    {
+        $Why = if ($Admission.Reason -eq 'memory') { $FreeText } else { 'no other subscription in progress' }
+        & $Log ([string]::Format($Culture, 'admitted {0} after waiting {1} s: {2}', $Subscription, $WaitedSeconds, $Why)) 'DarkGray'
+    }
+    return $Admission
 }
 
 function Exit-StreamAdmission
 {
-    # Takes a subscription that Enter-StreamAdmission admitted off the in-progress count. Called from the
-    # subscription's finally block, so a subscription that fails is taken off as well.
-    param([Parameter(Mandatory = $true)][hashtable]$State)
-    $Lock = $State.SyncRoot
-    [System.Threading.Monitor]::Enter($Lock)
+    # Releases -Holder, the token Enter-StreamAdmission recorded as admitted, and wakes the waiting streams so the
+    # next one re-checks at once. A token that is not recorded is left alone, so the stream calls this from the
+    # subscription's finally block whether the subscription was admitted, failed or was stopped.
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$State,
+        [Parameter(Mandatory = $true)][string]$Holder
+    )
+    $Lock = $State['Lock']
+    if ($null -eq $Lock) { throw [System.InvalidOperationException]::new('The admission state has no lock: create it with New-StreamAdmissionState.') }
+    $LockTaken = $false
     try
     {
-        if ([int]$State.InProgress -gt 0)
+        [System.Threading.Monitor]::Enter($Lock, [ref]$LockTaken)
+        if ($State['Holders'].Remove($Holder))
         {
-            $State.InProgress = [int]$State.InProgress - 1
+            [System.Threading.Monitor]::PulseAll($Lock)
         }
+    }
+    catch
+    {
+        throw
     }
     finally
     {
-        [System.Threading.Monitor]::Exit($Lock)
+        if ($LockTaken)
+        {
+            [System.Threading.Monitor]::Exit($Lock)
+        }
     }
 }
 

@@ -37,17 +37,6 @@ param (
 
     [int]$ParallelStreams = 1,
 
-    [ValidateSet('Process', 'Runspace')]
-    [string]$StreamIsolation = 'Process',
-
-    # Memory one parallel stream is allowed, in GB. It is used two ways. With the memory available at
-    # start-up it decides how many streams the auto-tuning starts (no effect when -ParallelStreams is
-    # passed; a value of 0 is read as the default 2 there). Under -StreamIsolation Runspace it is also
-    # the free memory a stream waits for before it starts a subscription while another subscription is
-    # in progress; 0 turns that check off.
-    [ValidateRange(0, 1024)]
-    [double]$StreamMemoryGB = 2,
-
     [ValidateRange(0, 90)]
     [int]$HeadRoom = 0,
 
@@ -60,7 +49,19 @@ param (
 
     [switch]$Plan,
 
-    [double]$PlanPerQuerySeconds = 0
+    [double]$PlanPerQuerySeconds = 0,
+
+    # Parameters added after main's are declared last, so every earlier parameter keeps its position.
+    [ValidateSet('Process', 'Runspace')]
+    [string]$StreamIsolation = 'Process',
+
+    # Memory one parallel stream is allowed, in GB. It is used two ways. With the memory available at
+    # start-up it decides how many streams the auto-tuning starts (no effect when -ParallelStreams is
+    # passed; a value of 0 is read as the default 2 there). Under -StreamIsolation Runspace it is also
+    # the free memory a stream waits for before it starts a subscription while another subscription is
+    # in progress; 0 turns that check off.
+    [ValidateRange(0, 1024)]
+    [double]$StreamMemoryGB = 2
 )
 
 if ([string]::IsNullOrWhiteSpace($TenantID))

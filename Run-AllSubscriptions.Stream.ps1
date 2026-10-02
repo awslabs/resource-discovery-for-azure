@@ -236,6 +236,9 @@ $Global:CollectorFailures = @()
 
 $Global:MemoryReadings = @()
 
+# Under -StreamIsolation Runspace every subscription asks the run's shared admission state before it starts.
+$UseAdmission = [bool]($SharedProcess -and $null -ne $AdmissionState)
+
 $PairCount = [Math]::Min($SubscriptionIds.Count, $SubscriptionNames.Count)
 for ($i = 0; $i -lt $PairCount; $i++)
 {
@@ -250,15 +253,16 @@ for ($i = 0; $i -lt $PairCount; $i++)
 
     Write-Stream ("processing ({0} of {1}): {2} ({3})" -f ($i + 1), $PairCount, $SubName, $SubId) 'Cyan'
 
-    $Admitted = $false
+    # The token under which the shared check records this subscription as admitted. It is made before the try, so
+    # the finally below can always release it: whether the subscription was admitted, failed or was stopped.
+    $AdmissionHolder = [guid]::NewGuid().ToString('N')
     try
     {
-        if ($SharedProcess -and $null -ne $AdmissionState)
+        if ($UseAdmission)
         {
             # The streams share this process, so one out-of-memory error would end them all: a subscription
-            # starts only once the shared check admits it, and the finally below always releases it.
-            $null = Enter-StreamAdmission -State $AdmissionState -Subscription ("{0} ({1})" -f $SubName, $SubId)
-            $Admitted = $true
+            # starts only once the shared check admits it.
+            $null = Enter-StreamAdmission -State $AdmissionState -Holder $AdmissionHolder -Subscription ("{0} ({1})" -f $SubName, $SubId)
         }
         $global:LASTEXITCODE = 0
         $Global:ZipOutputFile = $null
@@ -335,9 +339,9 @@ for ($i = 0; $i -lt $PairCount; $i++)
     }
     finally
     {
-        if ($Admitted)
+        if ($UseAdmission)
         {
-            Exit-StreamAdmission -State $AdmissionState
+            Exit-StreamAdmission -State $AdmissionState -Holder $AdmissionHolder
         }
     }
 }

@@ -34,17 +34,33 @@ param(
 
 function Get-GcReading
 {
+    # The figure Get-GcFreeMemoryGB (Functions/RunAllSubscriptions.Functions.ps1) reads, after a collection of
+    # -Gen: the memory not in use, against the total recovered from the high-load threshold, and never more than
+    # the heap's room under a hard limit. Without a heap limit it is TotalAvailableMemoryBytes - MemoryLoadBytes.
     param([int]$Gen)
     $Watch = [System.Diagnostics.Stopwatch]::StartNew()
     [System.GC]::Collect($Gen)
     $Info = [System.GC]::GetGCMemoryInfo()
     $Watch.Stop()
+    $TotalBytes = [double]$Info.TotalAvailableMemoryBytes
+    $FreeBytes = $TotalBytes - [double]$Info.MemoryLoadBytes
+    $HighPercent = 0.0
+    if ([System.GC].GetMethod('GetConfigurationVariables'))
+    {
+        $Variables = [System.GC]::GetConfigurationVariables()
+        if ($Variables.ContainsKey('GCHighMemPercent')) { $HighPercent = [double]$Variables['GCHighMemPercent'] }
+    }
+    if ($HighPercent -gt 0 -and $Info.HighMemoryLoadThresholdBytes -gt 0)
+    {
+        $TotalBytes = [double]$Info.HighMemoryLoadThresholdBytes * 100 / $HighPercent
+        $FreeBytes = [math]::Min($TotalBytes - [double]$Info.MemoryLoadBytes, [double]$Info.TotalAvailableMemoryBytes - [double]$Info.TotalCommittedBytes)
+    }
     [pscustomobject]@{
         Index   = $Info.Index
         Gen     = $Info.Generation
-        TotalMB = [double]$Info.TotalAvailableMemoryBytes / 1MB
+        TotalMB = $TotalBytes / 1MB
         LoadMB  = [double]$Info.MemoryLoadBytes / 1MB
-        FreeMB  = [double]($Info.TotalAvailableMemoryBytes - $Info.MemoryLoadBytes) / 1MB
+        FreeMB  = $FreeBytes / 1MB
         Ms      = $Watch.Elapsed.TotalMilliseconds
     }
 }

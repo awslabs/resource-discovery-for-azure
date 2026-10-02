@@ -176,10 +176,12 @@ small host such as Cloud Shell.
 
 **What `Runspace` gives up.**
 
-- **Crash isolation.** An out-of-memory error or a crash in one stream ends every stream.
-  A stream process dies alone, and the wrapper still ships the reports it had finished.
-  To make that less likely, a stream starts each subscription only when enough memory is free (see [`-StreamMemoryGB`](#-streammemorygb)).
-  That lowers the risk but does not remove it: a subscription that has started can still grow past the memory that was free.
+- **Crash isolation.** An out-of-memory error or a crash in one stream ends every
+  stream. A stream process dies alone, and the wrapper still ships the reports
+  it had finished. To make that less likely, a stream starts each subscription
+  only when enough memory is free (see [`-StreamMemoryGB`](#-streammemorygb)).
+  That lowers the risk but does not remove it: a subscription that has started
+  can still grow past the memory that was free.
 - **Separate .NET runtimes.** The streams share one garbage-collected heap, so a
   forced full collection (the billing phases and the memory readings trigger
   them) pauses every stream at once. The memory readings in `RunSummary.log` and
@@ -212,22 +214,27 @@ When `-ParallelStreams` is auto-tuned, the wrapper starts no more streams than `
 It has no effect on the count when `-ParallelStreams` is passed, and a value of `0` is read as the default `2` there.
 Under `-StreamIsolation Runspace` it is also the memory one stream may need for a subscription.
 Before each subscription a stream asks for admission, and it is admitted when at least this much memory is free.
-While less is free, the stream waits and reads free memory again every 15 seconds.
-It is admitted anyway when no other subscription is in progress, so one subscription always runs and the streams cannot all wait on each other.
-It is also admitted, with a warning, once it has waited 30 minutes.
-The decision and the count of subscriptions in progress change together under one lock, so the count stays exact, and when memory is short two streams cannot both be admitted as the only one running.
-The check reads the memory that is free when a subscription starts, not what the subscription will need, so streams that start at the same moment are all admitted on the same free memory.
+While less is free, the stream waits.
+Waiting streams queue in the order they arrived, and only the first in the queue can be admitted, so a stream that has just finished a subscription queues behind the others.
+The first in the queue reads free memory at most every 15 seconds.
+It is admitted anyway when no other subscription is in progress, so one subscription always runs and the streams cannot all wait on each other, and a subscription that ends wakes it at once.
+Once it has waited 30 minutes it is also admitted, with a warning, but that lets in at most one stream every 30 minutes.
+Each admission is recorded under a token of its own, which the stream always releases when the subscription ends, however it ends, so the count of subscriptions in progress cannot leak.
+The check reads the memory that is free when a subscription starts, not what the subscription will need, so streams that start at the same moment can all be admitted on the same free memory.
 `0` turns the check off.
 It has no effect under `-StreamIsolation Process` or with one stream.
 
-**How free memory is read.** The figure is the one the .NET garbage collector records: the memory the process may use (physical memory, or a container limit the runtime detects) less the memory in use, refreshed by a gen-0 collection that takes about a millisecond.
+**How free memory is read.** The figure comes from the .NET garbage collector: the machine's memory, or a container's limit, less the memory in use, and never more than the room left under the garbage collector's own heap limit.
+That heap limit matters inside a memory-limited container, where .NET sets it to 75% of the container's memory by default.
+The figure is refreshed by `[GC]::Collect(0)`, which collects at least generation 0 (the runtime can choose a higher one) and usually takes a millisecond or two.
 No OS command is run, so the same code runs on every platform.
 The runtime records the memory in use in whole percent of the total, so the figure moves in steps of 1% of it.
-Before a stream first waits, one aggressive full collection hands back the memory the process holds only as garbage, which any stream can have left in the shared heap.
+The first time a waiting subscription's reading is below the floor, one aggressive full collection hands back the memory the process holds only as garbage, which any stream can have left in the shared heap.
+It is skipped when another stream ran one in the last 15 seconds.
 On Windows a default full collection keeps that memory committed, so the figure would not move.
 Step 5 of `docs/experiments/one-process-streams.md` compares the figure with the operating system's own on macOS and Windows.
 
-**What it logs.** A stream that has to wait prints one line when it starts waiting, with the subscription, the free memory, the floor and how many other subscriptions are in progress.
+**What it logs.** A stream that has to wait prints one line when it starts waiting, with the subscription, the free memory, the floor, how many other subscriptions are in progress and how many streams are ahead of it in the queue.
 It prints one more line when it is admitted, with the seconds it waited, or a warning when it is admitted because it waited 30 minutes.
 Nothing is added to the report files.
 

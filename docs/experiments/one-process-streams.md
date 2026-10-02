@@ -331,7 +331,9 @@ So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on
 - The real worker as thread jobs, read only through their console lines, their summaries and the order the stub inventory saw, so the same tests run against the previous commit too:
   - a stream stopped while it waits for the lock leaves nothing in progress, so the next stream starts without waiting;
   - streams that wait are admitted in arrival order, so a stream that has just finished goes to the back of the queue;
-  - with memory always short and a 3 s longest wait, two streams that start waiting together are let in for waiting too long at least 1.5 s apart, timed by their warnings, which each stream logs after it leaves the lock.
+  - with memory always short and a 1 s longest wait, the two decisions that let in two waiting streams for waiting too long are at least 1 s apart.
+    They are timed where they are made, by the `LastOverride` stamp that `Enter-StreamAdmission` sets under the lock, not by the warnings the streams log after leaving it.
+    Timed by the warnings, the test failed in 1 or 2 of 20 runs on the Windows box although every pair of decisions was at least 1 s apart: each time, the next stream's aggressive full collection (0.1-0.3 s, which pauses every thread) held the first warning back by more than 0.1 s.
 
 Against d3a840b, 18 of the 23 fail on the Mac.
 The three thread-job tests and the heap-limit test fail on what they check: the stream after the stopped one had to wait, the order was `a-1, a-2, a-3, c-1, b-1`, the two waiters were let in 0.13 s apart, and the figure under the limit was -9.52 GB.

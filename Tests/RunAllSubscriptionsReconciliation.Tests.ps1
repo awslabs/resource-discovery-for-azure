@@ -3497,13 +3497,21 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
         }
 
         It 'lets at most one waiting stream in per longest wait when memory stays short' {
-            # The overrides are timed by their warnings, which a stream logs after it leaves the lock, so a full
-            # collection by the next stream can delay one; a 3 s longest wait leaves room for that.
-            $State = New-StreamAdmissionState -FloorGB 1024 -PollSeconds 0.2 -MaxWaitSeconds 3
+            # The overrides are timed where they are decided: Enter-StreamAdmission stamps LastOverride under the
+            # lock when it lets a waiter in for waiting too long, and the test thread samples that stamp while it
+            # waits. Their warnings are logged after the lock is left, and a blocking full collection by the next
+            # stream can hold a warning back (on Windows by more than 0.1 s), so the warnings are not timed.
+            $State = New-StreamAdmissionState -FloorGB 1024 -PollSeconds 0.2 -MaxWaitSeconds 1
             $Probe = script:New-AdProbe -Gated @('a-1') -Durations @{ 'b-1' = 200; 'c-1' = 200 }
             $State.Probe = $Probe
             $Streams = @()
             $Overrides = @()
+            $Decisions = [System.Collections.Generic.List[long]]::new()
+            # Overrides are at least the longest wait (1 s) apart, and the sample runs every ~50 ms, so none is missed.
+            $SampleDecision = {
+                $Stamp = $State['LastOverride']
+                if ($null -ne $Stamp -and -not $Decisions.Contains([long]$Stamp)) { $Decisions.Add([long]$Stamp) }
+            }
             try
             {
                 $Streams += script:Start-AdStream -Name 'a' -State $State -SubIds @('a-1')
@@ -3512,8 +3520,9 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
                 $Streams += script:Start-AdStream -Name 'b' -State $State -SubIds @('b-1')
                 $Streams += script:Start-AdStream -Name 'c' -State $State -SubIds @('c-1')
                 $IsOverride = { $_.Text -like '*WARNING: starting*for free memory*' }
-                (script:Wait-AdCondition -TimeoutSeconds 30 { @($Streams[1], $Streams[2] | ForEach-Object { script:Get-AdStreamLines $_ } | Where-Object $IsOverride).Count -ge 2 }) | Should -BeTrue
-                $Overrides = @($Streams[1], $Streams[2] | ForEach-Object { script:Get-AdStreamLines $_ } | Where-Object $IsOverride | Sort-Object -Property Time)
+                (script:Wait-AdCondition -TimeoutSeconds 30 { & $SampleDecision; @($Streams[1], $Streams[2] | ForEach-Object { script:Get-AdStreamLines $_ } | Where-Object $IsOverride).Count -ge 2 }) | Should -BeTrue
+                & $SampleDecision
+                $Overrides = @($Streams[1], $Streams[2] | ForEach-Object { script:Get-AdStreamLines $_ } | Where-Object $IsOverride)
                 $Probe.Gates['a-1'].Set()
                 (script:Wait-AdCondition -TimeoutSeconds 60 { @($Streams | Where-Object { $_.Job.State -in 'NotStarted', 'Running' }).Count -eq 0 }) | Should -BeTrue
             }
@@ -3523,8 +3532,9 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
                 script:Stop-AdStreams $Streams
             }
             $Overrides.Count | Should -Be 2
-            $Gap = ($Overrides[1].Time - $Overrides[0].Time).TotalSeconds
-            $Gap | Should -BeGreaterOrEqual 1.5 -Because ('the second stream may be let in only 3 s after the first; their warnings were {0:N2} s apart' -f $Gap)
+            $Decisions.Count | Should -Be 2 -Because 'each of the two waiters is let in by its own override decision, and each decision stamps LastOverride'
+            $Gap = ($Decisions[1] - $Decisions[0]) / [double][System.Diagnostics.Stopwatch]::Frequency
+            $Gap | Should -BeGreaterOrEqual 1 -Because ('the second waiter may be let in only a full longest wait (1 s) after the first; the two decisions were {0:N3} s apart' -f $Gap)
             $State.Holders.Count | Should -Be 0
         }
     }

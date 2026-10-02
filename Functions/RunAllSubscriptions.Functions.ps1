@@ -611,8 +611,9 @@ function Enter-StreamAdmission
     # its reading is below the floor it runs one aggressive full collection (Get-GcFreeMemoryGB -Full), to give
     # back garbage any stream left in the shared heap, unless another stream ran one within PollSeconds.
     # Waiters sleep in Monitor.Wait slices of at most a second, so a stop lands quickly, and an admission or a
-    # release wakes them at once. Everything is decided and recorded under the state's lock. The check sees the
-    # memory that is free when a subscription starts, not what the subscription will need.
+    # release wakes them at once. Everything is decided and recorded under the state's lock; the waiting line is
+    # written without it, from what was read under it. The check sees the memory that is free when a subscription
+    # starts, not what the subscription will need.
     # -FreeMemoryReader is called with $true for the full reading. Returns the reason the subscription was
     # admitted, how long it waited, and the free memory this call read, if it read any.
     param(
@@ -640,10 +641,9 @@ function Enter-StreamAdmission
     $ShownGB = $null
     $InProgress = 0
     $ReadError = $null
-    $LockTaken = $false
     try
     {
-        [System.Threading.Monitor]::Enter($Lock, [ref]$LockTaken)
+        [System.Threading.Monitor]::Enter($Lock)
         $Waiting.Add($Holder)
         while ($null -eq $Admission)
         {
@@ -717,7 +717,14 @@ function Enter-StreamAdmission
                 {
                     $Logged = $true
                     $FreeText = if ($null -ne $ShownGB) { [string]::Format($Culture, '{0:0.0} GB free', $ShownGB) } else { 'free memory not read yet' }
-                    & $Log ([string]::Format($Culture, 'waiting for free memory before starting {0}: {1}, floor {2} GB (-StreamMemoryGB), {3} other subscription(s) in progress, {4} stream(s) ahead of it', $Subscription, $FreeText, $FloorGB, $InProgress, $Waiting.IndexOf($Holder))) 'Yellow'
+                    $WaitingLine = [string]::Format($Culture, 'waiting for free memory before starting {0}: {1}, floor {2} GB (-StreamMemoryGB), {3} other subscription(s) in progress, {4} stream(s) ahead of it', $Subscription, $FreeText, $FloorGB, $InProgress, $Waiting.IndexOf($Holder))
+                    # The line is made from what was read under the lock and written without it, so a slow host write
+                    # holds up no other stream. A release while the lock is free wakes no one, so look again before
+                    # the first sleep.
+                    [System.Threading.Monitor]::Exit($Lock)
+                    & $Log $WaitingLine 'Yellow'
+                    [System.Threading.Monitor]::Enter($Lock)
+                    continue
                 }
                 $null = [System.Threading.Monitor]::Wait($Lock, $SliceMs)
             }
@@ -730,14 +737,21 @@ function Enter-StreamAdmission
     }
     finally
     {
-        if ($LockTaken)
+        # Asked of the lock itself, because a stop can land between letting the lock go and taking it back. The
+        # streams call this function without holding the lock, so a held lock here is this call's own.
+        if ($null -eq $Admission)
         {
-            if ($null -eq $Admission)
+            # Stopped or failed while queued: leave the queue, and let the next stream re-check at once. A failure
+            # while the waiting line was written finds the lock free, so it takes the lock back first.
+            if (-not [System.Threading.Monitor]::IsEntered($Lock))
             {
-                # Stopped or failed while queued: leave the queue, and let the next stream re-check at once.
-                [void]$Waiting.Remove($Holder)
-                [System.Threading.Monitor]::PulseAll($Lock)
+                [System.Threading.Monitor]::Enter($Lock)
             }
+            [void]$Waiting.Remove($Holder)
+            [System.Threading.Monitor]::PulseAll($Lock)
+        }
+        if ([System.Threading.Monitor]::IsEntered($Lock))
+        {
             [System.Threading.Monitor]::Exit($Lock)
         }
     }

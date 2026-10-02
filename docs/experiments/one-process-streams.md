@@ -273,6 +273,8 @@ Step 5 makes each stream ask for admission before every subscription.
 - **Release.** Before each subscription the worker makes a token, and its `finally` block always passes it to `Exit-StreamAdmission`, whether the subscription was admitted, failed or was stopped; a token that is not recorded is left alone.
   A stream stopped while it waits leaves the queue in `Enter-StreamAdmission`'s own `finally` block.
 - **Logging.** A stream logs once when it starts waiting (the subscription, free GB, the floor, the other subscriptions in progress and the streams ahead of it) and once when it is admitted, with the seconds it waited, through its usual `[stream-N]` console lines.
+  The waiting line is made from what was read under the lock and written with the lock let go, so a slow host write holds up no other stream.
+  A release in that gap wakes no one, so the stream looks again before its first sleep, and a stop or a failed write there still leaves the queue.
   Nothing is added to the Inventory, Metrics or Consumption output.
 - **Process mode.** The wrapper creates no state and the worker gets none, so `-StreamIsolation Process` runs as before.
 - **Parameters.** `-StreamIsolation` and `-StreamMemoryGB` are declared after every parameter `main`'s wrapper has, so a positional call binds as it does on `main`.
@@ -318,10 +320,12 @@ So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on
 
 ### Tests
 
-`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` has 23 tests for the check, and each runs the code:
+`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` has 26 tests for the check, and each runs the code:
 
 - `Enter-StreamAdmission` with an injected free-memory reader and log: it admits at once above the floor, admits below it when nothing else is in progress, waits and is admitted when memory recovers (one full collection before the first wait, gen-0 readings after), skips the full collection when one ran within the poll interval, is admitted after the longest wait with a warning, never waits with a floor of 0, and admits with a warning when the reading throws.
 - A release wakes the waiting stream at once: with a 30 s poll interval it was admitted within 0.5 s of the release.
+- The waiting line is written without the lock, from the values read under it.
+  A release that lands while it is being written still admits the stream at once, before its first 1 s sleep, and a write that throws still leaves the queue, so the stream behind it is admitted.
 - While the test holds the lock, a stream neither queues nor is admitted, and it is admitted once the lock is free.
 - Two thread jobs that always read memory below the floor, through 25 rounds that start together: one is admitted at a time, and the other only after the first releases.
 - `Exit-StreamAdmission` releases only the token it is given.
@@ -335,14 +339,21 @@ So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on
     They are timed where they are made, by the `LastOverride` stamp that `Enter-StreamAdmission` sets under the lock, not by the warnings the streams log after leaving it.
     Timed by the warnings, the test failed in 1 or 2 of 20 runs on the Windows box although every pair of decisions was at least 1 s apart: each time, the next stream's aggressive full collection (0.1-0.3 s, which pauses every thread) held the first warning back by more than 0.1 s.
 
-Against d3a840b, 18 of the 23 fail on the Mac.
+Against a188284, 18 of the 23 fail on the Mac.
 The three thread-job tests and the heap-limit test fail on what they check: the stream after the stopped one had to wait, the order was `a-1, a-2, a-3, c-1, b-1`, the two waiters were let in 0.13 s apart, and the figure under the limit was -9.52 GB.
 The positions test fails because `-StreamIsolation` and `-StreamMemoryGB` came before `-HeadRoom`.
 The other 13 fail because the tokens they use do not exist there, and 5 pass there.
 On macOS, `RunAllSubscriptionsReconciliation` passed 259 of 259, `ParamForwardingParity` 12, `StampCollision` 5, `MemoryRelease` 51 and `CollectorBreakerAndVisibility` 97 (`ParallelStreamsAggregation` skips its 13 without a report zip).
 On the Windows box all 23 pass, with the positions test skipped because the staged copy has no git history.
-Against d3a840b there, the three thread-job tests fail, and the heap-limit test passes, because there the plain figure stayed within the limit.
+Against a188284 there, the three thread-job tests fail, and the heap-limit test passes, because there the plain figure stayed within the limit.
 The rest of that file fails the same 3 tests with and without the change, as in Step 4, and `ParamForwardingParity` and `StampCollision` pass.
+
+When the waiting line moved outside the lock, the line test and the release test failed on the code before it, on what they check: the lock was held during the write, and the stream waited 1.002 s.
+The failed-write test passes there too, because with the line written under the lock the old cleanup already left the queue; it guards the new code, where the line is written with the lock let go.
+Three mutations of the new code were each caught by exactly one test: writing the line under the lock again, sleeping without looking again first, and leaving the queue only while holding the lock.
+On macOS `RunAllSubscriptionsReconciliation` passed 262 of 262, with the four files above as before.
+The branch now sits on the colour and snapshot test fixes, so on the Windows box the whole file passed under Pester 5.7.1 and 6.2.0, with 261 passed and the positions test skipped each time, and the check's 26 tests gave 25 passed and 1 skipped in 3 of 3 runs.
+A live run with `-StreamIsolation Runspace -StreamMemoryGB 64` on the Mac wrote the same waiting and admission lines as the code before, in the same order, and a consolidated bundle with the same 29 entries and row counts.
 
 ### Live runs on macOS
 

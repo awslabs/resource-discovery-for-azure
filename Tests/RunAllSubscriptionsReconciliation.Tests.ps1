@@ -2968,6 +2968,52 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         $Logs[1].Message | Should -Match '^admitted Sub C \(sub-c\) after waiting \d+ s: no other subscription in progress$'
     }
 
+    It 'writes the waiting line without holding the lock, from the values read under it' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        [void]$State.Holders.Add('other')
+        $Lock = $State['Lock']
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $Readings = [System.Collections.Generic.Queue[double]]::new([double[]]@(1.0, 1.5, 3.0))
+        $Reader = { param([bool]$Full) $Readings.Dequeue() }.GetNewClosure()
+        # Monitor.IsEntered answers for the calling thread, which is the one running Enter-StreamAdmission.
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add([pscustomobject]@{ Message = $Message; LockHeld = [System.Threading.Monitor]::IsEntered($Lock) }) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Holder 'sub-a' -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log $LogBlock
+        $Admission.Reason | Should -Be 'memory'
+        $Logs.Count | Should -Be 2
+        $Logs[0].Message | Should -Be 'waiting for free memory before starting Sub A (sub-a): 1.5 GB free, floor 2 GB (-StreamMemoryGB), 1 other subscription(s) in progress, 0 stream(s) ahead of it'
+        $Logs[0].LockHeld | Should -BeFalse -Because 'a slow host write while the lock is held would hold up every other stream'
+        $Logs[1].LockHeld | Should -BeFalse
+        [System.Threading.Monitor]::IsEntered($Lock) | Should -BeFalse -Because 'the lock taken back after the waiting line is let go again on admission'
+    }
+
+    It 'is admitted at once when the subscription ahead of it ends while its waiting line is being written' {
+        # A poll interval of 30 s makes the stream sleep in 1 s slices. The release lands while the lock is free for
+        # the waiting line, so its wake finds no stream asleep, and only a check before the first sleep admits it sooner.
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 30 -MaxWaitSeconds 60
+        [void]$State.Holders.Add('other')
+        $Release = ${function:Exit-StreamAdmission}
+        $LogBlock = { param([string]$Message, [string]$Color) if ($Message -like 'waiting*') { & $Release -State $State -Holder 'other' } }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Holder 'sub-g' -Subscription 'Sub G (sub-g)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log $LogBlock
+        $Admission.Reason | Should -Be 'alone'
+        $Admission.WaitedSeconds | Should -BeLessThan 0.9 -Because ('a check before the first 1 s sleep admits it at once; it waited {0:N3} s' -f $Admission.WaitedSeconds)
+        @($State.Holders) | Should -Be @('sub-g')
+        $State.Waiting.Count | Should -Be 0
+    }
+
+    It 'leaves the queue when writing its waiting line fails, so the stream behind it is not held up' {
+        # The waiting line is written without the lock, so a failure there has to take the lock back to leave the queue.
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 30 -MaxWaitSeconds 60
+        [void]$State.Holders.Add('other')
+        $Lock = $State['Lock']
+        { Enter-StreamAdmission -State $State -Holder 'sub-h' -Subscription 'Sub H (sub-h)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log { param([string]$Message, [string]$Color) throw 'the host write failed' } } | Should -Throw '*the host write failed*'
+        $State.Waiting.Count | Should -Be 0 -Because 'only the head of the queue can be admitted, so a token left there would hold every later stream forever'
+        @($State.Holders) | Should -Be @('other')
+        [System.Threading.Monitor]::IsEntered($Lock) | Should -BeFalse
+        Exit-StreamAdmission -State $State -Holder 'other'
+        $Next = Enter-StreamAdmission -State $State -Holder 'sub-i' -Subscription 'Sub I (sub-i)' -FreeMemoryReader { param([bool]$Full) 0.5 } -Log { param([string]$Message, [string]$Color) }
+        $Next.Reason | Should -Be 'alone'
+    }
+
     It 'is admitted with a warning once it has waited the longest wait, when memory never recovers' {
         $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 0.3
         [void]$State.Holders.Add('other-1')

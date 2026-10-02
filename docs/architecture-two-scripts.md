@@ -57,8 +57,9 @@ $Jobs += Start-Job -ScriptBlock {
 } -ArgumentList @($WorkerScript, $WorkerArgs)
 ```
 
-— `Run-AllSubscriptions.ps1` line 1618 (`$WorkerScript` is the inner
-`ResourceInventory.ps1`).
+— `Run-AllSubscriptions.ps1` line 1618 (`$WorkerScript` is
+`Run-AllSubscriptions.Stream.ps1`, which runs the inner `ResourceInventory.ps1` once
+for each subscription assigned to that stream).
 
 The comment that opens the parallel branch states the rationale directly:
 
@@ -77,15 +78,17 @@ with `-RunAllSubs`) is.
 
 ## Two scripts, two jobs (not a thin loop)
 
-The wrapper is not a small `foreach` around the inner script. It is the **larger**
-of the two:
+The wrapper is not a small `foreach` around the inner script. On its own it is
+about three quarters of the inner script's size, and with the helper file it loads
+it is the larger side:
 
 | Script | Lines | Role |
 |---|---|---|
 | `Run-AllSubscriptions.ps1` | 2979 | Tenant-wide orchestrator |
 | `ResourceInventory.ps1` | 3850 | Single-subscription worker |
+| `Functions/RunAllSubscriptions.Functions.ps1` | 2432 | Helpers the wrapper loads |
 
-(`wc -l`, current main.) On top of that, `Functions/RunAllSubscriptions.Functions.ps1`
+(`wc -l`, current main.) The helper file, `Functions/RunAllSubscriptions.Functions.ps1`,
 defines **72 functions** (`grep -c '^function '`) that exist only to orchestrate a
 multi-subscription, multi-machine run — work the inner script never does. It
 defines only 5 functions of its own by comparison. Representative orchestration
@@ -140,8 +143,9 @@ line 23). You never pass it yourself; the wrapper sets it on every child launch:
 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
 ```
 
-— `Run-AllSubscriptions.ps1` line 1265 (sequential path) and line 1450 (parallel
-per-stream path).
+— `Run-AllSubscriptions.ps1` line 1265 (sequential path) and line 1450 (the
+single-subscription fallback of the parallel branch). Each parallel stream makes the
+same call from `Run-AllSubscriptions.Stream.ps1` line 240.
 
 Effectively, `-RunAllSubs` signals *"you are a per-subscription worker under the
 orchestrator, not a standalone run."* It does two things: it **suppresses the

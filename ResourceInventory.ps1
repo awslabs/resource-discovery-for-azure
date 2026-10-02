@@ -3523,18 +3523,47 @@ if (-not $RunAllSubs.IsPresent)
         if ($null -ne $Drive -and $null -ne $Drive.Free)
         {
             $FreeMB = [math]::Round($Drive.Free / 1MB, 0)
+
+            # Render the figure ONCE, for all three branches below, so none of
+            # them can drift back into an ambiguous form.
+            #
+            # Do NOT reintroduce a bare "{0:N0} MB" here. N0 uses the HOST
+            # culture's NumberGroupSeparator, and on a culture where that
+            # separator is '.' (en-NL, de-DE, ...) 69969 prints as "69.969 MB",
+            # which an operator reads as 69 MB - so a perfectly healthy 68 GB
+            # free looks like an imminent out-of-disk failure.
+            #
+            # Two properties keep it unambiguous on every host: the MB value is
+            # formatted with NO grouping at all (bare digits cannot be misread
+            # as a decimal), and both values use InvariantCulture so the decimal
+            # point is always '.'. MB alone is also the wrong unit at this
+            # magnitude, so a GB value leads once there is more than 1 GB.
+            #
+            # Keep in sync with Invoke-PreFlightChecks in
+            # Functions/RunAllSubscriptions.Functions.ps1 - both copies must
+            # produce identical text for the same input.
+            $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+            $FreeSpaceDisplay = if ($FreeMB -ge 1024)
+            {
+                '{0} GB ({1} MB)' -f ($FreeMB / 1024).ToString('0.0', $InvariantCulture), $FreeMB.ToString('0', $InvariantCulture)
+            }
+            else
+            {
+                '{0} MB' -f $FreeMB.ToString('0', $InvariantCulture)
+            }
+
             if ($FreeMB -lt 100)
             {
-                Write-Host ("ERROR: Free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Red
+                Write-Host ("ERROR: Free disk space at {0} is {1}; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeSpaceDisplay) -ForegroundColor Red
                 exit 1
             }
             elseif ($FreeMB -lt 500)
             {
-                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Yellow
+                Write-Host ("WARNING: Free disk space at {0} is {1}. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $FreeSpaceDisplay) -ForegroundColor Yellow
             }
             else
             {
-                Write-Host ("Free disk space: {0} MB at {1}" -f $FreeMB.ToString('N0', [cultureinfo]::InvariantCulture), $PreFlightInventoryRoot) -ForegroundColor Green
+                Write-Host ("Free disk space: {0} at {1}" -f $FreeSpaceDisplay, $PreFlightInventoryRoot) -ForegroundColor Green
             }
         }
     }

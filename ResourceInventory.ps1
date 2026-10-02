@@ -222,7 +222,12 @@ function RunInventorySetup()
             }
         }
 
-        $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
+        # The tail keeps two runs that start in the same millisecond apart. Parallel streams run either as
+        # separate processes (different PIDs) or, under -StreamIsolation Runspace, as runspaces of ONE process,
+        # where only the runspace id differs, so both go in. The first runspace of a process (id 1: a
+        # standalone run, the sequential wrapper and each stream process) keeps the plain PID value; an odd
+        # multiplier keeps every other runspace id distinct within the 4 hex digits.
+        $ProcDiscriminator = ('{0:x4}' -f (($PID -bxor ([long]([runspace]::DefaultRunspace.Id - 1) * 0x9E37)) -band 0xffff))
         $Global:CurrentDateTime = ((Get-Date).ToString('yyyyMMddHHmmssfff', [cultureinfo]::InvariantCulture) + $ProcDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
 

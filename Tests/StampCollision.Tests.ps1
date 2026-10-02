@@ -69,3 +69,37 @@ Describe 'Report-stamp collision on same-millisecond reports' {
         }
     }
 }
+
+Describe 'Report-stamp tail when parallel streams share one process' {
+    # Under -StreamIsolation Runspace the streams are runspaces of ONE process, so the PID alone no longer
+    # tells two same-millisecond reports apart. The statement is lifted from ResourceInventory.ps1 and run,
+    # with the process id and the runspace id as inputs.
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Script:RepoRoot 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Assign = @($Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$ProcDiscriminator' }, $true))
+        if ($Assign.Count -ne 1) { throw ('expected one $ProcDiscriminator assignment in ResourceInventory.ps1, found {0}' -f $Assign.Count) }
+        $Script:TailText = $Assign[0].Right.Extent.Text
+        $Parameterised = ($Script:TailText -replace '\$PID\b', '$$ProcessId') -replace '\[runspace\]::DefaultRunspace\.Id', '$$RunspaceId'
+        $Script:TailOf = [scriptblock]::Create('param($ProcessId, $RunspaceId) ' + $Parameterised)
+    }
+
+    It 'keeps the plain PID value in the first runspace of a process (a standalone run, the sequential wrapper, a stream process)' {
+        foreach ($ProcessId in 1, 4242, 70000, 123456)
+        {
+            (& $Script:TailOf $ProcessId 1) | Should -Be ('{0:x4}' -f ($ProcessId -band 0xffff))
+        }
+    }
+
+    It 'gives every runspace of one process its own 4-hex tail' {
+        $Tails = @(1..2000 | ForEach-Object { & $Script:TailOf 4242 $_ })
+        @($Tails | Where-Object { $_ -cnotmatch '^[0-9a-f]{4}$' }).Count | Should -Be 0
+        @($Tails | Select-Object -Unique).Count | Should -Be 2000
+    }
+
+    It 'differs between thread jobs running at the same time in one process' {
+        $Jobs = @(1..3 | ForEach-Object { Start-ThreadJob -ThrottleLimit 3 -ArgumentList $Script:TailText -ScriptBlock { param($Expression) [pscustomobject]@{ ProcessId = $PID; Tail = (& ([scriptblock]::Create($Expression))) } } })
+        $Seen = @(Receive-Job -Job $Jobs -Wait -AutoRemoveJob)
+        @($Seen.ProcessId | Select-Object -Unique).Count | Should -Be 1
+        @($Seen.Tail | Select-Object -Unique).Count | Should -Be 3
+    }
+}

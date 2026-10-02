@@ -497,6 +497,32 @@ function Test-BackgroundJobSupport
     }
 }
 
+function Test-ThreadJobSupport
+{
+    # -StreamIsolation Runspace runs each stream as a thread job (Start-ThreadJob, from the ThreadJob module
+    # PowerShell 7 ships with) in this process. Probed by starting one, on every platform, because a
+    # session can lack the module or refuse to start one.
+    if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) { return $false }
+
+    $Probe = $null
+    try
+    {
+        $Probe = Start-ThreadJob -ScriptBlock { $true } -ErrorAction Stop
+        return [bool](Receive-Job -Job $Probe -Wait -ErrorAction Stop)
+    }
+    catch
+    {
+        return $false
+    }
+    finally
+    {
+        if ($Probe)
+        {
+            try { Remove-Job -Job $Probe -Force -ErrorAction SilentlyContinue } catch { Write-Verbose ("Probe thread job cleanup failed: {0}" -f $_.Exception.Message) }
+        }
+    }
+}
+
 function Disable-ConsoleQuickEdit
 {
     if (-not $IsWindows) { return }

@@ -37,6 +37,9 @@ param (
 
     [int]$ParallelStreams = 1,
 
+    [ValidateSet('Process', 'Runspace')]
+    [string]$StreamIsolation = 'Process',
+
     [ValidateRange(0, 90)]
     [int]$HeadRoom = 0,
 
@@ -1193,7 +1196,18 @@ $AvailableLabel = if ($AutoTune.MemoryBasis -eq 'available') { '{0} GB available
 Write-Host ("Sizing: {0}, {1} GB per stream (-StreamMemoryGB) -> up to {2} stream(s) by memory; auto streams limited by {3}; up to {4} metric call(s) per stream, at most {5} across the host for {6} stream(s)." -f $AvailableLabel, $StreamMemoryGB.ToString([cultureinfo]::InvariantCulture), $AutoTune.StreamsByMemory, $AutoTune.StreamsLimitedBy, $AutoTune.PerStreamConcurrency, $AutoTune.TotalConcurrencyCap, $ConcurrencyStreams) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
-if ($ParallelStreams -gt 1 -and -not (Test-BackgroundJobSupport))
+if ($ParallelStreams -gt 1 -and $StreamIsolation -eq 'Runspace' -and -not (Test-ThreadJobSupport))
+{
+    Write-Host ""
+    Write-Host "WARNING: -StreamIsolation Runspace needs thread jobs (Start-ThreadJob), which this session" -ForegroundColor Yellow
+    Write-Host "         cannot start. Falling back to the SEQUENTIAL path (one subscription at a time)." -ForegroundColor Yellow
+    Write-Host "         The report content is identical - only slower. Omit -StreamIsolation to run the" -ForegroundColor Yellow
+    Write-Host "         streams as separate pwsh processes instead." -ForegroundColor Yellow
+    Write-Host ""
+    $ParallelStreams = 1
+}
+
+if ($ParallelStreams -gt 1 -and $StreamIsolation -eq 'Process' -and -not (Test-BackgroundJobSupport))
 {
     Write-Host ""
     Write-Host "WARNING: PowerShell background jobs (Start-Job) are unavailable in this session." -ForegroundColor Yellow
@@ -1440,7 +1454,7 @@ if ($ParallelStreams -le 1)
 }
 else
 {
-    # === PARALLEL-STREAMS PATH: each "stream" is a separate `pwsh` background job (Start-Job runs the ScriptBlock in a fresh process) with its own copy of the Az context, imported from a snapshot. No phase moves the process's context any more (the billing phases scope each call to its subscription through $PSDefaultParameterValues['*:DefaultProfile'], not Set-AzContext), so the process boundary is not what keeps billing data correct; it keeps a crash or an out-of-memory error in one stream from ending the others.
+    # === PARALLEL-STREAMS PATH: each "stream" runs Run-AllSubscriptions.Stream.ps1 over its slice of the subscriptions. By default (-StreamIsolation Process) each stream is a separate `pwsh` background job (Start-Job runs the ScriptBlock in a fresh process) with its own copy of the Az context, imported from a snapshot. Under -StreamIsolation Runspace each stream is a thread job (Start-ThreadJob) in THIS process, sharing its signed-in context: that is safe because no phase moves the process's context any more (the billing phases scope each call to its subscription through $PSDefaultParameterValues['*:DefaultProfile'], not Set-AzContext), and PowerShell globals are per runspace, so each stream keeps its own run state. In the default mode the separate process also keeps a crash or an out-of-memory error in one stream from ending the others.
 
     # Drop what an earlier run completed BEFORE slicing, as the sequential loop does. A stream worker
     # only knows its own per-stream state, which is merged into the resume state when a run starts and
@@ -1467,7 +1481,14 @@ else
         {
             Write-Host ("Note: -ParallelStreams {0} clamped to {1} (one stream per subscription is the practical limit)." -f $ParallelStreams, $StreamCount) -ForegroundColor DarkGray
         }
-        Write-Host "Each stream is a separate pwsh background job with its own Az context and resume-state file." -ForegroundColor DarkGray
+        if ($StreamIsolation -eq 'Runspace')
+        {
+            Write-Host "-StreamIsolation Runspace: each stream is a runspace in this pwsh process, sharing its signed-in Az context, with its own resume-state file." -ForegroundColor DarkGray
+        }
+        else
+        {
+            Write-Host "Each stream is a separate pwsh background job with its own Az context and resume-state file." -ForegroundColor DarkGray
+        }
         Write-Host ""
     }
 
@@ -1564,21 +1585,26 @@ else
             }
         }
 
+        # Under -StreamIsolation Runspace the streams use this process's own context, so the path is never
+        # written: no token cache goes to disk, and the cleanup below finds nothing to remove.
         $AzContextSnapshot = Join-Path $InventoryRoot (".rda-stream-azcontext-{0}.json" -f ([guid]::NewGuid().ToString()))
-        try
+        if ($StreamIsolation -eq 'Process')
         {
-            Save-AzContext -Path $AzContextSnapshot -Force -ErrorAction Stop | Out-Null
-        }
-        catch
-        {
-            Write-Host ("ERROR: could not snapshot Az context for stream workers: {0}" -f $_.Exception.Message) -ForegroundColor Red
-            Write-Host "Re-run without -ParallelStreams to use the sequential code path." -ForegroundColor Yellow
-            if (Test-Path -LiteralPath $AzContextSnapshot)
+            try
             {
-                try { Remove-Item -LiteralPath $AzContextSnapshot -Force }
-                catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
+                Save-AzContext -Path $AzContextSnapshot -Force -ErrorAction Stop | Out-Null
             }
-            Exit-Wrapper -Code 1
+            catch
+            {
+                Write-Host ("ERROR: could not snapshot Az context for stream workers: {0}" -f $_.Exception.Message) -ForegroundColor Red
+                Write-Host "Re-run without -ParallelStreams to use the sequential code path." -ForegroundColor Yellow
+                if (Test-Path -LiteralPath $AzContextSnapshot)
+                {
+                    try { Remove-Item -LiteralPath $AzContextSnapshot -Force }
+                    catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
+                }
+                Exit-Wrapper -Code 1
+            }
         }
 
         $Jobs = @()
@@ -1673,10 +1699,34 @@ else
                     $WorkerArgs.ShardCount = $ShardCount
                 }
 
-                $Jobs += Start-Job -ScriptBlock {
-                    param($WorkerScript, $WorkerArgs)
-                    & $WorkerScript @WorkerArgs
-                } -ArgumentList @($WorkerScript, $WorkerArgs)
+                if ($StreamIsolation -eq 'Runspace')
+                {
+                    $WorkerArgs.SharedProcess = $true
+                    # The same worker, as a thread job in this process. Thread jobs share one process-wide
+                    # throttle (5 by default), so it is raised to the stream count: a stream over it would wait
+                    # NotStarted until another ended. A stream's metrics worker pool lives in its runspace's
+                    # globals and would outlive the stream, so it is released when the stream ends; a stream
+                    # process releases its pool simply by exiting.
+                    $Jobs += Start-ThreadJob -ThrottleLimit $StreamCount -ScriptBlock {
+                        param($WorkerScript, $WorkerArgs, $CommonFunctionsFile)
+                        try
+                        {
+                            & $WorkerScript @WorkerArgs
+                        }
+                        finally
+                        {
+                            . $CommonFunctionsFile
+                            $null = Close-RdaMetricWorkerPool
+                        }
+                    } -ArgumentList @($WorkerScript, $WorkerArgs, $CommonFunctionsFile)
+                }
+                else
+                {
+                    $Jobs += Start-Job -ScriptBlock {
+                        param($WorkerScript, $WorkerArgs)
+                        & $WorkerScript @WorkerArgs
+                    } -ArgumentList @($WorkerScript, $WorkerArgs)
+                }
             }
 
             Write-Host ""
@@ -1737,6 +1787,19 @@ else
                 {
                     try { if (Test-Path -LiteralPath $ImportMarker -PathType Leaf) { Remove-Item -LiteralPath $ImportMarker -Force -ErrorAction Stop } }
                     catch { Write-Verbose ("Could not remove stream import marker {0}: {1}" -f $ImportMarker, $_.Exception.Message) }
+                }
+            }
+
+            if ($StreamIsolation -eq 'Runspace')
+            {
+                # No snapshot to release in this mode. A thread job is NotStarted until its thread picks it up,
+                # which can be just after Start-ThreadJob returns, and the loop below watches only Running, so
+                # it would end at once; wait for every stream to have started first (bounded, in case one never does).
+                $script:SnapshotReleased = $true
+                $StartDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                while (@($Jobs | Where-Object { $_.State -eq 'NotStarted' }).Count -gt 0 -and [DateTime]::UtcNow -lt $StartDeadline)
+                {
+                    Start-Sleep -Milliseconds 100
                 }
             }
 

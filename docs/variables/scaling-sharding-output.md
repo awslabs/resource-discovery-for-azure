@@ -118,12 +118,12 @@ share of the estimated total.
 **Why it exists.** `-ConcurrencyLimit` parallelises *within* one subscription;
 `-ParallelStreams` parallelises *across* subscriptions. On a tenant with many
 subscriptions the wall-clock win comes from running several subscriptions at
-once. Each stream is a separate `pwsh` process. That used to be required for
-correctness, because the billing phases switched the process-global Az context
-with `Set-AzContext`; they now scope each call to its subscription with
-`-DefaultProfile` instead, so no phase moves the process's context (see
-[Why two scripts?](../architecture-two-scripts.md)). The process boundary still
-means a crash or an out-of-memory error ends only the stream it happens in.
+once. By default each stream is a separate `pwsh` process; `-StreamIsolation
+Runspace` runs them as runspaces of the wrapper's own process instead (see
+below). Either is safe, because no phase moves the process's Az context: the
+billing phases scope each call to its subscription instead of calling
+`Set-AzContext`. In the default mode the process boundary also means a crash or
+an out-of-memory error ends only the stream it happens in.
 
 **When to change it.** Raise it on a machine with spare cores and RAM (budget
 ~1 core and ~500–700 MB per stream); the README's sizing table recommends `2`
@@ -142,6 +142,61 @@ it cannot be read, total RAM is used as `floor((RamGB - 2) / StreamMemoryGB)`. S
 `Start-Job` (WDAC/AppLocker language-mode policy), the wrapper falls back to the
 sequential path and forces `ParallelStreams = 1` with a warning
 (line ~1083–1096) — the report content is identical, only slower.
+
+### `-StreamIsolation`
+
+| | |
+|---|---|
+| **Type** | `string`, `[ValidateSet('Process', 'Runspace')]` |
+| **Declared on** | `Run-AllSubscriptions.ps1` - **wrapper only** |
+| **Default** | `Process` |
+
+**What it does.** Chooses how the parallel streams run when `-ParallelStreams`
+is above 1. It changes nothing else: every stream runs the same
+`Run-AllSubscriptions.Stream.ps1` over the same round-robin slice and keeps its
+own resume-state file, summary and report folders.
+
+- `Process` (default): each stream is a separate `pwsh` background job
+  (`Start-Job`). It imports a snapshot of the wrapper's Az context, which the
+  wrapper writes to the inventory root and deletes once every stream has
+  imported it.
+- `Runspace` (experimental): each stream is a thread job (`Start-ThreadJob`) in
+  the wrapper's own `pwsh` process. The streams share the process's signed-in Az
+  context, so no snapshot (and no token cache) is written to disk. PowerShell
+  globals belong to a runspace, so each stream keeps its own run state, and each
+  stream's metrics worker pool is released when the stream ends.
+
+**Why it exists.** A stream process loads PowerShell and the Az modules again
+before it collects anything: a `pwsh` with the six Az modules and the function
+files measured 220 MB of working set, against 19 MB for one more runspace with
+the same modules and functions. With 3 streams on 3 subscriptions the runspace
+streams used about half the threads and 16-38% less peak memory than stream
+processes (`docs/experiments/one-process-streams.md`). That matters most on a
+small host such as Cloud Shell.
+
+**What `Runspace` gives up.**
+
+- **Crash isolation.** An out-of-memory error or a crash in one stream ends every
+  stream. A stream process dies alone, and the wrapper still ships the reports
+  it had finished.
+- **Separate .NET runtimes.** The streams share one garbage-collected heap, so a
+  forced full collection (the billing phases and the memory readings trigger
+  them) pauses every stream at once. The memory readings in `RunSummary.log` and
+  `Diagnostics_*.log` then measure the whole process, not one stream. Setting
+  `DOTNET_gcServer=1` before starting `pwsh` (one heap per core, collected in
+  parallel) made the one-process runs faster than stream processes in the
+  experiment, at the cost of more memory held.
+
+Lookups that use the process's current context, such as the VM SKU details,
+read the same subscription in both modes, as before.
+
+**When to change it.** Try `Runspace` on a memory-constrained host or to compare
+the two. Keep the default for long unattended runs where one stream's failure
+must not stop the others.
+
+**Fallback.** If thread jobs cannot be started in the session, the wrapper warns
+and falls back to the sequential path, as `Process` does when `Start-Job` is
+blocked.
 
 ### `-HeadRoom`
 

@@ -33,7 +33,10 @@ param (
     [ValidateSet(0, 5, 15, 30, 60)][int] $MetricsIntervalMinutes = 0,
     [ValidateRange(1, 93)][int] $MetricsLookbackDays,
     [string[]] $Service = @(),
-    [int]    $ConcurrencyLimit = 6
+    [int]    $ConcurrencyLimit = 6,
+    # Set by the wrapper under -StreamIsolation Runspace, where this worker runs as a thread job in the
+    # wrapper's own process instead of in a pwsh process of its own.
+    [switch] $SharedProcess
 )
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
@@ -89,55 +92,66 @@ if ($SubscriptionIds.Count -eq 0)
 
 Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 
-try
+if ($SharedProcess)
 {
-    # Once context autosave has been disabled for the CurrentUser scope, the user's
-    # AzureRmContextSettings.json records the literal 'None' as its context directory, and Az.Accounts
-    # resolves that relative name against the process working directory, which a job inherits from
-    # the wrapper. Set-Location does not change that directory. When it is a folder the user cannot
-    # write to, such as C:\Windows\System32 for a standard user, loading Az.Accounts or importing the
-    # context fails with access denied. The user's temp folder is normally writable and keeps the empty
-    # 'None' folder the module creates out of the report tree. The directory stays changed for the life
-    # of this worker, because the module resolves the name again whenever it needs it. If the move
-    # fails, the import is still attempted from the inherited directory.
-    try { [System.IO.Directory]::SetCurrentDirectory([System.IO.Path]::GetTempPath()) }
-    catch { Write-Stream ("WARNING: could not move the process directory to the temp folder: {0}" -f $_.Exception.Message) 'Yellow' }
-    Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
-    try { Disable-AzContextAutosave -Scope Process -ErrorAction Stop | Out-Null }
-    catch { Write-Stream ("WARNING: could not disable AzContext autosave: {0}" -f $_.Exception.Message) 'Yellow' }
-    Import-AzContext -Path $AzContextPath -ErrorAction Stop | Out-Null
-    Write-Stream "Az context imported from shared snapshot" 'Green'
+    # A thread job in the wrapper's own process. The Az context, the context-autosave setting and the .NET
+    # process directory belong to that whole process, so this stream changes none of them: it uses the
+    # context the wrapper signed in with, as the sequential path does, and there is no snapshot to import
+    # or to release. The billing phases scope their calls to each subscription themselves.
+    Write-Stream "running in the wrapper's process: using its signed-in Az context" 'Green'
 }
-catch
+else
 {
-    Write-Stream ("FATAL: could not import Az context from {0}: {1}" -f $AzContextPath, $_.Exception.Message) 'Red'
-    @{
-        StreamId       = $StreamId
-        Tenant         = $TenantID
-        Status         = 'failed-to-start'
-        Reason         = $_.Exception.Message
-        Completed      = @()
-        Failed         = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
-                $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
-                $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
-                [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
-            })
-        ResourceCounts = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
-    exit 1
-}
+    try
+    {
+        # Once context autosave has been disabled for the CurrentUser scope, the user's
+        # AzureRmContextSettings.json records the literal 'None' as its context directory, and Az.Accounts
+        # resolves that relative name against the process working directory, which a job inherits from
+        # the wrapper. Set-Location does not change that directory. When it is a folder the user cannot
+        # write to, such as C:\Windows\System32 for a standard user, loading Az.Accounts or importing the
+        # context fails with access denied. The user's temp folder is normally writable and keeps the empty
+        # 'None' folder the module creates out of the report tree. The directory stays changed for the life
+        # of this worker, because the module resolves the name again whenever it needs it. If the move
+        # fails, the import is still attempted from the inherited directory.
+        try { [System.IO.Directory]::SetCurrentDirectory([System.IO.Path]::GetTempPath()) }
+        catch { Write-Stream ("WARNING: could not move the process directory to the temp folder: {0}" -f $_.Exception.Message) 'Yellow' }
+        Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
+        try { Disable-AzContextAutosave -Scope Process -ErrorAction Stop | Out-Null }
+        catch { Write-Stream ("WARNING: could not disable AzContext autosave: {0}" -f $_.Exception.Message) 'Yellow' }
+        Import-AzContext -Path $AzContextPath -ErrorAction Stop | Out-Null
+        Write-Stream "Az context imported from shared snapshot" 'Green'
+    }
+    catch
+    {
+        Write-Stream ("FATAL: could not import Az context from {0}: {1}" -f $AzContextPath, $_.Exception.Message) 'Red'
+        @{
+            StreamId       = $StreamId
+            Tenant         = $TenantID
+            Status         = 'failed-to-start'
+            Reason         = $_.Exception.Message
+            Completed      = @()
+            Failed         = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
+                    $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
+                    $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
+                    [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
+                })
+            ResourceCounts = @()
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
+        exit 1
+    }
 
-# Tell the parent this stream no longer needs the snapshot. Once every stream has left its marker or
-# ended, the parent deletes the snapshot, so the token cache it holds is on disk for seconds rather than
-# for the whole run. If the marker cannot be written the parent keeps the snapshot until this job ends.
-$ImportMarkerPath = Get-StreamImportMarkerPath -AzContextPath $AzContextPath -StreamId $StreamId
-try
-{
-    Set-Content -LiteralPath $ImportMarkerPath -Value $StreamId -Encoding utf8 -ErrorAction Stop
-}
-catch
-{
-    Write-Stream ("WARNING: could not record the Az context import at {0}: {1}. The parent keeps the snapshot until this stream ends." -f $ImportMarkerPath, $_.Exception.Message) 'Yellow'
+    # Tell the parent this stream no longer needs the snapshot. Once every stream has left its marker or
+    # ended, the parent deletes the snapshot, so the token cache it holds is on disk for seconds rather than
+    # for the whole run. If the marker cannot be written the parent keeps the snapshot until this job ends.
+    $ImportMarkerPath = Get-StreamImportMarkerPath -AzContextPath $AzContextPath -StreamId $StreamId
+    try
+    {
+        Set-Content -LiteralPath $ImportMarkerPath -Value $StreamId -Encoding utf8 -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Stream ("WARNING: could not record the Az context import at {0}: {1}. The parent keeps the snapshot until this stream ends." -f $ImportMarkerPath, $_.Exception.Message) 'Yellow'
+    }
 }
 
 $StreamStateFile = Get-StreamStateFilePath -InventoryRoot $InventoryRoot -Tenant $TenantID -StreamId $StreamId

@@ -35,12 +35,15 @@ $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -Subs
 The wrapper's up-front consumption probe (`Test-ConsumptionAccess`) scopes its call the same way.
 Neither the process context nor the saved default moves any more.
 The existing check that the context matches the target subscription still runs, and a subscription it cannot confirm is still skipped rather than given another subscription's billing data.
+The evidence is in [the one-process streams experiment](experiments/one-process-streams.md).
 
-## Streams are still separate processes
+## Streams: separate processes by default, runspaces on request
 
-Each parallel stream is still a separate `pwsh` process, launched with `Start-Job`, that imports a snapshot of the wrapper's context.
-That boundary no longer keeps the billing data correct, because no phase moves the process's context any more.
-What it still does is isolate the streams: a crash or an out-of-memory error in one stream ends only that stream.
+By default each parallel stream is still a separate `pwsh` process (`Start-Job`) that imports a snapshot of the wrapper's context.
+That boundary isolates the streams: a crash or an out-of-memory error in one stream ends only that stream.
+`-StreamIsolation Runspace` runs each stream as a thread job (`Start-ThreadJob`) in the wrapper's own process instead.
+Those streams share the process's signed-in context, which no phase moves any more, and each keeps its own `$Global:` run state, because PowerShell globals belong to a runspace.
+What each mode costs, and what a shared process gives up, is under [`-StreamIsolation`](variables/scaling-sharding-output.md#-streamisolation).
 
 ## Two scripts, two jobs (not a thin loop)
 
@@ -145,7 +148,8 @@ The split still wins, on two grounds the single-process loop cannot match:
 
 Correctness used to be a third ground. While the billing phases moved the global
 Az context, process-per-stream isolation was the only thing that prevented the
-silent billing cross-contamination described above. They no longer move it.
+silent billing cross-contamination described above. They no longer move it,
+which is what lets `-StreamIsolation Runspace` run the streams in one process.
 
 And the clinching point: a merged single script that still wanted isolated
 streams or shards would have to **re-launch itself as subprocesses** anyway - which
@@ -155,8 +159,8 @@ explicit.
 
 ## Inside one worker process: the metrics worker pool
 
-The sections above say that streams are separate processes, never runspaces inside one process.
-Inside each process there is one place that does use runspaces: the metrics phase in `Extension/Metrics.ps1`.
+By default the streams are separate processes; under `-StreamIsolation Runspace` they are runspaces of one process.
+Inside each stream there is one place that runs runspaces of its own: the metrics phase in `Extension/Metrics.ps1`.
 This section explains what that is, why it is safe, and how it keeps memory flat over a long run.
 
 ### The analogy: a workshop and its team
@@ -216,7 +220,7 @@ The pool may grow to 4 times that only while calls keep timing out, because a st
 No phase moves the process's context: the billing phases scope each call to its subscription, as described above, and the metrics phase never calls `Set-AzContext`.
 At the start of each subscription's metrics phase it reads the current context once with `Get-AzContext` and passes it to every call through `-DefaultProfile`.
 So every call is told exactly which context to use, and nothing about the previous subscription's context is carried into the next one.
-Subscriptions in one process still run one after another, never at the same time.
+Within one stream, subscriptions run one after another; under `-StreamIsolation Runspace` the other streams in the process each run their own pool.
 
 ### How the design got here
 
@@ -252,7 +256,9 @@ PowerShell has no supported way for a local runspace pool to share one type tabl
   Each later subscription reuses it, but only if it is still open; a pool in any other state is dropped and a new one is built.
   `Close-RdaMetricWorkerPool` in `Functions/Common.Functions.ps1` releases it once when the wrapper exits, called from `Exit-Wrapper` and just before the final `exit` of `Run-AllSubscriptions.ps1`.
 - **Parallel streams.**
-  Each stream is its own `pwsh` process started with `Start-Job`, so it has its own pool, and that pool ends when the process ends.
+  Each stream has its own pool, because `$Global:MetricCallPool` belongs to the stream's runspace.
+  A stream started with `Start-Job` (the default) is its own `pwsh` process, so its pool ends when the process ends.
+  A stream started under `-StreamIsolation Runspace` is a thread job in the wrapper's process, so the thread job releases its pool with `Close-RdaMetricWorkerPool` when the stream ends; otherwise the pool would stay open in the wrapper's process until it exited.
 
 ### The safety checks: a worker goes home only when the job is finished
 

@@ -2682,3 +2682,168 @@ Describe 'Run-AllSubscriptions.ps1: a -Resume bundle carries the reports of the 
         $BannerIdx | Should -BeLessThan $StopIdx
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: -StreamIsolation Runspace runs each stream as a thread job in this process' {
+    # The wrapper's launch and start-wait blocks are lifted from its parsed source and run against a stub
+    # worker, so what is asserted is what the wrapper does in each mode. The real worker is run with
+    # -SharedProcess against a stub inventory, with the process-wide Az commands it must leave alone
+    # replaced by stubs that record any call.
+    BeforeAll {
+        $script:SiRoot = Split-Path $PSScriptRoot -Parent
+        $SiAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:SiRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $FindRunspaceIf = {
+            param([string]$Contains)
+            $Found = @($SiAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq "`$StreamIsolation -eq 'Runspace'" -and $args[0].Extent.Text.Contains($Contains) }, $true))
+            if ($Found.Count -ne 1) { throw ("expected one Runspace block containing '{0}' in Run-AllSubscriptions.ps1, found {1}" -f $Contains, $Found.Count) }
+            [scriptblock]::Create($Found[0].Extent.Text)
+        }
+        $script:LaunchBlock = & $FindRunspaceIf '$Jobs += Start-ThreadJob'
+        $script:StartWaitBlock = & $FindRunspaceIf "State -eq 'NotStarted'"
+        $script:IsolationParam = @($SiAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'StreamIsolation' })
+
+        # A worker that reports where it ran, and leaves a "pool" in its runspace's globals.
+        $script:StubWorker = Join-Path $TestDrive 'stub-worker.ps1'
+        Set-Content -LiteralPath $script:StubWorker -Value @'
+param([string]$Probe, [switch]$SharedProcess)
+$Global:MetricCallPool = 'stub-pool'
+$Global:StubReleaseProbe = $Probe + '.released'
+[pscustomobject]@{ ProcessId = $PID; RunspaceId = [runspace]::DefaultRunspace.Id; SharedProcess = [bool]$SharedProcess } | ConvertTo-Json | Set-Content -LiteralPath $Probe
+'@
+        # Stands in for Functions/Common.Functions.ps1: records which pool the release saw.
+        $script:StubCommon = Join-Path $TestDrive 'stub-common.ps1'
+        Set-Content -LiteralPath $script:StubCommon -Value @'
+function Close-RdaMetricWorkerPool { Set-Content -LiteralPath $Global:StubReleaseProbe -Value ([string]$Global:MetricCallPool); 'released' }
+'@
+    }
+
+    It 'defaults to Process and accepts only Process or Runspace' {
+        $script:IsolationParam.Count | Should -Be 1
+        $script:IsolationParam[0].DefaultValue.Extent.Text | Should -Be "'Process'"
+        $Validate = @($script:IsolationParam[0].Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' })
+        $Validate.Count | Should -Be 1
+        @($Validate[0].PositionalArguments.Value) | Should -Be @('Process', 'Runspace')
+    }
+
+    It 'Runspace: starts a thread job in this process that runs the worker with -SharedProcess and releases its pool there' {
+        $Probe = Join-Path $TestDrive 'runspace.json'
+        # Inputs of the lifted block, which reads them when it is dot-sourced below.
+        Set-Variable -Name StreamIsolation -Value 'Runspace'
+        Set-Variable -Name StreamCount -Value 2
+        Set-Variable -Name WorkerScript -Value $script:StubWorker
+        Set-Variable -Name CommonFunctionsFile -Value $script:StubCommon
+        $WorkerArgs = @{ Probe = $Probe }
+        $Jobs = @()
+        . $script:LaunchBlock
+        @($Jobs).Count | Should -Be 1
+        $Jobs[0].PSJobTypeName | Should -Be 'ThreadJob'
+        $null = $Jobs | Wait-Job -Timeout 60
+        $Jobs[0].State | Should -Be 'Completed'
+        $Jobs | Remove-Job -Force
+        $Seen = Get-Content -Raw -LiteralPath $Probe | ConvertFrom-Json
+        $Seen.ProcessId | Should -Be $PID -Because 'a thread job runs in the wrapper''s own process'
+        $Seen.RunspaceId | Should -Not -Be ([runspace]::DefaultRunspace.Id) -Because 'each stream gets a runspace of its own'
+        $Seen.SharedProcess | Should -BeTrue
+        $WorkerArgs.SharedProcess | Should -BeTrue
+        (Get-Content -Raw -LiteralPath ($Probe + '.released')).Trim() | Should -Be 'stub-pool' -Because 'the stream''s pool lives in its own runspace, so that is where it must be released'
+    }
+
+    It 'Process (default): still starts the worker in a separate pwsh process, without -SharedProcess' {
+        $Probe = Join-Path $TestDrive 'process.json'
+        Set-Variable -Name StreamIsolation -Value 'Process'
+        Set-Variable -Name StreamCount -Value 2
+        Set-Variable -Name WorkerScript -Value $script:StubWorker
+        Set-Variable -Name CommonFunctionsFile -Value $script:StubCommon
+        $WorkerArgs = @{ Probe = $Probe }
+        $Jobs = @()
+        . $script:LaunchBlock
+        @($Jobs).Count | Should -Be 1
+        $Jobs[0].PSJobTypeName | Should -Be 'BackgroundJob'
+        $null = $Jobs | Wait-Job -Timeout 120
+        $Jobs | Remove-Job -Force
+        $Seen = Get-Content -Raw -LiteralPath $Probe | ConvertFrom-Json
+        $Seen.ProcessId | Should -Not -Be $PID
+        $Seen.SharedProcess | Should -BeFalse
+        $WorkerArgs.ContainsKey('SharedProcess') | Should -BeFalse
+    }
+
+    It 'Runspace: waits until every thread job has left NotStarted, which the Running-watch loop cannot see' {
+        Set-Variable -Name StreamIsolation -Value 'Runspace'
+        $Jobs = @(1..3 | ForEach-Object { Start-ThreadJob -ThrottleLimit 3 -ScriptBlock { Start-Sleep -Seconds 2 } })
+        try
+        {
+            . $script:StartWaitBlock
+            @($Jobs | Where-Object { $_.State -eq 'NotStarted' }).Count | Should -Be 0
+        }
+        finally { $Jobs | Remove-Job -Force }
+    }
+
+    It 'Test-ThreadJobSupport reports thread jobs usable and leaves no job behind' {
+        $Before = @(Get-Job).Count
+        Test-ThreadJobSupport | Should -BeTrue
+        @(Get-Job).Count | Should -Be $Before
+    }
+
+    Context 'the worker, run as a stream' {
+        BeforeAll {
+            $script:WorkerPath = Join-Path $script:SiRoot 'Run-AllSubscriptions.Stream.ps1'
+            # An inventory that only reports a finished subscription.
+            $script:StubTree = Join-Path $TestDrive 'tree'
+            New-Item -ItemType Directory -Path $script:StubTree -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $script:StubTree 'ResourceInventory.ps1') -Value @'
+param($TenantID, $SubscriptionID, [switch]$RunAllSubs, $ConcurrencyLimit)
+$Global:ResourceCount = 3
+$Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
+'@
+            function script:Invoke-StubStream
+            {
+                param([string]$Root, [switch]$SharedProcess)
+                New-Item -ItemType Directory -Path $Root -Force | Out-Null
+                $WorkerArgs = @{
+                    TenantID           = 'tenant-x'
+                    StreamId           = '0'
+                    InventoryRoot      = $Root
+                    ScriptRoot         = $script:StubTree
+                    AzContextPath      = (Join-Path $Root 'snapshot.json')
+                    StreamSummaryPath  = (Join-Path $Root 'summary.json')
+                    StreamFailuresPath = (Join-Path $Root 'failures.log')
+                    SubscriptionIds    = @('sub-1')
+                    SubscriptionNames  = @('Sub One')
+                }
+                if ($SharedProcess) { $WorkerArgs.SharedProcess = $true }
+                $null = & $script:WorkerPath @WorkerArgs 6>&1
+                Get-Content -Raw -LiteralPath (Join-Path $Root 'summary.json') | ConvertFrom-Json
+            }
+        }
+
+        It 'with -SharedProcess it leaves the Az context, autosave and the process directory alone, and still completes' {
+            Mock Import-Module { }
+            Mock Disable-AzContextAutosave { }
+            Mock Import-AzContext { }
+            $Root = Join-Path $TestDrive 'shared'
+            $DirectoryBefore = [System.Environment]::CurrentDirectory
+            $Summary = script:Invoke-StubStream -Root $Root -SharedProcess
+            Should -Invoke Import-Module -Times 0 -Exactly
+            Should -Invoke Disable-AzContextAutosave -Times 0 -Exactly
+            Should -Invoke Import-AzContext -Times 0 -Exactly
+            [System.Environment]::CurrentDirectory | Should -Be $DirectoryBefore
+            @(Get-ChildItem -LiteralPath $Root -Filter '*.imported-*' -Force).Count | Should -Be 0 -Because 'there is no snapshot to release'
+            $Summary.Status | Should -Be 'ok'
+            @($Summary.Completed) | Should -Be @('sub-1')
+        }
+
+        It 'without it, the same worker still imports the snapshot and leaves its marker, as a stream process does' {
+            Mock Import-Module { }
+            Mock Disable-AzContextAutosave { }
+            Mock Import-AzContext { }
+            $Root = Join-Path $TestDrive 'process'
+            $DirectoryBefore = [System.Environment]::CurrentDirectory
+            try { $Summary = script:Invoke-StubStream -Root $Root }
+            finally { [System.Environment]::CurrentDirectory = $DirectoryBefore }
+            Should -Invoke Import-Module -Times 1 -Exactly -ParameterFilter { $Name -eq 'Az.Accounts' }
+            Should -Invoke Disable-AzContextAutosave -Times 1 -Exactly
+            Should -Invoke Import-AzContext -Times 1 -Exactly -ParameterFilter { $Path -eq (Join-Path $Root 'snapshot.json') }
+            @(Get-ChildItem -LiteralPath $Root -Filter 'snapshot.json.imported-*' -Force).Count | Should -Be 1
+            $Summary.Status | Should -Be 'ok'
+        }
+    }
+}

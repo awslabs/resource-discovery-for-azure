@@ -667,7 +667,7 @@ A version check must never gate the inventory.
 
 | Module | Cmdlets this script actually calls |
 |---|---|
-| `Az.Accounts` | `Connect-AzAccount`, `Get-AzContext`, `Set-AzContext`, `Get-AzSubscription`, `Get-AzAccessToken`, `Save-AzContext`, `Import-AzContext` |
+| `Az.Accounts` | `Connect-AzAccount`, `Get-AzContext`, `Get-AzSubscription`, `Get-AzAccessToken`, `Save-AzContext`, `Import-AzContext` |
 | `Az.Compute` | `Get-AzComputeResourceSku` |
 | `Az.Monitor` | `Get-AzMetric` |
 | `Az.Billing` | `Get-UsageAggregates` |
@@ -919,8 +919,8 @@ It has to cope with an already authenticated session, a mismatched tenant, an un
             if (!$TenantID -or $ExistingContext.Tenant.Id -eq $TenantID)
             {
                 # [long comment: the existing context already matches. Per-subscription
-                #  scoping happens later via Set-AzContext / resource-id parameters, so
-                #  the context only needs to match the TENANT.]
+                #  scoping happens later via a per-subscription -DefaultProfile or
+                #  resource-id parameters, so the context only needs to match the TENANT.]
                 $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
                 if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID }) }
                 return
@@ -946,7 +946,7 @@ It has to cope with an already authenticated session, a mismatched tenant, an un
 | 483 | `Write-Log ... "Re-authenticating."` | Tenant mismatch. Does not return, so execution falls through to the full login below. |
 
 The comment at line 476 answers a question you would reasonably ask: if we only match on *tenant*, how does the script end up scoped to the right *subscription*?
-The answer is that per subscription scoping happens later, either through `Set-AzContext` or by passing an explicit resource ID to cmdlets like `Get-AzMetric`.
+The answer is that per subscription scoping happens later, either through a per-subscription profile that the billing phases pass to every call with `-DefaultProfile` (`Get-RdaSubscriptionProfile`) or by passing an explicit resource ID to cmdlets like `Get-AzMetric`.
 The context only ever needs to be correct at the tenant level.
 
 ### Login with no tenant specified (lines 488-575)
@@ -2600,7 +2600,7 @@ It pulls billing and usage data per subscription, and it contains more defensive
             │
   ┌───── for each subscription ──────────────────────────────────┐
   │  -SubscriptionID filter                       1648-1660      │
-  │  Set-AzContext + VERIFY it landed             1675-1704      │
+  │  scope calls to sub + VERIFY it landed        1675-1704      │
   │  reset per-sub counters and $UsageData        1714-1732      │
   │  ┌── do ... while (ContinuationToken) ───────────────────┐   │
   │  │  build $Params with the token                         │   │
@@ -2662,24 +2662,19 @@ Same pattern as the metrics phase.
         }
 ```
 
-### The context switch, and the data leak it prevents (lines 1606-1648)
+### Scoping the calls, and the data leak it prevents (lines 1606-1648)
 
 This is the most important 40 lines in the function.
 
 ```powershell
-            # [long comment: switch the Azure context to the TARGET subscription before
-            #  pulling its billing data. This MUST succeed AND MUST land on $sub.id:
-            #  Get-UsageAggregates reads whatever subscription the CURRENT CONTEXT points
-            #  at, so a silently-failed switch would leave the context on the PREVIOUS
-            #  subscription and attribute THAT subscription's consumption to this one - a
-            #  data-integrity bug AND a cross-subscription data leak. The production
-            #  SilentlyContinue would swallow the failure, so force it terminating here
-            #  and then VERIFY the resulting context actually matches the target.]
+            # [at the top of the function: a function-local copy of
+            #  $PSDefaultParameterValues, so the scope set below reaches every Az call in
+            #  this phase and ends when the function returns]
             $ContextOk = $false
             $ContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                 $ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch
@@ -2689,7 +2684,7 @@ This is the most important 40 lines in the function.
 
             if (-not $ContextOk)
             {
-                $SkipMessage = ("Consumption SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(...))
+                $SkipMessage = ("Consumption SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(...))
                 Write-Log -Message ("Consumption: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
                 ...
                 continue
@@ -2697,15 +2692,16 @@ This is the most important 40 lines in the function.
 ```
 
 The problem: `Get-UsageAggregates` has **no subscription parameter**.
-It bills whatever subscription the current Az context happens to point at.
-So the only way to target a subscription is to change the context first.
+It bills whatever subscription its Az context points at.
+So the phase gives every call a context for the target subscription: a copy of the signed-in context with only the subscription swapped, passed through `-DefaultProfile`.
+The process's own context and the saved default subscription are left where they are.
 
-Now consider what happens if that switch fails, which it will whenever the identity cannot access that subscription.
+Now consider what happens if that scoping fails, which it will whenever the identity cannot access that subscription.
 
 | Without the guard | With the guard |
 |---|---|
-| `Set-AzContext` fails and `SilentlyContinue` swallows it | `-ErrorAction Stop` makes it terminating and catchable |
-| Context stays pointing at the **previous** subscription | The context is **verified** to match the target |
+| Building the profile fails and `SilentlyContinue` swallows it | `Get-RdaSubscriptionProfile` throws, and the `catch` records why |
+| The calls keep the **previous** subscription's profile | The profile is **verified** to target this subscription |
 | `Get-UsageAggregates` returns the previous subscription's billing | The subscription is skipped with a loud error |
 | Those rows get written to the CSV attributed to **this** subscription | No wrong data is written |
 
@@ -2715,8 +2711,8 @@ Two separate defences are applied, and both are needed:
 
 | Line | Defence | Catches |
 |---|---|---|
-| 1623 | `-ErrorAction Stop` | A switch that throws |
-| 1624 | `$ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)` | A switch that returns without error but does not land on the target |
+| 1623 | `Get-RdaSubscriptionProfile` throws inside the `try` | Scoping that fails, such as a subscription the identity cannot read |
+| 1624 | `$ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)` | Scoping that returns without error but does not target the subscription (`Get-AzContext` takes the same default profile, so it reports the context the calls will use) |
 
 The second is the more interesting one.
 It does not trust the cmdlet's silence as evidence of success; it goes and checks the resulting state.

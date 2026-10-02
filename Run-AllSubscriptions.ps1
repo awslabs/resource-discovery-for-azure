@@ -1419,7 +1419,7 @@ if ($ParallelStreams -le 1)
 }
 else
 {
-    # === PARALLEL-STREAMS PATH: each "stream" is a separate `pwsh` background job (Start-Job runs the ScriptBlock in a fresh process). Process-level isolation is what makes this safe - the inner script's Set-AzContext -Subscription (consumption phase) mutates PROCESS-GLOBAL Az state, so two streams in one process would race contexts and silently cross-contaminate consumption data.
+    # === PARALLEL-STREAMS PATH: each "stream" is a separate `pwsh` background job (Start-Job runs the ScriptBlock in a fresh process) with its own copy of the Az context, imported from a snapshot. No phase moves the process's context any more (the billing phases scope each call to its subscription through $PSDefaultParameterValues['*:DefaultProfile'], not Set-AzContext), so the process boundary is not what keeps billing data correct; it keeps a crash or an out-of-memory error in one stream from ending the others.
 
     # Drop what an earlier run completed BEFORE slicing, as the sequential loop does. A stream worker
     # only knows its own per-stream state, which is merged into the resume state when a run starts and

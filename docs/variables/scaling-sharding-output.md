@@ -103,11 +103,12 @@ light subscriptions are interleaved rather than clumped.
 **Why it exists.** `-ConcurrencyLimit` parallelises *within* one subscription;
 `-ParallelStreams` parallelises *across* subscriptions. On a tenant with many
 subscriptions the wall-clock win comes from running several subscriptions at
-once. Separate processes are used **on purpose**: the inner script's consumption
-phase calls `Set-AzContext -Subscription`, which mutates process-global Az state,
-so two subscriptions in one process would race contexts and cross-contaminate
-billing data. Process isolation makes concurrency safe (see the comment at
-`Run-AllSubscriptions.ps1` line ~1307).
+once. Each stream is a separate `pwsh` process. That used to be required for
+correctness, because the billing phases switched the process-global Az context
+with `Set-AzContext`; they now scope each call to its subscription with
+`-DefaultProfile` instead, so no phase moves the process's context (see
+[Why two scripts?](../architecture-two-scripts.md)). The process boundary still
+means a crash or an out-of-memory error ends only the stream it happens in.
 
 **When to change it.** Raise it on a machine with spare cores and RAM (budget
 ~1 core and ~500–700 MB per stream); the README's sizing table recommends `2`

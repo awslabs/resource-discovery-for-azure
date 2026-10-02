@@ -5,76 +5,42 @@ per-subscription script (`ResourceInventory.ps1`) and a tenant-wide wrapper
 (`Run-AllSubscriptions.ps1`), joined by a private `-RunAllSubs` switch, instead
 of one script that loops over every subscription with all the logic inside?
 
-The short answer is that a single-process loop **cannot safely collect billing
-data for more than one subscription at a time**, because Azure's session context
-is process-global. Everything else about the design follows from that one
-constraint.
+The short answer is that the billing phases once had to point the whole `pwsh` process at one subscription, so two subscriptions could never be collected in one process at the same time.
+The rest of the design followed from that constraint.
+The constraint is gone now (see the next sections), but the split stays: it is what lets a stream or a shard run as a process of its own.
 
-## The hard constraint: Az context is process-global
+## The constraint that shaped the design: one Az context per process
 
-The consumption (billing) phase must point the Azure session at the subscription
-it is about to query. It does this with `Set-AzContext`:
+Azure PowerShell keeps one current context for the whole process, shared by every runspace in it.
+The billing phases (consumption, Marketplace, Foundry tokens and Foundry coverage) used to select each subscription with `Set-AzContext -Subscription $sub.id`, which moves that shared context.
+A billing query that ran after another subscription had moved it would have returned that other subscription's data, with no error to flag it.
+So each parallel stream had to be a separate `pwsh` process, launched with `Start-Job` and given its own copy of the context.
+That in turn needed a single subscription to be inventoried by a standalone, independently launchable worker, which is what `ResourceInventory.ps1` invoked with `-RunAllSubs` is.
 
-```powershell
-$null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
-```
+`Set-AzContext` had a second effect too.
+With context autosave on, it saved the new subscription as the default the operator's next session started on.
 
-— `ResourceInventory.ps1` line 1227.
+## How subscriptions are selected now
 
-`Set-AzContext` does **not** set a local variable. It mutates the **process-global**
-Azure PowerShell session state, so the *entire* `pwsh` process is now pointed at
-`$sub.id`. Any billing query that runs after this — anywhere in the process — is
-attributed to whatever subscription the context currently names.
-
-The code immediately downstream is explicit that getting this wrong corrupts the
-data rather than erroring. When the context switch cannot be confirmed, the phase
-skips the subscription rather than query it under the wrong context:
+The billing phases no longer call `Set-AzContext`.
+Each phase copies the signed-in context with only the subscription swapped (`Get-RdaSubscriptionProfile`, in `Functions/Common.Functions.ps1`) and hands that copy to every Az call it makes, through a function-local `$PSDefaultParameterValues`:
 
 ```powershell
-$SkipMessage = ("Consumption SKIPPED: could not switch the Azure context to this
-subscription... Skipped to avoid attributing another subscription's billing data
-to this one." ...)
+# once, at the top of the phase function: a copy that lives only as long as the function
+$PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+# per subscription, where Set-AzContext used to be
+$PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
 ```
 
-— `ResourceInventory.ps1` line 1237 (paraphrased; the phrase *"attributing
-another subscription's billing data to this one"* is verbatim).
+The wrapper's up-front consumption probe (`Test-ConsumptionAccess`) scopes its call the same way.
+Neither the process context nor the saved default moves any more.
+The existing check that the context matches the target subscription still runs, and a subscription it cannot confirm is still skipped rather than given another subscription's billing data.
 
-That guard exists because the failure mode is **silent**: a billing query run
-under the wrong context returns another subscription's data with no error. If two
-subscriptions were processed concurrently in one process, they would race that
-single global context — subscription A's billing query could execute while the
-context still named subscription B — and cross-contaminate the consumption data
-with nothing to flag it.
+## Streams are still separate processes
 
-So the wrapper does **not** run streams as threads or runspaces inside one
-process. Each parallel "stream" is a **separate `pwsh` process**, launched via
-`Start-Job`:
-
-```powershell
-$Jobs += Start-Job -ScriptBlock {
-    param($WorkerScript, $WorkerArgs)
-    & $WorkerScript @WorkerArgs
-} -ArgumentList @($WorkerScript, $WorkerArgs)
-```
-
-— `Run-AllSubscriptions.ps1` line 1618 (`$WorkerScript` is
-`Run-AllSubscriptions.Stream.ps1`, which runs the inner `ResourceInventory.ps1` once
-for each subscription assigned to that stream).
-
-The comment that opens the parallel branch states the rationale directly:
-
-> each "stream" is a separate `pwsh` background job (`Start-Job` runs the
-> ScriptBlock in a fresh process). Process-level isolation is what makes this
-> safe — the inner script's `Set-AzContext -Subscription` (consumption phase)
-> mutates PROCESS-GLOBAL Az state, so two streams in one process would race
-> contexts and silently cross-contaminate consumption data.
-
-— `Run-AllSubscriptions.ps1` line 1402 (quoted).
-
-**The consequence is the whole design.** Safe parallelism requires that a single
-subscription can be inventoried by a standalone, independently-launchable worker
-process. That standalone worker is exactly what `ResourceInventory.ps1` (invoked
-with `-RunAllSubs`) is.
+Each parallel stream is still a separate `pwsh` process, launched with `Start-Job`, that imports a snapshot of the wrapper's context.
+That boundary no longer keeps the billing data correct, because no phase moves the process's context any more.
+What it still does is isolate the streams: a crash or an out-of-memory error in one stream ends only that stream.
 
 ## Two scripts, two jobs (not a thin loop)
 
@@ -171,16 +137,18 @@ The split is not free, and the costs are real:
 
 The split still wins, on two grounds the single-process loop cannot match:
 
-- **Correctness.** Process-per-subscription isolation is the only thing that
-  prevents the silent billing cross-contamination described above. A single
-  process cannot run two subscriptions' consumption phases concurrently without
-  racing the global Az context.
 - **Capability.** Real parallelism (`-ParallelStreams`) and horizontal sharding
   across machines (`-ShardCount`/`-ShardIndex`) both depend on an independently
   launchable per-subscription worker.
+- **Isolation.** A stream that runs as a process of its own fails alone: a crash
+  or an out-of-memory error in one stream does not end the others.
 
-And the clinching point: a merged single script that still wanted safe
-parallelism would have to **re-launch itself as subprocesses** anyway — which
+Correctness used to be a third ground. While the billing phases moved the global
+Az context, process-per-stream isolation was the only thing that prevented the
+silent billing cross-contamination described above. They no longer move it.
+
+And the clinching point: a merged single script that still wanted isolated
+streams or shards would have to **re-launch itself as subprocesses** anyway - which
 just reintroduces the same orchestrator/worker split, only hidden behind a mode
 flag instead of expressed as two files. The current design makes that split
 explicit.
@@ -243,8 +211,7 @@ The pool may grow to 6 x 4 = 24 only while calls keep timing out, because a stop
 
 ### Why this does not break the process-global context rule
 
-The billing phase has to call `Set-AzContext`, which changes the whole process, so two subscriptions must never run in one process at the same time.
-The metrics phase never calls `Set-AzContext`.
+No phase moves the process's context: the billing phases scope each call to its subscription, as described above, and the metrics phase never calls `Set-AzContext`.
 At the start of each subscription's metrics phase it reads the current context once with `Get-AzContext` and passes it to every call through `-DefaultProfile`.
 So every call is told exactly which context to use, and nothing about the previous subscription's context is carried into the next one.
 Subscriptions in one process still run one after another, never at the same time.

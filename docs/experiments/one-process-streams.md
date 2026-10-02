@@ -10,9 +10,15 @@ The scripts that produced every number below are in `experiments/one-process-str
 - `Set-AzContext` also rewrote the operator's saved default subscription in three places: a standalone run with consumption on, a sequential wrapper run, and the wrapper's up-front consumption probe.
 - Step 2 replaces every `Set-AzContext` call with a per-subscription profile passed through a function-local `$PSDefaultParameterValues['*:DefaultProfile']`.
   The outputs are unchanged, and neither the process context nor the saved default moves any more.
-- With that in place, three subscriptions ran concurrently in ONE process with correct per-subscription data.
+- With that in place, three subscriptions ran concurrently in ONE process, and each subscription's consumption count came out right.
   Against today's one-process-per-stream design it used about half the threads and 16-38% less memory.
   With .NET Server GC it also finished about 6% sooner at the same CPU; with the default GC it used 16% less CPU but took about 10% longer.
+- That prototype checked the in-memory counts, not the report folders, and the folders could collide: the report stamp's tail was the PID alone, so two streams of one process that started a subscription in the same millisecond wrote into one folder.
+  On the Windows box it happened in 5 of 8 in-process runs, each time losing a subscription's report.
+  Step 4 fixes the stamp.
+- Step 4 puts the one-process design into the real wrapper behind `-StreamIsolation Runspace`, with `Process` (separate `pwsh` processes) staying the default.
+  On macOS, 3 runs of each mode produced identical bundles; the runspace mode used 65% fewer threads, 32% less peak memory and 14% less CPU, for a median wall time 6% longer.
+- On the 2-vCPU Windows test box, with the stamp fix, the one-process prototype was better on every measure (at least 20% faster, 20-30% less CPU, at least 40% less peak memory), and the real wrapper produced the same bundle contents in both modes.
 
 ## Step 1: what `Set-AzContext` does to the saved default
 
@@ -114,7 +120,7 @@ CPU is user plus system time for the process and its children (`/usr/bin/time -l
 | One process, runspaces, Server GC (4 runs) | 72.2 / 69.3 / 65.6 / 69.5 | 65.7 / 66.1 / 64.2 / 68.2 | 68 / 68 / 67 / 70 | 745 / 728 / 825 / 883 | 1 |
 | One process, one stream (sequential floor) | 140.6 | 44.8 | 45 | 441 | 1 |
 
-- Every run of every design wrote the same consumption rows per subscription (619, 8 and 0), and none moved the process context.
+- Every run of every design counted the same consumption rows per subscription (619, 8 and 0, counted in memory), and none moved the process context.
 - **One process, default GC:** median CPU 16% lower, threads 63% fewer, peak memory 38% lower, but wall time about 10% longer.
   One GC heap pauses every stream at once; that is an inference, but Server GC (parallel collection, one heap per core) recovered the time.
 - **One process, Server GC:** median wall time 6% shorter, CPU the same, threads 50% fewer, peak memory 16% lower.
@@ -126,12 +132,127 @@ CPU is user plus system time for the process and its children (`/usr/bin/time -l
 - Small sample: 3-4 runs per design, and the wall time is set by the one subscription with data.
   A real tenant has far more data per subscription, which makes the per-process saving (about 200 MB per stream) smaller in proportion but no smaller in MB.
 - The process design here mimics the core of `Run-AllSubscriptions.Stream.ps1` (context snapshot, autosave off, the same per-subscription call), not the wrapper's state files, summaries and aggregation.
-- macOS only.
-  The one-process design changes process invocation, so it needs the Windows run the cross-OS rule asks for before it is considered verified.
+- These measurements are from macOS; the Windows runs are in their own section below.
 - The shared metrics pool was not measured, because of the ownership problem above.
+- The prototype checked each subscription's consumption count in memory, not the report folders it wrote.
+  Those folders could collide (see Step 4), so the prototype's outputs on disk were not verified.
+
+## Step 4: `-StreamIsolation Runspace` in the real wrapper
+
+`Run-AllSubscriptions.ps1 -StreamIsolation Runspace` runs every parallel stream as a thread job in the wrapper's own process.
+`-StreamIsolation Process`, the default, keeps today's separate `pwsh` processes, and nothing on that path changes.
+
+### What changes under `Runspace`
+
+- **Launch.** Each stream is started with `Start-ThreadJob -ThrottleLimit <streams>` instead of `Start-Job`, running the same `Run-AllSubscriptions.Stream.ps1` with `-SharedProcess`.
+  The thread-job throttle is process-wide and defaults to 5, so it is raised to the stream count; a stream over it would wait in `NotStarted`.
+- **No snapshot.** The streams use the process's own signed-in context, so the wrapper writes no context snapshot and no token cache reaches the disk.
+- **Start wait.** A thread job can still be `NotStarted` when `Start-ThreadJob` returns, and the wrapper's monitoring loop watches only `Running`, so it would end at once; the wrapper first waits (at most 60 seconds) for every stream to start.
+- **Pool release.** Each stream's metrics worker pool lives in its runspace's `$Global:MetricCallPool`, so the thread job releases it with `Close-RdaMetricWorkerPool` when the stream ends; a stream process releases its pool by exiting.
+- **Worker.** With `-SharedProcess` the worker skips the three process-wide steps a stream process takes: moving the .NET process directory to the temp folder, disabling context autosave and importing the snapshot.
+- **Fallback.** If a thread job cannot be started, the wrapper falls back to the sequential path, as it does when `Start-Job` is blocked.
+
+Everything else is the same code in both modes: the round-robin split, the per-stream state files and summaries, dead-stream recovery and aggregation.
+A shared work queue and one metrics pool for all streams are not part of this change.
+
+### The report-stamp collision
+
+`ResourceInventory.ps1` names each report folder and archive with a stamp: the time to the millisecond plus a 4-hex tail that was the PID alone.
+Streams in one process share one PID, so two streams that start a subscription in the same millisecond got the same stamp, and so the same report folder.
+That is not rare: the streams finish loading the Az modules at nearly the same moment.
+In the first macOS run of the switch all three streams stamped their subscription in the same millisecond, and on the Windows box at least 5 stamps were shared between subscriptions during the prototype runs.
+
+The tail now mixes in the runspace id: `($PID -bxor ([long]([runspace]::DefaultRunspace.Id - 1) * 0x9E37)) -band 0xffff`.
+The first runspace of a process (id 1, which is what a standalone run, the sequential wrapper and each stream process use) keeps the plain PID value, so nothing changes outside the runspace mode.
+The odd multiplier keeps every other runspace id distinct within the 4 hex digits.
+`Tests/StampCollision.Tests.ps1` runs the statement for 2,000 runspace ids and in 3 concurrent thread jobs; against the previous statement both checks fail.
+
+### Live runs on macOS
+
+The real wrapper against the 3 sandbox subscriptions, `-ParallelStreams 3 -ConcurrencyLimit 6 -AllowPartialAccess`, 3 runs per mode in the order Process, Runspace, Runspace, Process, Runspace, Process (measured with `/usr/bin/time -l` and the process-tree sampler).
+
+| Mode | Wall time (s) | CPU (s) | Peak threads | Peak memory, all processes (MB) | Processes |
+|---|---|---|---|---|---|
+| `Process` (default) | 74.3 / 87.2 / 76.1 | 75.1 / 65.4 / 67.8 | 138 / 137 / 138 | 1053 / 939 / 1149 | 4 |
+| `Runspace` | 80.4 / 90.4 / 70.2 | 59.1 / 58.4 / 49.1 | 49 / 48 / 47 | 717 / 711 / 550 | 1 |
+
+- **Same output.** All 6 consolidated bundles had the same 29 entries with the same row counts (Consumption 623 / 12 / 0, 34 metric records), and the RunSummary health blocks matched.
+  The one difference was a single metric call retried once in the first runspace run; the retry succeeded, the debug log does not record its cause, and no call was retried in the other 5 runs.
+- **Medians.** The runspace mode used 65% fewer threads, 32% less peak memory and 14% less CPU, for a wall time 6% longer; the wall-time ranges overlap.
+- **Side effects.** Neither mode moved the saved default subscription, and neither left a context snapshot behind.
+- **Memory readings.** Under `Runspace` the `Memory (MB, ...)` block in `RunSummary.log` measures the whole shared process, so a stream's readings include the other streams' memory, and its per-resource estimate can come out as 0.
+
+## Windows Server 2022
+
+### Setup
+
+- The owner's Windows test instance: 2 vCPU, 8 GB, unlimited CPU credits, PowerShell 7.4 or later.
+  Every command ran as SYSTEM through SSM, signed in from a short-lived ARM token relayed from the macOS session; the token file was deleted after each batch.
+- SYSTEM had no `Az.CognitiveServices`, so RDA's six required Az modules were installed into SYSTEM's own module scope.
+- `Step3-Windows.ps1` runs each design in a fresh `pwsh` process inside a Windows job object.
+  Every process that run starts joins the job, so the CPU figure (the job's user plus kernel time) is exact, stream processes included, and the job's processes are sampled every second for threads and working set.
+  `Step3-WinRun.ps1` signs that process in from the relayed token; `Step3-WinSummary.ps1` takes the medians over the runs that collected every subscription.
+- The agent's policy blocks reading SSM command output back (`aws-destructive-ssm-get-command-invocation`), so every result below came back as the yes/no exit status of a question asked on the box.
+  The exact figures stay on the box in `summary.txt` and `summary.json` under `C:\Windows\Temp\rda-step3\results` and `results2`, and `e2e\e2e-summary.json`.
+
+### The prototype on the code before Step 4 (13 runs)
+
+- The first 3 runs failed because SYSTEM's inventory root did not exist yet: the prototype, unlike the wrapper, does not create it before the processes design saves its context snapshot there.
+- From then on every process-design run collected every subscription, but 3 of the 6 in-process runs lost a subscription's report, as had the 2 in-process runs while the root was being created.
+  At least 5 report stamps were shared by two subscriptions: the collision Step 4 fixes.
+- Over the valid runs (processes 3, runspaces 2, runspaces with Server GC 1, sequential 1), against the processes design:
+
+| Question | Runspaces, default GC | Runspaces, Server GC |
+|---|---|---|
+| Peak threads at most half? | yes | - |
+| Peak working set at most 70%? | yes | lower: yes |
+| Peak commit lower? | yes | - |
+| CPU at most 80%? | yes | lower: yes |
+| Wall time no longer? | yes (but not 10% shorter) | yes, and no longer than default GC |
+
+- The main subscription's consumption row count differed between valid runs (two values over about 45 minutes); the other two subscriptions' counts matched.
+  Not explained: the box cannot tell me which runs differed by how much without a run of questions per run.
+
+### The prototype with Step 4 (10 runs)
+
+The same prototype on the Step 4 code: 3 runs per design in the order processes, runspaces, runspaces with Server GC, repeated three times, then the sequential floor.
+
+- All 10 runs collected every subscription, and every run counted the same consumption rows per subscription.
+- Medians against the processes design, as brackets (each bound is a separate yes/no question):
+
+| Measure | Runspaces, default GC | Runspaces, Server GC |
+|---|---|---|
+| Peak threads | 40-50% of processes | at most 60% |
+| Peak working set | at most 60% | at most 80% |
+| Peak commit | no higher | no higher |
+| CPU | 70-80% | at most 90% |
+| Wall time | at most 80% | no longer than default GC, so at most 80% too |
+
+- So on this 2-vCPU host the one-process design was better on every measure: at least 20% faster, 20-30% less CPU, at least 40% less peak working set and 50-60% fewer threads.
+  Server GC was faster still; how its memory compares with the default GC was not asked.
+- The sequential floor took less than 1.5 times the processes design's wall time: with 2 vCPUs, three streams buy less than on macOS.
+
+### The real wrapper
+
+`Run-AllSubscriptions.ps1 -ParallelStreams 3 -ConcurrencyLimit 6 -AllowPartialAccess`, 2 runs per mode in the order Process, Runspace, Process, Runspace.
+
+- All 4 exited 0 and built a bundle, and no context snapshot was left behind.
+- Every bundle had the same entries with the same row counts, and the RunSummary health blocks were identical.
+  The per-subscription archives appear in the bundle in stamp order, which differs between the modes, so a comparison of the bundles has to sort the entries first.
+- Each runspace run was 1 process; each process run peaked at 4 or more.
+- Runspace against Process (mean of 2): peak threads at most half, peak working set at most 80%, CPU at most 90%, and wall time no longer.
+
+### Pester on Windows
+
+- The 5 test files that cover the change (`RunAllSubscriptionsReconciliation`, `StampCollision`, `ParamForwardingParity`, `MemoryRelease`, `CollectorBreakerAndVisibility`): every test added for Step 4 passes, and against the code before Step 4 those tests fail, as they should.
+- 4 existing tests fail on this box with and without the change (the failing set is the same), so they are not caused by it.
+  Three are the two `Write-RdaHostLinesInTranscript` tests that check the colours and the transcript (`appends them to the closed transcript`) and `keeps the markers and retries when the snapshot cannot be removed`; the fourth is named in `e2e\pester.json` on the box.
+  Their cause was not established; they involve the host's transcript and a file that cannot be removed, which may well behave differently when PowerShell runs as SYSTEM under SSM with its output redirected.
 
 ## Next steps
 
-1. Review and merge step 2 on its own: it fixes the saved-default side effect and removes the only reason streams must be processes.
-2. Implement the one-process wrapper behind a switch (`-StreamIsolation Runspace|Process`), with the shared queue, per-runspace scoping, Server GC, per-subscription memory admission and `SetMinRunspaces`.
-3. Measure it with the customer replay and on Windows, then decide the default.
+1. Review step 2 on its own (it is on `fix/memory-per-sub`): it fixes the saved-default side effect and removes the only reason streams must be processes.
+   Its user docs still describe `Set-AzContext` there (`docs/architecture-two-scripts.md`, `docs/variables/scaling-sharding-output.md`, `docs/ResourceInventory-line-by-line.md`); this branch updates the first two.
+2. Before `Runspace` could become the default: check free memory before each subscription (one stream's out-of-memory error now ends every stream), and measure it on a tenant with real data volume.
+3. Then the parts of the design not in Step 4: a shared work queue instead of the round-robin slices, `SetMinRunspaces` on the metrics pool, and one metrics pool for all streams.
+4. Look into the 3 tests that fail on the Windows box with and without this work.

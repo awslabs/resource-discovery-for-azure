@@ -334,7 +334,7 @@ Pass `-ParallelStreams N` to process N subscriptions concurrently in separate `p
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -ParallelStreams 6
 ```
 
-Each stream is a separate background process. They don't share state with each other. Each has its own Azure session, its own progress tracking file, and its own output folder. The wrapper splits your subscription list across the streams in round-robin order so the workload stays balanced even when subscriptions vary in size.
+Each stream is a separate background process. They don't share state with each other. Each has its own Azure session, its own progress tracking file, and its own output folder. The wrapper splits your subscription list across the streams by estimated work (resources and metric-query volume per subscription) so the workload stays balanced even when subscriptions vary in size. If the estimates cannot be read, it falls back to round-robin order.
 
 To save memory, `-StreamIsolation Runspace` (experimental) runs the streams as runspaces inside the wrapper's own `pwsh` process instead, sharing its Azure session; each stream still keeps its own progress tracking file and output folder. The trade-off is that a crash or out-of-memory error in one stream stops them all. See [`-StreamIsolation`](docs/variables/scaling-sharding-output.md#-streamisolation).
 

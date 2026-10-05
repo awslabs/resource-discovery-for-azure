@@ -153,7 +153,7 @@ sequential path and forces `ParallelStreams = 1` with a warning
 
 **What it does.** Chooses how the parallel streams run when `-ParallelStreams`
 is above 1. It changes nothing else: every stream runs the same
-`Run-AllSubscriptions.Stream.ps1` over the same round-robin slice and keeps its
+`Run-AllSubscriptions.Stream.ps1` over the same slice of subscriptions and keeps its
 own resume-state file, summary and report folders.
 
 - `Process` (default): each stream is a separate `pwsh` background job

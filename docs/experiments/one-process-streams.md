@@ -154,7 +154,7 @@ CPU is user plus system time for the process and its children (`/usr/bin/time -l
 - **Worker.** With `-SharedProcess` the worker skips the three process-wide steps a stream process takes: moving the .NET process directory to the temp folder, disabling context autosave and importing the snapshot.
 - **Fallback.** If a thread job cannot be started, the wrapper falls back to the sequential path, as it does when `Start-Job` is blocked.
 
-Everything else is the same code in both modes: the round-robin split, the per-stream state files and summaries, dead-stream recovery and aggregation.
+Everything else is the same code in both modes: the split of subscriptions across streams, the per-stream state files and summaries, dead-stream recovery and aggregation.
 A shared work queue and one metrics pool for all streams are not part of this change.
 
 ### The report-stamp collision
@@ -385,5 +385,5 @@ The real wrapper against the 3 sandbox subscriptions with `-ParallelStreams 3 -C
 1. Review step 2 on its own (it is on `fix/memory-per-sub`): it fixes the saved-default side effect and removes the only reason streams must be processes.
    Its user docs still describe `Set-AzContext` there (`docs/architecture-two-scripts.md`, `docs/variables/scaling-sharding-output.md`, `docs/ResourceInventory-line-by-line.md`); this branch updates the first two.
 2. Before `Runspace` could become the default: measure the Step 5 admission check on a tenant with real billing volume, and decide whether it should also hold memory back for subscriptions that have just started, which it does not do.
-3. Then the parts of the design not in Step 4: a shared work queue instead of the round-robin slices, `SetMinRunspaces` on the metrics pool, and one metrics pool for all streams.
+3. Then the parts of the design not in Step 4: a shared work queue instead of the per-stream slices, `SetMinRunspaces` on the metrics pool, and one metrics pool for all streams.
 4. Look into the 3 tests that fail on the Windows box with and without this work.

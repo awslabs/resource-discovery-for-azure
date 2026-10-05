@@ -40,6 +40,7 @@ The evidence is in [the one-process streams experiment](experiments/one-process-
 ## Streams: separate processes by default, runspaces on request
 
 By default each parallel stream is still a separate `pwsh` process (`Start-Job`) that imports a snapshot of the wrapper's context.
+The worker each stream runs is `Run-AllSubscriptions.Stream.ps1`, which runs the inner `ResourceInventory.ps1` once for each subscription assigned to that stream.
 That boundary isolates the streams: a crash or an out-of-memory error in one stream ends only that stream.
 `-StreamIsolation Runspace` runs each stream as a thread job (`Start-ThreadJob`) in the wrapper's own process instead.
 Those streams share the process's signed-in context, which no phase moves any more, and each keeps its own `$Global:` run state, because PowerShell globals belong to a runspace.

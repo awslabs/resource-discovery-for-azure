@@ -57,7 +57,7 @@ jobs:
           # The settings' Severity list does not include ParseError, so the analyzer drops syntax
           # errors. Every file is parsed here and a parse error blocks like an Error finding.
           $ParseErrors = @()
-          foreach ($File in (Get-ChildItem -Path . -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1'))
+          foreach ($File in (Get-ChildItem -Path . -Recurse -File -Force -Include '*.ps1', '*.psm1', '*.psd1'))
           {
               $FileErrors = $null
               [void][System.Management.Automation.Language.Parser]::ParseFile($File.FullName, [ref]$null, [ref]$FileErrors)

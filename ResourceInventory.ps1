@@ -2749,9 +2749,9 @@ function ExecuteInventoryProcessing()
                     $FtAuthRefreshedThisCall = $true
                     Write-Log -Message ("Foundry tokens: metric '{0}' for {1} failed with an expired/invalid token: {2}. Attempting Azure re-authentication before retrying." -f $MetricName, $SubName, $_.Exception.Message) -Severity 'Warning'
                     $null = Test-DataPlaneAuthReady -Phase 'FoundryTokens'
-                    # NOTE: the caller has already pinned the context to this subscription; a reconnect
-                    # can move it, so it is re-pinned by the caller's next-metric loop iteration only
-                    # if it fully fails. Here we simply retry; a wrong-context read would return this
+                    # NOTE: every Az call in this phase is scoped to this subscription through the caller's
+                    # $PSDefaultParameterValues['*:DefaultProfile'], so a reconnect cannot move the scope.
+                    # Here we simply retry; a wrong-context read would return this
                     # account's own (empty) data, not another sub's, because the ResourceId is absolute.
                 }
 

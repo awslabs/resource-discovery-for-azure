@@ -902,7 +902,7 @@ function Write-RdaFindSummary
             if ($Excluded -gt 0)
             {
                 Write-Host '  NOTHING WAS SCANNED. Candidates were found but every one was refused,' -ForegroundColor Red
-                Write-Host '  unreadable, skipped, or missing (see the counts and warnings above), so no' -ForegroundColor Red
+                Write-Host '  unreadable or skipped (see the counts and warnings above), so no' -ForegroundColor Red
                 Write-Host '  inventory could be read. This does NOT mean the path is wrong.' -ForegroundColor Red
             }
             elseif (@($Result.Missing).Count -gt 0)

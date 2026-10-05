@@ -8,11 +8,11 @@ $Target = Get-AzSubscription -SubscriptionName $TargetSubName -WarningAction Sil
 $Decoy = Get-AzSubscription -SubscriptionName $DecoySubName -WarningAction SilentlyContinue
 $null = Set-AzContext -Subscription $Decoy.Id -Scope Process -WarningAction SilentlyContinue
 '[{0}] process context before the run: {1}' -f $Label, (Get-AzContext).Subscription.Name
-$Before = @(Get-ChildItem (Join-Path $HOME 'InventoryReports') -Directory | ForEach-Object { $_.FullName })
+$Before = @(Get-ChildItem -LiteralPath (Join-Path $HOME 'InventoryReports') -Directory | ForEach-Object { $_.FullName })
 & (Join-Path $Tree 'ResourceInventory.ps1') -TenantID $Target.TenantId -SubscriptionID $Target.Id -ReportName $Label -SkipMetrics *> $null
 '[{0}] process context after the run: {1}' -f $Label, (Get-AzContext).Subscription.Name
-$New = @(Get-ChildItem (Join-Path $HOME 'InventoryReports') -Directory | Where-Object { $_.FullName -notin $Before })
-$Csv = Get-ChildItem $New.FullName -Filter 'Consumption_*.csv' -Recurse | Select-Object -First 1
+$New = @(Get-ChildItem -LiteralPath (Join-Path $HOME 'InventoryReports') -Directory | Where-Object { $_.FullName -notin $Before })
+$Csv = Get-ChildItem -LiteralPath $New.FullName -Filter 'Consumption_*.csv' -Recurse | Select-Object -First 1
 $Rows = @(Import-Csv -LiteralPath $Csv.FullName)
 $SubIds = @($Rows | ForEach-Object { if ("$($_.AdditionalInfo)$($_.ResourceId)" -match '/subscriptions/([0-9a-f-]{36})') { $Matches[1] } } | Sort-Object -Unique)
 $Kinds = $Rows | Group-Object MeterCategory | Sort-Object Name | ForEach-Object { '{0}={1}' -f $_.Name, $_.Count }

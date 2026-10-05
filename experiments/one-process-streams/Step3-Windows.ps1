@@ -137,7 +137,7 @@ foreach ($Run in $Runs)
     $Design = if ($Run -eq 'runspaces-servergc') { 'runspaces' } else { $Run }
     $ResultFile = Join-Path $OutDir ($Label + '.result.json')
     $ArgumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $RunScript, '-Tree', $Tree, '-Design', $Design, '-ResultFile', $ResultFile, '-TokenFile', $TokenFile, '-Streams', [string]$Streams, '-ConcurrencyLimit', [string]$ConcurrencyLimit)
-    if ($Run -eq 'runspaces-servergc') { $env:DOTNET_gcServer = '1' } else { Remove-Item Env:\DOTNET_gcServer -ErrorAction SilentlyContinue }
+    if ($Run -eq 'runspaces-servergc') { $env:DOTNET_gcServer = '1' } else { Remove-Item -LiteralPath Env:\DOTNET_gcServer -ErrorAction SilentlyContinue }
     $Job = [RdaJobObject]::Create()
     $PeakThreads = 0; $PeakWorkingSet = 0; $PeakProcesses = 0
     $Clock = [System.Diagnostics.Stopwatch]::StartNew()
@@ -154,7 +154,7 @@ foreach ($Run in $Runs)
     $Accounting = [RdaJobObject]::Accounting($Job)
     $PeakCommit = [RdaJobObject]::PeakCommitMB($Job)
     [RdaJobObject]::Close($Job)
-    Remove-Item Env:\DOTNET_gcServer -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\DOTNET_gcServer -ErrorAction SilentlyContinue
     [pscustomobject]@{
         Label            = $Label
         Run              = $Run

@@ -256,6 +256,7 @@ PowerShell has no supported way for a local runspace pool to share one type tabl
   The first subscription creates the pool and stores it in `$Global:MetricCallPool`.
   Each later subscription reuses it, but only if it is still open; a pool in any other state is dropped and a new one is built.
   `Close-RdaMetricWorkerPool` in `Functions/Common.Functions.ps1` releases it once when the wrapper exits, called from `Exit-Wrapper` and just before the final `exit` of `Run-AllSubscriptions.ps1`.
+  The two in-process runs of `ResourceInventory.ps1` (the sequential loop and the one-subscription fallback) also release it in a `finally`, so a Ctrl+C in an interactive session does not leave the pool open in that session.
 - **Parallel streams.**
   Each stream has its own pool, because `$Global:MetricCallPool` belongs to the stream's runspace.
   A stream started with `Start-Job` (the default) is its own `pwsh` process, so its pool ends when the process ends.

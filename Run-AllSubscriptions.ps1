@@ -1376,157 +1376,166 @@ if ($ParallelStreams -le 1)
     # === SEQUENTIAL PATH (default) ============================================
     $SubTotal = @($Subscriptions).Count
     $SubIndex = 0
-    foreach ($Sub in $Subscriptions)
+    try
     {
-        $SubIndex++
-        Write-RdaProgress -Activity 'Processing subscriptions' -CurrentItem $Sub.Name -Index $SubIndex -Total $SubTotal
-        if ($Resume -and ($CompletedIds -contains $Sub.Id))
+        foreach ($Sub in $Subscriptions)
         {
-            Write-Host ("Skipping (already completed): {0} ({1})" -f $Sub.Name, $Sub.Id) -ForegroundColor DarkGray
-            $SkippedCount++
-            $SkippedSubscriptions += @($Sub)
-            continue
-        }
-
-        Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
-
-        try
-        {
-            $global:LASTEXITCODE = 0
-            $Global:ZipOutputFile = $null
-            & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
-            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
+            $SubIndex++
+            Write-RdaProgress -Activity 'Processing subscriptions' -CurrentItem $Sub.Name -Index $SubIndex -Total $SubTotal
+            if ($Resume -and ($CompletedIds -contains $Sub.Id))
             {
-                if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
-                elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
-                throw ("ResourceInventory.ps1 exited with code {0} ({1})" -f $LASTEXITCODE, (Get-InventoryExitCodeMeaning -Code $LASTEXITCODE))
+                Write-Host ("Skipping (already completed): {0} ({1})" -f $Sub.Name, $Sub.Id) -ForegroundColor DarkGray
+                $SkippedCount++
+                $SkippedSubscriptions += @($Sub)
+                continue
             }
 
-            $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
-            $SubResourceCounts += [pscustomobject]@{
-                Name  = $Sub.Name
-                Id    = $Sub.Id
-                Count = $ResCount
-                Zip   = $Global:ZipOutputFile
-            }
-
-            if ($ResCount -eq 0)
-            {
-                Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: Search-AzGraph -Query 'resources | summarize count()' -Subscription {1}" -f $Sub.Name, $Sub.Id) -ForegroundColor Yellow
-            }
-            else
-            {
-                Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
-            }
-
-            Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
-
-            # This run's report replaces any earlier one recorded for the subscription, so the state is
-            # saved even when the id was already recorded as completed.
-            $CompletedReports += $SubResourceCounts[-1]
-            $StateChanged = $true
-            if (-not ($CompletedIds -contains $Sub.Id))
-            {
-                $CompletedIds += $Sub.Id
-                $StateChanged = $true
-            }
-            $BeforeFailedCount = @($FailedAttempts).Count
-            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
-            if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
-            if ($StateChanged)
-            {
-                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
-            }
-        }
-        catch
-        {
-            $ErrRecord = $_
-            Write-Host "ERROR processing subscription $($Sub.Name): $ErrRecord" -ForegroundColor Red
-
-            $DiagLines = @()
-            $DiagLines += "==== Failure for subscription: $($Sub.Name) ($($Sub.Id)) ===="
-            $DiagLines += "Timestamp: $(Get-Date -Format 'o')"
-            $DiagLines += "Message:   $($ErrRecord.Exception.Message)"
-            $DiagLines += "Type:      $($ErrRecord.Exception.GetType().FullName)"
-
-            $Inner = $ErrRecord.Exception.InnerException
-            $Depth = 0
-            while ($null -ne $Inner -and $Depth -lt 5)
-            {
-                $DiagLines += "Inner[$Depth] Type:    $($Inner.GetType().FullName)"
-                $DiagLines += "Inner[$Depth] Message: $($Inner.Message)"
-                $Inner = $Inner.InnerException
-                $Depth++
-            }
-
-            if ($null -ne $ErrRecord.InvocationInfo)
-            {
-                $DiagLines += "ScriptName:    $($ErrRecord.InvocationInfo.ScriptName)"
-                $DiagLines += "Line:          $($ErrRecord.InvocationInfo.ScriptLineNumber)"
-                $DiagLines += "PositionMsg:   $($ErrRecord.InvocationInfo.PositionMessage)"
-            }
-
-            $DiagLines += "StackTrace:"
-            $DiagLines += $ErrRecord.ScriptStackTrace
-            if ($null -ne $ErrRecord.Exception.StackTrace)
-            {
-                $DiagLines += "ExceptionStackTrace:"
-                $DiagLines += $ErrRecord.Exception.StackTrace
-            }
+            Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
 
             try
             {
-                $Proc = Get-Process -Id $PID
-                $DiagLines += "Process WorkingSet (MB):  $([math]::Round($Proc.WorkingSet64 / 1MB, 1))"
-                $DiagLines += "Process PrivateMemory (MB): $([math]::Round($Proc.PrivateMemorySize64 / 1MB, 1))"
-            }
-            catch { Write-Verbose ("Process snapshot failed: {0}" -f $_.Exception.Message) }
-
-            try
-            {
-                $DiagRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
-                if (-not [string]::IsNullOrWhiteSpace($DiagRoot) -and (Test-Path -LiteralPath $DiagRoot))
+                $global:LASTEXITCODE = 0
+                $Global:ZipOutputFile = $null
+                & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
+                if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0)
                 {
-                    $RootDrive = (Get-Item -LiteralPath $DiagRoot).PSDrive
-                    if ($RootDrive)
+                    if ($LASTEXITCODE -eq 2) { $ArchiveWriteFailures += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
+                    elseif ($LASTEXITCODE -eq 3) { $CollectionAbortedSubs += ("{0} ({1})" -f $Sub.Name, $Sub.Id) }
+                    throw ("ResourceInventory.ps1 exited with code {0} ({1})" -f $LASTEXITCODE, (Get-InventoryExitCodeMeaning -Code $LASTEXITCODE))
+                }
+
+                $ResCount = if ($null -ne $Global:ResourceCount) { [int]$Global:ResourceCount } else { 0 }
+                $SubResourceCounts += [pscustomobject]@{
+                    Name  = $Sub.Name
+                    Id    = $Sub.Id
+                    Count = $ResCount
+                    Zip   = $Global:ZipOutputFile
+                }
+
+                if ($ResCount -eq 0)
+                {
+                    Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: Search-AzGraph -Query 'resources | summarize count()' -Subscription {1}" -f $Sub.Name, $Sub.Id) -ForegroundColor Yellow
+                }
+                else
+                {
+                    Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
+                }
+
+                Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
+
+                # This run's report replaces any earlier one recorded for the subscription, so the state is
+                # saved even when the id was already recorded as completed.
+                $CompletedReports += $SubResourceCounts[-1]
+                $StateChanged = $true
+                if (-not ($CompletedIds -contains $Sub.Id))
+                {
+                    $CompletedIds += $Sub.Id
+                    $StateChanged = $true
+                }
+                $BeforeFailedCount = @($FailedAttempts).Count
+                $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+                if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
+                if ($StateChanged)
+                {
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+                }
+            }
+            catch
+            {
+                $ErrRecord = $_
+                Write-Host "ERROR processing subscription $($Sub.Name): $ErrRecord" -ForegroundColor Red
+
+                $DiagLines = @()
+                $DiagLines += "==== Failure for subscription: $($Sub.Name) ($($Sub.Id)) ===="
+                $DiagLines += "Timestamp: $(Get-Date -Format 'o')"
+                $DiagLines += "Message:   $($ErrRecord.Exception.Message)"
+                $DiagLines += "Type:      $($ErrRecord.Exception.GetType().FullName)"
+
+                $Inner = $ErrRecord.Exception.InnerException
+                $Depth = 0
+                while ($null -ne $Inner -and $Depth -lt 5)
+                {
+                    $DiagLines += "Inner[$Depth] Type:    $($Inner.GetType().FullName)"
+                    $DiagLines += "Inner[$Depth] Message: $($Inner.Message)"
+                    $Inner = $Inner.InnerException
+                    $Depth++
+                }
+
+                if ($null -ne $ErrRecord.InvocationInfo)
+                {
+                    $DiagLines += "ScriptName:    $($ErrRecord.InvocationInfo.ScriptName)"
+                    $DiagLines += "Line:          $($ErrRecord.InvocationInfo.ScriptLineNumber)"
+                    $DiagLines += "PositionMsg:   $($ErrRecord.InvocationInfo.PositionMessage)"
+                }
+
+                $DiagLines += "StackTrace:"
+                $DiagLines += $ErrRecord.ScriptStackTrace
+                if ($null -ne $ErrRecord.Exception.StackTrace)
+                {
+                    $DiagLines += "ExceptionStackTrace:"
+                    $DiagLines += $ErrRecord.Exception.StackTrace
+                }
+
+                try
+                {
+                    $Proc = Get-Process -Id $PID
+                    $DiagLines += "Process WorkingSet (MB):  $([math]::Round($Proc.WorkingSet64 / 1MB, 1))"
+                    $DiagLines += "Process PrivateMemory (MB): $([math]::Round($Proc.PrivateMemorySize64 / 1MB, 1))"
+                }
+                catch { Write-Verbose ("Process snapshot failed: {0}" -f $_.Exception.Message) }
+
+                try
+                {
+                    $DiagRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
+                    if (-not [string]::IsNullOrWhiteSpace($DiagRoot) -and (Test-Path -LiteralPath $DiagRoot))
                     {
-                        $DiagLines += "Free disk on $($RootDrive.Name): (MB): $([math]::Round($RootDrive.Free / 1MB, 1))"
+                        $RootDrive = (Get-Item -LiteralPath $DiagRoot).PSDrive
+                        if ($RootDrive)
+                        {
+                            $DiagLines += "Free disk on $($RootDrive.Name): (MB): $([math]::Round($RootDrive.Free / 1MB, 1))"
+                        }
                     }
                 }
-            }
-            catch { Write-Verbose ("Disk snapshot failed: {0}" -f $_.Exception.Message) }
+                catch { Write-Verbose ("Disk snapshot failed: {0}" -f $_.Exception.Message) }
 
-            $DiagLines += ""
+                $DiagLines += ""
 
-            if ($null -eq $DiagFile)
-            {
-                $FailRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
-                if ([string]::IsNullOrWhiteSpace($FailRoot))
+                if ($null -eq $DiagFile)
                 {
-                    $Resolved = Get-RdaInventoryRoot
-                    if ($Resolved.Ok) { $FailRoot = $Resolved.Path }
+                    $FailRoot = if (-not [string]::IsNullOrWhiteSpace($env:RDA_INVENTORY_ROOT)) { $env:RDA_INVENTORY_ROOT } else { $InventoryRoot }
+                    if ([string]::IsNullOrWhiteSpace($FailRoot))
+                    {
+                        $Resolved = Get-RdaInventoryRoot
+                        if ($Resolved.Ok) { $FailRoot = $Resolved.Path }
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($FailRoot) -and -not (Test-Path -LiteralPath $FailRoot))
+                    {
+                        try { New-Item -ItemType Directory -Path $FailRoot -Force -ErrorAction Stop | Out-Null }
+                        catch { Write-Host ("WARNING: could not create {0} for the failures log: {1}" -f $FailRoot, $_.Exception.Message) -ForegroundColor Yellow }
+                    }
+                    $DiagFile = Join-Path $FailRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
                 }
-                if (-not [string]::IsNullOrWhiteSpace($FailRoot) -and -not (Test-Path -LiteralPath $FailRoot))
-                {
-                    try { New-Item -ItemType Directory -Path $FailRoot -Force -ErrorAction Stop | Out-Null }
-                    catch { Write-Host ("WARNING: could not create {0} for the failures log: {1}" -f $FailRoot, $_.Exception.Message) -ForegroundColor Yellow }
-                }
-                $DiagFile = Join-Path $FailRoot ("RunAllSubscriptions_failures_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
-            }
-            try { $DiagLines | Out-File -LiteralPath $DiagFile -Append -Encoding utf8 }
-            catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
+                try { $DiagLines | Out-File -LiteralPath $DiagFile -Append -Encoding utf8 }
+                catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
-            $FailedSubscriptions += $Sub.Name
-            $FailedSubscriptionIds += $Sub.Id
-            $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
-                -Id $Sub.Id -Name $Sub.Name `
-                -Reason $ErrRecord.Exception.Message
-            # This run collected it again and failed, which outranks a completion an earlier run recorded.
-            $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
-            Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+                $FailedSubscriptions += $Sub.Name
+                $FailedSubscriptionIds += $Sub.Id
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
+                    -Id $Sub.Id -Name $Sub.Name `
+                    -Reason $ErrRecord.Exception.Message
+                # This run collected it again and failed, which outranks a completion an earlier run recorded.
+                $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
+                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+            }
+
+            Write-Host "-----------------------------------" -ForegroundColor Gray
         }
-
-        Write-Host "-----------------------------------" -ForegroundColor Gray
+    }
+    finally
+    {
+        # The pool is shared by every subscription of the run, so it is released once, here, and not per subscription.
+        # A Ctrl+C in an interactive session would otherwise leave it open in that session.
+        Write-Verbose ("Metric worker pool at the end of the sequential loop: {0}" -f (Close-RdaMetricWorkerPool))
     }
 
     Write-RdaProgress -Activity 'Processing subscriptions' -Completed
@@ -1650,6 +1659,12 @@ else
                 # This run collected it again and failed, which outranks a completion an earlier run recorded.
                 $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+            }
+            finally
+            {
+                # Only this one subscription uses the shared pool, so it is released as soon as it is done, and a
+                # Ctrl+C in an interactive session does not leave it open in that session.
+                Write-Verbose ("Metric worker pool after the single subscription: {0}" -f (Close-RdaMetricWorkerPool))
             }
         }
         $StreamCount = 0

@@ -725,6 +725,28 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
         }
     }
 
+
+    It 'releases the pool in a finally on both in-process paths, so a Ctrl+C in an interactive session does not leave it open' {
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        $Runs = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.InvocationOperator -eq 'Ampersand' -and $N.Extent.Text -match 'ResourceInventory\.ps1' }, $true))
+        $Runs.Count | Should -Be 2 -Because 'the sequential loop and the one-subscription fallback are the two in-process runs'
+        foreach ($Run in $Runs)
+        {
+            $Node = $Run.Parent
+            $Covered = $false
+            while ($null -ne $Node)
+            {
+                if ($Node -is [System.Management.Automation.Language.TryStatementAst] -and $null -ne $Node.Finally -and $Node.Finally.Extent.Text -match 'Close-RdaMetricWorkerPool' -and $Run.Extent.StartOffset -ge $Node.Body.Extent.StartOffset -and $Run.Extent.EndOffset -le $Node.Body.Extent.EndOffset)
+                {
+                    $Covered = $true
+                    break
+                }
+                $Node = $Node.Parent
+            }
+            $Covered | Should -BeTrue -Because ('the run at line {0} has to sit in the body of a try whose finally calls Close-RdaMetricWorkerPool' -f $Run.Extent.StartLineNumber)
+        }
+    }
+
     It 'is switched on only by the wrappers, which release the pool on every exit path' {
         $script:InvSrc | Should -Match '-ReuseWorkerPool:\$RunAllSubs\.IsPresent'
         $script:WrapperFnSrc | Should -Match '(?s)function Exit-Wrapper\s*\{.*?Close-RdaMetricWorkerPool.*?exit \$Code'

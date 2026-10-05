@@ -33,6 +33,9 @@ $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -Subs
 ```
 
 The wrapper's up-front consumption probe (`Test-ConsumptionAccess`) scopes its call the same way.
+`Get-RdaSubscriptionProfile` reads the signed-in context with `-DefaultProfile $null`, so a pin left over from before a reconnect is never copied back.
+It looks the subscription up in the signed-in tenant first and then without a tenant, so a subscription in another tenant that the identity can read gets a profile scoped to its own tenant.
+The metrics batch provider check (`Initialize-RdaMetricsBatchPrereq` in `Extension/Metrics.ps1`) uses the same profile, once for each subscription it batches.
 Neither the process context nor the saved default moves any more.
 The existing check that the context matches the target subscription still runs, and a subscription it cannot confirm is still skipped rather than given another subscription's billing data.
 The evidence is in [the one-process streams experiment](experiments/one-process-streams.md).
@@ -49,31 +52,32 @@ What each mode costs, and what a shared process gives up, is under [`-StreamIsol
 ## Two scripts, two jobs (not a thin loop)
 
 The wrapper is not a small `foreach` around the inner script. On its own it is
-about three quarters of the inner script's size, and with the helper file it loads
+over four fifths of the inner script's size, and with the helper file it loads
 it is the larger side:
 
 | Script | Lines | Role |
 |---|---|---|
-| `Run-AllSubscriptions.ps1` | 2979 | Tenant-wide orchestrator |
-| `ResourceInventory.ps1` | 3850 | Single-subscription worker |
-| `Functions/RunAllSubscriptions.Functions.ps1` | 2432 | Helpers the wrapper loads |
+| `Run-AllSubscriptions.ps1` | 3270 | Tenant-wide orchestrator |
+| `ResourceInventory.ps1` | 3956 | Single-subscription worker |
+| `Functions/RunAllSubscriptions.Functions.ps1` | 3113 | Helpers the wrapper loads |
 
 (`wc -l`, current main.) The helper file, `Functions/RunAllSubscriptions.Functions.ps1`,
-defines **72 functions** (`grep -c '^function '`) that exist only to orchestrate a
+defines **83 functions** (`grep -c '^function '`) that exist only to orchestrate a
 multi-subscription, multi-machine run — work the inner script never does. It
 defines only 5 functions of its own by comparison. Representative orchestration
 concerns and the functions that implement them:
 
-- **Sharding across machines** — `Get-ShardKeyForSubscription` (line 491),
-  `Select-ShardSubscriptions` (line 505), `Get-WeightedInventoryPlan` (line 762).
-- **Resume / failure state** — `Save-CompletedSubscriptionIds` (line 1120),
-  `Get-FailedAttempts` (line 1096), `Merge-FailedAttempts` (line 1257).
-- **Parallel-stream orchestration** — `Test-BackgroundJobSupport` (line 300),
-  plus the `Start-Job` fan-out (line 1618).
-- **Preflight / tenant resolution** — `Resolve-TenantId` (line 977),
-  `Invoke-PreFlightChecks` (line 869).
+- **Sharding across machines** - `Get-ShardKeyForSubscription` (line 1002),
+  `Select-ShardSubscriptions` (line 1016), `Get-WeightedInventoryPlan` (line 1273).
+- **Resume / failure state** - `Save-CompletedSubscriptionIds` (line 1660),
+  `Get-FailedAttempts` (line 1636), `Merge-FailedAttempts` (line 1813).
+- **Parallel-stream orchestration** - `Test-BackgroundJobSupport` (line 477),
+  plus the `Start-Job` fan-out (`Run-AllSubscriptions.ps1` line 1769).
+- **Preflight / tenant resolution** - `Resolve-TenantId` (line 1517),
+  `Invoke-PreFlightChecks` (line 1380).
 
-(All line numbers in `Functions/RunAllSubscriptions.Functions.ps1`.)
+(All line numbers in `Functions/RunAllSubscriptions.Functions.ps1`, except the
+`Start-Job` fan-out.)
 
 The wrapper also **consolidates** every per-subscription ZIP into a single outer
 bundle and builds an aggregate cross-subscription summary — neither of which a
@@ -83,8 +87,8 @@ per-subscription run produces:
 $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
 ```
 
-— `Run-AllSubscriptions.ps1` line 2209; the aggregate `MainSummary.html` is built
-by `New-RdaAllSubHtmlSummary` at line 2244.
+That is `Run-AllSubscriptions.ps1` line 2431; the aggregate `MainSummary.html` is built
+by `New-RdaAllSubHtmlSummary` at line 2481.
 
 The inner script's job is the inverse: do **one** subscription completely —
 discovery, metrics, consumption, obfuscation, and its own per-subscription ZIP.
@@ -99,7 +103,7 @@ group:
 
 Those two switches are **inner-script only** — the wrapper's `param()` block does
 not declare `-SubscriptionID`, `-ResourceGroup`, or `-ReportName`
-(`Run-AllSubscriptions.ps1` lines 2–53); the wrapper always covers the whole
+(`Run-AllSubscriptions.ps1` lines 2–65); the wrapper always covers the whole
 tenant and passes each subscription's id positionally as `$Sub.Id`. So the two
 scripts are genuinely two different entry points with two different jobs, not one
 job with a loop bolted on.
@@ -107,23 +111,23 @@ job with a loop bolted on.
 ## `-RunAllSubs` is the role switch
 
 `-RunAllSubs` is a private switch on the inner script (`ResourceInventory.ps1`
-line 23). You never pass it yourself; the wrapper sets it on every child launch:
+line 26). You never pass it yourself; the wrapper sets it on every child launch:
 
 ```powershell
 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
 ```
 
-— `Run-AllSubscriptions.ps1` line 1265 (sequential path) and line 1450 (the
+The call is at `Run-AllSubscriptions.ps1` line 1330 (sequential path) and line 1541 (the
 single-subscription fallback of the parallel branch). Each parallel stream makes the
-same call from `Run-AllSubscriptions.Stream.ps1` line 240.
+same call from `Run-AllSubscriptions.Stream.ps1` line 269.
 
 Effectively, `-RunAllSubs` signals *"you are a per-subscription worker under the
 orchestrator, not a standalone run."* It does two things: it **suppresses the
 worker's own authentication** so the child reuses the parent/imported context
 rather than tearing it down or logging in again (every relevant login/teardown is
-guarded by `if (!$RunAllSubs.IsPresent)` — `ResourceInventory.ps1` lines 300, 308,
-358, 380), and it **forces non-interactive tenant selection** so a child never
-blocks on a `Read-Host` prompt (`ResourceInventory.ps1` line 346). For the full
+guarded by `if (!$RunAllSubs.IsPresent)`, at `ResourceInventory.ps1` lines 308, 316,
+366, 388), and it **forces non-interactive tenant selection** so a child never
+blocks on a `Read-Host` prompt (`ResourceInventory.ps1` line 354). For the full
 authentication detail, see the `RunAllSubs` section in
 [variables/auth-and-execution.md](variables/auth-and-execution.md#runallsubs--the-anchor-example).
 
@@ -133,7 +137,7 @@ The split is not free, and the costs are real:
 
 - **Parameter duplication.** Both scripts re-declare the passthrough parameters,
   and the wrapper forwards them via a splat hashtable, `@InventoryPassthrough`
-  (built at `Run-AllSubscriptions.ps1` line 1218 and forwarded on the child launch
+  (built at `Run-AllSubscriptions.ps1` line 1275 and forwarded on the child launch
   lines above). Adding a new passthrough parameter therefore touches two files.
 - **Two entry points is more to learn than one.** The top-level README spends
   real effort explaining when to use the wrapper versus calling the inner script

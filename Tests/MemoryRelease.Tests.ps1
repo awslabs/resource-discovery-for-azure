@@ -746,6 +746,13 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             }
         }
 
+        It 'disposes a broken pool at the end of a subscription instead of leaving it registered in the process' {
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
+            $Global:MetricCallPool = $Pool
+            $null = & $script:PoolTeardownShared $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new()) 1 $true
+            $Pool.DisposeCount | Should -Be 1 -Because 'an opened pool registers a cleanup timer that only Dispose removes, broken or not'
+            $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a broken pool must not be handed to the next subscription'
+        }
 
         It 'Close-RdaMetricWorkerPool disposes a broken pool and says so' {
             $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)

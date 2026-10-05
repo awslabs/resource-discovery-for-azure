@@ -1419,7 +1419,13 @@ if ($Task -eq 'Processing')
                         $Global:MetricCallPool = $null
                     }
 
-                    $PoolCloseHandle = $MetricCallPool.BeginClose($null, $null)
+                    # A broken pool cannot be closed and has no running call to protect, so it is not asked
+                    # to close; it is disposed below, which is what removes its cleanup timer.
+                    $PoolBroken = ($MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
+                    if (-not $PoolBroken)
+                    {
+                        $PoolCloseHandle = $MetricCallPool.BeginClose($null, $null)
+                    }
                 }
                 foreach ($Abandoned in $MetricAbandonedCalls)
                 {
@@ -1442,11 +1448,24 @@ if ($Task -eq 'Processing')
                     {
                         $PoolClosed = $PoolCloseHandle.AsyncWaitHandle.WaitOne($PoolCloseRemainingMs) -and $MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed
                     }
+                    elseif ($PoolBroken)
+                    {
+                        # Same rule as Close-RdaMetricWorkerPool: a Broken pool has no worker left to protect
+                        # and cannot be closed, so it goes straight to Dispose.
+                        $PoolClosed = $true
+                    }
 
                     if ($PoolClosed)
                     {
                         $MetricCallPool.Dispose()
-                        Write-MetricsDiag ("Metric worker pool released: every worker had finished (waited {0} ms)." -f $PoolGraceClock.ElapsedMilliseconds)
+                        if ($PoolBroken)
+                        {
+                            Write-MetricsDiag "Metric worker pool was Broken: disposed without a close so it does not stay registered in the process."
+                        }
+                        else
+                        {
+                            Write-MetricsDiag ("Metric worker pool released: every worker had finished (waited {0} ms)." -f $PoolGraceClock.ElapsedMilliseconds)
+                        }
                     }
                     else
                     {

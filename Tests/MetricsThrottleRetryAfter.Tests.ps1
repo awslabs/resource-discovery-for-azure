@@ -611,3 +611,67 @@ Describe 'Az context - converted once in the main session, not per call in each 
         $script:Diag[0] | Should -Match '^WARNING: could not convert the Az context'
     }
 }
+
+Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provider on the subscription being inventoried' {
+    # Get-AzResourceProvider and Register-AzResourceProvider act on a subscription. Without a profile they use the
+    # process's current one, which under the wrappers is not the subscription of the run (no phase moves the
+    # process context any more), so the provider was checked, and registered, on the wrong subscription.
+    BeforeAll {
+        $PrereqAst = $script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Initialize-RdaMetricsBatchPrereq' }, $true) | Select-Object -First 1
+        if (-not $PrereqAst) { throw 'Initialize-RdaMetricsBatchPrereq was not found in Extension/Metrics.ps1' }
+        $script:PrereqAst = $PrereqAst
+        . ([scriptblock]::Create($PrereqAst.Extent.Text))
+        function Write-MetricsDiag { param($Message) $script:PrereqDiag.Add([string]$Message) }
+        function Start-Sleep { param($Seconds, $Milliseconds) }
+        function Get-RdaSubscriptionProfile { param([string]$SubscriptionId) if ($SubscriptionId -eq 'broken') { throw 'no profile' } "profile-for-$SubscriptionId" }
+        function Get-AzResourceProvider
+        {
+            param($ProviderNamespace, $DefaultProfile, $ErrorAction)
+            $script:PrereqCalls.Add(('Get:{0}' -f $DefaultProfile))
+            [pscustomobject]@{ RegistrationState = $script:PrereqState }
+        }
+        function Register-AzResourceProvider
+        {
+            param($ProviderNamespace, $DefaultProfile, $ErrorAction)
+            $script:PrereqCalls.Add(('Register:{0}' -f $DefaultProfile))
+            $script:PrereqState = 'Registered'
+        }
+    }
+
+    BeforeEach {
+        $script:PrereqCalls = [System.Collections.Generic.List[string]]::new()
+        $script:PrereqDiag = [System.Collections.Generic.List[string]]::new()
+        $script:PrereqState = 'Registered'
+    }
+
+    It 'looks the provider up through the profile of the subscription it was given' {
+        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
+        @($script:PrereqCalls) | Should -Be @('Get:profile-for-sub-a')
+    }
+
+    It 'registers the provider on that subscription when it is not registered' {
+        $script:PrereqState = 'NotRegistered'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
+        @($script:PrereqCalls | Where-Object { $_ -like 'Register:*' }) | Should -Be @('Register:profile-for-sub-a')
+    }
+
+    It 'reports, and leaves every other subscription alone, when the profile for the subscription cannot be built' {
+        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'broken'
+        $script:PrereqCalls.Count | Should -Be 0
+        @($script:PrereqDiag | Where-Object { $_ -like '*broken*' }).Count | Should -BeGreaterThan 0 -Because 'the operator has to be able to see which subscription was skipped'
+    }
+
+    It 'is called once for each subscription that has metric definitions to batch' {
+        $Calls = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Initialize-RdaMetricsBatchPrereq' }, $true) |
+                Where-Object { $_.Extent.StartOffset -lt $script:PrereqAst.Extent.StartOffset -or $_.Extent.StartOffset -gt $script:PrereqAst.Extent.EndOffset })
+        $Calls.Count | Should -Be 1
+        $Named = @($Calls[0].CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+        $Named | Should -Contain 'SubscriptionId'
+        $InLoop = $false
+        for ($Node = $Calls[0].Parent; $null -ne $Node; $Node = $Node.Parent)
+        {
+            if ($Node -is [System.Management.Automation.Language.ForEachStatementAst]) { $InLoop = $true; break }
+        }
+        $InLoop | Should -BeTrue -Because 'one call for each subscription, not one for the first'
+    }
+}

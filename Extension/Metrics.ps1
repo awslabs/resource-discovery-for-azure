@@ -253,30 +253,36 @@ if ($Task -eq 'Processing')
 
     function Initialize-RdaMetricsBatchPrereq
     {
+        # Get-AzResourceProvider and Register-AzResourceProvider act on one subscription. Without a profile they use
+        # the process's current one, which under the wrappers is not the subscription being inventoried (no phase
+        # moves the process context), so the provider was checked, and registered, on the wrong subscription.
+        param([Parameter(Mandatory = $true)][string]$SubscriptionId)
+
         try
         {
-            $Rp = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -ErrorAction Stop | Select-Object -First 1
+            $SubProfile = Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId
+            $Rp = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Select-Object -First 1
             if ($null -ne $Rp -and $Rp.RegistrationState -eq 'Registered')
             {
-                Write-MetricsDiag '[batch] Microsoft.Insights resource provider already registered.'
+                Write-MetricsDiag ("[batch] Microsoft.Insights resource provider already registered on subscription {0}." -f $SubscriptionId)
                 return
             }
 
-            Write-MetricsDiag ("[batch] Microsoft.Insights RP is '{0}'; registering (required for metrics:getBatch)..." -f $(if ($Rp) { $Rp.RegistrationState } else { 'unknown' }))
-            Register-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -ErrorAction Stop | Out-Null
+            Write-MetricsDiag ("[batch] Microsoft.Insights RP is '{0}' on subscription {1}; registering (required for metrics:getBatch)..." -f $(if ($Rp) { $Rp.RegistrationState } else { 'unknown' }), $SubscriptionId)
+            Register-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Out-Null
 
             $Deadline = (Get-Date).AddSeconds(60)
             $State = ''
             do
             {
                 Start-Sleep -Seconds 10
-                $State = (Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -ErrorAction SilentlyContinue | Select-Object -First 1).RegistrationState
+                $State = (Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction SilentlyContinue | Select-Object -First 1).RegistrationState
             } while ($State -ne 'Registered' -and (Get-Date) -lt $Deadline)
-            Write-MetricsDiag ("[batch] Microsoft.Insights registration state after wait: {0}" -f $State)
+            Write-MetricsDiag ("[batch] Microsoft.Insights registration state on subscription {0} after wait: {1}" -f $SubscriptionId, $State)
         }
         catch
         {
-            Write-MetricsDiag ("[batch] could not ensure Microsoft.Insights registration ({0}). If batch fails, an admin must register the provider: Register-AzResourceProvider -ProviderNamespace Microsoft.Insights" -f $_.Exception.Message)
+            Write-MetricsDiag ("[batch] could not ensure Microsoft.Insights registration on subscription {0} ({1}). If batch fails, an admin must register the provider: Register-AzResourceProvider -ProviderNamespace Microsoft.Insights" -f $SubscriptionId, $_.Exception.Message)
         }
     }
 
@@ -671,7 +677,14 @@ if ($Task -eq 'Processing')
 
         if ($BatchGroups.Count -gt 0)
         {
-            Initialize-RdaMetricsBatchPrereq
+            # The provider is per subscription, and the definitions can span several of them, so each one that has
+            # something to batch is checked on its own. The id's subscription segment is lower-cased so the same
+            # subscription written two ways is checked once.
+            $BatchSubscriptionIds = @($BatchGroups.Values | ForEach-Object { $_ } | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
+            foreach ($BatchSubscriptionId in $BatchSubscriptionIds)
+            {
+                Initialize-RdaMetricsBatchPrereq -SubscriptionId $BatchSubscriptionId
+            }
 
             foreach ($Service in $BatchGroups.Keys)
             {

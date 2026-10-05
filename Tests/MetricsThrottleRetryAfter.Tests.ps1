@@ -420,8 +420,9 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         $Logged | Should -Not -Contain 'Write-Verbose' -Because 'Write-Verbose is discarded at the default preference, losing the only trace of a leaked pool'
     }
 
-    It 'still uses BeginClose, never Close, and disposes the pool only once every worker has ended' {
+    It 'still uses BeginClose, never Close, and disposes the pool only once every worker has ended, or the pool is broken and has none' {
         # Close waits for a call blocked in a network read, and so does Dispose on a pool still open.
+        # A Broken pool cannot be closed and has no running call, so it is the one that reaches Dispose without a close.
         $Bad = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -eq 'Close' }, $true))
         $Bad.Count | Should -Be 0
         $Dispose = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -eq 'Dispose' }, $true))
@@ -653,6 +654,27 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         $script:PrereqState = 'NotRegistered'
         Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
         @($script:PrereqCalls | Where-Object { $_ -like 'Register:*' }) | Should -Be @('Register:profile-for-sub-a')
+    }
+
+    It 'polls and registers through the same profile, in the order look up, register, look up again' {
+        $script:PrereqState = 'NotRegistered'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
+        @($script:PrereqCalls) | Should -Be @('Get:profile-for-sub-a', 'Register:profile-for-sub-a', 'Get:profile-for-sub-a') -Because 'a polling call without the profile would read the provider state of the process''s current subscription'
+    }
+
+    It 'checks a subscription once when its ids differ only in case, and skips an id with no subscription segment' {
+        $Assign = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$BatchSubscriptionIds' }, $true))
+        $Assign.Count | Should -Be 1
+        Set-Variable -Name BatchGroups -Value ([ordered]@{
+                VirtualMachines = [System.Collections.Generic.List[object]]@(
+                    [pscustomobject]@{ Id = '/subscriptions/AAAA-1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1' },
+                    [pscustomobject]@{ Id = '/subscriptions/aaaa-1/resourceGroups/rg2/providers/Microsoft.Compute/virtualMachines/vm2' })
+                Sql             = [System.Collections.Generic.List[object]]@(
+                    [pscustomobject]@{ Id = '/subscriptions/BBBB-2/resourceGroups/rg/providers/Microsoft.Sql/servers/s1/databases/d1' },
+                    [pscustomobject]@{ Id = 'not-an-arm-id' })
+            })
+        $Ids = @(. ([scriptblock]::Create($Assign[0].Right.Extent.Text)))
+        @($Ids | Sort-Object) | Should -Be @('aaaa-1', 'bbbb-2')
     }
 
     It 'reports, and leaves every other subscription alone, when the profile for the subscription cannot be built' {

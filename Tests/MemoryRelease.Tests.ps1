@@ -754,6 +754,14 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a broken pool must not be handed to the next subscription'
         }
 
+        It 'does not ask a broken pool to close, and says in the debug log that it was broken' {
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
+            $Global:MetricCallPool = $Pool
+            $Result = & $script:PoolTeardownShared $Pool ([System.Collections.Concurrent.ConcurrentBag[psobject]]::new()) 1 $true
+            $Pool.BeginCloseCount | Should -Be 0 -Because 'a broken pool cannot be closed, and the close is what a running call would hold up'
+            @($Result.Diag | Where-Object { $_ -like 'Metric worker pool was Broken*' }).Count | Should -Be 1 -Because 'the debug log is the only place the operator can see why the pool went'
+        }
+
         It 'Close-RdaMetricWorkerPool disposes a broken pool and says so' {
             $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
             $Global:MetricCallPool = $Pool

@@ -1385,6 +1385,8 @@ if ($Task -eq 'Processing')
                 # stop is unwinding through this finally.
                 $PoolGraceClock = [System.Diagnostics.Stopwatch]::StartNew()
                 $PoolIdle = $false
+                $PoolBroken = $false
+                $PoolCloseHandle = $null
                 while ($true)
                 {
                     # GetAvailableRunspaces is only valid on an open pool; a broken pool is never idle.
@@ -1440,7 +1442,9 @@ if ($Task -eq 'Processing')
                     # every subscription under the wrapper added one to the heap for the life of the process.
                     # Dispose runs only once it is PROVEN that every worker has ended: the close has finished
                     # (it does not finish while any runspace still runs a call), the pool reports Closed, and
-                    # no abandoned call is still running. Otherwise the pool is kept and the debug log says so:
+                    # no abandoned call is still running. A Broken pool is the one exception: it cannot be
+                    # closed and has no call running, so it is disposed without a close. Otherwise the pool is
+                    # kept and the debug log says so:
                     # that costs one pool of memory for this subscription, never a hang or a torn-down worker.
                     $PoolCloseRemainingMs = [int][math]::Max(0, ($MetricPoolReleaseGraceSeconds * 1000) - $PoolGraceClock.ElapsedMilliseconds)
                     $PoolClosed = $false

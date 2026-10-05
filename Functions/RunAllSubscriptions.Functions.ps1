@@ -611,12 +611,13 @@ function Enter-StreamAdmission
     # its reading is below the floor it runs one aggressive full collection (Get-GcFreeMemoryGB -Full), to give
     # back garbage any stream left in the shared heap, unless another stream ran one within PollSeconds.
     # Waiters sleep in Monitor.Wait slices of at most a second, so a stop lands quickly, and an admission or a
-    # release wakes them at once. Everything is decided and recorded under the state's lock; the waiting line is
-    # written without it, from what was read under it. The check sees the memory that is free when a subscription
-    # starts, not what the subscription will need.
+    # release wakes them at once. Everything is decided and recorded under the state's lock; free memory is read, and
+    # the waiting line is written, without it, so a slow reading or host write holds up no stream that is releasing.
+    # The check sees the memory that is free when a subscription starts, not what the subscription will need.
     # -FreeMemoryReader is called with $true for the full reading. Neither it nor -Log may use break or continue:
     # in PowerShell, loop control in a script block reaches the loops of the function that runs it. A thread that
-    # already holds the state's lock is refused, because the lock is let go while the waiting line is written.
+    # already holds the state's lock is refused, because the lock is let go while free memory is read and the waiting
+    # line is written.
     # Returns the reason the subscription was admitted, how long it waited, and the free memory this call read, if
     # it read any.
     param(
@@ -668,20 +669,24 @@ function Enter-StreamAdmission
                 elseif ($null -eq $LastRead -or ($Now - $LastRead) / $Frequency -ge $PollSeconds)
                 {
                     $LastRead = $Now
+                    $LastFull = $State['LastFullCollection']
+                    $FullRan = $false
+                    # The reading, and the full collection it may run, can take seconds, and every stream that is
+                    # releasing needs this lock to do so. Only the head of the queue reads, so nothing else is
+                    # admitted while the lock is let go. The outer finally takes it back if a stop lands in between.
+                    [System.Threading.Monitor]::Exit($Lock)
                     try
                     {
                         $FreeGB = [double](& $FreeMemoryReader $false)
                         if ($FreeGB -lt $FloorGB -and -not $Collected)
                         {
                             $Collected = $true
-                            $LastFull = $State['LastFullCollection']
                             if ($null -eq $LastFull -or ($Now - $LastFull) / $Frequency -ge $PollSeconds)
                             {
                                 $FreeGB = [double](& $FreeMemoryReader $true)
-                                $State['LastFullCollection'] = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                                $FullRan = $true
                             }
                         }
-                        $State['LastFreeGB'] = $FreeGB
                         if ($FreeGB -ge $FloorGB)
                         {
                             $Reason = 'memory'
@@ -691,6 +696,15 @@ function Enter-StreamAdmission
                     {
                         $ReadError = $_.Exception.Message
                         $Reason = 'unreadable'
+                    }
+                    [System.Threading.Monitor]::Enter($Lock)
+                    if ($FullRan)
+                    {
+                        $State['LastFullCollection'] = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                    }
+                    if ($Reason -ne 'unreadable')
+                    {
+                        $State['LastFreeGB'] = $FreeGB
                     }
                 }
                 if (-not $Reason -and $Watch.Elapsed.TotalSeconds -ge $MaxWaitSeconds)
@@ -728,6 +742,12 @@ function Enter-StreamAdmission
                     [System.Threading.Monitor]::Exit($Lock)
                     & $Log $WaitingLine 'Yellow'
                     [System.Threading.Monitor]::Enter($Lock)
+                    continue
+                }
+                if ($Holders.Count -lt $InProgress)
+                {
+                    # A subscription finished while the lock was let go for the reading, and its wake-up found no
+                    # one asleep: look again now rather than after the next slice.
                     continue
                 }
                 $null = [System.Threading.Monitor]::Wait($Lock, $SliceMs)

@@ -3610,6 +3610,44 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         $Logs.Count | Should -Be 0 -Because 'only a wait is logged'
     }
 
+    It 'reads free memory without holding the admission lock, so a full collection does not stall the streams that are releasing' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        [void]$State.Holders.Add('other')
+        $LockHeld = [System.Collections.Generic.List[bool]]::new()
+        $Lock = $State['Lock']
+        $Reader = { param([bool]$Full) $LockHeld.Add([System.Threading.Monitor]::IsEntered($Lock)); 3.0 }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Holder 'sub-a' -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log { param([string]$Message, [string]$Color) }
+        $Admission.Reason | Should -Be 'memory'
+        $LockHeld.Count | Should -BeGreaterThan 0
+        @($LockHeld | Where-Object { $_ }).Count | Should -Be 0 -Because 'the reader runs an aggressive full collection, which can take seconds while every other stream waits for this lock'
+    }
+
+    It 'looks again at once when a subscription finishes while the lock is let go for the reading, instead of sleeping a slice first' {
+        # A 1 s poll interval makes the sleep slice a full second. The first reading finds the floor unmet and the
+        # subscription in progress; the second one is where 'other' finishes, when this stream is not asleep, so its
+        # wake-up finds no one.
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 1 -MaxWaitSeconds 60
+        [void]$State.Holders.Add('other')
+        $ExitAdmission = Get-Command -Name Exit-StreamAdmission -CommandType Function
+        $Calls = [System.Collections.Generic.List[int]]::new()
+        $ReleasedAt = [System.Collections.Generic.List[object]]::new()
+        $Reader = {
+            param([bool]$Full)
+            $Calls.Add(1)
+            if ($Calls.Count -eq 3)
+            {
+                & $ExitAdmission -State $State -Holder 'other'
+                $ReleasedAt.Add([DateTime]::UtcNow)
+            }
+            0.5
+        }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Holder 'sub-a' -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log { param([string]$Message, [string]$Color) }
+        $AdmittedAt = [DateTime]::UtcNow
+        $Admission.Reason | Should -Be 'alone'
+        $ReleasedAt.Count | Should -Be 1 -Because 'the release has to land inside the second reading for the test to mean anything'
+        ($AdmittedAt - $ReleasedAt[0]).TotalSeconds | Should -BeLessThan 0.5 -Because 'the sleep slice is a full second, which the stream must not sit through once the subscription has finished'
+    }
+
     It 'admits below the floor when no other subscription is in progress, without reading memory' {
         $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
         $Calls = [System.Collections.Generic.List[bool]]::new()

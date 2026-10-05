@@ -329,6 +329,7 @@ So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on
 - A release wakes the waiting stream at once: with a 30 s poll interval it was admitted within 0.5 s of the release.
 - The waiting line is written without the lock.
   A release that lands while it is being written still admits the stream at once, before its first 1 s sleep.
+- Free memory is read, including the full collection, without the lock, so a slow reading does not stall the streams that are releasing.
   A write that throws, or a stop of the stream's thread job during the write, still leaves the queue and the lock, so the stream behind it is admitted.
   A caller that already holds the lock is refused, and its hold is left alone.
 - While the test holds the lock, a stream neither queues nor is admitted, and it is admitted once the lock is free.

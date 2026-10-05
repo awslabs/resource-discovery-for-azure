@@ -415,6 +415,65 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         $Current.Subscription.Id | Should -Be $HomeSub.Id -Because 'the signed-in context must not be modified'
     }
 
+    It 'copies the current process context, not an older scoped profile that is still pinned (the re-pin after a reconnect)' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        # A reconnect replaces the process context, but the pin in $PSDefaultParameterValues still points at the
+        # profile built BEFORE it. Get-AzContext and Get-AzSubscription honour that pin, so a helper that does not
+        # opt out reads the pin back: it copies the pre-reconnect context, and the caller's check that the
+        # context matches the subscription is then true by construction.
+        Import-Module Az.Accounts -ErrorAction Stop
+        $ContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type]
+        $AbstractType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.IAzureContext' -as [type]
+        $NewContext = {
+            param([string]$AccountId)
+            $Context = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+            $Context.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+            $Context.Account.Id = $AccountId
+            $Context.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+            $Context.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+            $Context.Subscription.Id = [guid]::NewGuid().ToString()
+            $Context
+        }
+        $Stale = & $NewContext 'stale-account'
+        $Fresh = & $NewContext 'fresh-account'
+        $Target = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new(); $Target.Id = [guid]::NewGuid().ToString()
+        $StalePin = [System.Management.Automation.LanguagePrimitives]::ConvertTo($Stale, $ContainerType)
+        Mock Get-AzContext { if ($null -ne $DefaultProfile) { $Stale } else { $Fresh } }
+        Mock Get-AzSubscription { $Target }
+        $PSDefaultParameterValues['*:DefaultProfile'] = $StalePin
+        try { $Built = Get-RdaSubscriptionProfile -SubscriptionId $Target.Id }
+        finally { $PSDefaultParameterValues.Remove('*:DefaultProfile') }
+        $Built.DefaultContext.Account.Id | Should -Be 'fresh-account' -Because 'the helper must build from the context the process holds now, not from a pin that predates the reconnect'
+        $Built.DefaultContext.Subscription.Id | Should -Be $Target.Id
+    }
+
+    It 'finds a subscription that lives in another tenant than the signed-in context, and scopes the profile to that tenant' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        # Get-AzSubscription -TenantId <the context's tenant> throws for a subscription that belongs to a
+        # different tenant, which made the helper refuse every billing call for it ("not visible to the
+        # signed-in identity") although the identity can read it.
+        Import-Module Az.Accounts -ErrorAction Stop
+        $HomeTenantId = [guid]::NewGuid().ToString()
+        $OtherTenantId = [guid]::NewGuid().ToString()
+        $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+        $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+        $Current.Tenant.Id = $HomeTenantId
+        $Current.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $Current.Subscription.Id = [guid]::NewGuid().ToString()
+        $Target = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $Target.Id = [guid]::NewGuid().ToString()
+        $Target.TenantId = $OtherTenantId
+        Mock Get-AzContext { $Current }
+        Mock Get-AzSubscription {
+            if ($TenantId -and $TenantId -ne $OtherTenantId) { throw 'SubscriptionNotFound: the subscription was not found in this tenant' }
+            $Target
+        }
+        { Get-RdaSubscriptionProfile -SubscriptionId $Target.Id } | Should -Not -Throw -Because 'the subscription exists in another tenant the identity can read'
+        $Built = Get-RdaSubscriptionProfile -SubscriptionId $Target.Id
+        $Built.DefaultContext.Subscription.Id | Should -Be $Target.Id
+        $Built.DefaultContext.Tenant.Id | Should -Be $OtherTenantId -Because 'the profile must be scoped to the tenant the subscription belongs to'
+        $Current.Tenant.Id | Should -Be $HomeTenantId -Because 'the signed-in context must not be modified'
+    }
+
     It 'throws when there is no signed-in context, so the phase takes its skip path' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
         Import-Module Az.Accounts -ErrorAction Stop
         Mock Get-AzContext { $null }

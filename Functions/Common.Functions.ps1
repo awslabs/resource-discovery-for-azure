@@ -806,7 +806,8 @@ function Get-RdaMemoryReadingLines
 # -DefaultProfile or through $PSDefaultParameterValues['*:DefaultProfile']. Set-AzContext moves the
 # process's current context, which every runspace in the process shares, and with context autosave
 # it also rewrites the saved default subscription the operator's next session starts on. This changes
-# neither: it copies the current context and swaps only its subscription. Throws when the subscription
+# neither: it copies the current context and swaps only its subscription (and its tenant, when the
+# subscription belongs to another tenant than the signed-in context). Throws when the subscription
 # cannot be read with the signed-in identity, as Set-AzContext did, so callers keep their skip path.
 function Get-RdaSubscriptionProfile
 {
@@ -815,23 +816,53 @@ function Get-RdaSubscriptionProfile
     $ContextType = 'Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext' -as [type]
     $AbstractContextType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.IAzureContext' -as [type]
     $ContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type]
-    if ($null -eq $ContextType -or $null -eq $AbstractContextType -or $null -eq $ContainerType)
+    $TenantType = 'Microsoft.Azure.Commands.Profile.Models.PSAzureTenant' -as [type]
+    if ($null -eq $ContextType -or $null -eq $AbstractContextType -or $null -eq $ContainerType -or $null -eq $TenantType)
     {
         throw 'the Az.Accounts context types are not loaded, so the Azure calls cannot be scoped to one subscription'
     }
 
-    $Current = Get-AzContext -ErrorAction Stop
+    # -DefaultProfile $null on both reads: the callers pin a scoped profile in $PSDefaultParameterValues, and after
+    # a reconnect replaced the process context that pin still points at the profile built BEFORE it. Both cmdlets
+    # honour the pin, so without the opt-out this helper would copy the pre-reconnect context, and the caller's
+    # check that the context matches the subscription would be true by construction.
+    $Current = Get-AzContext -DefaultProfile $null -ErrorAction Stop
     if ($null -eq $Current -or $null -eq $Current.Account)
     {
         throw 'there is no signed-in Azure context to scope from'
     }
-    $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -TenantId $Current.Tenant.Id -ErrorAction Stop -WarningAction SilentlyContinue
+
+    # The signed-in tenant first, which is the common case and does not reach into other tenants. A subscription
+    # that lives in another tenant the identity can read is not found there, so it is looked up again without a
+    # tenant. A failure of that second lookup is the real answer and is left to throw.
+    $Subscription = $null
+    try
+    {
+        $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -TenantId $Current.Tenant.Id -DefaultProfile $null -ErrorAction Stop -WarningAction SilentlyContinue
+    }
+    catch
+    {
+        $Subscription = $null
+    }
+    if ($null -eq $Subscription)
+    {
+        $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -DefaultProfile $null -ErrorAction Stop -WarningAction SilentlyContinue
+    }
     if ($null -eq $Subscription)
     {
         throw ('subscription {0} is not visible to the signed-in identity' -f $SubscriptionId)
     }
+    $Subscription = @($Subscription)[0]
 
     $Scoped = $ContextType::new([System.Management.Automation.LanguagePrimitives]::ConvertTo($Current, $AbstractContextType))
-    $Scoped.Subscription = @($Subscription)[0]
+    $Scoped.Subscription = $Subscription
+    $SubscriptionTenantId = [string]$Subscription.TenantId
+    if (-not [string]::IsNullOrEmpty($SubscriptionTenantId) -and $SubscriptionTenantId -ne [string]$Current.Tenant.Id)
+    {
+        # A new tenant object rather than a change to the copied one, so the signed-in context is never touched.
+        $ScopedTenant = $TenantType::new()
+        $ScopedTenant.Id = $SubscriptionTenantId
+        $Scoped.Tenant = $ScopedTenant
+    }
     return [System.Management.Automation.LanguagePrimitives]::ConvertTo($Scoped, $ContainerType)
 }

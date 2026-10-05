@@ -725,6 +725,54 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
         }
     }
 
+    Context 'a pool that is not in a usable state, and a pool that cannot be released' {
+        BeforeAll {
+            # A real broken pool cannot be used here: one made to fail its open keeps this process from exiting.
+            # The members the release code touches are stood in for, and the calls it makes are counted.
+            $script:NewFakePool = {
+                param([System.Management.Automation.Runspaces.RunspacePoolState]$State, [int]$Available = 2, [int]$Max = 2)
+                $Pool = [pscustomobject]@{ RunspacePoolStateInfo = [pscustomobject]@{ State = $State }; DisposeCount = 0; BeginCloseCount = 0; Available = $Available; Max = $Max }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name GetAvailableRunspaces -Value { $this.Available }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name GetMaxRunspaces -Value { $this.Max }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name BeginClose -Value {
+                    param($Callback, $AsyncState)
+                    $this.BeginCloseCount++
+                    $Wait = [pscustomobject]@{}
+                    Add-Member -InputObject $Wait -MemberType ScriptMethod -Name WaitOne -Value { param($Milliseconds) $true }
+                    [pscustomobject]@{ IsCompleted = $true; AsyncWaitHandle = $Wait }
+                }
+                $Pool
+            }
+        }
+
+
+        It 'Close-RdaMetricWorkerPool disposes a broken pool and says so' {
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
+            $Global:MetricCallPool = $Pool
+            Close-RdaMetricWorkerPool | Should -BeLike 'released*'
+            $Pool.DisposeCount | Should -Be 1
+            $Global:MetricCallPool | Should -BeNullOrEmpty
+        }
+
+        It 'Close-RdaMetricWorkerPool warns, and still returns its result, when it leaves a pool with a busy worker alone' {
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Opened) 1 2
+            $Global:MetricCallPool = $Pool
+            $Output = @(Close-RdaMetricWorkerPool 3>&1)
+            $Warnings = @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+            $Warnings.Count | Should -Be 1 -Because 'a pool that is not released lives until the process ends, which a Write-Verbose line at the end of the run would never show'
+            $Warnings[0].Message | Should -Match 'not released'
+            @($Output | Where-Object { $_ -is [string] }) | Should -Be @('not released: a worker is still busy')
+            $Pool.DisposeCount | Should -Be 0
+        }
+
+        It 'Close-RdaMetricWorkerPool stays silent when there is no pool or it was released' {
+            $Global:MetricCallPool = $null
+            $Output = @(Close-RdaMetricWorkerPool 3>&1)
+            @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Count | Should -Be 0
+            $Output | Should -Be @('none')
+        }
+    }
 
     It 'releases the pool in a finally on both in-process paths, so a Ctrl+C in an interactive session does not leave it open' {
         $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)

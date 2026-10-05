@@ -577,7 +577,10 @@ function Close-RdaMetricWorkerPool
     # only when every worker has finished, so nothing should still be running here; the same proof is
     # still required before Dispose. BeginClose, never Close, and Dispose only once the close has
     # finished on a pool that reports Closed. A pool that fails that proof is left alone rather than
-    # torn down under a running call. Returns what happened, for the caller to log.
+    # torn down under a running call. A pool in state Broken has no running call to protect and cannot be
+    # closed, so it is disposed without a close, which is also what removes its cleanup timer. Returns what
+    # happened, for the caller to log; a pool that is left open is also reported as a warning, because it
+    # then lives until the process ends and a verbose line at the end of the run would never show it.
     param([int]$GraceSeconds = 10)
 
     $Pool = $Global:MetricCallPool
@@ -587,28 +590,46 @@ function Close-RdaMetricWorkerPool
         return 'none'
     }
 
+    $Result = $null
     try
     {
-        if ($Pool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
-        {
-            return ('not released: pool state {0}' -f $Pool.RunspacePoolStateInfo.State)
-        }
-        if ($Pool.GetAvailableRunspaces() -ne $Pool.GetMaxRunspaces())
-        {
-            return 'not released: a worker is still busy'
-        }
-        $CloseHandle = $Pool.BeginClose($null, $null)
-        if ($CloseHandle.AsyncWaitHandle.WaitOne([math]::Max(0, $GraceSeconds) * 1000) -and $Pool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed)
+        if ($Pool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
         {
             $Pool.Dispose()
-            return 'released'
+            $Result = 'released: pool state Broken, disposed without a close'
         }
-        return ('not released: close did not finish within {0}s' -f $GraceSeconds)
+        elseif ($Pool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
+        {
+            $Result = ('not released: pool state {0}' -f $Pool.RunspacePoolStateInfo.State)
+        }
+        elseif ($Pool.GetAvailableRunspaces() -ne $Pool.GetMaxRunspaces())
+        {
+            $Result = 'not released: a worker is still busy'
+        }
+        else
+        {
+            $CloseHandle = $Pool.BeginClose($null, $null)
+            if ($CloseHandle.AsyncWaitHandle.WaitOne([math]::Max(0, $GraceSeconds) * 1000) -and $Pool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed)
+            {
+                $Pool.Dispose()
+                $Result = 'released'
+            }
+            else
+            {
+                $Result = ('not released: close did not finish within {0}s' -f $GraceSeconds)
+            }
+        }
     }
     catch
     {
-        return ('not released: {0}' -f $_.Exception.Message)
+        $Result = ('not released: {0}' -f $_.Exception.Message)
     }
+
+    if ($Result -like 'not released*')
+    {
+        Write-Warning ('Metric worker pool {0}. It stays open until this PowerShell process ends.' -f $Result)
+    }
+    return $Result
 }
 
 function Write-RdaMemorySnapshot

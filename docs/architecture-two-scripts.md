@@ -282,6 +282,8 @@ At the end of each subscription's metrics phase it does this instead:
    That pool stays in memory until the process ends, but nothing hangs and no call is cut off mid-job.
 
 `Close-RdaMetricWorkerPool` at wrapper exit follows the same rule: it releases the pool only if no worker is busy, and it never waits for a busy worker.
+A pool it leaves open is reported as a warning, because it then stays in the process until the process ends.
+A pool in state `Broken` has no running call to protect, so it is disposed without a close.
 
 ### The context conversion: the "Cannot convert PSAzureContext" bug
 

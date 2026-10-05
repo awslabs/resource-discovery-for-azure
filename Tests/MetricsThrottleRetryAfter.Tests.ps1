@@ -622,7 +622,7 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         $script:PrereqAst = $PrereqAst
         . ([scriptblock]::Create($PrereqAst.Extent.Text))
         function Write-MetricsDiag { param($Message) $script:PrereqDiag.Add([string]$Message) }
-        function Start-Sleep { param($Seconds, $Milliseconds) }
+        Mock Start-Sleep { }
         function Get-RdaSubscriptionProfile { param([string]$SubscriptionId) if ($SubscriptionId -eq 'broken') { throw 'no profile' } "profile-for-$SubscriptionId" }
         function Get-AzResourceProvider
         {

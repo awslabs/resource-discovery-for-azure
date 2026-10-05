@@ -422,7 +422,6 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         # context matches the subscription is then true by construction.
         Import-Module Az.Accounts -ErrorAction Stop
         $ContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type]
-        $AbstractType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.IAzureContext' -as [type]
         $NewContext = {
             param([string]$AccountId)
             $Context = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()

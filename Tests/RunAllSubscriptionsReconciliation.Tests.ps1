@@ -2260,6 +2260,21 @@ Describe 'Az context snapshot lifecycle: it leaves the disk once every stream ha
             $PreFlight | Should -BeGreaterThan 0
             $Save | Should -BeGreaterThan $PreFlight
         }
+        It 'the streams are sliced before the token cache is snapshotted, so the weights query runs while no cache is on disk' {
+            $Code = $script:Wrapper.Code
+            $Slice = $Code.IndexOf('Get-WeightedStreamSlices -Subscriptions', $script:Ordinal)
+            $Save = $Code.IndexOf('Save-AzContext -Path $AzContextSnapshot', $script:Ordinal)
+            $Slice | Should -BeGreaterThan 0
+            $Save | Should -BeGreaterThan $Slice
+        }
+        It 'the Runspace fallback to the sequential path recomputes the auto concurrency for one stream, as the Process fallback does' {
+            $Code = $script:Wrapper.Code
+            $From = $Code.IndexOf('-StreamIsolation Runspace needs thread jobs', $script:Ordinal)
+            $To = $Code.IndexOf('PowerShell background jobs (Start-Job) are unavailable', $script:Ordinal)
+            $From | Should -BeGreaterThan 0
+            $To | Should -BeGreaterThan $From
+            $Code.Substring($From, $To - $From) | Should -Match 'Get-PerStreamConcurrency -PerStreamConcurrency \$AutoTune\.PerStreamConcurrency -Streams 1'
+        }
         It 'the parent checks for release once per pass of its monitoring loop and once more after it' {
             $Loops = @($script:Wrapper.Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.WhileStatementAst] -and $args[0].Condition.Extent.Text -match "State -eq 'Running'" }, $true))
             $Loops.Count | Should -Be 1

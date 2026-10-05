@@ -1197,7 +1197,7 @@ $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
 if ($HeadRoom -gt 0) { $ConcurrencySrc = '{0}, -HeadRoom {1}' -f $ConcurrencySrc, $HeadRoom }
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
 $AvailableLabel = if ($AutoTune.MemoryBasis -eq 'available') { '{0} GB available' -f $AutoTune.AvailableGB.ToString([cultureinfo]::InvariantCulture) } elseif ($AutoTune.MemoryBasis -eq 'total') { 'available memory unreadable, sized from total RAM' } else { 'memory undetected' }
-Write-Host ("Sizing: {0}, {1} GB per stream (-StreamMemoryGB) -> up to {2} stream(s) by memory; auto streams limited by {3}; up to {4} metric call(s) per stream, at most {5} across the host for {6} stream(s)." -f $AvailableLabel, $StreamMemoryGB.ToString([cultureinfo]::InvariantCulture), $AutoTune.StreamsByMemory, $AutoTune.StreamsLimitedBy, $AutoTune.PerStreamConcurrency, $AutoTune.TotalConcurrencyCap, $ConcurrencyStreams) -ForegroundColor DarkGray
+Write-Host ("Sizing: {0}, {1} GB per stream (-StreamMemoryGB) -> up to {2} stream(s) by memory; auto streams limited by {3}; up to {4} metric call(s) per stream, at most {5} across the host for {6} stream(s)." -f $AvailableLabel, $AutoTune.StreamMemoryGB.ToString([cultureinfo]::InvariantCulture), $AutoTune.StreamsByMemory, $AutoTune.StreamsLimitedBy, $AutoTune.PerStreamConcurrency, $AutoTune.TotalConcurrencyCap, $ConcurrencyStreams) -ForegroundColor DarkGray
 Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
 
 if ($ParallelStreams -gt 1 -and $StreamIsolation -eq 'Runspace' -and -not (Test-ThreadJobSupport))
@@ -1209,6 +1209,13 @@ if ($ParallelStreams -gt 1 -and $StreamIsolation -eq 'Runspace' -and -not (Test-
     Write-Host "         streams as separate pwsh processes instead." -ForegroundColor Yellow
     Write-Host ""
     $ParallelStreams = 1
+    if ($ConcurrencyAuto)
+    {
+        # The per-stream figure may have been cut for streams that can no longer run; one stream is never cut.
+        $ConcurrencyLimit = Get-PerStreamConcurrency -PerStreamConcurrency $AutoTune.PerStreamConcurrency -Streams 1 -TotalCap $AutoTune.TotalConcurrencyCap
+        if ($HeadRoom -gt 0) { $ConcurrencyLimit = Get-HeadroomAdjustedConcurrency -Concurrency $ConcurrencyLimit -HeadRoomPercent $HeadRoom }
+        Write-Host ("Sequential path: -ConcurrencyLimit {0} (one stream is never cut back by the host-wide cap)." -f $ConcurrencyLimit) -ForegroundColor DarkGray
+    }
 }
 
 if ($ParallelStreams -gt 1 -and $StreamIsolation -eq 'Process' -and -not (Test-BackgroundJobSupport))
@@ -1597,6 +1604,32 @@ else
             }
         }
 
+        # Slice the subscriptions before the token cache is snapshotted: the weights come from a network query,
+        # and the snapshot should sit on disk only for the seconds between its write and the streams reading it.
+        $Slices = @()
+        for ($i = 0; $i -lt $StreamCount; $i++)
+        {
+            $Slices += , (New-Object 'System.Collections.Generic.List[object]')
+        }
+        # Balance the streams by estimated work. The weights come from the same Resource Graph
+        # query -Plan uses; if it cannot be read, fall back to the round-robin split.
+        $SliceWeights = Get-PlanSubscriptionWeights -SubscriptionIds @($ParallelSubscriptions | ForEach-Object { [string]$_.Id }) -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:(-not $IncludeStorageMetrics) -WarningAction SilentlyContinue
+        if ($null -ne $SliceWeights)
+        {
+            $WeightedSplit = Get-WeightedStreamSlices -Subscriptions @($ParallelSubscriptions) -StreamCount $StreamCount -Weights $SliceWeights
+            $Slices = $WeightedSplit.Slices
+            $BusiestShare = if ($WeightedSplit.TotalSeconds -gt 0) { [math]::Round(100.0 * ($WeightedSplit.Loads | Measure-Object -Maximum).Maximum / $WeightedSplit.TotalSeconds) } else { 0 }
+            Write-Host ("Stream split: balanced by estimated work (metric-query volume per subscription); busiest stream ~{0}% of the estimated total (an even split is {1}%)." -f $BusiestShare, [math]::Round(100.0 / $StreamCount)) -ForegroundColor DarkGray
+        }
+        else
+        {
+            for ($i = 0; $i -lt $ParallelSubscriptions.Count; $i++)
+            {
+                $Slices[$i % $StreamCount].Add($ParallelSubscriptions[$i])
+            }
+            Write-Host "Stream split: round-robin (per-subscription work estimates could not be read from Resource Graph)." -ForegroundColor DarkGray
+        }
+
         # Under -StreamIsolation Runspace the streams use this process's own context, so the path is never
         # written: no token cache goes to disk, and the cleanup below finds nothing to remove.
         $AzContextSnapshot = Join-Path $InventoryRoot (".rda-stream-azcontext-{0}.json" -f ([guid]::NewGuid().ToString()))
@@ -1629,30 +1662,6 @@ else
                 Write-Host ("ERROR: parallel worker script not found at {0}." -f $WorkerScript) -ForegroundColor Red
                 Write-Host "Make sure Run-AllSubscriptions.Stream.ps1 is present alongside Run-AllSubscriptions.ps1, or re-run without -ParallelStreams." -ForegroundColor Yellow
                 Exit-Wrapper -Code 1
-            }
-
-            $Slices = @()
-            for ($i = 0; $i -lt $StreamCount; $i++)
-            {
-                $Slices += , (New-Object 'System.Collections.Generic.List[object]')
-            }
-            # Balance the streams by estimated work. The weights come from the same Resource Graph
-            # query -Plan uses; if it cannot be read, fall back to the round-robin split.
-            $SliceWeights = Get-PlanSubscriptionWeights -SubscriptionIds @($ParallelSubscriptions | ForEach-Object { [string]$_.Id }) -SkipDiskMetrics:$SkipDiskMetrics -SkipStorageMetrics:(-not $IncludeStorageMetrics) -WarningAction SilentlyContinue
-            if ($null -ne $SliceWeights)
-            {
-                $WeightedSplit = Get-WeightedStreamSlices -Subscriptions @($ParallelSubscriptions) -StreamCount $StreamCount -Weights $SliceWeights
-                $Slices = $WeightedSplit.Slices
-                $BusiestShare = if ($WeightedSplit.TotalSeconds -gt 0) { [math]::Round(100.0 * ($WeightedSplit.Loads | Measure-Object -Maximum).Maximum / $WeightedSplit.TotalSeconds) } else { 0 }
-                Write-Host ("Stream split: balanced by estimated work (metric-query volume per subscription); busiest stream ~{0}% of the estimated total (an even split is {1}%)." -f $BusiestShare, [math]::Round(100.0 / $StreamCount)) -ForegroundColor DarkGray
-            }
-            else
-            {
-                for ($i = 0; $i -lt $ParallelSubscriptions.Count; $i++)
-                {
-                    $Slices[$i % $StreamCount].Add($ParallelSubscriptions[$i])
-                }
-                Write-Host "Stream split: round-robin (per-subscription work estimates could not be read from Resource Graph)." -ForegroundColor DarkGray
             }
 
             if ($StreamIsolation -eq 'Runspace')

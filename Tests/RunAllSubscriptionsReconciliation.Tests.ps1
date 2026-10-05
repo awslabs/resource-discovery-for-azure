@@ -3499,6 +3499,16 @@ function Close-RdaMetricWorkerPool { Set-Content -LiteralPath ($WorkerArgs.Probe
         # One thread at a time, so the second job stays NotStarted behind the first.
         Set-Variable -Name StreamIsolation -Value 'Runspace'
         Set-Variable -Name StartWaitSeconds -Value 2
+        $StoppedBeforeStart = [System.Collections.Generic.List[int]]::new()
+        Set-Variable -Name TenantID -Value 'tenant-t'
+        Set-Variable -Name Slices -Value @(
+            @([pscustomobject]@{ Id = 'id-a'; Name = 'sub-a' }, [pscustomobject]@{ Id = 'id-b'; Name = 'sub-b' }),
+            @([pscustomobject]@{ Id = 'id-c'; Name = 'sub-c' }, [pscustomobject]@{ Id = 'id-d'; Name = 'sub-d' }, [pscustomobject]@{ Id = 'id-e'; Name = 'sub-e' })
+        )
+        Set-Variable -Name StreamSummaries -Value @(
+            [pscustomobject]@{ SubCount = 2; SummaryPath = (Join-Path $TestDrive 'stop-summary-0.json') },
+            [pscustomobject]@{ SubCount = 3; SummaryPath = (Join-Path $TestDrive 'stop-summary-1.json') }
+        )
         $Jobs = @(
             (Start-ThreadJob -ThrottleLimit 1 -ScriptBlock { Start-Sleep -Seconds 20 }),
             (Start-ThreadJob -ThrottleLimit 1 -ScriptBlock { 'second' })
@@ -3510,9 +3520,69 @@ function Close-RdaMetricWorkerPool { Set-Content -LiteralPath ($WorkerArgs.Probe
             $Jobs[1].State | Should -BeIn @('Stopped', 'Failed') -Because 'left queued it could still start later, while the wrapper is merging the stream state (Stop-Job ends a queued thread job as Failed)'
             $Jobs[1].PSBeginTime | Should -BeNullOrEmpty -Because 'the stream must never have run'
             $Jobs[0].State | Should -Be 'Running' -Because 'a stream that did start is left alone'
-            ($Output | Out-String) | Should -Match '\[stream-1\].*did not start' -Because 'the stream and the cause are named, not reported later as a summary file that is missing'
+            @($StoppedBeforeStart) | Should -Be @(1) -Because 'the job-state loop needs to know which streams were stopped before they ran'
+            ($Output | Out-String) | Should -Match '\[stream-1\].*did not start.*none of its 3 subscription' -Because 'the stream, the cause and how many subscriptions were lost are named'
+            Test-Path -LiteralPath $StreamSummaries[0].SummaryPath | Should -BeFalse -Because 'a stream that did start writes its own summary'
+            Test-Path -LiteralPath $StreamSummaries[1].SummaryPath | Should -BeTrue -Because 'the stopped stream leaves a summary the wrapper folds like a worker that failed to start'
         }
         finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue }
+    }
+
+    Context 'a stream that was stopped before it started is folded like a worker that failed to start' {
+        BeforeAll {
+            $FoldIf = @($SiAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$StreamSummary.Failed' }, $true))
+            if ($FoldIf.Count -ne 1) { throw ("expected one failed-fold block in Run-AllSubscriptions.ps1, found {0}" -f $FoldIf.Count) }
+            $script:StoppedFoldBlock = [scriptblock]::Create($FoldIf[0].Extent.Text)
+            $EndLoopAst = @($SiAst.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Extent.Text.Contains('job ended in state') }, $true))
+            if ($EndLoopAst.Count -ne 1) { throw ("expected one job-state loop in Run-AllSubscriptions.ps1, found {0}" -f $EndLoopAst.Count) }
+            $script:JobStateLoop = [scriptblock]::Create($EndLoopAst[0].Extent.Text)
+        }
+
+        It 'lists its subscriptions by name and id and records them for -ResumeFailedOnly, so a resume retries them' {
+            Set-Variable -Name StreamIsolation -Value 'Runspace'
+            Set-Variable -Name StartWaitSeconds -Value 2
+            Set-Variable -Name TenantID -Value 'tenant-t'
+            Set-Variable -Name StoppedBeforeStart -Value ([System.Collections.Generic.List[int]]::new())
+            Set-Variable -Name Slices -Value @(
+                @([pscustomobject]@{ Id = 'id-a'; Name = 'sub-a' }),
+                @([pscustomobject]@{ Id = 'id-b'; Name = 'sub-b' }, [pscustomobject]@{ Id = 'id-c'; Name = 'sub-c' })
+            )
+            Set-Variable -Name StreamSummaries -Value @(
+                [pscustomobject]@{ SubCount = 1; SummaryPath = (Join-Path $TestDrive 'fold-summary-0.json') },
+                [pscustomobject]@{ SubCount = 2; SummaryPath = (Join-Path $TestDrive 'fold-summary-1.json') }
+            )
+            $Jobs = @(
+                (Start-ThreadJob -ThrottleLimit 1 -ScriptBlock { Start-Sleep -Seconds 20 }),
+                (Start-ThreadJob -ThrottleLimit 1 -ScriptBlock { 'second' })
+            )
+            try
+            {
+                $null = @(. $script:StartWaitBlock 6>&1)
+            }
+            finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue }
+
+            Set-Variable -Name S -Value ([pscustomobject]@{ StreamId = 1 })
+            Set-Variable -Name StreamSummary -Value (Get-Content -LiteralPath $StreamSummaries[1].SummaryPath -Raw | ConvertFrom-Json)
+            Set-Variable -Name FailedSubscriptions -Value @()
+            Set-Variable -Name FailedSubscriptionIds -Value @()
+            Set-Variable -Name FailedAttempts -Value @()
+            Set-Variable -Name FailedToStartRecorded -Value $false
+            $StreamSummary.Status | Should -Be 'failed-to-start'
+            $null = @(. $script:StoppedFoldBlock 6>&1)
+            @($FailedSubscriptionIds | Sort-Object) | Should -Be @('id-b', 'id-c') -Because 'the real subscriptions are named, not the stream'
+            @($FailedSubscriptions | Where-Object { $_ -like 'sub-b (stream-1: stream did not start*' }).Count | Should -Be 1
+            @($FailedAttempts | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('id-b', 'id-c') -Because '-ResumeFailedOnly retries only what is in the failed attempts, and a stream that never ran wrote no state of its own'
+            $FailedToStartRecorded | Should -BeTrue -Because 'the resume state is saved when subscriptions were recorded here'
+        }
+
+        It 'does not report a stopped stream a second time as a job that ended in a bad state' {
+            Set-Variable -Name Jobs -Value @([pscustomobject]@{ State = 'Failed' }, [pscustomobject]@{ State = 'Failed' })
+            Set-Variable -Name StoppedBeforeStart -Value ([System.Collections.Generic.List[int]]::new())
+            $StoppedBeforeStart.Add(1)
+            $Output = ((. $script:JobStateLoop 6>&1) | Out-String)
+            $Output | Should -Match 'stream-0\] job ended in state Failed'
+            $Output | Should -Not -Match 'stream-1\] job ended in state'
+        }
     }
 
     It 'Test-ThreadJobSupport reports thread jobs usable and leaves no job behind' {

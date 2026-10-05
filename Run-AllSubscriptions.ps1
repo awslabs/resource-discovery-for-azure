@@ -1534,7 +1534,8 @@ if ($ParallelStreams -le 1)
     finally
     {
         # The pool is shared by every subscription of the run, so it is released once, here, and not per subscription.
-        # A Ctrl+C in an interactive session would otherwise leave it open in that session.
+        # A Ctrl+C in an interactive session would otherwise leave an idle pool open in that session. A pool with a
+        # worker still busy is left alone and reported by Close-RdaMetricWorkerPool's warning.
         Write-Verbose ("Metric worker pool at the end of the sequential loop: {0}" -f (Close-RdaMetricWorkerPool))
     }
 
@@ -1663,7 +1664,8 @@ else
             finally
             {
                 # Only this one subscription uses the shared pool, so it is released as soon as it is done, and a
-                # Ctrl+C in an interactive session does not leave it open in that session.
+                # Ctrl+C in an interactive session does not leave an idle pool open in that session. A pool with a
+                # worker still busy is left alone and reported by Close-RdaMetricWorkerPool's warning.
                 Write-Verbose ("Metric worker pool after the single subscription: {0}" -f (Close-RdaMetricWorkerPool))
             }
         }
@@ -1903,14 +1905,20 @@ else
                 }
             }
 
+            # Streams stopped below because they had not started, by stream number.
+            $StoppedBeforeStart = [System.Collections.Generic.List[int]]::new()
+            # Seconds a queued stream may wait to start. Set here so a value left in the caller's scope cannot
+            # reach the wait; the tests set it after this line.
+            $StartWaitSeconds = 60
+
             if ($StreamIsolation -eq 'Runspace')
             {
                 # No snapshot to release in this mode. A thread job is NotStarted until its thread picks it up,
                 # which can be just after Start-ThreadJob returns, and the loop below watches only Running, so
                 # it would end at once; wait for every stream to have started first. A stream that is still queued
                 # when the wait ends is stopped and named: left queued it could start later, while the loop below
-                # has already ended and the wrapper is merging the stream state. $StartWaitSeconds is 60 unless the
-                # caller has set it (the tests shorten it).
+                # has already ended and the wrapper is merging the stream state. Its subscriptions are recorded as
+                # failed in the summary loop below, so -ResumeFailedOnly retries them.
                 $script:SnapshotReleased = $true
                 $StartWait = if ($StartWaitSeconds -gt 0) { $StartWaitSeconds } else { 60 }
                 $StartDeadline = [DateTime]::UtcNow.AddSeconds($StartWait)
@@ -1924,7 +1932,20 @@ else
                     if ($QueuedJob.State -eq 'NotStarted')
                     {
                         Stop-Job -Job $QueuedJob
-                        Write-Host ("[stream-{0}] ERROR: the stream did not start within {1} s and was stopped, so none of its subscriptions were inventoried" -f $StartIndex, $StartWait) -ForegroundColor Red
+                        $StoppedBeforeStart.Add($StartIndex)
+                        # Written like the summary of a worker that failed to start, so the summary loop below lists
+                        # the subscriptions by name, records them for -ResumeFailedOnly and ends the run with exit 2.
+                        $StopReason = ("stream did not start: not started within {0} s, so it was stopped" -f $StartWait)
+                        @{
+                            StreamId       = $StartIndex
+                            Tenant         = $TenantID
+                            Status         = 'failed-to-start'
+                            Reason         = $StopReason
+                            Completed      = @()
+                            Failed         = @(@($Slices[$StartIndex]) | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.Name; Reason = $StopReason } })
+                            ResourceCounts = @()
+                        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath @($StreamSummaries)[$StartIndex].SummaryPath -Encoding utf8
+                        Write-Host ("[stream-{0}] ERROR: the stream did not start within {1} s and was stopped, so none of its {2} subscription(s) were inventoried" -f $StartIndex, $StartWait, @($StreamSummaries)[$StartIndex].SubCount) -ForegroundColor Red
                     }
                 }
             }
@@ -1943,7 +1964,8 @@ else
             for ($StreamIndex = 0; $StreamIndex -lt @($Jobs).Count; $StreamIndex++)
             {
                 $StreamJob = @($Jobs)[$StreamIndex]
-                if ($StreamJob.State -ne 'Completed')
+                # A stream stopped because it never started was named where it was stopped.
+                if ($StreamJob.State -ne 'Completed' -and @($StoppedBeforeStart) -notcontains $StreamIndex)
                 {
                     Write-Host ("[stream-{0}] job ended in state {1}" -f $StreamIndex, $StreamJob.State) -ForegroundColor Yellow
                 }

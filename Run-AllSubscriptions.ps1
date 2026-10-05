@@ -1907,12 +1907,25 @@ else
             {
                 # No snapshot to release in this mode. A thread job is NotStarted until its thread picks it up,
                 # which can be just after Start-ThreadJob returns, and the loop below watches only Running, so
-                # it would end at once; wait for every stream to have started first (bounded, in case one never does).
+                # it would end at once; wait for every stream to have started first. A stream that is still queued
+                # when the wait ends is stopped and named: left queued it could start later, while the loop below
+                # has already ended and the wrapper is merging the stream state. $StartWaitSeconds is 60 unless the
+                # caller has set it (the tests shorten it).
                 $script:SnapshotReleased = $true
-                $StartDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                $StartWait = if ($StartWaitSeconds -gt 0) { $StartWaitSeconds } else { 60 }
+                $StartDeadline = [DateTime]::UtcNow.AddSeconds($StartWait)
                 while (@($Jobs | Where-Object { $_.State -eq 'NotStarted' }).Count -gt 0 -and [DateTime]::UtcNow -lt $StartDeadline)
                 {
                     Start-Sleep -Milliseconds 100
+                }
+                for ($StartIndex = 0; $StartIndex -lt @($Jobs).Count; $StartIndex++)
+                {
+                    $QueuedJob = @($Jobs)[$StartIndex]
+                    if ($QueuedJob.State -eq 'NotStarted')
+                    {
+                        Stop-Job -Job $QueuedJob
+                        Write-Host ("[stream-{0}] ERROR: the stream did not start within {1} s and was stopped, so none of its subscriptions were inventoried" -f $StartIndex, $StartWait) -ForegroundColor Red
+                    }
                 }
             }
 

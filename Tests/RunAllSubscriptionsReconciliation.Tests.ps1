@@ -3495,6 +3495,26 @@ function Close-RdaMetricWorkerPool { Set-Content -LiteralPath ($WorkerArgs.Probe
         finally { $Jobs | Remove-Job -Force }
     }
 
+    It 'Runspace: a stream that has not started when the start wait ends is stopped and named, so it cannot start while the wrapper reads state' {
+        # One thread at a time, so the second job stays NotStarted behind the first.
+        Set-Variable -Name StreamIsolation -Value 'Runspace'
+        Set-Variable -Name StartWaitSeconds -Value 2
+        $Jobs = @(
+            (Start-ThreadJob -ThrottleLimit 1 -ScriptBlock { Start-Sleep -Seconds 20 }),
+            (Start-ThreadJob -ThrottleLimit 1 -ScriptBlock { 'second' })
+        )
+        try
+        {
+            $Jobs[1].State | Should -Be 'NotStarted' -Because 'the test needs a stream that is still queued when the wait ends'
+            $Output = @(. $script:StartWaitBlock 6>&1)
+            $Jobs[1].State | Should -BeIn @('Stopped', 'Failed') -Because 'left queued it could still start later, while the wrapper is merging the stream state (Stop-Job ends a queued thread job as Failed)'
+            $Jobs[1].PSBeginTime | Should -BeNullOrEmpty -Because 'the stream must never have run'
+            $Jobs[0].State | Should -Be 'Running' -Because 'a stream that did start is left alone'
+            ($Output | Out-String) | Should -Match '\[stream-1\].*did not start' -Because 'the stream and the cause are named, not reported later as a summary file that is missing'
+        }
+        finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue }
+    }
+
     It 'Test-ThreadJobSupport reports thread jobs usable and leaves no job behind' {
         $Before = @(Get-Job).Count
         Test-ThreadJobSupport | Should -BeTrue

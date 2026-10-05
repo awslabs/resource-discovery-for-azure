@@ -150,6 +150,7 @@ CPU is user plus system time for the process and its children (`/usr/bin/time -l
   The thread-job throttle is process-wide and defaults to 5, so it is raised to the stream count; a stream over it would wait in `NotStarted`.
 - **No snapshot.** The streams use the process's own signed-in context, so the wrapper writes no context snapshot and no token cache reaches the disk.
 - **Start wait.** A thread job can still be `NotStarted` when `Start-ThreadJob` returns, and the wrapper's monitoring loop watches only `Running`, so it would end at once; the wrapper first waits (at most 60 seconds) for every stream to start.
+  A stream that is still queued when that wait ends is stopped and named in the console, so it cannot start later while the wrapper merges the stream state; it is then reported as a stream with no summary.
 - **Pool release.** Each stream's metrics worker pool lives in its runspace's `$Global:MetricCallPool`, so the thread job releases it with `Close-RdaMetricWorkerPool` when the stream ends; a stream process releases its pool by exiting.
 - **Worker.** With `-SharedProcess` the worker skips the three process-wide steps a stream process takes: moving the .NET process directory to the temp folder, disabling context autosave and importing the snapshot.
 - **Fallback.** If a thread job cannot be started, the wrapper falls back to the sequential path, as it does when `Start-Job` is blocked.

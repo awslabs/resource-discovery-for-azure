@@ -96,6 +96,16 @@ Describe 'Get-ParallelismForHost' {
         (Get-ParallelismForHost -VCpu 8 -AvailableGB 1.2 -StreamMemoryGB 2).Streams | Should -Be 1
     }
 
+    It 'reads a per-stream allowance too small to divide by as a very large memory budget, not an overflow' {
+        # 1e-9 passes the parameter's 0 to 1024 range, and the division is far past the int range.
+        { Get-ParallelismForHost -VCpu 8 -AvailableGB 20 -StreamMemoryGB 1e-9 } | Should -Not -Throw
+        $Available = Get-ParallelismForHost -VCpu 8 -AvailableGB 20 -StreamMemoryGB 1e-9
+        $Available.Streams | Should -Be 4
+        $Available.StreamsLimitedBy | Should -Be 'vCPU'
+        { Get-ParallelismForHost -VCpu 8 -RamGB 32 -AvailableGB 0 -StreamMemoryGB 1e-9 } | Should -Not -Throw
+        (Get-ParallelismForHost -VCpu 8 -RamGB 32 -AvailableGB 0 -StreamMemoryGB 1e-9).Streams | Should -Be 4
+    }
+
     It 'uses vCPU alone when no memory figure is known' {
         $R = Get-ParallelismForHost -VCpu 8
         $R.MemoryBasis | Should -Be 'none'

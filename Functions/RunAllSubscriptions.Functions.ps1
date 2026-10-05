@@ -344,12 +344,12 @@ function Get-ParallelismForHost
     if ($AvailableGB -gt 0)
     {
         $MemoryBasis = 'available'
-        $StreamsByMemory = [int][math]::Floor(($AvailableGB - 1) / $StreamMemoryGB)
+        $StreamsByMemory = [int][math]::Min([math]::Floor(($AvailableGB - 1) / $StreamMemoryGB), 1000000.0)
     }
     elseif ($RamGB -gt 0)
     {
         $MemoryBasis = 'total'
-        $StreamsByMemory = [int][math]::Floor(($RamGB - 2) / $StreamMemoryGB)
+        $StreamsByMemory = [int][math]::Min([math]::Floor(($RamGB - 2) / $StreamMemoryGB), 1000000.0)
     }
     if ($MemoryBasis -ne 'none')
     {

@@ -3718,6 +3718,70 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         ($AdmittedAt - $ReleasedAt[0]).TotalSeconds | Should -BeLessThan 0.5 -Because 'the sleep slice is a full second, which the stream must not sit through once the subscription has finished'
     }
 
+    It 'is admitted as alone, not on the longest wait, when the last other subscription finishes during the reading' {
+        # With no wait allowed the longest-wait rule is always due. Decided from the count taken before the reading,
+        # it would admit this stream as 'max-wait' and record an override, although nothing is in progress any more.
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 30 -MaxWaitSeconds 0
+        [void]$State.Holders.Add('other')
+        $ExitAdmission = Get-Command -Name Exit-StreamAdmission -CommandType Function
+        $Reader = { param([bool]$Full) & $ExitAdmission -State $State -Holder 'other'; 0.5 }.GetNewClosure()
+        $Logs = [System.Collections.Generic.List[object]]::new()
+        $LogBlock = { param([string]$Message, [string]$Color) $Logs.Add($Message) }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Holder 'sub-k' -Subscription 'Sub K (sub-k)' -FreeMemoryReader $Reader -Log $LogBlock
+        $Admission.Reason | Should -Be 'alone'
+        $State['LastOverride'] | Should -BeNullOrEmpty -Because 'no stream was let in anyway'
+        @($Logs | Where-Object { $_ -like 'WARNING*' }).Count | Should -Be 0 -Because 'a warning about waiting for memory would be false'
+    }
+
+    It 'runs the full collection without the lock as well, not only the first reading' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
+        [void]$State.Holders.Add('other')
+        $Lock = $State['Lock']
+        $Calls = [System.Collections.Generic.List[object]]::new()
+        $Reader = {
+            param([bool]$Full)
+            $Calls.Add([pscustomobject]@{ Full = $Full; Locked = [System.Threading.Monitor]::IsEntered($Lock) })
+            if ($Full) { 3.0 } else { 1.0 }
+        }.GetNewClosure()
+        $Admission = Enter-StreamAdmission -State $State -Holder 'sub-l' -Subscription 'Sub L (sub-l)' -FreeMemoryReader $Reader -Log { param([string]$Message, [string]$Color) }
+        $Admission.Reason | Should -Be 'memory'
+        @($Calls | ForEach-Object { $_.Full }) | Should -Be @($false, $true) -Because 'a gen-0 reading below the floor is followed by one full collection'
+        @($Calls | Where-Object { $_.Locked }).Count | Should -Be 0 -Because 'the full collection is the slow reading, so it is the one that must not hold the lock'
+    }
+
+    It 'leaves the queue and the lock when its stream is stopped while it reads free memory' {
+        $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 30 -MaxWaitSeconds 60
+        [void]$State.Holders.Add('other')
+        $Lock = $State['Lock']
+        $Reading = [System.Threading.ManualResetEventSlim]::new($false)
+        $Job = Start-ThreadJob -ScriptBlock {
+            param([string]$FunctionsPath, [hashtable]$State, [System.Threading.ManualResetEventSlim]$Reading)
+            . $FunctionsPath
+            $ReaderBlock = { param([bool]$Full) $Reading.Set(); Start-Sleep -Seconds 30; 3.0 }.GetNewClosure()
+            Enter-StreamAdmission -State $State -Holder 'sub-m' -Subscription 'Sub M (sub-m)' -FreeMemoryReader $ReaderBlock -Log { param([string]$Message, [string]$Color) }
+        } -ArgumentList $script:FunctionsPath, $State, $Reading
+        $Taken = $false
+        try
+        {
+            $Reading.Wait(30000) | Should -BeTrue
+            $State.Waiting.Count | Should -Be 1 -Because 'the stream stays queued while it reads'
+            Stop-Job -Job $Job
+            $null = Wait-Job -Job $Job -Timeout 30
+            $Job.State | Should -Be 'Stopped'
+            $State.Waiting.Count | Should -Be 0 -Because 'a token left at the head of the queue would hold every later stream'
+            @($State.Holders) | Should -Be @('other')
+            $Taken = [System.Threading.Monitor]::TryEnter($Lock, 1000)
+            $Taken | Should -BeTrue -Because 'a stopped stream must not leave the lock held'
+        }
+        finally
+        {
+            if ($Taken) { [System.Threading.Monitor]::Exit($Lock) }
+            $Job | Remove-Job -Force
+            $Reading.Dispose()
+        }
+    }
+
+
     It 'admits below the floor when no other subscription is in progress, without reading memory' {
         $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
         $Calls = [System.Collections.Generic.List[bool]]::new()

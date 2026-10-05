@@ -324,14 +324,16 @@ So `Get-GcFreeMemoryGB -Full` runs an aggressive collection, or a default one on
 
 ### Tests
 
-`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` has 28 tests for the check, and each runs the code:
+`Tests/RunAllSubscriptionsReconciliation.Tests.ps1` has tests for the check, and each runs the code:
 
 - `Enter-StreamAdmission` with an injected free-memory reader and log: it admits at once above the floor, admits below it when nothing else is in progress, waits and is admitted when memory recovers (one full collection before the first wait, gen-0 readings after), skips the full collection when one ran within the poll interval, is admitted after the longest wait with a warning, never waits with a floor of 0, and admits with a warning when the reading throws.
 - A release wakes the waiting stream at once: with a 30 s poll interval it was admitted within 0.5 s of the release.
 - The waiting line is written without the lock.
   A release that lands while it is being written still admits the stream at once, before its first 1 s sleep.
-- Free memory is read, including the full collection, without the lock, so a slow reading does not stall the streams that are releasing.
   A write that throws, or a stop of the stream's thread job during the write, still leaves the queue and the lock, so the stream behind it is admitted.
+- Free memory is read, including the full collection, without the lock, so a slow reading does not stall the streams that are releasing.
+  A subscription that finishes during the reading is seen before the longest-wait rule is applied, so the stream is admitted as alone and no override is recorded.
+  A stop of the stream's thread job during the reading leaves the queue and the lock.
   A caller that already holds the lock is refused, and its hold is left alone.
 - While the test holds the lock, a stream neither queues nor is admitted, and it is admitted once the lock is free.
 - Two thread jobs that always read memory below the floor, through 25 rounds that start together: one is admitted at a time, and the other only after the first releases.

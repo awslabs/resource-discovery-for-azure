@@ -672,8 +672,9 @@ function Enter-StreamAdmission
                     $LastFull = $State['LastFullCollection']
                     $FullRan = $false
                     # The reading, and the full collection it may run, can take seconds, and every stream that is
-                    # releasing needs this lock to do so. Only the head of the queue reads, so nothing else is
-                    # admitted while the lock is let go. The outer finally takes it back if a stop lands in between.
+                    # releasing needs this lock to do so. Nothing else is admitted while the lock is let go, because
+                    # only the head of the queue may be admitted and only its own thread removes its token. The
+                    # finally block takes the lock back on every path, including a stop.
                     [System.Threading.Monitor]::Exit($Lock)
                     try
                     {
@@ -697,7 +698,10 @@ function Enter-StreamAdmission
                         $ReadError = $_.Exception.Message
                         $Reason = 'unreadable'
                     }
-                    [System.Threading.Monitor]::Enter($Lock)
+                    finally
+                    {
+                        [System.Threading.Monitor]::Enter($Lock)
+                    }
                     if ($FullRan)
                     {
                         $State['LastFullCollection'] = [System.Diagnostics.Stopwatch]::GetTimestamp()
@@ -705,6 +709,13 @@ function Enter-StreamAdmission
                     if ($Reason -ne 'unreadable')
                     {
                         $State['LastFreeGB'] = $FreeGB
+                    }
+                    if (-not $Reason -and $Holders.Count -lt $InProgress)
+                    {
+                        # A subscription finished while the lock was let go for the reading, and its wake-up found no
+                        # one asleep. Look again now, before the longest-wait decision below works from a count that
+                        # is out of date, and rather than after the next slice.
+                        continue
                     }
                 }
                 if (-not $Reason -and $Watch.Elapsed.TotalSeconds -ge $MaxWaitSeconds)
@@ -742,12 +753,6 @@ function Enter-StreamAdmission
                     [System.Threading.Monitor]::Exit($Lock)
                     & $Log $WaitingLine 'Yellow'
                     [System.Threading.Monitor]::Enter($Lock)
-                    continue
-                }
-                if ($Holders.Count -lt $InProgress)
-                {
-                    # A subscription finished while the lock was let go for the reading, and its wake-up found no
-                    # one asleep: look again now rather than after the next slice.
                     continue
                 }
                 $null = [System.Threading.Monitor]::Wait($Lock, $SliceMs)

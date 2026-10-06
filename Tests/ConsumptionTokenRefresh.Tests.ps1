@@ -473,6 +473,33 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         $Current.Tenant.Id | Should -Be $HomeTenantId -Because 'the signed-in context must not be modified'
     }
 
+    It 'keeps the signed-in tenant failure in the error when the lookup without a tenant also fails' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        # The lookup without a tenant reports what that lookup found, which can be a bare "not found" even
+        # when the signed-in tenant actually failed on a token: per-tenant token failures come out of that
+        # lookup as warnings, which -WarningAction SilentlyContinue hides. The caller logs one message, so
+        # that message has to carry both failures or the real cause is lost.
+        Import-Module Az.Accounts -ErrorAction Stop
+        $HomeTenantId = [guid]::NewGuid().ToString()
+        $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+        $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+        $Current.Tenant.Id = $HomeTenantId
+        $Current.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $Current.Subscription.Id = [guid]::NewGuid().ToString()
+        Mock Get-AzContext { $Current }
+        Mock Get-AzSubscription {
+            if ($TenantId) { throw 'AADSTS50076: the refresh token for the signed-in tenant has expired' }
+            throw 'SubscriptionNotFound: the subscription was not found'
+        }
+        $Thrown = $null
+        try { $null = Get-RdaSubscriptionProfile -SubscriptionId ([guid]::NewGuid().ToString()) } catch { $Thrown = $_ }
+        $Thrown | Should -Not -BeNullOrEmpty -Because 'the caller keeps its skip path'
+        $Thrown.Exception.Message | Should -BeLike '*SubscriptionNotFound: the subscription was not found*' -Because 'the second lookup is the real answer'
+        $Thrown.Exception.Message | Should -BeLike '*AADSTS50076*' -Because 'the first failure is what names the real cause'
+        $Thrown.Exception.Message | Should -BeLike ('*tenant {0}*' -f $HomeTenantId) -Because 'the operator needs to know which tenant that first lookup used'
+        $Thrown.Exception.InnerException | Should -Not -BeNullOrEmpty -Because 'the original failure is kept for anything that inspects the exception rather than its text'
+    }
+
     It 'throws when there is no signed-in context, so the phase takes its skip path' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
         Import-Module Az.Accounts -ErrorAction Stop
         Mock Get-AzContext { $null }

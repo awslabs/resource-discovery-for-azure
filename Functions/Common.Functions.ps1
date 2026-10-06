@@ -579,8 +579,8 @@ function Close-RdaMetricWorkerPool
     # finished on a pool that reports Closed. A pool that fails that proof is left alone rather than
     # torn down under a running call. A pool in state Broken has no running call to protect and cannot be
     # closed, so it is disposed without a close, which is also what removes its cleanup timer. Returns what
-    # happened, for the caller to log; a pool that is left open is also reported as a warning, because it
-    # then lives until the process ends and a verbose line at the end of the run would never show it.
+    # happened, for the caller to log; a pool that is not released is also reported as a warning, because it
+    # then lives in memory until the process ends and a verbose line at the end of the run would never show it.
     param([int]$GraceSeconds = 10)
 
     $Pool = $Global:MetricCallPool
@@ -591,11 +591,13 @@ function Close-RdaMetricWorkerPool
     }
 
     $Result = $null
+    $Released = $false
     try
     {
         if ($Pool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
         {
             $Pool.Dispose()
+            $Released = $true
             $Result = 'released: pool state Broken, disposed without a close'
         }
         elseif ($Pool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
@@ -612,6 +614,7 @@ function Close-RdaMetricWorkerPool
             if ($CloseHandle.AsyncWaitHandle.WaitOne([math]::Max(0, $GraceSeconds) * 1000) -and $Pool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed)
             {
                 $Pool.Dispose()
+                $Released = $true
                 $Result = 'released'
             }
             else
@@ -622,12 +625,25 @@ function Close-RdaMetricWorkerPool
     }
     catch
     {
+        $Released = $false
         $Result = ('not released: {0}' -f $_.Exception.Message)
     }
 
-    if ($Result -like 'not released*')
+    if (-not $Released)
     {
-        Write-Warning ('Metric worker pool {0}. It stays open until this PowerShell process ends.' -f $Result)
+        # Whether to warn follows the flag each branch set, not a prefix match on the result text, so
+        # rewording a result cannot silence the warning. The result can already end in a period (an
+        # exception message), so the trailing one is trimmed rather than printed as "..".
+        # Write-Warning itself is guarded: with a caller $WarningPreference of Stop (or Inquire with no
+        # console) it throws, and every caller runs this from a finally block or from Exit-Wrapper
+        # ahead of Stop-Transcript, where a throw would skip the rest of the cleanup. The pool decision
+        # is already made and the caller still gets its result, so a report that cannot be delivered is
+        # dropped rather than turned into a terminating error.
+        try
+        {
+            Write-Warning ('Metric worker pool {0}. It stays in memory until this PowerShell process ends.' -f ([string]$Result).TrimEnd('.'))
+        }
+        catch { }
     }
     return $Result
 }
@@ -834,19 +850,38 @@ function Get-RdaSubscriptionProfile
 
     # The signed-in tenant first, which is the common case and does not reach into other tenants. A subscription
     # that lives in another tenant the identity can read is not found there, so it is looked up again without a
-    # tenant. A failure of that second lookup is the real answer and is left to throw.
+    # tenant. A failure of that second lookup is the real answer and is what the caller sees, with the
+    # first failure's message carried along in the text and the original exception kept as its inner one.
     $Subscription = $null
+    $TenantLookupError = $null
     try
     {
         $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -TenantId $Current.Tenant.Id -DefaultProfile $null -ErrorAction Stop -WarningAction SilentlyContinue
     }
     catch
     {
+        # Kept for the diagnostics. A lookup without a tenant reports what that lookup found, which can be
+        # a bare "not found" even when the signed-in tenant failed on a token instead; per-tenant token
+        # failures come out of that lookup as warnings, which -WarningAction SilentlyContinue hides.
+        # No caller reads this text (every one of them only logs it), so it only has to tell the operator
+        # which failure came first.
+        $TenantLookupError = [string]$_.Exception.Message
         $Subscription = $null
     }
     if ($null -eq $Subscription)
     {
-        $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -DefaultProfile $null -ErrorAction Stop -WarningAction SilentlyContinue
+        try
+        {
+            $Subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -DefaultProfile $null -ErrorAction Stop -WarningAction SilentlyContinue
+        }
+        catch
+        {
+            if ([string]::IsNullOrWhiteSpace($TenantLookupError))
+            {
+                throw
+            }
+            throw [System.Exception]::new(('{0} (the lookup in tenant {1} had already failed with: {2})' -f $_.Exception.Message, $Current.Tenant.Id, $TenantLookupError), $_.Exception)
+        }
     }
     if ($null -eq $Subscription)
     {

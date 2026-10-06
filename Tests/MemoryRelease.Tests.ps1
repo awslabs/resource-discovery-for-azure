@@ -665,10 +665,14 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
         [object]::ReferenceEquals($Global:MetricCallPool, $Pool) | Should -BeTrue
         @($Result.Diag | Where-Object { $_ -like 'Metric worker pool kept open for the next subscription*' }).Count | Should -Be 1
 
-        Close-RdaMetricWorkerPool | Should -Be 'released'
+        $ReleaseOutput = @(Close-RdaMetricWorkerPool 3>&1)
+        @($ReleaseOutput | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Count | Should -Be 0 -Because 'a pool that was released holds nothing after the run, so there is nothing to report'
+        @($ReleaseOutput | Where-Object { $_ -is [string] }) | Should -Be @('released')
         $Pool.RunspacePoolStateInfo.State | Should -Be 'Closed'
         $Global:MetricCallPool | Should -BeNullOrEmpty
-        Close-RdaMetricWorkerPool | Should -Be 'none'
+        $SecondOutput = @(Close-RdaMetricWorkerPool 3>&1)
+        @($SecondOutput | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Count | Should -Be 0
+        @($SecondOutput | Where-Object { $_ -is [string] }) | Should -Be @('none')
     }
 
     It 'retires a pool whose worker outlasts the grace window instead of handing it to the next subscription' {
@@ -711,7 +715,7 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Started = [System.Diagnostics.Stopwatch]::StartNew()
             while ($Call.InvocationStateInfo.State -ne 'Running' -and $Started.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
             $Timer = [System.Diagnostics.Stopwatch]::StartNew()
-            Close-RdaMetricWorkerPool | Should -Be 'not released: a worker is still busy'
+            Close-RdaMetricWorkerPool 3>$null | Should -Be 'not released: a worker is still busy'
             $Timer.Elapsed.TotalSeconds | Should -BeLessThan 1 -Because 'it never waits on a running call'
             $Pool.RunspacePoolStateInfo.State | Should -Be 'Opened'
         }
@@ -777,10 +781,12 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             @($Result.Diag | Where-Object { $_ -like 'WARNING: metric worker pool NOT released*' }).Count | Should -Be 1
         }
 
-        It 'Close-RdaMetricWorkerPool disposes a broken pool and says so' {
+        It 'Close-RdaMetricWorkerPool disposes a broken pool, says so, and stays silent' {
             $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
             $Global:MetricCallPool = $Pool
-            Close-RdaMetricWorkerPool | Should -BeLike 'released*'
+            $Output = @(Close-RdaMetricWorkerPool 3>&1)
+            @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Count | Should -Be 0 -Because 'a broken pool that was disposed is released, so nothing lives on to report'
+            ($Output | Where-Object { $_ -is [string] }) | Should -BeLike 'released*'
             $Pool.DisposeCount | Should -Be 1
             $Global:MetricCallPool | Should -BeNullOrEmpty
         }
@@ -796,11 +802,69 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Pool.DisposeCount | Should -Be 0
         }
 
-        It 'Close-RdaMetricWorkerPool stays silent when there is no pool or it was released' {
+        It 'Close-RdaMetricWorkerPool stays silent when there is no pool' {
+            # The released and Broken paths are pinned where they are exercised with a pool: 'keeps an idle
+            # pool open at phase end ...' and 'disposes a broken pool, says so, and stays silent'.
             $Global:MetricCallPool = $null
             $Output = @(Close-RdaMetricWorkerPool 3>&1)
             @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Count | Should -Be 0
             $Output | Should -Be @('none')
+        }
+
+        It 'Close-RdaMetricWorkerPool decides whether to warn from a flag, not from the text of its result' {
+            # The result text is what the caller logs and what three other tests pin by value. If the
+            # warning followed a prefix of that text, rewording any result would silence the report.
+            $CommonPath = Join-Path $script:RepoRoot 'Functions/Common.Functions.ps1'
+            $Ast = [System.Management.Automation.Language.Parser]::ParseFile($CommonPath, [ref]$null, [ref]$null)
+            $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Close-RdaMetricWorkerPool' }, $true))
+            $Fn.Count | Should -Be 1
+            $Warns = @($Fn[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Write-Warning' }, $true))
+            $Warns.Count | Should -Be 1 -Because 'one report, on one path'
+            $Guard = $null
+            $Node = $Warns[0].Parent
+            while ($null -ne $Node -and $Node -ne $Fn[0])
+            {
+                if ($Node -is [System.Management.Automation.Language.IfStatementAst])
+                {
+                    $Guard = $Node
+                    break
+                }
+                $Node = $Node.Parent
+            }
+            $Guard | Should -Not -BeNullOrEmpty -Because 'only a pool that was not released is reported'
+            $Guard.Clauses[0].Item1.Extent.Text | Should -Be '-not $Released'
+            $Fn[0].Extent.Text | Should -Not -Match 'not released\*' -Because 'no prefix match on the result text may decide whether to warn'
+        }
+
+        It 'Close-RdaMetricWorkerPool still returns its result when the caller has turned warnings into errors' {
+            # Every caller runs it from a finally block or from Exit-Wrapper ahead of Stop-Transcript, so a
+            # throw out of the report would skip the rest of the cleanup. The pool decision is already made
+            # by then and the caller still needs the result it logs.
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Opened) 1 2
+            $Global:MetricCallPool = $Pool
+            $WarningPreference = 'Stop'
+            $Thrown = $null
+            $StopResult = $null
+            try { $StopResult = Close-RdaMetricWorkerPool 3>$null } catch { $Thrown = $_ }
+            $Thrown | Should -BeNullOrEmpty -Because 'a report that cannot be delivered is dropped, not turned into a terminating error'
+            $StopResult | Should -Be 'not released: a worker is still busy'
+            $Pool.DisposeCount | Should -Be 0
+        }
+
+        It 'Close-RdaMetricWorkerPool says the pool stays in memory, and never doubles the period of an error it quotes' {
+            # A close handle that comes back without a wait handle is the realistic way the catch ends up
+            # quoting a message that already ends in a period; a throw from a stand-in method would be
+            # wrapped by PowerShell and end in a quote instead.
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
+            Add-Member -InputObject $Pool -MemberType ScriptMethod -Name BeginClose -Force -Value { param($Callback, $AsyncState) [pscustomobject]@{ IsCompleted = $true; AsyncWaitHandle = $null } }
+            $Global:MetricCallPool = $Pool
+            $Output = @(Close-RdaMetricWorkerPool 3>&1)
+            $Warnings = @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+            $Warnings.Count | Should -Be 1
+            $Warnings[0].Message | Should -Be 'Metric worker pool not released: You cannot call a method on a null-valued expression. It stays in memory until this PowerShell process ends.' -Because 'the pool may be Closed or Broken rather than open, and what the operator needs to know is that it is still held'
+            $Warnings[0].Message | Should -Not -Match '\.\.' -Because 'a quoted error message that ends in a period must not produce ".."'
+            @($Output | Where-Object { $_ -is [string] }) | Should -Be @('not released: You cannot call a method on a null-valued expression.') -Because 'the result the caller logs is unchanged'
+            $Pool.DisposeCount | Should -Be 0 -Because 'a pool whose close never finished is not disposed'
         }
     }
 

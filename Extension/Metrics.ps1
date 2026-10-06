@@ -895,6 +895,7 @@ if ($Task -eq 'Processing')
     # while the per-call clock is already running, so a call that never reached Azure is recorded
     # as a timeout and still counted as an API call issued.
     $MetricCallPool = $null
+    $MetricPerCallPoolFailed = $false
     $MetricAbandonedCalls = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
     if ($MetricCount -gt 0)
     {
@@ -961,6 +962,7 @@ if ($Task -eq 'Processing')
                 # Nothing in this phase repairs the pool, so the per-call loop is skipped rather than run
                 # against a pool that is gone. The counts below then report what was really collected.
                 $MetricCount = 0
+                $MetricPerCallPoolFailed = $true
             }
         }
     }
@@ -1000,7 +1002,21 @@ if ($Task -eq 'Processing')
     $MetricAbandonedDrained = 0
 
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, throttle retries={5} (honours Retry-After up to {6}s), lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays), $MetricMaxThrottleRetries, $MetricMaxRetryAfterSeconds)
+    # Only a run that has something to collect per call announces a collection. A pool that could not be
+    # opened sets $MetricCount to 0, and "Starting metrics collection: 0 metric definition(s)" would read
+    # as a clean no-op rather than as the skip the ERROR line above reports.
+    if ($MetricCount -gt 0)
+    {
+        Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, throttle retries={5} (honours Retry-After up to {6}s), lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays), $MetricMaxThrottleRetries, $MetricMaxRetryAfterSeconds)
+    }
+    elseif ($MetricPerCallPoolFailed)
+    {
+        Write-MetricsDiag "Per-call metrics collection skipped: the metric worker pool could not be opened, as the ERROR above reports."
+    }
+    else
+    {
+        Write-MetricsDiag "Per-call metrics collection has nothing to do: no metric definition is left on the per-call path."
+    }
 
     $RangeBatch = [math]::Min($MetricCount , 250)
     $RangeIdx = 1

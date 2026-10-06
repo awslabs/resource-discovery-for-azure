@@ -49,6 +49,7 @@ BeforeAll {
     $script:CallProfileFnAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricCallProfile' }, $true) | Select-Object -First 1
     if ($script:CallProfileFnAst) { . ([scriptblock]::Create($script:CallProfileFnAst.Extent.Text)) }
     $script:SubProfileBuild = Get-PhaseBlock -Root $Ast -Condition '$MetricCount -gt 0' -Contains @('$MetricSubProfiles[', 'Get-RdaSubscriptionProfile')
+    $script:PhaseStartLine = Get-PhaseBlock -Root $Ast -Condition '$MetricCount -gt 0' -Contains @('Starting metrics collection', 'Per-call metrics collection')
 
     # Production defaults, read from the source so the test tracks them.
     $script:MaxRetries = [int]([regex]::Match($script:MetricsSrc, '(?m)^\s*\$MetricMaxRetries\s*=\s*(\d+)').Groups[1].Value)
@@ -1072,5 +1073,54 @@ Describe 'The per-call metric path queries each subscription through its own ten
         $script:MetricsSrc.IndexOf("`$CallProfile = Get-RdaMetricCallProfile -ResourceId `$_.Id -SubProfiles `$SubProfiles -PhaseProfile `$AzContext") | Should -BeGreaterThan -1 -Because 'the subscription comes from the definition being queried, not from the phase'
         $script:MetricsSrc.IndexOf("`$MetricArgs['DefaultProfile'] = `$CallProfile") | Should -BeGreaterThan -1
         $script:MetricsSrc.IndexOf("`$MetricArgs['DefaultProfile'] = `$AzContext") | Should -Be -1 -Because 'the phase context is now only the fallback, never the profile every call is given'
+    }
+}
+
+Describe 'The metrics phase says what it is doing when nothing is collected per call' {
+    # A pool that cannot be opened sets the count to 0, and the old unconditional line then read
+    # 'Starting metrics collection: 0 metric definition(s)', which looks like a clean no-op.
+
+    BeforeAll {
+        $script:RunPhaseStart = {
+            param([int]$Count, [bool]$PoolFailed)
+            $Diag = [System.Collections.Generic.List[string]]::new()
+            $Runner = [scriptblock]::Create(((@(
+                            'param($Count, $PoolFailed, $Diag)'
+                            'function Write-MetricsDiag { param($Message) $Diag.Add([string]$Message) }'
+                            '$MetricCount = $Count'
+                            '$MetricPerCallPoolFailed = $PoolFailed'
+                            '$ConcurrencyLimit = 4'
+                            '$MetricTimeoutSeconds = 120'
+                            '$MetricMaxRetries = 3'
+                            '$MetricsLookbackPeriodDays = -30'
+                            '$MetricMaxThrottleRetries = 6'
+                            '$MetricMaxRetryAfterSeconds = 120'
+                            $script:PhaseStartLine.Extent.Text
+                        ) -join [Environment]::NewLine)))
+            & $Runner $Count $PoolFailed $Diag
+            @($Diag)
+        }
+    }
+
+    It 'announces a collection only when there is something to collect per call' {
+        $script:PhaseStartLine | Should -Not -BeNullOrEmpty -Because 'the phase-start line is chosen by what actually happens'
+        $Diag = @(& $script:RunPhaseStart 3 $false)
+        $Diag.Count | Should -Be 1
+        $Diag[0] | Should -BeLike 'Starting metrics collection: 3 metric definition(s)*'
+    }
+
+    It 'says the per-call collection was skipped when the worker pool could not be opened' {
+        $script:PhaseStartLine | Should -Not -BeNullOrEmpty
+        $Diag = @(& $script:RunPhaseStart 0 $true)
+        $Diag.Count | Should -Be 1
+        $Diag[0] | Should -Be 'Per-call metrics collection skipped: the metric worker pool could not be opened, as the ERROR above reports.'
+        $Diag[0] | Should -Not -BeLike '*Starting metrics collection*' -Because 'nothing started'
+    }
+
+    It 'says there is nothing to do when every definition was already batched' {
+        $script:PhaseStartLine | Should -Not -BeNullOrEmpty
+        $Diag = @(& $script:RunPhaseStart 0 $false)
+        $Diag.Count | Should -Be 1
+        $Diag[0] | Should -Be 'Per-call metrics collection has nothing to do: no metric definition is left on the per-call path.'
     }
 }

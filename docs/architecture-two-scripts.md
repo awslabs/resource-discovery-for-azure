@@ -365,6 +365,9 @@ These lines appear in the local `DebugLog_*.log`, after the `[Metrics]` prefix:
 | `WARNING: metric worker pool NOT released after Ns - idle=..., abandoned calls still running=..., pool state=...` | A worker was still busy, so the pool was left in memory rather than risk a hang. |
 | `ERROR: Metrics: the metric worker pool could not be opened (...); N per-call metric definition(s) were not collected for this subscription.` | The pool could not start its runspaces, usually because the host is out of memory. The pool is disposed, the per-call metric collection of this subscription is skipped, and the subscription is listed as metrics-incomplete in the wrapper's summary. The same line is written to the run log at `Error` severity. |
 | `WARNING: could not convert the Az context for the metric workers (...)` | The one-time conversion failed, so calls fall back to converting the raw context themselves. |
+| `WARNING: metrics batch group skipped for subscription S region R (...)` | One subscription and region of the batch could not be prepared or queried, usually a token or a region problem. Its definitions fall back to the per-call path; the other groups are unaffected. |
+| `WARNING: metrics batch chunk skipped for subscription S region R, resource A-B of N (...)` | One getBatch POST, covering at most 50 resources, failed. Only those resources fall back to the per-call path; the records the other chunks returned are kept. |
+| `WARNING: metrics batch fast-path failed for N of M SERVICE metric def(s) (...)` | How many definitions of that service ended up on the per-call path, with the batch error and a remediation hint. |
 
 With `-Verbose`, the wrapper also prints `Metric worker pool at wrapper exit: ...` with the result of the final release.
 

@@ -192,6 +192,10 @@ if ($Task -eq 'Processing')
         if (-not $Defs -or @($Defs).Count -eq 0) { return $Results.ToArray() }
 
         $Groups = $Defs | Group-Object -Property { (([string]$_.Id) -split '/')[2] + '|' + $_.Location + '|' + $_.Interval + '|' + $_.StartTime + '|' + $_.EndTime }
+        # One profile per subscription, reused by every group and chunk of it: the lookup costs two
+        # Get-AzSubscription calls, and the groups are keyed on region and time window as well, so one
+        # subscription usually has several.
+        $SubProfiles = @{}
         foreach ($Group in $Groups)
         {
             # One failing group, or one failing chunk inside it, used to throw out of this function, and
@@ -211,6 +215,18 @@ if ($Task -eq 'Processing')
 
             try
             {
+                # The token has to be minted for the subscription's own tenant. Without a profile
+                # Get-AzAccessToken mints it for the process's current tenant, and a subscription homed
+                # in another tenant - a standalone run with no -TenantID - then sent getBatch a token the
+                # metrics data plane rejects. Get-RdaSubscriptionProfile returns the scoped context
+                # container that -DefaultProfile takes, with the subscription's tenant already swapped in,
+                # and throws when the subscription is not visible, which the group catch below reports.
+                if (-not $SubProfiles.ContainsKey($SubscriptionId))
+                {
+                    $SubProfiles[$SubscriptionId] = Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId
+                }
+                $SubProfile = $SubProfiles[$SubscriptionId]
+
                 $Endpoint = "https://$Region.metrics.monitor.azure.com"
                 $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
                 $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLowerInvariant() })
@@ -218,7 +234,7 @@ if ($Task -eq 'Processing')
                 $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
                 $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
 
-                $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
+                $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -DefaultProfile $SubProfile -WarningAction SilentlyContinue
                 $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
 
                 $NamesParam = (($MetricNames | ForEach-Object { [uri]::EscapeDataString($_) }) -join ',')
@@ -233,7 +249,7 @@ if ($Task -eq 'Processing')
                     {
                         if ($null -ne $TokenObj.ExpiresOn -and $TokenObj.ExpiresOn -lt [DateTimeOffset]::UtcNow.AddMinutes(5))
                         {
-                            $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
+                            $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -DefaultProfile $SubProfile -WarningAction SilentlyContinue
                             $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
                         }
 

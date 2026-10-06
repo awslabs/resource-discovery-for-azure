@@ -723,9 +723,17 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         function New-RdaMetricObject { param($Def, $MetricResult) [pscustomobject]@{ ID = $Def.Id; Metric = $Def.MetricName } }
         function Get-AzAccessToken
         {
-            param($ResourceUrl, $WarningAction)
+            param($ResourceUrl, $DefaultProfile, $WarningAction)
+            $script:BatchTokens.Add([string]$DefaultProfile)
             if ($script:BatchTokenFails) { throw 'the token could not be minted' }
-            [pscustomobject]@{ Token = 'token'; ExpiresOn = [DateTimeOffset]::UtcNow.AddHours(1) }
+            [pscustomobject]@{ Token = 'token'; ExpiresOn = [DateTimeOffset]::UtcNow.AddMinutes($script:BatchTokenMinutes) }
+        }
+        function Get-RdaSubscriptionProfile
+        {
+            param([string]$SubscriptionId)
+            $script:BatchProfileLookups.Add([string]$SubscriptionId)
+            if ($SubscriptionId -eq 'sub-broken') { throw ('subscription {0} is not visible to the signed-in identity' -f $SubscriptionId) }
+            ('profile-for-{0}' -f $SubscriptionId)
         }
 
         function New-BatchDef
@@ -744,6 +752,9 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         $script:BatchPosts = [System.Collections.Generic.List[string]]::new()
         $script:BatchFailOn = @()
         $script:BatchTokenFails = $false
+        $script:BatchTokens = [System.Collections.Generic.List[string]]::new()
+        $script:BatchProfileLookups = [System.Collections.Generic.List[string]]::new()
+        $script:BatchTokenMinutes = 60
         $script:MetricsBatchHttpCalls = 0
         $script:MetricsBatchLastError = $null
         Mock Invoke-RestMethod {
@@ -798,6 +809,51 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
         $Records.Count | Should -Be 0
         @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-a region *(the token could not be minted)*' }).Count | Should -Be 2 -Because 'each group reports its own failure instead of one throw ending the function'
+    }
+
+    It 'mints the token through the profile of the subscription the resources live in' {
+        $Defs = @((New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1), (New-BatchDef -Sub 'sub-b' -Region 'westeurope' -Index 2))
+        $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
+        @($script:BatchTokens | Sort-Object) | Should -Be @('profile-for-sub-a', 'profile-for-sub-b') -Because 'without a profile the token is minted for the tenant the process happens to be signed in to, and the metrics data plane rejects it for a subscription homed elsewhere'
+    }
+
+    It 'builds one profile per subscription, not one per group or chunk' {
+        $Defs = @(
+            (New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1)
+            (New-BatchDef -Sub 'sub-a' -Region 'eastus' -Index 2)
+            (New-BatchDef -Sub 'sub-a' -Region 'northeurope' -Index 3)
+            (New-BatchDef -Sub 'sub-b' -Region 'westeurope' -Index 4))
+        $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
+        @($script:BatchProfileLookups | Sort-Object) | Should -Be @('sub-a', 'sub-b') -Because 'the lookup costs two Get-AzSubscription calls, and sub-a has three groups'
+        $script:BatchTokens.Count | Should -Be 4 -Because 'the profile is cached, the token is still minted per group'
+    }
+
+    It 'refreshes an expiring token through the same subscription profile' {
+        $Defs = @(1..60 | ForEach-Object { New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index $_ })
+        $script:BatchTokenMinutes = 1
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        $Records.Count | Should -Be 60
+        $script:BatchTokens.Count | Should -Be 3 -Because 'the group token plus one refresh at each of the two chunks'
+        @($script:BatchTokens | Select-Object -Unique) | Should -Be @('profile-for-sub-a') -Because 'a refresh without the profile would swap in a token for the process tenant halfway through'
+    }
+
+    It 'skips only the groups of a subscription whose profile cannot be built' {
+        $Defs = @(
+            (New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1)
+            (New-BatchDef -Sub 'sub-broken' -Region 'westeurope' -Index 2)
+            (New-BatchDef -Sub 'sub-broken' -Region 'eastus' -Index 3))
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        @($Records | ForEach-Object { $_.ID }) | Should -Be @($Defs[0].Id)
+        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-broken*is not visible*' }).Count | Should -Be 2
+        @($script:BatchTokens) | Should -Be @('profile-for-sub-a') -Because 'no token is minted for a subscription whose profile could not be built'
+    }
+
+    It 'passes the profile through the parameter the installed Az.Accounts really has' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        Import-Module Az.Accounts -ErrorAction Stop
+        $Real = Get-Command Get-AzAccessToken -Module Az.Accounts
+        $Real.Parameters.Keys | Should -Contain 'DefaultProfile'
+        $Real.Parameters['DefaultProfile'].ParameterType.FullName | Should -Be 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -Because 'Get-RdaSubscriptionProfile returns exactly that type, with the subscription tenant already swapped in'
+        @($Real.ParameterSets | Where-Object { $_.Name -eq 'ResourceUrl' } | ForEach-Object { $_.Parameters.Name }) | Should -Contain 'DefaultProfile' -Because 'the batch path calls it with -ResourceUrl'
     }
 }
 

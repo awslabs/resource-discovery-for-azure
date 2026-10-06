@@ -825,10 +825,54 @@ if ($Task -eq 'Processing')
         {
             $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
             [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
-            $MetricCallPool.Open()
-            if ($ReuseWorkerPool)
+            # Open() is the only step here that can fail, and the pool it leaves behind is Broken: it has
+            # already registered its process-wide cleanup timer, so it has to be disposed, and it can serve
+            # no call, so it is never stored for the next subscription. Without this the failure either
+            # throws out of the phase under -ErrorAction Stop and leaks that pool, or is swallowed under the
+            # default preference and every worker then fails on its own at BeginInvoke. Only the per-call
+            # collection of this subscription is given up: the batch records already written and the rest of
+            # the inventory are untouched, and the subscription is named in the wrapper's run summary.
+            try
             {
-                $Global:MetricCallPool = $MetricCallPool
+                $MetricCallPool.Open()
+                if ($ReuseWorkerPool)
+                {
+                    $Global:MetricCallPool = $MetricCallPool
+                }
+            }
+            catch
+            {
+                $PoolOpenError = $_.Exception.Message
+                try
+                {
+                    $MetricCallPool.Dispose()
+                }
+                catch
+                {
+                    Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
+                }
+                $MetricCallPool = $null
+                $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected for this subscription.' -f $PoolOpenError, $MetricCount)
+                Write-MetricsDiag ('ERROR: ' + $PoolSkipMsg + ' The rest of the inventory continues.')
+                Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. Re-run the metrics phase for this subscription once the host can start worker runspaces again.') -Severity 'Error'
+                if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+                $PoolFailedSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
+                if ($PoolFailedSubIds.Count -eq 0)
+                {
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = $PoolSkipMsg }
+                }
+                else
+                {
+                    foreach ($PoolFailedSubId in $PoolFailedSubIds)
+                    {
+                        $PoolFailedSub = $SubLookup[$PoolFailedSubId]
+                        $PoolFailedSubName = if ($null -ne $PoolFailedSub -and ![string]::IsNullOrEmpty($PoolFailedSub.Name)) { $PoolFailedSub.Name } else { '(subscription)' }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $PoolFailedSubName; Id = $PoolFailedSubId; Message = $PoolSkipMsg }
+                    }
+                }
+                # Nothing in this phase repairs the pool, so the per-call loop is skipped rather than run
+                # against a pool that is gone. The counts below then report what was really collected.
+                $MetricCount = 0
             }
         }
     }
@@ -1452,10 +1496,11 @@ if ($Task -eq 'Processing')
                     {
                         $PoolClosed = $PoolCloseHandle.AsyncWaitHandle.WaitOne($PoolCloseRemainingMs) -and $MetricCallPool.RunspacePoolStateInfo.State -eq [System.Management.Automation.Runspaces.RunspacePoolState]::Closed
                     }
-                    elseif ($PoolBroken)
+                    elseif ($PoolBroken -and $MetricAbandonedRunning -eq 0)
                     {
                         # Same rule as Close-RdaMetricWorkerPool: a Broken pool has no worker left to protect
-                        # and cannot be closed, so it goes straight to Dispose.
+                        # and cannot be closed, so it goes straight to Dispose. The abandoned count is still
+                        # checked here rather than assumed, so the code enforces what the comment claims.
                         $PoolClosed = $true
                     }
 

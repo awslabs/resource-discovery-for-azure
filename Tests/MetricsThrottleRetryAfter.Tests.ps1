@@ -420,21 +420,34 @@ Describe 'Pool lifecycle - released on every exit, drained per batch, errors sur
         $Logged | Should -Not -Contain 'Write-Verbose' -Because 'Write-Verbose is discarded at the default preference, losing the only trace of a leaked pool'
     }
 
-    It 'still uses BeginClose, never Close, and disposes the pool only once every worker has ended, or the pool is broken and has none' {
+    It 'still uses BeginClose, never Close, and disposes the pool only once every worker has ended, the pool is broken and has none, or it never opened' {
         # Close waits for a call blocked in a network read, and so does Dispose on a pool still open.
         # A Broken pool cannot be closed and has no running call, so it is the one that reaches Dispose without a close.
+        # A pool whose Open() threw never ran a call either, and it has to be disposed or its cleanup timer
+        # keeps it, and a runspace holding the Az modules, registered for the life of the process.
         $Bad = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -eq 'Close' }, $true))
         $Bad.Count | Should -Be 0
         $Dispose = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$MetricCallPool' -and $N.Member.Extent.Text -eq 'Dispose' }, $true))
-        $Dispose.Count | Should -Be 1 -Because 'one place releases the pool'
-        # Its nearest enclosing if must test the proof, and the proof must require a finished close on a
-        # pool that reports Closed, with the pool idle and no abandoned call still running.
-        $Node = $Dispose[0].Parent
+        $Dispose.Count | Should -Be 2 -Because 'one place releases the pool at the end of the phase, and one disposes a pool that never served a call'
+
+        # The open-failure disposal has to sit in the catch of the try that opens the pool, so it can only
+        # ever run on a pool that never reached Opened.
+        $OpenTry = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.Body.Extent.Text -match '\$MetricCallPool\.Open\(\)' }, $true))
+        $OpenTry.Count | Should -Be 1 -Because 'a failed Open() outside a try leaves a Broken pool undisposed'
+        $OnOpenFailure = @($Dispose | Where-Object { $_.Extent.StartOffset -ge $OpenTry[0].CatchClauses[0].Body.Extent.StartOffset -and $_.Extent.EndOffset -le $OpenTry[0].CatchClauses[0].Body.Extent.EndOffset })
+        $OnOpenFailure.Count | Should -Be 1
+
+        # The teardown disposal: its nearest enclosing if must test the proof, and the proof must require a
+        # finished close on a pool that reports Closed, with the pool idle and no abandoned call still running.
+        $Teardown = @($Dispose | Where-Object { $_.Extent.StartOffset -gt $OpenTry[0].Extent.EndOffset })
+        $Teardown.Count | Should -Be 1
+        $Node = $Teardown[0].Parent
         while ($null -ne $Node -and $Node -isnot [System.Management.Automation.Language.IfStatementAst]) { $Node = $Node.Parent }
         $Node | Should -Not -BeNullOrEmpty
         $Node.Clauses[0].Item1.Extent.Text | Should -Be '$PoolClosed'
         $script:MetricsSrc | Should -Match '(?s)if \(\$PoolIdle -and \$MetricAbandonedRunning -eq 0 -and \$null -ne \$PoolCloseHandle\)\s*\{\s*\$PoolClosed = \$PoolCloseHandle\.AsyncWaitHandle\.WaitOne\(\$PoolCloseRemainingMs\) -and \$MetricCallPool\.RunspacePoolStateInfo\.State -eq \[System\.Management\.Automation\.Runspaces\.RunspacePoolState\]::Closed'
         $script:MetricsSrc | Should -Match '\$PoolIdle = \(\$MetricCallPool\.GetAvailableRunspaces\(\) -eq \$MetricCallPool\.GetMaxRunspaces\(\)\)'
+        $script:MetricsSrc | Should -Match 'elseif \(\$PoolBroken -and \$MetricAbandonedRunning -eq 0\)' -Because 'the broken-pool branch has to check the abandoned count its comment claims is zero'
     }
 
     It 'drains the abandoned calls after every batch, not only at phase end' {

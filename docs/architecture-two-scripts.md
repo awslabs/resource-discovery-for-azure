@@ -361,7 +361,9 @@ These lines appear in the local `DebugLog_*.log`, after the `[Metrics]` prefix:
 | `Metric worker pool reused from the previous subscription in this process.` | Under the wrappers, this subscription used the existing pool. |
 | `Metric worker pool kept open for the next subscription: every worker had finished (waited N ms).` | Under the wrappers, the pool was idle and stays open. |
 | `Metric worker pool released: every worker had finished (waited N ms).` | The pool was released at the end of the phase, as in a standalone run. |
+| `Metric worker pool was Broken: disposed without a close so it does not stay registered in the process.` | The pool had failed, so it was not asked to close; it is disposed, which is what removes its cleanup timer. |
 | `WARNING: metric worker pool NOT released after Ns - idle=..., abandoned calls still running=..., pool state=...` | A worker was still busy, so the pool was left in memory rather than risk a hang. |
+| `ERROR: Metrics: the metric worker pool could not be opened (...); N per-call metric definition(s) were not collected for this subscription.` | The pool could not start its runspaces, usually because the host is out of memory. The pool is disposed, the per-call metric collection of this subscription is skipped, and the subscription is listed as metrics-incomplete in the wrapper's summary. The same line is written to the run log at `Error` severity. |
 | `WARNING: could not convert the Az context for the metric workers (...)` | The one-time conversion failed, so calls fall back to converting the raw context themselves. |
 
 With `-Verbose`, the wrapper also prints `Metric worker pool at wrapper exit: ...` with the result of the final release.

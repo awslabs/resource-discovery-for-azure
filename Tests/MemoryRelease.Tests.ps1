@@ -762,6 +762,21 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             @($Result.Diag | Where-Object { $_ -like 'Metric worker pool was Broken*' }).Count | Should -Be 1 -Because 'the debug log is the only place the operator can see why the pool went'
         }
 
+        It 'does not dispose a broken pool while an abandoned call is still running' {
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
+            $Global:MetricCallPool = $Pool
+            $Bag = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
+            $Call = [pscustomobject]@{ DisposeCount = 0 }
+            Add-Member -InputObject $Call -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+            $Bag.Add([pscustomobject]@{ Handle = [pscustomobject]@{ IsCompleted = $false }; Call = $Call })
+            $Result = & $script:PoolTeardownShared $Pool $Bag 1 $true
+            $Result.Running | Should -Be 1
+            $Result.Released | Should -BeFalse -Because 'a call that has not returned can still hold a runspace of this pool'
+            $Pool.DisposeCount | Should -Be 0 -Because 'the block comment promises a pool is never disposed under a running call, so the code has to check it'
+            $Call.DisposeCount | Should -Be 0
+            @($Result.Diag | Where-Object { $_ -like 'WARNING: metric worker pool NOT released*' }).Count | Should -Be 1
+        }
+
         It 'Close-RdaMetricWorkerPool disposes a broken pool and says so' {
             $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Broken)
             $Global:MetricCallPool = $Pool
@@ -814,6 +829,98 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
         $script:InvSrc | Should -Match '-ReuseWorkerPool:\$RunAllSubs\.IsPresent'
         $script:WrapperFnSrc | Should -Match '(?s)function Exit-Wrapper\s*\{.*?Close-RdaMetricWorkerPool.*?exit \$Code'
         $script:WrapperSrc | Should -Match 'Close-RdaMetricWorkerPool\)\)\s*\r?\nexit \$WrapperExitCode'
+    }
+
+    Context 'a worker pool that cannot be opened' {
+        BeforeAll {
+            # A real pool made to fail its open keeps this process from exiting, so the open is driven
+            # against a stand-in, as the broken-pool Context above does. The block under test is lifted
+            # out of the shipped script by AST so the tests run what Metrics.ps1 does.
+            $OpenAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
+            $OpenTry = @($OpenAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.Body.Extent.Text -match '\$MetricCallPool\.Open\(\)' }, $true))
+            if ($OpenTry.Count -ne 1) { throw ('Expected one try block that opens the metrics pool; found {0}. A failed Open() outside a try leaves a Broken pool undisposed.' -f $OpenTry.Count) }
+            $script:PoolOpenTryAst = $OpenTry[0]
+            $script:PoolOpen = [scriptblock]::Create((@(
+                        'param($Pool, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup)'
+                        '$MetricCallPool = $Pool'
+                        '$OpenDiag = [System.Collections.Generic.List[string]]::new()'
+                        '$OpenLog = [System.Collections.Generic.List[object]]::new()'
+                        'function Write-MetricsDiag { param($Message) $OpenDiag.Add([string]$Message) }'
+                        'function Write-Log { param($Message, $Severity, [switch]$NoConsole, [switch]$ToDebugLog) $OpenLog.Add([pscustomobject]@{ Message = [string]$Message; Severity = [string]$Severity }) }'
+                        $OpenTry[0].Extent.Text
+                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; Diag = @($OpenDiag); Log = @($OpenLog) }'
+                    ) -join [Environment]::NewLine))
+            $script:NewUnopenablePool = {
+                param([string]$Message = 'Insufficient resources to start a runspace.')
+                $Pool = [pscustomobject]@{ DisposeCount = 0; OpenCount = 0; OpenError = $Message }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name Open -Value { $this.OpenCount++; throw $this.OpenError }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+                $Pool
+            }
+            $script:OpenDefs = [System.Collections.Generic.List[object]]@(
+                [pscustomobject]@{ Id = '/subscriptions/AAAA-1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1' }
+                [pscustomobject]@{ Id = '/subscriptions/aaaa-1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm2' }
+                [pscustomobject]@{ Id = '/subscriptions/bbbb-2/resourceGroups/rg/providers/Microsoft.Sql/servers/s1/databases/d1' })
+            $script:OpenSubLookup = @{ 'aaaa-1' = [pscustomobject]@{ id = 'aaaa-1'; Name = 'Contoso-Dev' }; 'bbbb-2' = [pscustomobject]@{ id = 'bbbb-2'; Name = 'Contoso-Prod' } }
+        }
+
+        BeforeEach {
+            $script:PriorFailedSubs = $Global:MetricsFailedSubs
+            $Global:MetricsFailedSubs = @()
+        }
+
+        AfterEach {
+            $Global:MetricsFailedSubs = $script:PriorFailedSubs
+        }
+
+        It 'disposes the pool, keeps nothing in the global, and gives up only the per-call collection' {
+            $Pool = & $script:NewUnopenablePool
+            $Result = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup
+            $Pool.OpenCount | Should -Be 1
+            $Pool.DisposeCount | Should -Be 1 -Because 'a pool that failed its open has already registered the cleanup timer that only Dispose removes'
+            $Result.Pool | Should -BeNullOrEmpty -Because 'the teardown in the finally must not be handed a pool that is gone'
+            $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a pool that cannot be opened must never serve the next subscription'
+            $Result.Count | Should -Be 0 -Because 'the per-call loop cannot run without a pool, so it is skipped rather than failed one call at a time'
+        }
+
+        It 'fails loud: an Error in the run log and the reason in the debug log' {
+            $Pool = & $script:NewUnopenablePool 'Insufficient resources to start a runspace.'
+            $Result = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup
+            @($Result.Diag | Where-Object { $_ -like 'ERROR: Metrics: the metric worker pool could not be opened*' }).Count | Should -Be 1
+            $Errors = @($Result.Log | Where-Object { $_.Severity -eq 'Error' })
+            $Errors.Count | Should -Be 1 -Because 'under the default error preference a failed open was swallowed and only the workers complained, one per call'
+            $Errors[0].Message | Should -BeLike '*Insufficient resources to start a runspace.*' -Because 'the operator needs the host error, not a generic failure'
+            $Errors[0].Message | Should -BeLike '*7 per-call metric definition(s) were not collected*'
+        }
+
+        It 'names every affected subscription in the wrapper health list, once per subscription' {
+            $Pool = & $script:NewUnopenablePool
+            $null = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup
+            $Entries = @($Global:MetricsFailedSubs)
+            $Entries.Count | Should -Be 2 -Because 'the two casings of one subscription id are the same subscription'
+            @($Entries | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('aaaa-1', 'bbbb-2')
+            @($Entries | ForEach-Object { $_.Name } | Sort-Object) | Should -Be @('Contoso-Dev', 'Contoso-Prod')
+            @($Entries | Where-Object { $_.Message -like '*could not be opened*' }).Count | Should -Be 2
+        }
+
+        It 'falls back to one unknown-subscription entry when no definition carries a subscription id' {
+            $Pool = & $script:NewUnopenablePool
+            $Defs = [System.Collections.Generic.List[object]]@([pscustomobject]@{ Id = 'not-an-arm-id' })
+            $null = & $script:PoolOpen $Pool $true 1 $Defs $script:OpenSubLookup
+            $Entries = @($Global:MetricsFailedSubs)
+            $Entries.Count | Should -Be 1
+            $Entries[0].Id | Should -Be '(unknown)'
+            $Entries[0].Name | Should -Be '(subscription)'
+        }
+
+        It 'stores the pool for the next subscription only after the open has returned' {
+            $Open = @($script:PoolOpenTryAst.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Member.Extent.Text -eq 'Open' }, $true))
+            $Open.Count | Should -Be 1
+            $Store = @($script:PoolOpenTryAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$Global:MetricCallPool' -and $N.Right.Extent.Text -eq '$MetricCallPool' }, $true))
+            $Store.Count | Should -Be 1 -Because 'the only place the pool is kept for the next subscription is inside this try'
+            $Store[0].Extent.StartOffset | Should -BeGreaterThan $Open[0].Extent.EndOffset -Because 'a pool stored before the open could be handed on in a Broken state'
+            $Store[0].Extent.StartOffset | Should -BeLessThan $script:PoolOpenTryAst.Body.Extent.EndOffset
+        }
     }
 }
 

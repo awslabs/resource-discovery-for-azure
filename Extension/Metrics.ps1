@@ -298,35 +298,65 @@ if ($Task -eq 'Processing')
     function Initialize-RdaMetricsBatchPrereq
     {
         # Get-AzResourceProvider and Register-AzResourceProvider act on one subscription. Without a profile they use
-        # the process's current one, which under the wrappers is not the subscription being inventoried (no phase
-        # moves the process context), so the provider was checked, and registered, on the wrong subscription.
-        param([Parameter(Mandatory = $true)][string]$SubscriptionId)
+        # the process's current one, which need not be the subscription being inventoried (no phase moves the
+        # process context), so every call below passes that subscription's own profile.
+        # The registration of every subscription that needs it is started first, and they are then polled against
+        # ONE shared deadline with one sleep per round. N unregistered subscriptions therefore cost at most one
+        # 60 second wait between them, not one each.
+        param([Parameter(Mandatory = $true)][string[]]$SubscriptionId)
 
-        try
+        $Pending = [System.Collections.Generic.List[object]]::new()
+        foreach ($Sub in @($SubscriptionId))
         {
-            $SubProfile = Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId
-            $Rp = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Select-Object -First 1
-            if ($null -ne $Rp -and $Rp.RegistrationState -eq 'Registered')
+            try
             {
-                Write-MetricsDiag ("[batch] Microsoft.Insights resource provider already registered on subscription {0}." -f $SubscriptionId)
-                return
+                $SubProfile = Get-RdaSubscriptionProfile -SubscriptionId $Sub
+                $Rp = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Select-Object -First 1
+                if ($null -ne $Rp -and $Rp.RegistrationState -eq 'Registered')
+                {
+                    Write-MetricsDiag ("[batch] Microsoft.Insights resource provider already registered on subscription {0}." -f $Sub)
+                    continue
+                }
+
+                Write-MetricsDiag ("[batch] Microsoft.Insights RP is '{0}' on subscription {1}; registering (required for metrics:getBatch)..." -f $(if ($Rp) { $Rp.RegistrationState } else { 'unknown' }), $Sub)
+                Register-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Out-Null
+                $Pending.Add([pscustomobject]@{ SubscriptionId = $Sub; SubProfile = $SubProfile; State = '' })
             }
-
-            Write-MetricsDiag ("[batch] Microsoft.Insights RP is '{0}' on subscription {1}; registering (required for metrics:getBatch)..." -f $(if ($Rp) { $Rp.RegistrationState } else { 'unknown' }), $SubscriptionId)
-            Register-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Out-Null
-
-            $Deadline = (Get-Date).AddSeconds(60)
-            $State = ''
-            do
+            catch
             {
-                Start-Sleep -Seconds 10
-                $State = (Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction SilentlyContinue | Select-Object -First 1).RegistrationState
-            } while ($State -ne 'Registered' -and (Get-Date) -lt $Deadline)
-            Write-MetricsDiag ("[batch] Microsoft.Insights registration state on subscription {0} after wait: {1}" -f $SubscriptionId, $State)
+                # Register-AzResourceProvider has no subscription parameter: it acts on whatever subscription the
+                # admin's session points at, so the remediation has to name this one.
+                Write-MetricsDiag ("[batch] could not ensure Microsoft.Insights registration on subscription {0} ({1}). If batch fails, an admin must register the provider on subscription {0}: select that subscription, then run Register-AzResourceProvider -ProviderNamespace Microsoft.Insights" -f $Sub, $_.Exception.Message)
+            }
         }
-        catch
+
+        if ($Pending.Count -eq 0) { return }
+
+        $Deadline = (Get-Date).AddSeconds(60)
+        $Waiting = [System.Collections.Generic.List[object]]::new($Pending)
+        while ($Waiting.Count -gt 0)
         {
-            Write-MetricsDiag ("[batch] could not ensure Microsoft.Insights registration on subscription {0} ({1}). If batch fails, an admin must register the provider: Register-AzResourceProvider -ProviderNamespace Microsoft.Insights" -f $SubscriptionId, $_.Exception.Message)
+            Start-Sleep -Seconds 10
+            # Backwards, so removing a subscription that has finished does not disturb the indices still to visit.
+            for ($Idx = $Waiting.Count - 1; $Idx -ge 0; $Idx--)
+            {
+                $Entry = $Waiting[$Idx]
+                try
+                {
+                    $Entry.State = (Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $Entry.SubProfile -ErrorAction SilentlyContinue | Select-Object -First 1).RegistrationState
+                }
+                catch
+                {
+                    $Entry.State = ''
+                }
+                if ($Entry.State -eq 'Registered') { $Waiting.RemoveAt($Idx) }
+            }
+            if ((Get-Date) -ge $Deadline) { break }
+        }
+
+        foreach ($Entry in $Pending)
+        {
+            Write-MetricsDiag ("[batch] Microsoft.Insights registration state on subscription {0} after wait: {1}" -f $Entry.SubscriptionId, $Entry.State)
         }
     }
 
@@ -724,13 +754,14 @@ if ($Task -eq 'Processing')
 
         if ($BatchGroups.Count -gt 0)
         {
-            # The provider is per subscription, and the definitions can span several of them, so each one that has
-            # something to batch is checked on its own. The id's subscription segment is lower-cased so the same
-            # subscription written two ways is checked once.
+            # The provider is per subscription, and the definitions can span several of them, so every one that
+            # has something to batch is passed in together: the registrations all start before any of them is
+            # waited for. The id's subscription segment is lower-cased so the same subscription written two ways
+            # is checked once.
             $BatchSubscriptionIds = @($BatchGroups.Values | ForEach-Object { $_ } | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
-            foreach ($BatchSubscriptionId in $BatchSubscriptionIds)
+            if ($BatchSubscriptionIds.Count -gt 0)
             {
-                Initialize-RdaMetricsBatchPrereq -SubscriptionId $BatchSubscriptionId
+                Initialize-RdaMetricsBatchPrereq -SubscriptionId $BatchSubscriptionIds
             }
 
             foreach ($Service in $BatchGroups.Keys)

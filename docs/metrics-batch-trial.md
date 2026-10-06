@@ -45,7 +45,9 @@ pwsh ./Run-AllSubscriptions.ps1 -TenantID <your-tenant-id> -UseMetricsBatch
   (for example `-ParallelStreams 4`) to process several subscriptions at once.
 - The first run per subscription may register the `Microsoft.Insights` resource
   provider (a one-time, low-privilege operation). If your identity cannot
-  register it, batch simply falls back to the per-call path.
+  register it, batch simply falls back to the per-call path. Several
+  subscriptions that need it are registered together and then share one wait of
+  up to 60 seconds, rather than waiting one after another.
 
 Single subscription instead of the whole tenant:
 

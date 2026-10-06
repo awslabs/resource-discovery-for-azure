@@ -188,63 +188,91 @@ if ($Task -eq 'Processing')
         param($Defs, $MetricNamespace)
 
         $Results = [System.Collections.Generic.List[object]]::new()
+        $script:MetricsBatchLastError = $null
         if (-not $Defs -or @($Defs).Count -eq 0) { return $Results.ToArray() }
 
         $Groups = $Defs | Group-Object -Property { (([string]$_.Id) -split '/')[2] + '|' + $_.Location + '|' + $_.Interval + '|' + $_.StartTime + '|' + $_.EndTime }
         foreach ($Group in $Groups)
         {
+            # One failing group, or one failing chunk inside it, used to throw out of this function, and
+            # the caller then sent every definition of the service to the per-call path: one bad region
+            # turned thousands of batched definitions into thousands of Get-AzMetric calls. What has
+            # already been fetched is kept instead, the failure is logged with the subscription, the
+            # region and the chunk it covered, and the caller sends on only what is genuinely missing.
             $First = $Group.Group[0]
             $SubscriptionId = (([string]$First.Id) -split '/')[2]
             $Region = $First.Location
             if ([string]::IsNullOrEmpty($SubscriptionId) -or [string]::IsNullOrEmpty($Region))
             {
-                throw ("Metrics batch: cannot derive subscription/region from id '{0}'." -f $First.Id)
+                $script:MetricsBatchLastError = ("cannot derive subscription/region from id '{0}'" -f $First.Id)
+                Write-MetricsDiag ("WARNING: metrics batch group skipped: {0}. Its {1} metric def(s) fall back to per-call." -f $script:MetricsBatchLastError, @($Group.Group).Count)
+                continue
             }
 
-            $Endpoint = "https://$Region.metrics.monitor.azure.com"
-            $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
-            $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLowerInvariant() })
-            $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
-            $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
-            $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
-
-            $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
-            $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
-
-            $NamesParam = (($MetricNames | ForEach-Object { [uri]::EscapeDataString($_) }) -join ',')
-            $NsParam = [uri]::EscapeDataString($MetricNamespace)
-            $AggParam = ($Aggregations -join ',')
-
-            $ResourceIds = @($Group.Group | Select-Object -ExpandProperty Id -Unique)
-            for ($Offset = 0; $Offset -lt $ResourceIds.Count; $Offset += 50)
+            try
             {
-                if ($null -ne $TokenObj.ExpiresOn -and $TokenObj.ExpiresOn -lt [DateTimeOffset]::UtcNow.AddMinutes(5))
+                $Endpoint = "https://$Region.metrics.monitor.azure.com"
+                $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
+                $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLowerInvariant() })
+                $StartIso = ([datetime]$First.StartTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
+                $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
+                $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
+
+                $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
+                $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
+
+                $NamesParam = (($MetricNames | ForEach-Object { [uri]::EscapeDataString($_) }) -join ',')
+                $NsParam = [uri]::EscapeDataString($MetricNamespace)
+                $AggParam = ($Aggregations -join ',')
+
+                $ResourceIds = @($Group.Group | Select-Object -ExpandProperty Id -Unique)
+                for ($Offset = 0; $Offset -lt $ResourceIds.Count; $Offset += 50)
                 {
-                    $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
-                    $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
-                }
-
-                $Chunk = @($ResourceIds[$Offset..([math]::Min($Offset + 49, $ResourceIds.Count - 1))])
-                $Uri = "{0}/subscriptions/{1}/metrics:getBatch?api-version=2023-10-01&metricnamespace={2}&metricnames={3}&aggregation={4}&interval={5}&starttime={6}&endtime={7}" -f `
-                    $Endpoint, $SubscriptionId, $NsParam, $NamesParam, $AggParam, $IntervalIso, $StartIso, $EndIso
-                $BodyJson = @{ resourceids = $Chunk } | ConvertTo-Json
-
-                $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -ErrorAction Stop
-                $script:MetricsBatchHttpCalls++
-
-                foreach ($ResourceResult in @($Response.values))
-                {
-                    $ResId = [string]$ResourceResult.resourceid
-                    $ResourceDefs = @($Group.Group | Where-Object { ([string]$_.Id) -ieq $ResId })
-                    foreach ($Def in $ResourceDefs)
+                    $ChunkEnd = [math]::Min($Offset + 49, $ResourceIds.Count - 1)
+                    try
                     {
-                        $MetricResult = @($ResourceResult.value | Where-Object { ([string]$_.name.value) -ieq ([string]$Def.MetricName) })[0]
-                        if ($null -ne $MetricResult)
+                        if ($null -ne $TokenObj.ExpiresOn -and $TokenObj.ExpiresOn -lt [DateTimeOffset]::UtcNow.AddMinutes(5))
                         {
-                            $Results.Add((New-RdaMetricObject -Def $Def -MetricResult $MetricResult))
+                            $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -WarningAction SilentlyContinue
+                            $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
+                        }
+
+                        $Chunk = @($ResourceIds[$Offset..$ChunkEnd])
+                        $Uri = "{0}/subscriptions/{1}/metrics:getBatch?api-version=2023-10-01&metricnamespace={2}&metricnames={3}&aggregation={4}&interval={5}&starttime={6}&endtime={7}" -f `
+                            $Endpoint, $SubscriptionId, $NsParam, $NamesParam, $AggParam, $IntervalIso, $StartIso, $EndIso
+                        $BodyJson = @{ resourceids = $Chunk } | ConvertTo-Json
+
+                        # Counted before the POST, not after: a request that threw was still issued and
+                        # still counts against the Azure Monitor metric-query meter, so counting it only
+                        # on success under-reported every failed run.
+                        $script:MetricsBatchHttpCalls++
+                        $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -ErrorAction Stop
+
+                        foreach ($ResourceResult in @($Response.values))
+                        {
+                            $ResId = [string]$ResourceResult.resourceid
+                            $ResourceDefs = @($Group.Group | Where-Object { ([string]$_.Id) -ieq $ResId })
+                            foreach ($Def in $ResourceDefs)
+                            {
+                                $MetricResult = @($ResourceResult.value | Where-Object { ([string]$_.name.value) -ieq ([string]$Def.MetricName) })[0]
+                                if ($null -ne $MetricResult)
+                                {
+                                    $Results.Add((New-RdaMetricObject -Def $Def -MetricResult $MetricResult))
+                                }
+                            }
                         }
                     }
+                    catch
+                    {
+                        $script:MetricsBatchLastError = $_.Exception.Message
+                        Write-MetricsDiag ("WARNING: metrics batch chunk skipped for subscription {0} region {1}, resource {2}-{3} of {4} ({5}). Those metric def(s) fall back to per-call." -f $SubscriptionId, $Region, ($Offset + 1), ($ChunkEnd + 1), $ResourceIds.Count, $script:MetricsBatchLastError)
+                    }
                 }
+            }
+            catch
+            {
+                $script:MetricsBatchLastError = $_.Exception.Message
+                Write-MetricsDiag ("WARNING: metrics batch group skipped for subscription {0} region {1} ({2}). Its {3} metric def(s) fall back to per-call." -f $SubscriptionId, $Region, $script:MetricsBatchLastError, @($Group.Group).Count)
             }
         }
 
@@ -648,6 +676,9 @@ if ($Task -eq 'Processing')
     $MetricCount = $MetricDefs.Count
 
     $script:MetricsBatchHttpCalls = 0
+    # The service's own message for the last group or chunk the batch had to skip. Read by the call site
+    # below, which is the one place that knows how many definitions ended up on the per-call path.
+    $script:MetricsBatchLastError = $null
 
     if ($UseMetricsBatch)
     {
@@ -690,35 +721,45 @@ if ($Task -eq 'Processing')
             {
                 $ServiceDefs = $BatchGroups[$Service]
                 $Namespace = $BatchNamespaceMap[$Service]
+                $BatchObjects = @()
+                $BatchErr = $null
                 try
                 {
-                    $BatchObjects = Invoke-RdaMetricsBatch -Defs $ServiceDefs -MetricNamespace $Namespace
-                    if (@($BatchObjects).Count -eq 0)
-                    {
-                        throw ("getBatch returned no metric records for {0} {1} metric def(s)." -f $ServiceDefs.Count, $Service)
-                    }
-
-                    $SatisfiedKeys = @{}
-                    foreach ($BatchObj in $BatchObjects)
-                    {
-                        $SatisfiedKeys[('{0}|{1}' -f ([string]$BatchObj.ID).ToLower(), $BatchObj.Metric)] = $true
-                    }
-                    foreach ($Def in $ServiceDefs)
-                    {
-                        if (-not $SatisfiedKeys.ContainsKey(('{0}|{1}' -f ([string]$Def.Id).ToLower(), $Def.MetricName)))
-                        {
-                            $RemainingDefs.Add($Def)
-                        }
-                    }
-
-                    foreach ($BatchObj in $BatchObjects) { $Tmp.Metrics.Add($BatchObj) }
-                    Write-MetricsDiag ("Metrics batch fast-path: fetched {0} {1} metric record(s) via getBatch." -f $BatchObjects.Count, $Service)
+                    $BatchObjects = @(Invoke-RdaMetricsBatch -Defs $ServiceDefs -MetricNamespace $Namespace)
                 }
                 catch
                 {
-                    foreach ($Def in $ServiceDefs) { $RemainingDefs.Add($Def) }
                     $BatchErr = $_.Exception.Message
-                    $Hint = if ($BatchErr -match '(?i)403|AuthorizationFailed|does not have access|does not have authorization')
+                }
+                if ([string]::IsNullOrEmpty($BatchErr)) { $BatchErr = $script:MetricsBatchLastError }
+
+                # Whatever came back is kept, and only the definitions it did not cover go to the per-call
+                # path. A failed region or chunk inside the batch therefore costs the definitions it
+                # covered, not every definition of the service.
+                $SatisfiedKeys = @{}
+                foreach ($BatchObj in $BatchObjects)
+                {
+                    $SatisfiedKeys[('{0}|{1}' -f ([string]$BatchObj.ID).ToLower(), $BatchObj.Metric)] = $true
+                }
+                $FellBack = 0
+                foreach ($Def in $ServiceDefs)
+                {
+                    if (-not $SatisfiedKeys.ContainsKey(('{0}|{1}' -f ([string]$Def.Id).ToLower(), $Def.MetricName)))
+                    {
+                        $RemainingDefs.Add($Def)
+                        $FellBack++
+                    }
+                }
+
+                foreach ($BatchObj in $BatchObjects) { $Tmp.Metrics.Add($BatchObj) }
+                if ($BatchObjects.Count -gt 0)
+                {
+                    Write-MetricsDiag ("Metrics batch fast-path: fetched {0} {1} metric record(s) via getBatch." -f $BatchObjects.Count, $Service)
+                }
+                if ($FellBack -gt 0)
+                {
+                    $BatchErrText = if ([string]::IsNullOrEmpty($BatchErr)) { 'getBatch returned no record for them' } else { $BatchErr }
+                    $Hint = if ($BatchErrText -match '(?i)403|AuthorizationFailed|does not have access|does not have authorization')
                     {
                         'the signed-in identity lacks subscription-level read for the metrics data plane - assign Reader or Monitoring Reader at the subscription scope, and ensure Microsoft.Insights is registered'
                     }
@@ -726,7 +767,7 @@ if ($Task -eq 'Processing')
                     {
                         'ensure Microsoft.Insights is registered and the region/resources are reachable'
                     }
-                    Write-MetricsDiag ("WARNING: metrics batch fast-path failed for {0} ({1}). {2}. Those metrics fall back to per-call (no data lost)." -f $Service, $BatchErr, $Hint)
+                    Write-MetricsDiag ("WARNING: metrics batch fast-path failed for {0} of {1} {2} metric def(s) ({3}). {4}. Those metrics fall back to per-call (no data lost)." -f $FellBack, @($ServiceDefs).Count, $Service, $BatchErrText, $Hint)
                 }
             }
 

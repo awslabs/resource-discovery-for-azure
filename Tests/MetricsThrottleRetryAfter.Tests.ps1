@@ -710,3 +710,149 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         $InLoop | Should -BeTrue -Because 'one call for each subscription, not one for the first'
     }
 }
+
+Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk fails' {
+    # A throw in any group or chunk used to leave the function with nothing, and the call site then sent
+    # every definition of the service to the per-call path: one bad region turned thousands of batched
+    # definitions into thousands of Get-AzMetric calls.
+    BeforeAll {
+        $BatchAst = $script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Invoke-RdaMetricsBatch' }, $true) | Select-Object -First 1
+        if (-not $BatchAst) { throw 'Invoke-RdaMetricsBatch was not found in Extension/Metrics.ps1' }
+        . ([scriptblock]::Create($BatchAst.Extent.Text))
+        function Write-MetricsDiag { param($Message) $script:BatchDiag.Add([string]$Message) }
+        function New-RdaMetricObject { param($Def, $MetricResult) [pscustomobject]@{ ID = $Def.Id; Metric = $Def.MetricName } }
+        function Get-AzAccessToken
+        {
+            param($ResourceUrl, $WarningAction)
+            if ($script:BatchTokenFails) { throw 'the token could not be minted' }
+            [pscustomobject]@{ Token = 'token'; ExpiresOn = [DateTimeOffset]::UtcNow.AddHours(1) }
+        }
+
+        function New-BatchDef
+        {
+            param([string]$Sub, [string]$Region, [int]$Index)
+            [pscustomobject]@{
+                Id = ('/subscriptions/{0}/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm{1}' -f $Sub, $Index)
+                MetricName = 'Percentage CPU'; Aggregation = 'Average'; Location = $Region
+                Interval = '01:00:00'; StartTime = '2026-10-01T00:00:00Z'; EndTime = '2026-10-02T00:00:00Z'
+            }
+        }
+    }
+
+    BeforeEach {
+        $script:BatchDiag = [System.Collections.Generic.List[string]]::new()
+        $script:BatchPosts = [System.Collections.Generic.List[string]]::new()
+        $script:BatchFailOn = @()
+        $script:BatchTokenFails = $false
+        $script:MetricsBatchHttpCalls = 0
+        $script:MetricsBatchLastError = $null
+        Mock Invoke-RestMethod {
+            $script:BatchPosts.Add([string]$Uri)
+            $Ids = @((ConvertFrom-Json $Body).resourceids)
+            foreach ($Pattern in $script:BatchFailOn)
+            {
+                if ($Uri -like $Pattern -or @($Ids | Where-Object { $_ -like $Pattern }).Count -gt 0) { throw ('getBatch refused the request: {0}' -f $Pattern) }
+            }
+            [pscustomobject]@{ values = @($Ids | ForEach-Object { [pscustomobject]@{ resourceid = $_; value = @([pscustomobject]@{ name = [pscustomobject]@{ value = 'Percentage CPU' } }) } }) }
+        }
+    }
+
+    It 'returns the records of the regions that worked when one region fails' {
+        $Defs = @((New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1), (New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 2), (New-BatchDef -Sub 'sub-a' -Region 'eastus' -Index 3))
+        $script:BatchFailOn = @('*eastus*')
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        @($Records | ForEach-Object { $_.ID }) | Should -Be @($Defs[0].Id, $Defs[1].Id) -Because 'the region that answered must not be thrown away with the one that did not'
+        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch chunk skipped for subscription sub-a region eastus*' }).Count | Should -Be 1
+        $script:MetricsBatchLastError | Should -BeLike '*getBatch refused the request*'
+    }
+
+    It 'returns the records of the chunks that worked when one chunk fails, and names the chunk' {
+        $Defs = @(1..60 | ForEach-Object { New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index $_ })
+        $script:BatchFailOn = @('*/virtualMachines/vm55')
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        $script:BatchPosts.Count | Should -Be 2 -Because '60 resources are two chunks of at most 50'
+        $Records.Count | Should -Be 50 -Because 'the chunk that answered keeps its records'
+        @($script:BatchDiag | Where-Object { $_ -like '*resource 51-60 of 60*' }).Count | Should -Be 1 -Because 'the operator has to be able to see which resources were not batched'
+    }
+
+    It 'counts a POST that threw as an API call issued' {
+        $Defs = @((New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1))
+        $script:BatchFailOn = @('*westeurope*')
+        $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
+        $script:BatchPosts.Count | Should -Be 1
+        $script:MetricsBatchHttpCalls | Should -Be 1 -Because 'a request that reached the service and failed still counts against the metric-query meter'
+    }
+
+    It 'skips a group with no subscription segment and still batches the rest' {
+        $Bad = New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 9
+        $Bad.Id = 'not-an-arm-id'
+        $Defs = @((New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1), $Bad)
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        @($Records | ForEach-Object { $_.ID }) | Should -Be @($Defs[0].Id)
+        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped: cannot derive subscription/region*' }).Count | Should -Be 1
+    }
+
+    It 'lets a failing token for one group leave the other groups alone' {
+        $Defs = @((New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1), (New-BatchDef -Sub 'sub-a' -Region 'eastus' -Index 2))
+        $script:BatchTokenFails = $true
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        $Records.Count | Should -Be 0
+        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-a region *(the token could not be minted)*' }).Count | Should -Be 2 -Because 'each group reports its own failure instead of one throw ending the function'
+    }
+}
+
+Describe 'The metrics batch call site sends only the definitions the batch did not satisfy to the per-call path' {
+    BeforeAll {
+        # The per-service loop is lifted out of the shipped script by AST so the test runs what Metrics.ps1 does.
+        $Loop = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.ForEachStatementAst] -and $N.Condition.Extent.Text -eq '$BatchGroups.Keys' }, $true))
+        if ($Loop.Count -ne 1) { throw ('Expected one per-service batch loop; found {0}.' -f $Loop.Count) }
+        $script:BatchCallSite = [scriptblock]::Create((@(
+                    'param($BatchGroups, $BatchNamespaceMap, $Returned, $ThrowMessage)'
+                    '$RemainingDefs = [System.Collections.Generic.List[object]]::new()'
+                    '$Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }'
+                    '$CallDiag = [System.Collections.Generic.List[string]]::new()'
+                    'function Write-MetricsDiag { param($Message) $CallDiag.Add([string]$Message) }'
+                    'function Invoke-RdaMetricsBatch { param($Defs, $MetricNamespace) if ($ThrowMessage) { throw $ThrowMessage } @($Returned) }'
+                    $Loop[0].Extent.Text
+                    '[pscustomobject]@{ Remaining = @($RemainingDefs); Kept = @($Tmp.Metrics); Diag = @($CallDiag) }'
+                ) -join [Environment]::NewLine))
+        $script:CallSiteDefs = [System.Collections.Generic.List[object]]@(
+            [pscustomobject]@{ Id = '/subscriptions/sub-a/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1'; MetricName = 'Percentage CPU' }
+            [pscustomobject]@{ Id = '/subscriptions/sub-a/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm2'; MetricName = 'Percentage CPU' }
+            [pscustomobject]@{ Id = '/subscriptions/sub-a/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm3'; MetricName = 'Percentage CPU' })
+        $script:CallSiteGroups = [ordered]@{ 'Virtual Machines' = $script:CallSiteDefs }
+        $script:CallSiteMap = [ordered]@{ 'Virtual Machines' = 'microsoft.compute/virtualMachines' }
+    }
+
+    BeforeEach { $script:MetricsBatchLastError = $null }
+
+    It 'keeps the batched records and sends on only the definitions that were not covered' {
+        $Returned = @([pscustomobject]@{ ID = $script:CallSiteDefs[0].Id; Metric = 'Percentage CPU' }, [pscustomobject]@{ ID = $script:CallSiteDefs[1].Id; Metric = 'Percentage CPU' })
+        $Result = & $script:BatchCallSite $script:CallSiteGroups $script:CallSiteMap $Returned $null
+        $Result.Kept.Count | Should -Be 2
+        @($Result.Remaining | ForEach-Object { $_.Id }) | Should -Be @($script:CallSiteDefs[2].Id) -Because 'a partial batch must cost the per-call path only what it did not cover'
+        @($Result.Diag | Where-Object { $_ -like 'WARNING: metrics batch fast-path failed for 1 of 3 Virtual Machines metric def(s)*' }).Count | Should -Be 1
+    }
+
+    It 'falls the whole service back, with the batch error and the hint, when the function throws' {
+        $Result = & $script:BatchCallSite $script:CallSiteGroups $script:CallSiteMap @() 'AuthorizationFailed: the client does not have authorization'
+        $Result.Kept.Count | Should -Be 0
+        $Result.Remaining.Count | Should -Be 3
+        @($Result.Diag | Where-Object { $_ -like '*3 of 3 Virtual Machines metric def(s)*' -and $_ -like '*AuthorizationFailed*' -and $_ -like '*Monitoring Reader*' }).Count | Should -Be 1 -Because 'a 403 keeps its own remediation hint, and the line says how many definitions it cost'
+    }
+
+    It 'reports the service error the batch recorded when the batch itself did not throw' {
+        $script:MetricsBatchLastError = 'getBatch refused the request: BadRequest'
+        $Result = & $script:BatchCallSite $script:CallSiteGroups $script:CallSiteMap @() $null
+        $Result.Remaining.Count | Should -Be 3
+        @($Result.Diag | Where-Object { $_ -like '*getBatch refused the request: BadRequest*' }).Count | Should -Be 1 -Because 'the skipped group or chunk is the only thing that knows why the records are missing'
+    }
+
+    It 'says nothing about a fallback, and logs the fetch, when every definition was batched' {
+        $Returned = @($script:CallSiteDefs | ForEach-Object { [pscustomobject]@{ ID = $_.Id; Metric = 'Percentage CPU' } })
+        $Result = & $script:BatchCallSite $script:CallSiteGroups $script:CallSiteMap $Returned $null
+        $Result.Remaining.Count | Should -Be 0
+        @($Result.Diag | Where-Object { $_ -like 'WARNING:*' }).Count | Should -Be 0
+        @($Result.Diag | Where-Object { $_ -like 'Metrics batch fast-path: fetched 3 Virtual Machines metric record(s)*' }).Count | Should -Be 1
+    }
+}

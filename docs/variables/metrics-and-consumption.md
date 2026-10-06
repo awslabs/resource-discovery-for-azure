@@ -595,10 +595,16 @@ In `Extension/Metrics.ps1`, the batch path is entered under `if
   records which `(resource id, metric)` keys were satisfied; any definition the
   batch did not return is pushed back onto the per-call remainder (~lines
   622–632), so **no metric is lost**.
-- On any batch error it logs a warning (with an auth-specific hint for
-  403/AuthorizationFailed) and **falls back** the whole service group to the
-  per-call path (~lines 638–652). The comment on the batch call notes it "falls
-  back to the per-call path on any failure."
+- On a batch error it logs a warning (with an auth-specific hint for
+  403/AuthorizationFailed) saying how many definitions it cost, and **falls
+  back only those definitions** to the per-call path. A failing region, or a
+  failing chunk of at most 50 resources inside it, is skipped with its own
+  warning naming the subscription, the region and the resource range; the
+  records the batch did fetch are kept, so one bad region no longer sends every
+  definition of the service to the per-call path.
+- Counts the getBatch POST before it is issued, so a request that failed still
+  counts against the Azure Monitor metric-query meter in
+  `$Global:MetricsApiCallCount`.
 - Writes the batch results to a `<FilePath>_0.json` shard (~line 660), then the
   remaining `$MetricDefs` continue through the normal per-call runspace loop.
 

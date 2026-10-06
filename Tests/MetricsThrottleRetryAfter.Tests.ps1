@@ -925,6 +925,7 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         @($Records | ForEach-Object { $_.ID }) | Should -Be @($Defs[0].Id)
         @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-broken*is not visible*' }).Count | Should -Be 2
         @($script:BatchTokens) | Should -Be @('profile-for-sub-a') -Because 'no token is minted for a subscription whose profile could not be built'
+        @($script:BatchProfileLookups) | Should -Be @('sub-a', 'sub-broken') -Because 'a lookup that threw is remembered too, so a subscription with several groups pays it once - and the failing lookup is the expensive one, since its second call enumerates every tenant before throwing'
     }
 
     It 'passes the profile through the parameter the installed Az.Accounts really has' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {

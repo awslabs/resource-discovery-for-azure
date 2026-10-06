@@ -194,8 +194,11 @@ if ($Task -eq 'Processing')
         $Groups = $Defs | Group-Object -Property { (([string]$_.Id) -split '/')[2] + '|' + $_.Location + '|' + $_.Interval + '|' + $_.StartTime + '|' + $_.EndTime }
         # One profile per subscription, reused by every group and chunk of it: the lookup costs two
         # Get-AzSubscription calls, and the groups are keyed on region and time window as well, so one
-        # subscription usually has several.
+        # subscription usually has several. A lookup that throws is remembered too, in $SubProfileErrors,
+        # so a subscription the identity cannot read costs one lookup rather than one per group - and a
+        # failing lookup is the expensive one, because the second call enumerates every tenant.
         $SubProfiles = @{}
+        $SubProfileErrors = @{}
         foreach ($Group in $Groups)
         {
             # One failing group, or one failing chunk inside it, used to throw out of this function, and
@@ -213,18 +216,34 @@ if ($Task -eq 'Processing')
                 continue
             }
 
-            try
+            if (-not $SubProfiles.ContainsKey($SubscriptionId) -and -not $SubProfileErrors.ContainsKey($SubscriptionId))
             {
                 # The token has to be minted for the subscription's own tenant. Without a profile
                 # Get-AzAccessToken mints it for the process's current tenant, and a subscription homed
                 # in another tenant - a standalone run with no -TenantID - then sent getBatch a token the
                 # metrics data plane rejects. Get-RdaSubscriptionProfile returns the scoped context
                 # container that -DefaultProfile takes, with the subscription's tenant already swapped in,
-                # and throws when the subscription is not visible, which the group catch below reports.
-                if (-not $SubProfiles.ContainsKey($SubscriptionId))
+                # and throws when the subscription is not visible.
+                try
                 {
                     $SubProfiles[$SubscriptionId] = Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId
                 }
+                catch
+                {
+                    $SubProfileErrors[$SubscriptionId] = $_.Exception.Message
+                }
+            }
+            if ($SubProfileErrors.ContainsKey($SubscriptionId))
+            {
+                # Every group of this subscription still reports its own fallback, because each one is a
+                # distinct set of definitions leaving the batch; only the lookup is not repeated.
+                $script:MetricsBatchLastError = $SubProfileErrors[$SubscriptionId]
+                Write-MetricsDiag ("WARNING: metrics batch group skipped for subscription {0} region {1} ({2}). Its {3} metric def(s) fall back to per-call." -f $SubscriptionId, $Region, $script:MetricsBatchLastError, @($Group.Group).Count)
+                continue
+            }
+
+            try
+            {
                 $SubProfile = $SubProfiles[$SubscriptionId]
 
                 $Endpoint = "https://$Region.metrics.monitor.azure.com"

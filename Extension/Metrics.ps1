@@ -960,22 +960,38 @@ if ($Task -eq 'Processing')
                     Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
                 }
                 $MetricCallPool = $null
-                $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected for this subscription.' -f $PoolOpenError, $MetricCount)
+                $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected.' -f $PoolOpenError, $MetricCount)
                 Write-MetricsDiag ('ERROR: ' + $PoolSkipMsg + ' The rest of the inventory continues.')
-                Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. Re-run the metrics phase for this subscription once the host can start worker runspaces again.') -Severity 'Error'
+                Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. Re-run the metrics phase for the subscriptions listed as metrics-incomplete once the host can start worker runspaces again.') -Severity 'Error'
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
-                $PoolFailedSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
-                if ($PoolFailedSubIds.Count -eq 0)
+                # One entry per subscription that had definitions on the per-call path, each carrying its
+                # OWN count. A standalone run's phase can cover several subscriptions, so an entry that
+                # repeated the phase total would tell each of them that every definition of the run was
+                # its own. The ids are lower-cased so the same subscription written two ways is one entry,
+                # and the first-appearance order is kept for the summary.
+                $PoolFailedSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() })
+                $PoolFailedCounts = @{}
+                foreach ($PoolFailedSubId in $PoolFailedSubIds)
+                {
+                    if (-not $PoolFailedCounts.ContainsKey($PoolFailedSubId)) { $PoolFailedCounts[$PoolFailedSubId] = 0 }
+                    $PoolFailedCounts[$PoolFailedSubId]++
+                }
+                $PoolFailedUniqueIds = @($PoolFailedSubIds | Select-Object -Unique)
+                if ($PoolFailedUniqueIds.Count -eq 0)
                 {
                     $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = $PoolSkipMsg }
                 }
                 else
                 {
-                    foreach ($PoolFailedSubId in $PoolFailedSubIds)
+                    foreach ($PoolFailedSubId in $PoolFailedUniqueIds)
                     {
                         $PoolFailedSub = $SubLookup[$PoolFailedSubId]
                         $PoolFailedSubName = if ($null -ne $PoolFailedSub -and ![string]::IsNullOrEmpty($PoolFailedSub.Name)) { $PoolFailedSub.Name } else { '(subscription)' }
-                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $PoolFailedSubName; Id = $PoolFailedSubId; Message = $PoolSkipMsg }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{
+                            Name    = $PoolFailedSubName
+                            Id      = $PoolFailedSubId
+                            Message = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) of this subscription were not collected.' -f $PoolOpenError, $PoolFailedCounts[$PoolFailedSubId])
+                        }
                     }
                 }
                 # Nothing in this phase repairs the pool, so the per-call loop is skipped rather than run

@@ -965,6 +965,11 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             @($Entries | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('aaaa-1', 'bbbb-2')
             @($Entries | ForEach-Object { $_.Name } | Sort-Object) | Should -Be @('Contoso-Dev', 'Contoso-Prod')
             @($Entries | Where-Object { $_.Message -like '*could not be opened*' }).Count | Should -Be 2
+            # Each entry carries its own count, not the phase total: this phase has 7 definitions on the
+            # per-call path, of which two belong to aaaa-1 and one to bbbb-2.
+            ($Entries | Where-Object { $_.Id -eq 'aaaa-1' }).Message | Should -BeLike '*2 per-call metric definition(s) of this subscription were not collected*'
+            ($Entries | Where-Object { $_.Id -eq 'bbbb-2' }).Message | Should -BeLike '*1 per-call metric definition(s) of this subscription were not collected*'
+            @($Entries | Where-Object { $_.Message -like '*7 per-call*' }).Count | Should -Be 0 -Because 'the phase total belongs to the one phase-wide line, not to each subscription'
         }
 
         It 'falls back to one unknown-subscription entry when no definition carries a subscription id' {

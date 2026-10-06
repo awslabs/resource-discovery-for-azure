@@ -21,6 +21,35 @@ BeforeAll {
     if (-not $ClsAst) { throw 'Get-RdaMetricFailureClass was not found in Extension/Metrics.ps1' }
     . ([scriptblock]::Create($ClsAst.Extent.Text))
 
+    # The per-call profile chooser, the profile map and the phase-start line all live in the phase body,
+    # so they are lifted by shape and run against stubs rather than re-implemented here. Lifted without
+    # throwing on absence: a test asserts each one is there, so a source that has none of them fails
+    # those tests alone instead of taking the whole file down with a container error.
+    # Lifted by shape, not by position. Every statement of the metrics phase sits inside one
+    # if ($Task -eq 'Processing'), so a match on the text alone also finds that whole-phase block; the
+    # condition has to be part of the filter. Lifted without throwing on absence: a test asserts each
+    # one is there, so a source that has none of them fails those tests alone instead of taking the
+    # whole file down with a container error.
+    function Get-PhaseBlock
+    {
+        param([System.Management.Automation.Language.Ast]$Root, [string]$Condition, [string[]]$Contains)
+        $Found = @($Root.FindAll({
+                    param($N)
+                    if ($N -isnot [System.Management.Automation.Language.IfStatementAst]) { return $false }
+                    if ($N.Clauses[0].Item1.Extent.Text -ne $Condition) { return $false }
+                    foreach ($Needle in $Contains)
+                    {
+                        if ($N.Extent.Text.IndexOf($Needle, [System.StringComparison]::Ordinal) -lt 0) { return $false }
+                    }
+                    return $true
+                }, $true))
+        if ($Found.Count -ne 1) { return $null }
+        return $Found[0]
+    }
+    $script:CallProfileFnAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricCallProfile' }, $true) | Select-Object -First 1
+    if ($script:CallProfileFnAst) { . ([scriptblock]::Create($script:CallProfileFnAst.Extent.Text)) }
+    $script:SubProfileBuild = Get-PhaseBlock -Root $Ast -Condition '$MetricCount -gt 0' -Contains @('$MetricSubProfiles[', 'Get-RdaSubscriptionProfile')
+
     # Production defaults, read from the source so the test tracks them.
     $script:MaxRetries = [int]([regex]::Match($script:MetricsSrc, '(?m)^\s*\$MetricMaxRetries\s*=\s*(\d+)').Groups[1].Value)
     $script:MaxThrottle = [int]([regex]::Match($script:MetricsSrc, '(?m)^\s*\$MetricMaxThrottleRetries\s*=\s*(\d+)').Groups[1].Value)
@@ -959,5 +988,89 @@ Describe 'The metrics batch call site sends only the definitions the batch did n
         $Result.Remaining.Count | Should -Be 0
         @($Result.Diag | Where-Object { $_ -like 'WARNING:*' }).Count | Should -Be 0
         @($Result.Diag | Where-Object { $_ -like 'Metrics batch fast-path: fetched 3 Virtual Machines metric record(s)*' }).Count | Should -Be 1
+    }
+}
+
+Describe 'The per-call metric path queries each subscription through its own tenant profile' {
+    # The phase captures one Az context for the whole run. For a subscription homed in another tenant
+    # every Get-AzMetric of that subscription then carried a token for the wrong tenant - the same defect
+    # the getBatch token had, on the path the batch falls back to. Reachable in a standalone
+    # ResourceInventory.ps1 run without -TenantID, where the subscription list can span tenants.
+
+    BeforeAll {
+        # The map build is a plain statement block in the phase body, so it is run as the source has it,
+        # with the stubs composed in front of it. Built on invocation, not here, so a source that does
+        # not have the block fails the test that looks for it rather than this BeforeAll.
+        $script:RunSubProfileBuild = {
+            param($Defs, [scriptblock]$ProfileStub)
+            $Lookups = [System.Collections.Generic.List[string]]::new()
+            $Diag = [System.Collections.Generic.List[string]]::new()
+            $Runner = [scriptblock]::Create(((@(
+                            'param($Defs, $ProfileStub, $Lookups, $Diag)'
+                            'function Write-MetricsDiag { param($Message) $Diag.Add([string]$Message) }'
+                            'function Get-RdaSubscriptionProfile { param([string]$SubscriptionId) $Lookups.Add($SubscriptionId); & $ProfileStub $SubscriptionId }'
+                            '$MetricDefs = $Defs'
+                            '$MetricCount = @($Defs).Count'
+                            '$MetricSubProfiles = @{}'
+                            $script:SubProfileBuild.Extent.Text
+                            '[pscustomobject]@{ Profiles = $MetricSubProfiles; Lookups = @($Lookups); Diag = @($Diag) }'
+                        ) -join [Environment]::NewLine)))
+            & $Runner $Defs $ProfileStub $Lookups $Diag
+        }
+    }
+
+    It 'gives a query the profile built for the subscription its own resource lives in' {
+        $script:CallProfileFnAst | Should -Not -BeNullOrEmpty -Because 'the profile a call is given is chosen per definition, not once for the phase'
+        $Profiles = @{ 'sub-a' = 'profile-a'; 'sub-b' = 'profile-b' }
+        Get-RdaMetricCallProfile -ResourceId '/subscriptions/sub-a/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1' -SubProfiles $Profiles -PhaseProfile 'phase' | Should -Be 'profile-a'
+        Get-RdaMetricCallProfile -ResourceId '/subscriptions/SUB-B/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/sa1' -SubProfiles $Profiles -PhaseProfile 'phase' | Should -Be 'profile-b' -Because 'a resource id carries the subscription in whatever case Azure returned it'
+    }
+
+    It 'falls back to the phase context when the map has no profile for the subscription' {
+        $script:CallProfileFnAst | Should -Not -BeNullOrEmpty
+        Get-RdaMetricCallProfile -ResourceId '/subscriptions/sub-z/resourceGroups/rg/providers/x/y/z' -SubProfiles @{ 'sub-a' = 'profile-a' } -PhaseProfile 'phase' | Should -Be 'phase' -Because 'that is what every per-call query used before, so a failed lookup costs nothing'
+        Get-RdaMetricCallProfile -ResourceId 'not-a-resource-id' -SubProfiles @{ 'sub-a' = 'profile-a' } -PhaseProfile 'phase' | Should -Be 'phase'
+        Get-RdaMetricCallProfile -ResourceId '/subscriptions/sub-a/x' -SubProfiles $null -PhaseProfile 'phase' | Should -Be 'phase'
+    }
+
+    It 'builds one profile per distinct subscription, not one per metric definition' {
+        $script:SubProfileBuild | Should -Not -BeNullOrEmpty -Because 'the phase builds the map once, before the worker loop'
+        $Defs = @(
+            [pscustomobject]@{ Id = '/subscriptions/SUB-A/resourceGroups/rg/providers/x/y/a' }
+            [pscustomobject]@{ Id = '/subscriptions/sub-a/resourceGroups/rg/providers/x/y/b' }
+            [pscustomobject]@{ Id = '/subscriptions/sub-b/resourceGroups/rg/providers/x/y/c' }
+            [pscustomobject]@{ Id = 'no-subscription-segment' }
+        )
+        $Built = & $script:RunSubProfileBuild $Defs { param($Id) "profile-for-$Id" }
+        @($Built.Lookups | Sort-Object) | Should -Be @('sub-a', 'sub-b') -Because 'four definitions over two subscriptions cost two lookups, and an id with no subscription segment costs none'
+        $Built.Profiles.Count | Should -Be 2
+        $Built.Profiles['sub-a'] | Should -Be 'profile-for-sub-a'
+        $Built.Profiles['sub-b'] | Should -Be 'profile-for-sub-b'
+        @($Built.Diag) | Should -BeNullOrEmpty
+    }
+
+    It 'names the subscription it could not scope and leaves the others with their own profile' {
+        $script:SubProfileBuild | Should -Not -BeNullOrEmpty
+        $Defs = @(
+            [pscustomobject]@{ Id = '/subscriptions/sub-bad/resourceGroups/rg/providers/x/y/a' }
+            [pscustomobject]@{ Id = '/subscriptions/sub-ok/resourceGroups/rg/providers/x/y/b' }
+        )
+        $Built = & $script:RunSubProfileBuild $Defs {
+            param($Id)
+            if ($Id -eq 'sub-bad') { throw 'the subscription is not visible to the signed-in identity' }
+            "profile-for-$Id"
+        }
+        $Built.Profiles.ContainsKey('sub-bad') | Should -BeFalse -Because 'a lookup that threw stored nothing'
+        $Built.Profiles['sub-ok'] | Should -Be 'profile-for-sub-ok' -Because 'one subscription that cannot be scoped never costs the others their own profile'
+        @($Built.Diag | Where-Object { $_ -like '*sub-bad*' }).Count | Should -Be 1
+        @($Built.Diag | Where-Object { $_ -like '*not visible to the signed-in identity*' }).Count | Should -Be 1 -Because 'the helper''s own message is the only thing that says why'
+        Get-RdaMetricCallProfile -ResourceId '/subscriptions/sub-bad/resourceGroups/rg/providers/x/y/a' -SubProfiles $Built.Profiles -PhaseProfile 'phase' | Should -Be 'phase'
+    }
+
+    It 'hands the worker the map, and every call the profile of its own definition' {
+        $script:MetricsSrc.IndexOf("`$SubProfiles = `$using:MetricSubProfiles") | Should -BeGreaterThan -1 -Because 'the map has to reach the worker runspaces'
+        $script:MetricsSrc.IndexOf("`$CallProfile = Get-RdaMetricCallProfile -ResourceId `$_.Id -SubProfiles `$SubProfiles -PhaseProfile `$AzContext") | Should -BeGreaterThan -1 -Because 'the subscription comes from the definition being queried, not from the phase'
+        $script:MetricsSrc.IndexOf("`$MetricArgs['DefaultProfile'] = `$CallProfile") | Should -BeGreaterThan -1
+        $script:MetricsSrc.IndexOf("`$MetricArgs['DefaultProfile'] = `$AzContext") | Should -Be -1 -Because 'the phase context is now only the fallback, never the profile every call is given'
     }
 }

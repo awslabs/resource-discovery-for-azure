@@ -965,6 +965,34 @@ if ($Task -eq 'Processing')
         }
     }
 
+    # Per-subscription profiles for the per-call path, built after the pool so a pool that could not be
+    # opened costs no lookup. The context captured above is the process's own, so a subscription homed in
+    # another tenant would have every one of its Get-AzMetric calls carry a token for the wrong tenant -
+    # the same defect the batch token had, on the path the batch falls back to. Reachable in a standalone
+    # ResourceInventory.ps1 run without -TenantID, where $Global:Subscriptions can span tenants; under the
+    # wrappers a run is scoped to one tenant and this map holds one entry. Built once for the distinct
+    # subscriptions of $MetricDefs, the way the batch path builds its own, so the lookup costs one
+    # Get-RdaSubscriptionProfile per subscription and not one per call. That helper already returns the
+    # IAzureContextContainer that -DefaultProfile takes, so nothing is converted here. A subscription
+    # whose profile cannot be built is logged and keeps the phase context, which is what every per-call
+    # query used before. The map is only read after this loop, so the worker runspaces share it safely.
+    $MetricSubProfiles = @{}
+    if ($MetricCount -gt 0)
+    {
+        $MetricProfileSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
+        foreach ($MetricProfileSubId in $MetricProfileSubIds)
+        {
+            try
+            {
+                $MetricSubProfiles[$MetricProfileSubId] = Get-RdaSubscriptionProfile -SubscriptionId $MetricProfileSubId
+            }
+            catch
+            {
+                Write-MetricsDiag ("WARNING: could not scope the metric calls of subscription {0} to its own tenant ({1}); they use the process context, as every call did before." -f $MetricProfileSubId, $_.Exception.Message)
+            }
+        }
+    }
+
     $MetricAbandonedCount = 0
     $MetricAbandonedRunning = 0
     # Counted here and not from the bag: the per-batch drain takes a returned call OFF the bag, so
@@ -999,6 +1027,7 @@ if ($Task -eq 'Processing')
 
                 $Defs | ForEach-Object -Parallel {
                     $AzContext = $using:MetricAzContext
+                    $SubProfiles = $using:MetricSubProfiles
                     $CallTimeoutSeconds = $using:MetricTimeoutSeconds
                     $CallMaxRetries = $using:MetricMaxRetries
                     $CallMaxThrottleRetries = $using:MetricMaxThrottleRetries
@@ -1057,6 +1086,23 @@ if ($Task -eq 'Processing')
                             if ($RetryAfterSeconds -gt 0) { $Backoff = [math]::Min([math]::Max($RetryAfterSeconds, $Backoff), $MaxRetryAfterSeconds) }
                         }
                         return @{ Retry = $true; SleepSeconds = $Backoff }
+                    }
+
+                    function Get-RdaMetricCallProfile
+                    {
+                        # Which profile this one query is given: the one built for the subscription the
+                        # resource lives in, so a subscription homed in another tenant is queried with a
+                        # token for its own tenant. Falls back to the phase context when the map carries
+                        # no profile for it, which is what every per-call query used before.
+                        param([string]$ResourceId, $SubProfiles, $PhaseProfile)
+
+                        $CallSubId = (([string]$ResourceId) -split '/')[2]
+                        if (-not [string]::IsNullOrEmpty($CallSubId) -and $null -ne $SubProfiles)
+                        {
+                            $Mapped = $SubProfiles[$CallSubId.ToLowerInvariant()]
+                            if ($null -ne $Mapped) { return $Mapped }
+                        }
+                        return $PhaseProfile
                     }
 
                     function Get-RdaMetricErrorBody
@@ -1206,9 +1252,10 @@ if ($Task -eq 'Processing')
                         ErrorAction     = 'Stop'
                         WarningAction   = 'SilentlyContinue'
                     }
-                    if ($null -ne $AzContext)
+                    $CallProfile = Get-RdaMetricCallProfile -ResourceId $_.Id -SubProfiles $SubProfiles -PhaseProfile $AzContext
+                    if ($null -ne $CallProfile)
                     {
-                        $MetricArgs['DefaultProfile'] = $AzContext
+                        $MetricArgs['DefaultProfile'] = $CallProfile
                     }
 
                     try

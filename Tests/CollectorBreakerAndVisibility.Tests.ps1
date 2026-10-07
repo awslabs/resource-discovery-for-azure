@@ -1147,32 +1147,35 @@ finally
             $Result.Removed | Should -Be $Expected
         }
 
-        It 'the last block of the run has warnings = <Expected> when the reconciliation skipped = <Skipped> and retry entries removed = <Removed>' -ForEach @(
-            @{ Skipped = $true; Removed = $false; Expected = $true }
-            @{ Skipped = $false; Removed = $true; Expected = $true }
-            @{ Skipped = $true; Removed = $true; Expected = $true }
-            @{ Skipped = $false; Removed = $false; Expected = $false }
+        It 'the last block of the run has warnings = <Expected> when the reconciliation skipped = <Skipped>, retry entries removed = <Removed> and subscriptions still owed = <Owed>' -ForEach @(
+            @{ Skipped = $true; Removed = $false; Owed = 0; Expected = $true }
+            @{ Skipped = $false; Removed = $true; Owed = 0; Expected = $true }
+            @{ Skipped = $true; Removed = $true; Owed = 0; Expected = $true }
+            @{ Skipped = $false; Removed = $false; Owed = 1; Expected = $true }
+            @{ Skipped = $false; Removed = $false; Owed = 0; Expected = $false }
         ) {
             $Assign = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FinalHasWarnings' }, $true)
             $Assign | Should -Not -BeNullOrEmpty
             @($script:WrapAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FinalHasWarnings' }, $true)).Count | Should -Be 1 -Because 'one statement decides it, so the lifted one is the one that runs'
             $script:WrapSrc | Should -Match 'Get-RdaFinalScreenLines -ExitCode \$WrapperExitCode -HasWarnings \$FinalHasWarnings ' -Because 'the last block of the run is built from this value'
             @([regex]::Matches($script:WrapSrc, '(?m)^\$RetryEntriesRemoved = \$false\s*$')).Count | Should -Be 1 -Because 'the flag starts false, outside the block that sets it'
-            # Every other condition in the statement is held at "nothing wrong", so only these two can move it.
+            @([regex]::Matches($script:WrapSrc, '(?m)^\$OwedOutsideRetry = @\(\)\s*$')).Count | Should -Be 1 -Because 'the list starts empty, outside the -ResumeFailedOnly block that fills it'
+            # Every other condition in the statement is held at "nothing wrong", so only these three can move it.
             $Run = [scriptblock]::Create(@'
-param($AssignText, [bool]$Skipped, [bool]$Removed)
+param($AssignText, [bool]$Skipped, [bool]$Removed, [int]$Owed)
 $RunHadFailures = $false
 $BlobUploadProblem = $false
 $MissingMembers = @()
 $ReconciliationSkipped = $Skipped
 $RetryEntriesRemoved = $Removed
+$OwedOutsideRetry = @(if ($Owed -gt 0) { 1..$Owed | ForEach-Object { [pscustomobject]@{ Id = ('sub-owed-{0}' -f $_); Name = 'Owed' } } })
 $Held = $Global:MarketplaceFailedSubs
 $Global:MarketplaceFailedSubs = @()
 try { . ([scriptblock]::Create($AssignText)) }
 finally { $Global:MarketplaceFailedSubs = $Held }
 [bool]$FinalHasWarnings
 '@)
-            (& $Run $Assign.Extent.Text $Skipped $Removed) | Should -Be $Expected
+            (& $Run $Assign.Extent.Text $Skipped $Removed $Owed) | Should -Be $Expected
         }
     }
 

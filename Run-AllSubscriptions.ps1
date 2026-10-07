@@ -2549,7 +2549,8 @@ if ($CapacityPlan)
 # still owed. Its record stays, and so do the completions the next -Resume needs to skip. One missing
 # from the end-of-run listing is owed too, because not listed does not mean deleted. One that is really
 # gone is not owed by a later run: what a run owes is this run's own listing ($EligibleBeforeRetryFilter),
-# not the start snapshot that is carried across resumes.
+# not the start snapshot that is carried across resumes. While any is owed, the last block of the run
+# reports a warning, because at a real terminal the screen is cleared before it and hides the lines below.
 $OwedOutsideRetry = @()
 if ($ResumeFailedOnly)
 {
@@ -3244,7 +3245,7 @@ if (@($UncarriedSkipped).Count -gt 0)
 # transcript reopened, so the transcript ends on the same outcome the screen does.
 $FinalBundleBuilt = Test-ReportArchiveUsable -Path $OuterZipFile
 $FinalTranscriptKept = $WrapperTranscriptStarted -and (Test-ReportArchiveUsable -Path $WrapperTranscriptFile)
-$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0) -or $ReconciliationSkipped -or $RetryEntriesRemoved
+$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0) -or $ReconciliationSkipped -or $RetryEntriesRemoved -or ($OwedOutsideRetry.Count -gt 0)
 $FinalScreenCleared = $false
 if (Test-RdaFinalScreenClearable -BundleBuilt $FinalBundleBuilt -TranscriptKept $FinalTranscriptKept)
 {

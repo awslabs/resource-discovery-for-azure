@@ -330,7 +330,11 @@ Two switches read that file:
   `FailedAttempts` list — a fast, surgical retry that does not re-walk the whole
   slice. A retried subscription that now succeeds moves to the completed list and
   drops off the failure list; if there were no failures it prints "Nothing to
-  retry" and exits 0.
+  retry" and exits 0. An entry whose subscription is listed neither at the start
+  nor at the end of a run is removed by that run, unless the tenant-root management
+  group, when it can be read, still holds it, or the end-of-run listing failed; when
+  none of the entries is listed, `-ResumeFailedOnly` stops with a warning first, and
+  a normal or `-Resume` run clears them.
 
 ### Adding a subscription after the campaign has finished
 

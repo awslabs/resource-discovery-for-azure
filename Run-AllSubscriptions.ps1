@@ -271,8 +271,8 @@ if ($PSBoundParameters.ContainsKey('MainSummary'))
 }
 
 $FailedSubscriptions = @()
-# The id behind each entry above, or the stream it came from when no id is known. Kept so a
-# subscription deleted while the run was going can be told apart from one that genuinely failed.
+# The id behind each entry above, or the stream it came from when no id is known. Any entry here
+# makes the run exit 2, including one for a subscription that is no longer listed at the end.
 $FailedSubscriptionIds = @()
 
 $ArchiveWriteFailures = @()
@@ -2115,10 +2115,12 @@ else
     }
 }
 
-# === Moving-target subscription reconciliation: another team can create/delete subs DURING a long run, so the start-of-run Get-AzSubscription is stale by now. Re-enumerate and classify the delta against the ORIGINAL start snapshot ($StartSnapshot, preserved across resume) - subs deleted mid-run (Vanished) must NOT be reported as failures, and subs created mid-run (New) would otherwise be SILENTLY MISSING from the report.
+# === Moving-target subscription reconciliation: another team can create/delete subs DURING a long run, so the start-of-run Get-AzSubscription is stale by now. Re-enumerate and classify the delta against the ORIGINAL start snapshot ($StartSnapshot, preserved across resume) - subs no longer listed (Vanished) are reported but keep any failure, because not listed does not mean deleted (it can be a move to another directory or lost access), and subs created mid-run (New) would otherwise be SILENTLY MISSING from the report. A retry entry an earlier run left for a subscription that is listed neither at the start nor at the end of this run is removed.
 $StartIds = if ($StartSnapshot -and $StartSnapshot.SubscriptionIds) { @($StartSnapshot.SubscriptionIds) } else { @() }
 # Set by the catch below when the re-enumeration cannot be trusted, so the last block of the run reports a warning instead of a plain "RUN COMPLETE".
 $ReconciliationSkipped = $false
+# Set when the retry-list check below removes an entry. The removal is otherwise recorded only in the transcript, which the screen clear at a real terminal hides, so the last block of the run reports a warning.
+$RetryEntriesRemoved = $false
 if ($StartIds.Count -gt 0)
 {
     try
@@ -2139,49 +2141,52 @@ if ($StartIds.Count -gt 0)
         foreach ($ResponsibleSub in $ResponsibleSubscriptions) { $ResponsibleSet[([string]$ResponsibleSub.Id).ToLowerInvariant()] = $true }
         $VanishedMine = @($Delta.Vanished | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
         $IncompleteMine = @($Delta.Incomplete | Where-Object { $ResponsibleSet.ContainsKey(([string]$_).ToLowerInvariant()) })
-        if ($VanishedMine.Count -gt 0 -or $Delta.New.Count -gt 0 -or $IncompleteMine.Count -gt 0)
+        # An entry an earlier run left in the retry list for a subscription that neither listing names cannot be
+        # retried. It is removed only when the listing taken at the start of this run and the one taken now both miss
+        # it, and the tenant-root management group, when it could be read, does not hold it either: a subscription
+        # under that group still exists and is only hidden from this identity. When the group could not be read it is
+        # not consulted, and the removal says so. Every entry this run wrote belongs to a subscription in its
+        # start listing, so none of them can match. All candidates are found before the list changes.
+        $SeenSet = @{}
+        foreach ($SeenSub in (@($AllSubscriptions) + @($EndSubs)))
+        {
+            $SeenSet[([string]$SeenSub.Id).ToLowerInvariant()] = $true
+        }
+        $CoveredSet = @{}
+        if ($null -ne $Coverage -and $null -ne $Coverage.Ids)
+        {
+            foreach ($CoveredId in @($Coverage.Ids))
+            {
+                $CoveredSet[([string]$CoveredId).ToLowerInvariant()] = $true
+            }
+        }
+        $StaleRetryIds = @($FailedAttempts | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) -and -not $SeenSet.ContainsKey(([string]$_.Id).ToLowerInvariant()) -and -not $CoveredSet.ContainsKey(([string]$_.Id).ToLowerInvariant()) } | ForEach-Object { [string]$_.Id } | Sort-Object -Unique)
+        if ($VanishedMine.Count -gt 0 -or $Delta.New.Count -gt 0 -or $IncompleteMine.Count -gt 0 -or $StaleRetryIds.Count -gt 0)
         {
             Write-Host ""
             Write-Host "Subscription reconciliation (start-of-run vs now):" -ForegroundColor Cyan
         }
         if ($VanishedMine.Count -gt 0)
         {
-            Write-Host ("  Deleted mid-run ({0}): {1}" -f $VanishedMine.Count, (($VanishedMine | Select-Object -First 10) -join ', ')) -ForegroundColor DarkYellow
-            Write-Host "    These no longer exist; failures against them are expected and are dropped from the retry list (not run faults)." -ForegroundColor DarkGray
-            $VanishedSet = @{}
-            foreach ($VanishedId in $VanishedMine) { $VanishedSet[([string]$VanishedId).ToLowerInvariant()] = $true }
-            $FailedAttempts = @($FailedAttempts | Where-Object { $_ -and -not $VanishedSet.ContainsKey(([string]$_.Id).ToLowerInvariant()) })
-            # Its failure is expected, so it leaves every failure list, not only the retry list: the
-            # names and ids are kept in step, and the aborted and archive lists end in "(<id>)".
-            $KeptFailedNames = @()
-            $KeptFailedIds = @()
-            for ($FailedIndex = 0; $FailedIndex -lt @($FailedSubscriptionIds).Count; $FailedIndex++)
+            Write-Host ("  Not listed at the end of the run ({0}): {1}" -f $VanishedMine.Count, (($VanishedMine | Select-Object -First 10) -join ', ')) -ForegroundColor Yellow
+            Write-Host "    Each may have been deleted, moved to another directory, or be hidden from this identity. One that failed in this run stays in the failure list and the retry list, so the run exits 2. One that completed, in this run or in an earlier run that this one resumed, keeps its report. -ResumeFailedOnly cannot retry one that is not listed." -ForegroundColor Yellow
+        }
+        if ($StaleRetryIds.Count -gt 0)
+        {
+            $StaleSet = @{}
+            foreach ($StaleId in $StaleRetryIds)
             {
-                if (-not $VanishedSet.ContainsKey(([string]@($FailedSubscriptionIds)[$FailedIndex]).ToLowerInvariant()))
-                {
-                    $KeptFailedNames += @($FailedSubscriptions)[$FailedIndex]
-                    $KeptFailedIds += @($FailedSubscriptionIds)[$FailedIndex]
-                }
+                $StaleSet[$StaleId.ToLowerInvariant()] = $true
             }
-            $FailedSubscriptions = $KeptFailedNames
-            $FailedSubscriptionIds = $KeptFailedIds
-            $IsVanishedEntry = { param($Entry) $Entry -match '\(([^()]+)\)$' -and $VanishedSet.ContainsKey($Matches[1].ToLowerInvariant()) }
-            $CollectionAbortedSubs = @($CollectionAbortedSubs | Where-Object { -not (& $IsVanishedEntry $_) })
-            $ArchiveWriteFailures = @($ArchiveWriteFailures | Where-Object { -not (& $IsVanishedEntry $_) })
-            # A subscription that completed before it was deleted keeps its health rows: its report ships.
-            $ShippedSet = @{}
-            foreach ($ShippedRecord in @($SubResourceCounts)) { if ($null -ne $ShippedRecord) { $ShippedSet[([string]$ShippedRecord.Id).ToLowerInvariant()] = $true } }
-            $IsVanishedRecord = {
-                param($Record)
-                if ($null -eq $Record) { return $true }
-                $RecordKey = ([string]$Record.Id).ToLowerInvariant()
-                $VanishedSet.ContainsKey($RecordKey) -and -not $ShippedSet.ContainsKey($RecordKey)
+            $FailedAttempts = @($FailedAttempts | Where-Object { $_ -and -not $StaleSet.ContainsKey(([string]$_.Id).ToLowerInvariant()) })
+            Write-Host ("  Removed from the retry list ({0}): {1}" -f $StaleRetryIds.Count, ($StaleRetryIds -join ', ')) -ForegroundColor Yellow
+            Write-Host "    Each is listed neither at the start nor at the end of this run, and this run did not attempt it. It may have been deleted, moved to another directory, or be hidden from this identity. A normal or -Resume run collects it again if it is listed again." -ForegroundColor Yellow
+            if ($null -eq $Coverage -or $null -eq $Coverage.Ids)
+            {
+                Write-Host "    The tenant-root management group could not be read, so it was not checked for these entries." -ForegroundColor Yellow
             }
-            $Global:CollectorFailures = @($Global:CollectorFailures | Where-Object { -not (& $IsVanishedRecord $_) })
-            $Global:MetricsFailedSubs = @($Global:MetricsFailedSubs | Where-Object { -not (& $IsVanishedRecord $_) })
-            $Global:ConsumptionFailedSubs = @($Global:ConsumptionFailedSubs | Where-Object { -not (& $IsVanishedRecord $_) })
-            $Global:MarketplaceFailedSubs = @($Global:MarketplaceFailedSubs | Where-Object { -not (& $IsVanishedRecord $_) })
             Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+            $RetryEntriesRemoved = $true
         }
         if ($Delta.New.Count -gt 0)
         {
@@ -2198,7 +2203,7 @@ if ($StartIds.Count -gt 0)
     {
         $ReconciliationSkipped = $true
         Write-Host ("WARNING: subscription reconciliation skipped (re-enumeration failed): {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-        Write-Host "    The check for subscriptions created or deleted during the run did not finish. A subscription created during the run may be missing from this report, and a failure recorded for one deleted during the run may still be listed." -ForegroundColor Yellow
+        Write-Host "    The end-of-run subscription check did not finish, so nothing was reported about subscriptions created, removed or hidden during the run. A subscription created during the run may be missing from this report, and the retry list was not checked for entries whose subscription is no longer listed." -ForegroundColor Yellow
     }
 }
 
@@ -2287,7 +2292,7 @@ if ($UnrecordedReportFolders.Count -gt 0)
     {
         Write-Host ("  - {0}" -f $Unrecorded.Name) -ForegroundColor Yellow
     }
-    Write-Host "  Each belongs to a subscription reported as failed below, one a stream was still working on when it ended without a summary, or one deleted during the run, or was written by another run in the same inventory root." -ForegroundColor Yellow
+    Write-Host "  Each belongs to a subscription reported as failed below, one a stream was still working on when it ended without a summary, or was written by another run in the same inventory root." -ForegroundColor Yellow
 }
 # The inner script warns when it cannot write the marker. Without it the folder cannot be recognised
 # as partial, so say that it was kept out anyway.
@@ -3212,9 +3217,9 @@ if (@($CollectionAbortedSubs).Count -gt 0)
     $WrapperExitCode = 2
 }
 # So is any other subscription that failed outright: an inner exit 1, or a stream worker that died
-# before writing its summary. Exiting 0 over that contradicts "0 = no failures of any kind". A
-# subscription deleted while the run was going is the exception: the reconciliation above drops it,
-# because its failure is expected and there is no report left to miss.
+# before writing its summary. Exiting 0 over that contradicts "0 = no failures of any kind". That
+# holds for a subscription that is no longer listed at the end of the run too: it may be hidden from
+# this identity rather than deleted, and its report is missing either way.
 if (@($FailedSubscriptionIds).Count -gt 0)
 {
     $WrapperExitCode = 2
@@ -3236,7 +3241,7 @@ if (@($UncarriedSkipped).Count -gt 0)
 # transcript reopened, so the transcript ends on the same outcome the screen does.
 $FinalBundleBuilt = Test-ReportArchiveUsable -Path $OuterZipFile
 $FinalTranscriptKept = $WrapperTranscriptStarted -and (Test-ReportArchiveUsable -Path $WrapperTranscriptFile)
-$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0) -or $ReconciliationSkipped
+$FinalHasWarnings = $RunHadFailures -or (@($Global:MarketplaceFailedSubs).Count -gt 0) -or $BlobUploadProblem -or (@($MissingMembers | Where-Object { $_ }).Count -gt 0) -or $ReconciliationSkipped -or $RetryEntriesRemoved
 $FinalScreenCleared = $false
 if (Test-RdaFinalScreenClearable -BundleBuilt $FinalBundleBuilt -TranscriptKept $FinalTranscriptKept)
 {

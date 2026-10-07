@@ -856,7 +856,7 @@ Describe 'The wrapper reports every missing report, and never exits 0 over one' 
         $Adds | Should -Be 5
     }
 
-    It 'a subscription deleted mid-run leaves every failure list, and a real failure still forces exit 2' {
+    It 'a subscription missing from the end listing keeps its failure, and a real failure still forces exit 2' {
         # The reconciliation and the override, run as written, with the end-of-run listing shimmed.
         $Recon = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$StartIds.Count -gt 0' }, $true)
         $Override = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '@($FailedSubscriptionIds).Count -gt 0' }, $true)
@@ -875,8 +875,11 @@ $StartIds = @('sub-a', 'sub-gone')
 $Subscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-gone' })
 # The reconciliation reads the copy taken before processing, not $Subscriptions.
 $ResponsibleSubscriptions = $Subscriptions
+$AllSubscriptions = $Subscriptions
+$Coverage = [pscustomobject]@{ Ids = $null }
 $CompletedIds = @()
-$FailedAttempts = @($FailedIds | ForEach-Object { [pscustomobject]@{ Id = $_ } })
+# The wrapper records a retry entry only for a subscription id, never for a stream name.
+$FailedAttempts = @($FailedIds | Where-Object { $_ -notlike 'stream-*' } | ForEach-Object { [pscustomobject]@{ Id = $_ } })
 $FailedSubscriptions = @($FailedNames)
 $FailedSubscriptionIds = @($FailedIds)
 $CollectionAbortedSubs = @($Aborted)
@@ -884,9 +887,11 @@ $ArchiveWriteFailures = @($Archive)
 $ResumeStateFile = 'unused'
 $StateSaveArgs = @{}
 $WrapperExitCode = 0
+$ReconciliationSkipped = $false
+$RetryEntriesRemoved = $false
 $SubResourceCounts = @($ShippedIds | ForEach-Object { [pscustomobject]@{ Id = $_ } })
 $Held = @($Global:CollectorFailures, $Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:MarketplaceFailedSubs)
-# One record per list for the deleted subscription (in either case), beside records that must stay.
+# One record per list for the subscription that is missing from the end listing (in either case), beside records that must stay.
 $Global:CollectorFailures = @([pscustomobject]@{ Id = 'sub-gone'; Module = 'VMSS'; Message = 'm' }, [pscustomobject]@{ Id = 'sub-a'; Module = 'AKS'; Message = 'm' })
 $Global:MetricsFailedSubs = @([pscustomobject]@{ Name = 'Gone'; Id = 'sub-gone'; Message = 'm' }, [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = 'm' })
 $Global:ConsumptionFailedSubs = @([pscustomobject]@{ Name = 'Gone'; Id = 'SUB-GONE'; Message = 'm' }, [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'm' })
@@ -906,18 +911,21 @@ finally
 {
     $Global:CollectorFailures, $Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:MarketplaceFailedSubs = $Held
 }
-[pscustomobject]@{ Exit = $WrapperExitCode; Names = @($FailedSubscriptions); Ids = @($FailedSubscriptionIds); Aborted = @($CollectionAbortedSubs); Archive = @($ArchiveWriteFailures); Retry = @($FailedAttempts | ForEach-Object { $_.Id }); Health = $Health }
+[pscustomobject]@{ Exit = $WrapperExitCode; Names = @($FailedSubscriptions); Ids = @($FailedSubscriptionIds); Aborted = @($CollectionAbortedSubs); Archive = @($ArchiveWriteFailures); Retry = @($FailedAttempts | ForEach-Object { $_.Id }); Health = $Health; Skipped = $ReconciliationSkipped; Removed = $RetryEntriesRemoved }
 '@)
         $Gone = & $Run $Recon.Extent.Text $Override.Extent.Text @('sub-gone') @('Gone') @('Gone (sub-gone)') @('sub-a') @('Gone (sub-gone)')
-        $Gone.Exit | Should -Be 0 -Because 'its failure is expected: the subscription no longer exists'
-        $Gone.Names.Count | Should -Be 0 -Because 'the summary must not list it as failed and advise a retry the retry list no longer holds'
-        $Gone.Aborted.Count | Should -Be 0
-        $Gone.Archive.Count | Should -Be 0
-        $Gone.Retry.Count | Should -Be 0
-        $Gone.Health.Collector | Should -Be @('sub-a') -Because 'a collector failure on a deleted subscription is expected, and must not set the collector-failure exit code'
-        $Gone.Health.Metrics | Should -Be @('(unknown)')
-        $Gone.Health.Consumption | Should -Be @('(auth)') -Because 'ids match whatever their case, and a row with no subscription id stays'
-        $Gone.Health.Marketplace.Count | Should -Be 0
+        $Gone.Skipped | Should -BeFalse -Because 'the end listing is one that can be trusted'
+        $Gone.Exit | Should -Be 2 -Because 'a subscription missing from the end listing may be hidden from this identity rather than deleted, so its failure stands'
+        $Gone.Names | Should -Be @('Gone') -Because 'the summary still lists it as failed, and the retry list still holds it'
+        $Gone.Ids | Should -Be @('sub-gone')
+        $Gone.Aborted | Should -Be @('Gone (sub-gone)')
+        $Gone.Archive | Should -Be @('Gone (sub-gone)')
+        $Gone.Retry | Should -Be @('sub-gone') -Because 'it is listed at the start of the run, so it is a failure of this run and not an entry to remove'
+        $Gone.Removed | Should -BeFalse
+        $Gone.Health.Collector | Should -Be @('sub-gone', 'sub-a') -Because 'a collector failure on a subscription missing from the end listing still sets the collector-failure exit code'
+        $Gone.Health.Metrics | Should -Be @('sub-gone', '(unknown)')
+        $Gone.Health.Consumption | Should -Be @('SUB-GONE', '(auth)') -Because 'ids match whatever their case, and a row with no subscription id stays'
+        $Gone.Health.Marketplace | Should -Be @('sub-gone')
         $Kept = & $Run $Recon.Extent.Text $Override.Extent.Text @() @() @() @('sub-a', 'sub-gone')
         $Kept.Health.Collector | Should -Be @('sub-gone', 'sub-a') -Because 'nothing was deleted, so nothing is dropped'
         $Kept.Health.Consumption | Should -Be @('SUB-GONE', '(auth)')
@@ -927,8 +935,8 @@ finally
         $ShippedGone.Health.Consumption | Should -Be @('SUB-GONE', '(auth)')
         $Both = & $Run $Recon.Extent.Text $Override.Extent.Text @('sub-gone', 'sub-a') @('Gone', 'A') @() @('sub-a') @('A (sub-a)')
         $Both.Exit | Should -Be 2
-        $Both.Names | Should -Be @('A')
-        $Both.Ids | Should -Be @('sub-a')
+        $Both.Names | Should -Be @('Gone', 'A') -Because 'a subscription missing from the end listing is listed as failed beside one that is still listed'
+        $Both.Ids | Should -Be @('sub-gone', 'sub-a')
         $Both.Archive | Should -Be @('A (sub-a)') -Because 'a subscription that still exists keeps its archive failure'
         $Dead = & $Run $Recon.Extent.Text $Override.Extent.Text @('stream-1') @('stream-1 (no summary)') @() @('sub-a')
         $Dead.Exit | Should -Be 2 -Because 'a dead stream is never explained by a deletion'
@@ -945,11 +953,16 @@ finally
             # subscriptions is a listing that can be trusted, and the reconciliation must still run on it.
             # The token stand-in also puts an unrelated notice first and repeats it, so the message has to
             # carry every distinct warning Az gave, each once.
+            # A trusted listing also checks the retry list: an entry an earlier run left for a subscription
+            # that neither the start listing nor the end listing names is removed. The options shape that:
+            # StartListed (ids in the listing taken when the run started), Earlier (ids of entries left by
+            # earlier runs), CoverageIds (ids under the tenant-root management group) and Completed (ids
+            # this run completed). What they leave at their defaults is the run the first case describes.
             $script:ListingRecon = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$StartIds.Count -gt 0' }, $true)
             $script:ListingOverride = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '@($FailedSubscriptionIds).Count -gt 0' }, $true)
             if (-not $script:ListingRecon -or -not $script:ListingOverride) { throw 'The reconciliation or the exit override was not found in Run-AllSubscriptions.ps1.' }
             $script:ListingRun = [scriptblock]::Create(@'
-param($ReconText, $OverrideText, [string]$Fault, [string[]]$Listed)
+param($ReconText, $OverrideText, [string]$Fault, [string[]]$Listed, [hashtable]$Options = @{})
 # The wrapper sets no error preference, so production runs at the default. Pin it here so the error cases
 # cannot be satisfied by a caller whose own preference is Stop.
 $ErrorActionPreference = 'Continue'
@@ -976,8 +989,18 @@ $StartIds = @('sub-a', 'sub-b', 'sub-c')
 $Subscriptions = @($StartIds | ForEach-Object { [pscustomobject]@{ Id = $_ } })
 # The reconciliation reads the copy taken before processing, not $Subscriptions.
 $ResponsibleSubscriptions = $Subscriptions
-$CompletedIds = @('sub-a')
-$FailedAttempts = @([pscustomobject]@{ Id = 'sub-b' }, [pscustomobject]@{ Id = 'sub-c' })
+$StartListed = if ($Options.ContainsKey('StartListed')) { $Options['StartListed'] } else { $StartIds }
+$AllSubscriptions = @($StartListed | ForEach-Object { [pscustomobject]@{ Id = $_ } })
+# CoverageShape 'null' and 'noIds' are what the wrapper holds when the tenant-root management group could not be read.
+$Coverage = switch ($Options['CoverageShape'])
+{
+    'null' { $null }
+    'noIds' { [pscustomobject]@{ } }
+    default { [pscustomobject]@{ Ids = $(if ($Options.ContainsKey('CoverageIds')) { $Options['CoverageIds'] } else { $null }) } }
+}
+$CompletedIds = @(if ($Options.ContainsKey('Completed')) { $Options['Completed'] } else { 'sub-a' })
+$Earlier = @(if ($Options.ContainsKey('Earlier')) { $Options['Earlier'] })
+$FailedAttempts = @([pscustomobject]@{ Id = 'sub-b' }, [pscustomobject]@{ Id = 'sub-c' }) + @($Earlier | ForEach-Object { [pscustomobject]@{ Id = $_ } })
 $FailedSubscriptions = @('B', 'C')
 $FailedSubscriptionIds = @('sub-b', 'sub-c')
 $CollectionAbortedSubs = @('B (sub-b)')
@@ -987,6 +1010,7 @@ $StateSaveArgs = @{}
 $WrapperExitCode = 0
 $SubResourceCounts = @([pscustomobject]@{ Id = 'sub-a' })
 $ReconciliationSkipped = $false
+$RetryEntriesRemoved = $false
 $Held = @($Global:CollectorFailures, $Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:MarketplaceFailedSubs)
 $Global:CollectorFailures = @([pscustomobject]@{ Id = 'sub-b'; Module = 'VMSS'; Message = 'm' }, [pscustomobject]@{ Id = 'sub-a'; Module = 'AKS'; Message = 'm' })
 $Global:MetricsFailedSubs = @([pscustomobject]@{ Name = 'C'; Id = 'sub-c'; Message = 'm' })
@@ -1007,7 +1031,7 @@ finally
 {
     $Global:CollectorFailures, $Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:MarketplaceFailedSubs = $Held
 }
-[pscustomobject]@{ Exit = $WrapperExitCode; Names = @($FailedSubscriptions); Ids = @($FailedSubscriptionIds); Aborted = @($CollectionAbortedSubs); Archive = @($ArchiveWriteFailures); Retry = @($FailedAttempts | ForEach-Object { $_.Id }); Health = $Health; Saves = $Saves.Count; Shown = @($Shown); Skipped = $ReconciliationSkipped }
+[pscustomobject]@{ Exit = $WrapperExitCode; Names = @($FailedSubscriptions); Ids = @($FailedSubscriptionIds); Aborted = @($CollectionAbortedSubs); Archive = @($ArchiveWriteFailures); Retry = @($FailedAttempts | ForEach-Object { $_.Id }); Health = $Health; Saves = $Saves.Count; Shown = @($Shown); Skipped = $ReconciliationSkipped; Removed = $RetryEntriesRemoved }
 '@)
         }
 
@@ -1017,7 +1041,8 @@ finally
             @{ Label = 'an error after part of the listing'; Fault = 'Error'; Listed = @('sub-a'); Reason = 'Connection refused \(127\.0\.0\.1:9\)' }
         ) {
             . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
-            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text $Fault $Listed 2>&1)
+            # sub-earlier is an entry an earlier run left: a listing that failed cannot say it is gone.
+            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text $Fault $Listed @{ Earlier = @('sub-earlier') } 2>&1)
             $Leaked = @($Out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
             $Results = @($Out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
             $Results.Count | Should -Be 1
@@ -1025,7 +1050,7 @@ finally
             $Result.Exit | Should -Be 2 -Because 'both failures still stand, so the run must not exit 0'
             $Result.Names | Should -Be @('B', 'C') -Because 'the summary still lists both failures'
             $Result.Ids | Should -Be @('sub-b', 'sub-c')
-            $Result.Retry | Should -Be @('sub-b', 'sub-c') -Because 'the retry list is what -ResumeFailedOnly works from'
+            $Result.Retry | Should -Be @('sub-b', 'sub-c', 'sub-earlier') -Because 'the retry list is what -ResumeFailedOnly works from, and nothing is removed on the strength of a listing that failed'
             $Result.Aborted | Should -Be @('B (sub-b)')
             $Result.Archive | Should -Be @('C (sub-c)')
             $Result.Health.Collector | Should -Be @('sub-b', 'sub-a')
@@ -1033,6 +1058,7 @@ finally
             $Result.Health.Consumption | Should -Be @('sub-c')
             $Result.Health.Marketplace | Should -Be @('sub-b')
             $Result.Saves | Should -Be 0 -Because 'the resume state keeps the retry list it already holds'
+            $Result.Removed | Should -BeFalse -Because 'no retry entry was removed'
             @($Result.Shown | Where-Object { $_ -match 'sub-[abc]' }) | Should -BeNullOrEmpty -Because 'a listing that failed says nothing about any one subscription'
             ($Result.Shown -join "`n") | Should -Match ('reconciliation skipped.*' + $Reason) -Because 'the operator is told the reconciliation did not run, and why, with every warning Az gave'
             if ($Fault -eq 'Token') { [regex]::Matches(($Result.Shown -join "`n"), 'A different notice comes first').Count | Should -Be 1 -Because 'a warning Az repeats is reported once' }
@@ -1043,40 +1069,110 @@ finally
 
         It 'a warning beside a listing that returned subscriptions does not skip the reconciliation' {
             . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
-            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text 'Token' @('sub-a') 2>&1)
+            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text 'Token' @('sub-a') @{} 2>&1)
             $Results = @($Out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
             $Results.Count | Should -Be 1
             $Result = $Results[0]
             $Result.Skipped | Should -BeFalse -Because 'the listing names the subscriptions that still exist, so it can be trusted'
-            $Result.Exit | Should -Be 0 -Because 'sub-b and sub-c are missing from a listing that can be trusted, so their failures are expected'
-            $Result.Names.Count | Should -Be 0
-            $Result.Retry.Count | Should -Be 0
-            ($Result.Shown -join "`n") | Should -Match 'Deleted mid-run \(2\)'
+            $Result.Exit | Should -Be 2 -Because 'sub-b and sub-c failed, and a subscription missing from the end listing may be hidden from this identity rather than deleted'
+            $Result.Names | Should -Be @('B', 'C')
+            $Result.Retry | Should -Be @('sub-b', 'sub-c')
+            $Result.Saves | Should -Be 0 -Because 'both are listed at the start, so neither is an entry to remove'
+            ($Result.Shown -join "`n") | Should -Match 'Not listed at the end of the run \(2\)'
             ($Result.Shown -join "`n") | Should -Not -Match 'reconciliation skipped'
         }
 
-        It 'the last block of the run has warnings = <Expected> when the reconciliation skipped = <Skipped>' -ForEach @(
-            @{ Skipped = $true; Expected = $true }
-            @{ Skipped = $false; Expected = $false }
+        It 'a retry entry <Label>' -ForEach @(
+            @{ Label = 'listed at neither end is removed'; Options = @{ Earlier = @('sub-earlier') }; Gone = @('sub-earlier'); Kept = @() }
+            @{ Label = 'listed nowhere, in another case, is removed'; Options = @{ Earlier = @('SUB-EARLIER') }; Gone = @('SUB-EARLIER'); Kept = @() }
+            @{ Label = 'listed at the start only is kept'; Options = @{ Earlier = @('sub-x'); StartListed = @('sub-a', 'sub-b', 'sub-c', 'sub-x') }; Gone = @(); Kept = @('sub-x') }
+            @{ Label = 'listed at the start in another case is kept'; Options = @{ Earlier = @('SUB-X'); StartListed = @('sub-a', 'sub-b', 'sub-c', 'Sub-X') }; Gone = @(); Kept = @('SUB-X') }
+            @{ Label = 'listed at the end only is kept'; Options = @{ Earlier = @('sub-y') }; EndExtra = @('sub-y'); Gone = @(); Kept = @('sub-y') }
+            @{ Label = 'listed at the end in another case is kept'; Options = @{ Earlier = @('SUB-Y') }; EndExtra = @('Sub-Y'); Gone = @(); Kept = @('SUB-Y') }
+            @{ Label = 'with a blank id is kept'; Options = @{ Earlier = @(' ') }; Gone = @(); Kept = @(' ') }
+            @{ Label = 'under the tenant-root management group, but hidden from this identity, is kept'; Options = @{ Earlier = @('sub-hidden'); CoverageIds = @('SUB-HIDDEN', 'sub-a') }; Gone = @(); Kept = @('sub-hidden') }
+            @{ Label = 'next to two that are listed nowhere: all three ids are printed'; Options = @{ Earlier = @('sub-one', 'sub-two', 'sub-three') }; Gone = @('sub-one', 'sub-two', 'sub-three'); Kept = @() }
+            @{ Label = 'among twelve listed nowhere: every id is printed, not the first ten'; Options = @{ Earlier = @(1..12 | ForEach-Object { 'sub-earlier-{0:d2}' -f $_ }) }; Gone = @(1..12 | ForEach-Object { 'sub-earlier-{0:d2}' -f $_ }); Kept = @() }
+            @{ Label = 'is still removed when the management group result is missing altogether, and the group is said not to have been read'; Options = @{ Earlier = @('sub-earlier'); CoverageShape = 'null' }; Gone = @('sub-earlier'); Kept = @() }
+            @{ Label = 'is still removed when the management group result has no Ids, and the group is said not to have been read'; Options = @{ Earlier = @('sub-earlier'); CoverageShape = 'noIds' }; Gone = @('sub-earlier'); Kept = @() }
+            @{ Label = 'listed twice is removed once and counted once'; Options = @{ Earlier = @('sub-dup', 'sub-dup') }; Gone = @('sub-dup'); Kept = @() }
+            @{ Label = 'listed at neither end, with the management group read and not holding it, is removed without a note about the group'; Options = @{ Earlier = @('sub-earlier'); CoverageIds = @('sub-other') }; Gone = @('sub-earlier'); Kept = @() }
+        ) {
+            . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
+            $EndListed = @('sub-a', 'sub-b', 'sub-c') + @($EndExtra | Where-Object { $_ })
+            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text 'None' $EndListed $Options 2>&1)
+            $Results = @($Out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+            $Results.Count | Should -Be 1
+            $Result = $Results[0]
+            $Result.Skipped | Should -BeFalse -Because 'the end listing is one that can be trusted'
+            $Result.Exit | Should -Be 2 -Because 'sub-b and sub-c failed in this run, whatever happens to an old entry'
+            $Result.Retry | Should -Be (@('sub-b', 'sub-c') + @($Kept)) -Because 'this run''s failures always stay, and so does every entry that is not removed'
+            $Shown = $Result.Shown -join "`n"
+            if (@($Gone).Count -gt 0)
+            {
+                $Result.Removed | Should -BeTrue -Because 'the last block of the run reads this to report a warning'
+                $Result.Saves | Should -Be 1 -Because 'the resume state must stop holding what was removed'
+                $Shown | Should -Match ('Removed from the retry list \({0}\): ' -f @($Gone).Count)
+                foreach ($GoneId in $Gone) { $Shown | Should -Match ([regex]::Escape($GoneId)) -Because 'after the state is saved the transcript is the only record of what was removed' }
+                $script:WrapSrc | Should -Not -Match 'Deleted mid-run' -Because 'the wrapper no longer calls a subscription that is not listed deleted'
+                if ($Options.ContainsKey('CoverageIds') -and -not $Options.ContainsKey('CoverageShape'))
+                {
+                    $Shown | Should -Not -Match 'management group could not be read' -Because 'the group was read, so nothing is said about it'
+                }
+                else
+                {
+                    $Shown | Should -Match 'management group could not be read' -Because 'the removal says when the group was not consulted'
+                }
+            }
+            else
+            {
+                $Result.Removed | Should -BeFalse
+                $Result.Saves | Should -Be 0
+                $Shown | Should -Not -Match 'Removed from the retry list'
+            }
+        }
+
+        It 'a removal alone still gets the reconciliation heading, and nothing to report does not' -ForEach @(
+            @{ Earlier = @('sub-earlier'); Expected = $true }
+            @{ Earlier = @(); Expected = $false }
+        ) {
+            . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
+            # Every subscription of the run completed and is listed at both ends, so nothing else is reported.
+            $Out = @(& $script:ListingRun $script:ListingRecon.Extent.Text $script:ListingOverride.Extent.Text 'None' @('sub-a', 'sub-b', 'sub-c') @{ Earlier = $Earlier; Completed = @('sub-a', 'sub-b', 'sub-c') } 2>&1)
+            $Result = @($Out | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })[0]
+            $Result.Skipped | Should -BeFalse
+            $Shown = $Result.Shown -join "`n"
+            if ($Expected) { $Shown | Should -Match 'Subscription reconciliation \(start-of-run vs now\)' -Because 'a removal is the only thing the operator would otherwise see without a heading' }
+            else { $Shown | Should -Not -Match 'Subscription reconciliation \(start-of-run vs now\)' }
+            $Result.Removed | Should -Be $Expected
+        }
+
+        It 'the last block of the run has warnings = <Expected> when the reconciliation skipped = <Skipped> and retry entries removed = <Removed>' -ForEach @(
+            @{ Skipped = $true; Removed = $false; Expected = $true }
+            @{ Skipped = $false; Removed = $true; Expected = $true }
+            @{ Skipped = $true; Removed = $true; Expected = $true }
+            @{ Skipped = $false; Removed = $false; Expected = $false }
         ) {
             $Assign = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FinalHasWarnings' }, $true)
             $Assign | Should -Not -BeNullOrEmpty
             @($script:WrapAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$FinalHasWarnings' }, $true)).Count | Should -Be 1 -Because 'one statement decides it, so the lifted one is the one that runs'
             $script:WrapSrc | Should -Match 'Get-RdaFinalScreenLines -ExitCode \$WrapperExitCode -HasWarnings \$FinalHasWarnings ' -Because 'the last block of the run is built from this value'
-            # Every other condition in the statement is held at "nothing wrong", so only the skip can move it.
+            @([regex]::Matches($script:WrapSrc, '(?m)^\$RetryEntriesRemoved = \$false\s*$')).Count | Should -Be 1 -Because 'the flag starts false, outside the block that sets it'
+            # Every other condition in the statement is held at "nothing wrong", so only these two can move it.
             $Run = [scriptblock]::Create(@'
-param($AssignText, [bool]$Skipped)
+param($AssignText, [bool]$Skipped, [bool]$Removed)
 $RunHadFailures = $false
 $BlobUploadProblem = $false
 $MissingMembers = @()
 $ReconciliationSkipped = $Skipped
+$RetryEntriesRemoved = $Removed
 $Held = $Global:MarketplaceFailedSubs
 $Global:MarketplaceFailedSubs = @()
 try { . ([scriptblock]::Create($AssignText)) }
 finally { $Global:MarketplaceFailedSubs = $Held }
 [bool]$FinalHasWarnings
 '@)
-            (& $Run $Assign.Extent.Text $Skipped) | Should -Be $Expected
+            (& $Run $Assign.Extent.Text $Skipped $Removed) | Should -Be $Expected
         }
     }
 

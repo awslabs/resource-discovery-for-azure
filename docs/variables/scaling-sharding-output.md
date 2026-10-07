@@ -387,8 +387,13 @@ redone from the start.
 **What it does.** Retries **only** the subscriptions recorded as *failed* in the
 resume state, skipping both the already-completed and the never-attempted ones.
 It reads the `FailedAttempts` list and filters the in-scope set down to just
-those ids (`Run-AllSubscriptions.ps1` line ~817–843). If the failed list is
-empty, it exits cleanly saying there is nothing to retry.
+those ids (`Run-AllSubscriptions.ps1` line ~902-922). If the failed list is
+empty, it exits cleanly saying there is nothing to retry. An entry whose
+subscription is listed neither at the start nor at the end of a run is removed
+by that run, unless the tenant-root management group, when it can be read, still
+holds it, or the end-of-run listing failed. When none of the entries is listed,
+`-ResumeFailedOnly` stops with a warning first, and a normal or `-Resume` run
+clears them.
 
 **Why it exists — and how it differs from `-Resume`.** `-Resume` continues an
 *interrupted* run: it processes everything not yet completed (failed **and**

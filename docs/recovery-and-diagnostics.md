@@ -244,15 +244,16 @@ Merge-RecoveryData `
 Two logs help you see what failed and where.
 
 `DebugLog_<ReportName>_<timestamp>.log`
-- The full local debug log: per-collector start, finish, and failure lines, plus
+- The full debug log: per-collector start, finish, and failure lines, plus
   the metrics-phase detail that used to scroll past on the terminal.
-- Local only. It is never added to the ZIP, because it can contain real names and
-  raw error text.
+- It can contain real names and raw error text.
+  An `-Obfuscate` run keeps it local and never adds it to the ZIP.
+  A default run adds it to the ZIP, with a warning, because that report is not obfuscated anyway.
 
 `Diagnostics_<ReportName>_<timestamp>.log`
-- A shareable, scrubbed, readable log. It is built on `-Obfuscate` runs and is
-  included in the ZIP.
-- Subscriptions appear as tokens and identifiers are masked. It lists phase
+- A shareable, scrubbed, readable log, written on every run and included in the ZIP.
+- In an `-Obfuscate` run subscriptions appear as tokens and identifiers are masked; in a default run it masks GUIDs and email addresses, though the report beside it carries real names.
+- It lists phase
   timings and one line per health issue: collector failures, metrics auth skips,
   metrics left incomplete because the worker pool could not be opened,
   and consumption failures. For consumption it records exactly where a pull

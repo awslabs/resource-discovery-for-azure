@@ -583,35 +583,23 @@ want each family at its own native cadence instead.
 `metrics:getBatch` data-plane API (one request per ≤50 resources) instead of the
 default one-call-per-metric path, cutting the request count.
 
-In `Extension/Metrics.ps1`, the batch path is entered under `if
-($UseMetricsBatch)` (~line 580). It:
+In `Extension/Metrics.ps1`, the batch path is entered under `if ($UseMetricsBatch)`, after every metric definition has been built.
+It:
 
-- Partitions the already-built `$MetricDefs` into a batchable set and a
-  remainder using a fixed namespace map — only Virtual Machines, Managed Disk,
-  Storage Account, SQL Database, VM Scale Sets, and CosmosDB are batch-eligible
-  (`$BatchNamespaceMap`, ~lines 582–589). Everything else stays on the per-call
-  path.
-- Calls `Invoke-RdaMetricsBatch` per eligible service namespace (~line 616) and
-  records which `(resource id, metric)` keys were satisfied; any definition the
-  batch did not return is pushed back onto the per-call remainder (~lines
-  622–632), so **no metric is lost**.
-- On a batch error it logs a warning (with an auth-specific hint for
-  403/AuthorizationFailed) saying how many definitions it cost, and **falls
-  back only those definitions** to the per-call path. A failing region, or a
-  failing chunk of at most 50 resources inside it, is skipped with its own
-  warning naming the subscription, the region and the resource range; the
-  records the batch did fetch are kept, so one bad region no longer sends every
-  definition of the service to the per-call path.
-- Counts the getBatch POST before it is issued, so a request that failed still
-  counts against the Azure Monitor metric-query meter in
-  `$Global:MetricsApiCallCount`.
-- Writes the batch results to a `<FilePath>_0.json` shard (~line 660), then the
-  remaining `$MetricDefs` continue through the normal per-call runspace loop.
+- Partitions the already-built `$MetricDefs` into a batchable set and a remainder using a fixed namespace map, `$BatchNamespaceMap`.
+  Only Virtual Machines, Managed Disk, Storage Account, SQL Database, VM Scale Sets, and CosmosDB are batch-eligible; everything else stays on the per-call path.
+- Calls `Invoke-RdaMetricsBatch` once per eligible service namespace, in the `foreach ($Service in $BatchGroups.Keys)` loop, and records which `(resource id, metric)` keys were satisfied.
+  Any definition the batch did not return is pushed back onto the per-call remainder in that same loop, so **no metric is lost**.
+- On a batch error it logs a warning (with an auth-specific hint for 403/AuthorizationFailed) saying how many definitions it cost, and **falls back only those definitions** to the per-call path.
+  A failing group, one subscription and region, is skipped with a warning naming the subscription and the region.
+  A failing chunk of at most 50 resources inside a group is skipped with a warning that also names the chunk's resource range.
+  The records the batch did fetch are kept, so one bad region no longer sends every definition of the service to the per-call path.
+- Counts every getBatch POST it issues in `$Global:MetricsApiCallCount`, a failed one included.
+  A request that never reached Azure, such as a DNS or connection failure, is counted too, so the figure can slightly overstate what the Azure Monitor metric-query meter bills.
+- Writes the batch results to a `<FilePath>_0.json` shard once every service has been batched, then the remaining `$MetricDefs` continue through the normal per-call runspace loop.
 
-The wrapper forwards it as a passthrough on both paths
-(`Run-AllSubscriptions.ps1` ~lines 1135, 1458) and also uses it to adjust the
-`-Plan` per-query cost estimate (`if ($UseMetricsBatch)` branches, ~lines 564,
-590, 598).
+The wrapper forwards it as a passthrough on both paths (`$InventoryPassthrough` for the runs in the wrapper's own process, `$WorkerArgs` for the parallel stream workers, both in `Run-AllSubscriptions.ps1`).
+It also uses it to adjust the `-Plan` per-query cost estimate, in the `if ($UseMetricsBatch)` branches of that estimate.
 
 ### Why it exists / when to use it
 

@@ -2021,9 +2021,9 @@ function Write-RdaShareableDiagnosticsLog
         }
         $DiagLines.Add('')
         $DiagLines.Add(('Metrics incomplete subscriptions: {0}' -f $MetricsPoolSkips.Count))
-        foreach ($mpItem in $MetricsPoolSkips)
+        foreach ($MetricsPoolItem in $MetricsPoolSkips)
         {
-            $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$mpItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$mpItem.Message) $DiagScrubMap)))
+            $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$MetricsPoolItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$MetricsPoolItem.Message) $DiagScrubMap)))
         }
         $DiagLines.Add('')
         $DiagLines.Add(('Consumption failed/incomplete subscriptions: {0}' -f $ConsumpSkips.Count))

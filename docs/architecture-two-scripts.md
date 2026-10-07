@@ -286,7 +286,7 @@ At the end of each subscription's metrics phase it does this instead:
    That pool stays in memory until the process ends, but nothing hangs and no call is cut off mid-job.
 
 `Close-RdaMetricWorkerPool` at wrapper exit follows the same rule: it releases the pool only if no worker is busy, and it never waits for a busy worker.
-A pool it does not release is reported on the PowerShell warning stream, not only in the debug log, because it then stays in memory until the process ends.
+A pool it does not release is reported on the PowerShell warning stream, not only on the verbose stream, because it then stays in memory until the process ends.
 A pool in state `Broken` has no running call to protect, so it is disposed without a close.
 
 ### The context conversion: the "Cannot convert PSAzureContext" bug
@@ -368,7 +368,8 @@ These lines appear in the local `DebugLog_*.log`, after the `[Metrics]` prefix:
 | `WARNING: could not scope the metric calls of subscription S to its own tenant (...)` | No profile could be built for that subscription, so its per-call metric queries use the process context. They succeed when the subscription is in the signed-in tenant and fail when it is homed elsewhere. |
 | `Per-call metrics collection skipped: the metric worker pool could not be opened, as the ERROR above reports.` | Nothing was collected on the per-call path. Read the `ERROR:` line above it for how many definitions were given up. |
 | `Per-call metrics collection has nothing to do: no metric definition is left on the per-call path.` | Either the subscription has no resource that carries a metric, or `-UseMetricsBatch` covered every definition. |
-| `WARNING: metrics batch group skipped for subscription S region R (...)` | One subscription and region of the batch could not be prepared or queried, usually a token or a region problem. Its definitions fall back to the per-call path; the other groups are unaffected. |
+| `WARNING: metrics batch group skipped: cannot derive subscription/region from id '...'. Its N metric def(s) fall back to per-call.` | A definition's resource id carries no subscription or no region, so its group cannot be sent to getBatch. Its definitions fall back to the per-call path; the other groups are unaffected. |
+| `WARNING: metrics batch group skipped for subscription S region R (...)` | One subscription and region of the batch could not be prepared or queried, usually a token, profile lookup or region problem. Its definitions fall back to the per-call path; the other groups are unaffected. |
 | `WARNING: metrics batch chunk skipped for subscription S region R, resource A-B of N (...)` | One getBatch POST, covering at most 50 resources, failed. Only those resources fall back to the per-call path; the records the other chunks returned are kept. |
 | `WARNING: metrics batch fast-path failed for N of M SERVICE metric def(s) (...)` | How many definitions of that service ended up on the per-call path, with the batch error and a remediation hint. |
 

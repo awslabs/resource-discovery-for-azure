@@ -22,9 +22,7 @@ BeforeAll {
     . ([scriptblock]::Create($ClsAst.Extent.Text))
 
     # The per-call profile chooser, the profile map and the phase-start line all live in the phase body,
-    # so they are lifted by shape and run against stubs rather than re-implemented here. Lifted without
-    # throwing on absence: a test asserts each one is there, so a source that has none of them fails
-    # those tests alone instead of taking the whole file down with a container error.
+    # so they are lifted by shape and run against stubs rather than re-implemented here.
     # Lifted by shape, not by position. Every statement of the metrics phase sits inside one
     # if ($Task -eq 'Processing'), so a match on the text alone also finds that whole-phase block; the
     # condition has to be part of the filter. Lifted without throwing on absence: a test asserts each
@@ -907,7 +905,7 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         $script:BatchFailOn = @('*westeurope*')
         $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
         $script:BatchPosts.Count | Should -Be 1
-        $script:MetricsBatchHttpCalls | Should -Be 1 -Because 'a request that reached the service and failed still counts against the metric-query meter'
+        $script:MetricsBatchHttpCalls | Should -Be 1 -Because 'every request issued is counted, a failed one included'
     }
 
     It 'skips a group with no subscription segment and still batches the rest' {

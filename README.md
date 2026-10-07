@@ -452,9 +452,16 @@ When you run the wrapper at a console, it ends by clearing the screen and showin
 
 If a subscription fails, the wrapper also writes a structured failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`. This file captures the full exception type, the error message, up to five levels of inner exceptions, the script line number, the stack trace, and a snapshot of how much memory and free disk space the machine had when the failure happened. The final summary points at both files when failures occur.
 
-Inside each subscription's report folder, the inner script also writes a consolidated **local debug log**, `DebugLog_<ReportName>_<timestamp>.log` — the per-collector heartbeat (each collector's start/finish/failure) plus the metrics-phase diagnostics that used to scroll past on the terminal. It stays **local** and is never added to the shared ZIP: it can contain real service/resource names and raw exception text, so keep it for your own troubleshooting.
+Inside each subscription's report folder, the inner script also writes a consolidated **debug log**, `DebugLog_<ReportName>_<timestamp>.log`: the per-collector heartbeat (each collector's start/finish/failure) plus the metrics-phase diagnostics that used to scroll past on the terminal.
+It can contain real service/resource names and raw exception text.
+An `-Obfuscate` run keeps it **local** and never adds it to the shared ZIP, so keep it for your own troubleshooting.
+A default run adds it to the ZIP, with a warning on the console, because that report is not obfuscated anyway.
 
-Obfuscated runs (`-Obfuscate`) additionally produce a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP. It is human-readable and scrubbed — subscriptions appear as their obfuscated tokens and other identifiers are masked — and it summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, metrics left incomplete because the worker pool could not be opened, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer). Because it is safe to share, it can go to the AWS team alongside the report to explain any gaps without exposing real names. It is a plain `.log` on purpose so the ingestion pipeline treats it as an attachment, not as report data.
+Every run also produces a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP.
+It is human-readable and scrubbed: in an `-Obfuscate` run subscriptions appear as their obfuscated tokens and other identifiers are masked, and in a default run it masks GUIDs and email addresses, though the report beside it carries real names.
+It summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, metrics left incomplete because the worker pool could not be opened, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer).
+The one from an `-Obfuscate` run is safe to share, so it can go to the AWS team alongside the report to explain any gaps without exposing real names.
+It is a plain `.log` on purpose so the ingestion pipeline treats it as an attachment, not as report data.
 
 **Collecting everything in one step.** Rather than hunting these files down individually, run the log collector to gather them into a single zip you can hand to support:
 
@@ -466,7 +473,10 @@ It bundles the wrapper transcript, the failure / access-verdict logs, the run su
 
 **A failed run collects this for you automatically.** If `Run-AllSubscriptions.ps1` hard-stops *before* producing a report bundle — for example an authentication failure, the up-front subscription-access gate, or a consumption-access denial — it writes `InventoryReports/RdaSupportLogs_<timestamp>.zip` on its way out and prints the path. So even a run that "never worked" and produced no report still leaves exactly one file to send; you don't need to know which logs to gather.
 
-When reporting an issue, send the `RdaSupportLogs_*.zip`. (If you'd rather attach files individually: the wrapper transcript and the failure log, plus — for obfuscated runs — the in-ZIP diagnostics log. The local `DebugLog_*.log` carries the most detail; share it too if you've confirmed it doesn't expose sensitive names.) Together these contain enough context to diagnose most failures without a follow-up round trip.
+When reporting an issue, send the `RdaSupportLogs_*.zip`.
+(If you'd rather attach files individually: the wrapper transcript and the failure log, plus the in-ZIP diagnostics log.
+The `DebugLog_*.log` carries the most detail; share it too if you've confirmed it doesn't expose sensitive names.)
+Together these contain enough context to diagnose most failures without a follow-up round trip.
 
 ## Output Files
 
@@ -483,8 +493,8 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
 | `Transcript_Log_<ReportName>_(date).txt` | Plaintext transcript of script activity (excluded from the zip when `-Obfuscate` is used) |
-| `DebugLog_<ReportName>_(date).log` | Consolidated **local** debug log — per-collector heartbeat + metrics diagnostics. Never added to the zip (may contain real names/exception text) |
-| `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on `-Obfuscate` runs only** |
+| `DebugLog_<ReportName>_(date).log` | Consolidated debug log - per-collector heartbeat + metrics diagnostics. May contain real names and exception text, so an `-Obfuscate` run keeps it **local** and never adds it to the zip; a default run adds it, with a warning |
+| `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on every run** |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery

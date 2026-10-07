@@ -2050,13 +2050,14 @@ The overall shape here is worth remembering as a pattern: **detect the gap, atte
 | 1139 | `if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }` | Lazily initialise the health list. It has to be lazy because this script is invoked with `&` from the wrapper, so the variable lives in the wrapper's scope and persists across subscriptions. |
 | 1141-1152 | `$AffectedSubs = @( if (...) {...} else {...} )` | Works out which subscriptions this skip applies to. The wrapper passes `-SubscriptionID`, so it is that one; a standalone all subscriptions run means every in scope subscription. Note the `if` is used as an expression **inside** the array subexpression `@(...)`, which is a compact PowerShell idiom for conditional array construction. |
 | 1153-1159 | the `$AffectedSubs.Count -eq 0` fallback | If even the subscription list is unavailable, still record **one** entry, labelled `(unknown)`. The comment states the principle: the failure must never be silent. This is a good habit to notice, since it is the error path of an error path and would be easy to leave empty. |
-| 1162-1165 | the `foreach` | One health record per affected subscription, each a `[pscustomobject]` with `Name`, `Id` and `Message`. |
+| 1162-1165 | the `foreach` | One health record per affected subscription, each a `[pscustomobject]` with `Name`, `Id`, `Message` and `Cause`, which is `auth` here. |
 | 1166 | `return` | Leave the function. Metrics are skipped, everything else continues. |
 
 That health list is not decoration.
 `Run-AllSubscriptions.Stream.ps1` aggregates it across parallel streams and `Run-AllSubscriptions.ps1` prints it, per subscription, in the final run summary.
 So a metrics auth failure part way down a long subscription list is named explicitly at the end of the run rather than being something the operator has to notice by spotting a thin report.
-Each entry carries a `Cause`, so the wrapper can tell this auth skip apart from the metrics left incomplete when `Extension/Metrics.ps1` cannot open its worker pool, and print the right banner and remedy for each. An entry written before that field existed carries no `Cause` and is still read as an auth skip.
+Each entry carries a `Cause`, so the wrapper can tell this auth skip apart from the metrics left incomplete when `Extension/Metrics.ps1` cannot open its worker pool, and print the right banner and remedy for each.
+An entry written before that field existed carries no `Cause` and is still read as an auth skip.
 
 ### The success path (lines 1168-1183)
 

@@ -304,9 +304,10 @@ if ($Task -eq 'Processing')
                             $Endpoint, $SubscriptionId, $NsParam, $NamesParam, $AggParam, $IntervalIso, $StartIso, $EndIso
                         $BodyJson = @{ resourceids = $Chunk } | ConvertTo-Json
 
-                        # Counted before the POST, not after: a request that threw was still issued and
-                        # still counts against the Azure Monitor metric-query meter, so counting it only
-                        # on success under-reported every failed run.
+                        # Counted before the POST, not after: the figure is the requests issued, so one that
+                        # fails is counted too - even one that never reached Azure, such as a DNS or
+                        # connection failure - and the total can slightly overstate what the metric-query
+                        # meter bills. Counting only on success under-reported every failed run.
                         $script:MetricsBatchHttpCalls++
                         $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -ErrorAction Stop
 

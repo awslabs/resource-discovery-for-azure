@@ -77,6 +77,7 @@ Health:
 ```
 
 `Metric-query API calls issued` is the run-wide total across all subscriptions.
+Every request issued is counted, a failed one included, even one that never reached Azure, so the figure can slightly overstate what the metric-query meter bills.
 Per-subscription detail (a per-call vs getBatch breakdown) is written to each
 subscription's local `DebugLog_*.log`.
 

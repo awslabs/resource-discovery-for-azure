@@ -274,3 +274,59 @@ Exit code is `0` only if every scenario passed its applicable tests and the
 pre-merge gate). Generated zips are deleted automatically
 unless `-KeepOutput` is passed, because non-obfuscated zips contain real
 subscription identifiers.
+
+## Wrapper Scenarios (`Invoke-WrapperScenarios.ps1`)
+
+The scenario matrix exercises `ResourceInventory.ps1` and asserts the zip it produced.
+`Invoke-WrapperScenarios.ps1` is its sibling for `Run-AllSubscriptions.ps1`, and asserts what the wrapper decided rather than what it wrote: the exit code, the reconciliation it reported, and whether it kept or cleared the resume state.
+Those decisions leave no artifact to inspect, so each case states them as expectations and the run fails when one is not met.
+
+Every run is read-only against the tenant and skips every billed phase, so a full pass costs nothing but Resource Graph and control-plane reads.
+Faults are injected the way a live-run harness injects them: `Get-AzSubscription` and `Search-AzGraph` are shadowed by functions in a driver process, so the real wrapper runs unmodified and the real tenant answers everything that is not injected.
+Each case runs in its own child `pwsh`, so a shim cannot reach the next case.
+
+### Cases
+
+| Case | What is injected | Expected |
+|---|---|---|
+| `narrow` | nothing; the listing is narrowed to the one subscription | exit 0, every listed subscription processed |
+| `notlisted` | that subscription fails, and the end-of-run listing names a different one instead | exit 2, reported under "Not listed at the end of the run" |
+| `endlisting` | the end-of-run listing returns nothing with a token warning | exit 0, reconciliation skipped rather than acted on, run ends with warnings |
+| `corruptstate` | a truncated resume-state file the JSON parser stops on | exit 0, the run starts fresh and says so |
+| `resumefailedonly` | a state where one subscription failed and a second listed one was never reached, run with `-ResumeFailedOnly` | exit 0 with warnings, the never-collected one is named, the state file is kept |
+| `parallel` | nothing; two subscriptions and `-ParallelStreams 2` | exit 0, one stream per subscription |
+| `obfuscate` | nothing; `-Obfuscate` | exit 0, then the outer-bundle and obfuscation suites against the bundle it produced |
+
+### Which subscription it runs against
+
+Collection is confined to the subscription named by `-SubscriptionName`, which defaults to the sandbox subscription every live gate uses.
+The name is resolved against the live tenant at runtime, so no subscription id is stored in the script.
+
+Two cases list a second subscription without ever collecting it: `notlisted` needs the end-of-run listing to name a different subscription, and `resumefailedonly` needs a second eligible subscription for `-ResumeFailedOnly` to leave uncollected.
+One case, `parallel`, genuinely has to collect a second subscription, because a stream is sized per subscription and two streams cannot start against one.
+Pass `-SingleSubscriptionOnly` to skip that case and keep collection inside the named subscription.
+A case that cannot run says so and is reported as skipped, never quietly passed.
+
+### The report folder
+
+The wrapper resolves its own output root and has no output-directory parameter, so this runner cannot redirect it.
+It snapshots the root's entries instead, and after each case deletes exactly the entries that are new against that snapshot AND newer than the case's own start marker, then checks the root matches the snapshot again.
+An entry that is new but older than the marker belongs to something else and is left alone.
+The runner refuses to start when the root already holds a resume-state file, because a case seeds that file and would otherwise overwrite the state of an interrupted real run.
+
+### Run it
+
+```powershell
+# Every case:
+pwsh ./Tests/Invoke-WrapperScenarios.ps1
+
+# A subset:
+pwsh ./Tests/Invoke-WrapperScenarios.ps1 -Cases narrow,obfuscate
+
+# Stay inside one subscription (skips the two-streams case):
+pwsh ./Tests/Invoke-WrapperScenarios.ps1 -SingleSubscriptionOnly
+```
+
+Output is counts and yes/no only, because the wrapper's own lines name subscriptions.
+The captured transcripts stay in the work directory when a case fails or `-KeepOutput` is passed, and they carry real identifiers, so they are not shared.
+Exit code is `0` only when every case passed and the report folder was restored, else `1`.

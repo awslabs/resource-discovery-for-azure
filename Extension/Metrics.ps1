@@ -183,6 +183,37 @@ if ($Task -eq 'Processing')
         }
     }
 
+    function Get-RdaMetricsSubscriptionProfile
+    {
+        # One profile lookup per subscription for the whole phase, shared by the provider check, every batch
+        # service and the per-call map. A lookup costs two Get-AzSubscription calls, and a failing one is the
+        # expensive kind, because its second call lists every tenant, so a failure is kept as well, as its
+        # error, and thrown again to the next caller rather than retried. Each caller still reports the
+        # failure in its own words. The phase creates $script:MetricsSubProfileCache before its first lookup,
+        # so nothing found for one subscription of a wrapper run survives into the next. The keys are lower
+        # case because the same subscription can arrive written two ways.
+        param([Parameter(Mandatory = $true)][string]$SubscriptionId)
+
+        $CacheKey = $SubscriptionId.ToLowerInvariant()
+        if (-not $script:MetricsSubProfileCache.ContainsKey($CacheKey))
+        {
+            try
+            {
+                $script:MetricsSubProfileCache[$CacheKey] = [pscustomobject]@{ Profile = (Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId); Failure = $null }
+            }
+            catch
+            {
+                $script:MetricsSubProfileCache[$CacheKey] = [pscustomobject]@{ Profile = $null; Failure = $_ }
+            }
+        }
+        $Cached = $script:MetricsSubProfileCache[$CacheKey]
+        if ($null -ne $Cached.Failure)
+        {
+            throw $Cached.Failure
+        }
+        return $Cached.Profile
+    }
+
     function Invoke-RdaMetricsBatch
     {
         param($Defs, $MetricNamespace)
@@ -192,13 +223,10 @@ if ($Task -eq 'Processing')
         if (-not $Defs -or @($Defs).Count -eq 0) { return $Results.ToArray() }
 
         $Groups = $Defs | Group-Object -Property { (([string]$_.Id) -split '/')[2] + '|' + $_.Location + '|' + $_.Interval + '|' + $_.StartTime + '|' + $_.EndTime }
-        # One profile per subscription, reused by every group and chunk of it: the lookup costs two
-        # Get-AzSubscription calls, and the groups are keyed on region and time window as well, so one
-        # subscription usually has several. A lookup that throws is remembered too, in $SubProfileErrors,
-        # so a subscription the identity cannot read costs one lookup rather than one per group - and a
-        # failing lookup is the expensive one, because the second call enumerates every tenant.
-        $SubProfiles = @{}
-        $SubProfileErrors = @{}
+        # The groups are keyed on region and time window as well as subscription, so one subscription usually
+        # has several. Every one of them takes its profile from the phase's lookup cache
+        # (Get-RdaMetricsSubscriptionProfile), which the provider check, the other batch services and the
+        # per-call map share, so a subscription costs one lookup in the phase, a failing one included.
         foreach ($Group in $Groups)
         {
             # One failing group, or one failing chunk inside it, used to throw out of this function, and
@@ -216,36 +244,35 @@ if ($Task -eq 'Processing')
                 continue
             }
 
-            if (-not $SubProfiles.ContainsKey($SubscriptionId) -and -not $SubProfileErrors.ContainsKey($SubscriptionId))
+            # The token has to be minted for the subscription's own tenant. Without a profile
+            # Get-AzAccessToken mints it for the process's current tenant, and a subscription homed
+            # in another tenant - a standalone run with no -TenantID - then sent getBatch a token the
+            # metrics data plane rejects. Get-RdaSubscriptionProfile returns the scoped context
+            # container that -DefaultProfile takes, with the subscription's tenant already swapped in,
+            # and throws when the subscription is not visible.
+            $SubProfile = $null
+            $SubProfileFailed = $false
+            $SubProfileError = $null
+            try
             {
-                # The token has to be minted for the subscription's own tenant. Without a profile
-                # Get-AzAccessToken mints it for the process's current tenant, and a subscription homed
-                # in another tenant - a standalone run with no -TenantID - then sent getBatch a token the
-                # metrics data plane rejects. Get-RdaSubscriptionProfile returns the scoped context
-                # container that -DefaultProfile takes, with the subscription's tenant already swapped in,
-                # and throws when the subscription is not visible.
-                try
-                {
-                    $SubProfiles[$SubscriptionId] = Get-RdaSubscriptionProfile -SubscriptionId $SubscriptionId
-                }
-                catch
-                {
-                    $SubProfileErrors[$SubscriptionId] = $_.Exception.Message
-                }
+                $SubProfile = Get-RdaMetricsSubscriptionProfile -SubscriptionId $SubscriptionId
             }
-            if ($SubProfileErrors.ContainsKey($SubscriptionId))
+            catch
+            {
+                $SubProfileFailed = $true
+                $SubProfileError = $_.Exception.Message
+            }
+            if ($SubProfileFailed)
             {
                 # Every group of this subscription still reports its own fallback, because each one is a
                 # distinct set of definitions leaving the batch; only the lookup is not repeated.
-                $script:MetricsBatchLastError = $SubProfileErrors[$SubscriptionId]
+                $script:MetricsBatchLastError = $SubProfileError
                 Write-MetricsDiag ("WARNING: metrics batch group skipped for subscription {0} region {1} ({2}). Its {3} metric def(s) fall back to per-call." -f $SubscriptionId, $Region, $script:MetricsBatchLastError, @($Group.Group).Count)
                 continue
             }
 
             try
             {
-                $SubProfile = $SubProfiles[$SubscriptionId]
-
                 $Endpoint = "https://$Region.metrics.monitor.azure.com"
                 $MetricNames = @($Group.Group | Select-Object -ExpandProperty MetricName -Unique)
                 $Aggregations = @($Group.Group | Select-Object -ExpandProperty Aggregation -Unique | ForEach-Object { ([string]$_).ToLowerInvariant() })
@@ -329,7 +356,7 @@ if ($Task -eq 'Processing')
         {
             try
             {
-                $SubProfile = Get-RdaSubscriptionProfile -SubscriptionId $Sub
+                $SubProfile = Get-RdaMetricsSubscriptionProfile -SubscriptionId $Sub
                 $Rp = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Insights' -DefaultProfile $SubProfile -ErrorAction Stop | Select-Object -First 1
                 if ($null -ne $Rp -and $Rp.RegistrationState -eq 'Registered')
                 {
@@ -744,6 +771,10 @@ if ($Task -eq 'Processing')
     # The service's own message for the last group or chunk the batch had to skip. Read by the call site
     # below, which is the one place that knows how many definitions ended up on the per-call path.
     $script:MetricsBatchLastError = $null
+    # One profile lookup per subscription for the whole phase, shared by the provider check, every batch
+    # service and the per-call map (Get-RdaMetricsSubscriptionProfile). Created here, before the first
+    # lookup, so nothing found for one subscription of a wrapper run survives into the next.
+    $script:MetricsSubProfileCache = @{}
 
     if ($UseMetricsBatch)
     {
@@ -1006,34 +1037,6 @@ if ($Task -eq 'Processing')
         }
     }
 
-    # Per-subscription profiles for the per-call path, built after the pool so a pool that could not be
-    # opened costs no lookup. The context captured above is the process's own, so a subscription homed in
-    # another tenant would have every one of its Get-AzMetric calls carry a token for the wrong tenant -
-    # the same defect the batch token had, on the path the batch falls back to. Reachable in a standalone
-    # ResourceInventory.ps1 run without -TenantID, where $Global:Subscriptions can span tenants; under the
-    # wrappers a run is scoped to one tenant and this map holds one entry. Built once for the distinct
-    # subscriptions of $MetricDefs, the way the batch path builds its own, so the lookup costs one
-    # Get-RdaSubscriptionProfile per subscription and not one per call. That helper already returns the
-    # IAzureContextContainer that -DefaultProfile takes, so nothing is converted here. A subscription
-    # whose profile cannot be built is logged and keeps the phase context, which is what every per-call
-    # query used before. The map is only read after this loop, so the worker runspaces share it safely.
-    $MetricSubProfiles = @{}
-    if ($MetricCount -gt 0)
-    {
-        $MetricProfileSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
-        foreach ($MetricProfileSubId in $MetricProfileSubIds)
-        {
-            try
-            {
-                $MetricSubProfiles[$MetricProfileSubId] = Get-RdaSubscriptionProfile -SubscriptionId $MetricProfileSubId
-            }
-            catch
-            {
-                Write-MetricsDiag ("WARNING: could not scope the metric calls of subscription {0} to its own tenant ({1}); they use the process context, as every call did before." -f $MetricProfileSubId, $_.Exception.Message)
-            }
-        }
-    }
-
     $MetricAbandonedCount = 0
     $MetricAbandonedRunning = 0
     # Counted here and not from the bag: the per-batch drain takes a returned call OFF the bag, so
@@ -1067,8 +1070,41 @@ if ($Task -eq 'Processing')
     # to make less likely - and Run-AllSubscriptions.ps1 catches a failed subscription and carries
     # on in the SAME process, so a pool released only on the normal path would leave one open pool
     # per failed subscription: exactly when memory is already short, and the opposite of the point.
+    # The per-subscription profile map is built inside this try as well: its lookups are the first slow
+    # step after the pool opens, and a stop during them would otherwise leave the opened pool, and its
+    # cleanup timer, in a standalone session.
     try
     {
+        # Per-subscription profiles for the per-call path, built after the pool so a pool that could not be
+        # opened costs no lookup. The context captured above is the process's own, so a subscription homed
+        # in another tenant would have every one of its Get-AzMetric calls carry a token for the wrong
+        # tenant - the same defect the batch token had, on the path the batch falls back to. Reachable in a
+        # standalone ResourceInventory.ps1 run without -TenantID, where $Global:Subscriptions can span
+        # tenants; under the wrappers a run is scoped to one tenant and this map holds one entry. Built once
+        # for the distinct subscriptions of $MetricDefs, through the phase's lookup cache
+        # (Get-RdaMetricsSubscriptionProfile), so a subscription the provider check or the batch already
+        # looked up costs nothing more, and any other costs one lookup, not one per call. The lookup returns
+        # the IAzureContextContainer that -DefaultProfile takes, so nothing is converted here. A
+        # subscription whose profile cannot be built is logged and keeps the phase context, which is what
+        # every per-call query used before. The map is only read after it is built, so the worker
+        # runspaces share it safely.
+        $MetricSubProfiles = @{}
+        if ($MetricCount -gt 0)
+        {
+            $MetricProfileSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
+            foreach ($MetricProfileSubId in $MetricProfileSubIds)
+            {
+                try
+                {
+                    $MetricSubProfiles[$MetricProfileSubId] = Get-RdaMetricsSubscriptionProfile -SubscriptionId $MetricProfileSubId
+                }
+                catch
+                {
+                    Write-MetricsDiag ("WARNING: could not scope the metric calls of subscription {0} to its own tenant ({1}); they use the process context, as every call did before." -f $MetricProfileSubId, $_.Exception.Message)
+                }
+            }
+        }
+
         for ($i = 0; $i -lt $MetricCount; $i++)
         {
             $Defs.Add($MetricDefs[$i])

@@ -907,12 +907,13 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $script:PoolOpen = [scriptblock]::Create((@(
                         'param($Pool, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup)'
                         '$MetricCallPool = $Pool'
+                        '$MetricPerCallPoolFailed = $false'
                         '$OpenDiag = [System.Collections.Generic.List[string]]::new()'
                         '$OpenLog = [System.Collections.Generic.List[object]]::new()'
                         'function Write-MetricsDiag { param($Message) $OpenDiag.Add([string]$Message) }'
                         'function Write-Log { param($Message, $Severity, [switch]$NoConsole, [switch]$ToDebugLog) $OpenLog.Add([pscustomobject]@{ Message = [string]$Message; Severity = [string]$Severity }) }'
                         $OpenTry[0].Extent.Text
-                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; Diag = @($OpenDiag); Log = @($OpenLog) }'
+                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; PoolFailed = $MetricPerCallPoolFailed; Diag = @($OpenDiag); Log = @($OpenLog) }'
                     ) -join [Environment]::NewLine))
             $script:NewUnopenablePool = {
                 param([string]$Message = 'Insufficient resources to start a runspace.')
@@ -945,6 +946,7 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Result.Pool | Should -BeNullOrEmpty -Because 'the teardown in the finally must not be handed a pool that is gone'
             $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a pool that cannot be opened must never serve the next subscription'
             $Result.Count | Should -Be 0 -Because 'the per-call loop cannot run without a pool, so it is skipped rather than failed one call at a time'
+            $Result.PoolFailed | Should -BeTrue -Because 'without the flag the phase start says there is nothing to collect, right under the ERROR line that says the pool failed'
         }
 
         It 'fails loud: an Error in the run log and the reason in the debug log' {

@@ -48,7 +48,14 @@ BeforeAll {
     }
     $script:CallProfileFnAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricCallProfile' }, $true) | Select-Object -First 1
     if ($script:CallProfileFnAst) { . ([scriptblock]::Create($script:CallProfileFnAst.Extent.Text)) }
-    $script:SubProfileBuild = Get-PhaseBlock -Root $Ast -Condition '$MetricCount -gt 0' -Contains @('$MetricSubProfiles[', 'Get-RdaSubscriptionProfile')
+    # The phase's one profile lookup per subscription, shared by the provider check, the batch and the
+    # per-call map. Defined here so every Describe that runs one of them runs it through the same cache;
+    # each one resets $script:MetricsSubProfileCache, as the phase does when it starts. Absent from a
+    # source that predates it, which then looks the profile up directly.
+    $script:SubProfileCacheFnAst = $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-RdaMetricsSubscriptionProfile' }, $true) | Select-Object -First 1
+    if ($script:SubProfileCacheFnAst) { . ([scriptblock]::Create($script:SubProfileCacheFnAst.Extent.Text)) }
+    # 'SubscriptionProfile' matches the cached lookup and, in a source that predates it, the direct one.
+    $script:SubProfileBuild = Get-PhaseBlock -Root $Ast -Condition '$MetricCount -gt 0' -Contains @('$MetricSubProfiles[', 'SubscriptionProfile')
     $script:PhaseStartLine = Get-PhaseBlock -Root $Ast -Condition '$MetricCount -gt 0' -Contains @('Starting metrics collection', 'Per-call metrics collection')
 
     # Production defaults, read from the source so the test tracks them.
@@ -681,6 +688,8 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
             param($ProviderNamespace, $DefaultProfile, $ErrorAction)
             $script:PrereqCalls.Add(('Register:{0}' -f $DefaultProfile))
             if ($script:PrereqRegisterFails -contains [string]$DefaultProfile) { throw 'the registration was refused' }
+            # A registration Azure accepted but never finishes: the provider stays in its old state.
+            if ($script:PrereqRegisterStalls -contains [string]$DefaultProfile) { return }
             $script:PrereqStates[[string]$DefaultProfile] = 'Registered'
         }
     }
@@ -691,6 +700,8 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         $script:PrereqState = 'Registered'
         $script:PrereqStates = @{}
         $script:PrereqRegisterFails = @()
+        $script:PrereqRegisterStalls = @()
+        $script:MetricsSubProfileCache = @{}
         Mock Start-Sleep { }
     }
 
@@ -758,12 +769,31 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         @($script:PrereqDiag | Where-Object { $_ -like '*registration state on subscription*after wait: Registered' }).Count | Should -Be 3 -Because 'each subscription still reports its own result'
     }
 
-    It 'reports a subscription whose registration never completes without holding up the others' {
+    It 'reports a subscription whose registration is refused without holding up the others' {
         $script:PrereqState = 'NotRegistered'
         $script:PrereqRegisterFails = @('profile-for-sub-b')
         Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'sub-b')
         @($script:PrereqDiag | Where-Object { $_ -like '*could not ensure*sub-b*the registration was refused*' }).Count | Should -Be 1
         @($script:PrereqDiag | Where-Object { $_ -like '*subscription sub-a after wait: Registered' }).Count | Should -Be 1 -Because 'one failing subscription never skips the others'
+    }
+
+    It 'stops waiting at the deadline for a registration that never completes, and reports each subscription''s state' {
+        # The deadline check is the only way out of the wait for a subscription that stays NotRegistered or
+        # Registering, or whose every poll fails. The clock is moved past the deadline after the first round.
+        $script:PrereqState = 'NotRegistered'
+        $script:PrereqRegisterStalls = @('profile-for-sub-b')
+        $script:ClockReads = 0
+        $script:ClockStart = [datetime]::new(2026, 10, 7, 9, 0, 0, [System.DateTimeKind]::Utc)
+        Mock Get-Date { $script:ClockReads++; if ($script:ClockReads -eq 1) { $script:ClockStart } else { $script:ClockStart.AddSeconds(61) } }
+        # A wait with no way out would otherwise hang the run; the sixth round stops it as a failure instead.
+        $script:SleepCount = 0
+        Mock Start-Sleep { $script:SleepCount++; if ($script:SleepCount -gt 5) { throw 'the wait never ended' } }
+        $Thrown = $null
+        try { Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'sub-b') } catch { $Thrown = $_ }
+        $Thrown | Should -BeNullOrEmpty -Because 'the shared deadline ends the wait'
+        Should -Invoke Start-Sleep -Times 1 -Exactly -Because 'the first round already reads a clock past the deadline'
+        @($script:PrereqDiag | Where-Object { $_ -like '*registration state on subscription sub-b after wait: NotRegistered' }).Count | Should -Be 1 -Because 'the subscription that never registered is reported with the state it was left in'
+        @($script:PrereqDiag | Where-Object { $_ -like '*registration state on subscription sub-a after wait: Registered' }).Count | Should -Be 1
     }
 
     It 'is given every subscription that has metric definitions to batch, in one call' {
@@ -779,6 +809,12 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
             if ($Node -is [System.Management.Automation.Language.ForEachStatementAst]) { $InLoop = $true; break }
         }
         $InLoop | Should -BeFalse -Because 'a call per subscription is what serialised the waits'
+        # The guard only keeps an empty list from the mandatory parameter. A wrapper run has one subscription,
+        # so a guard that wanted more than one would skip the provider check in every wrapper run.
+        $Guard = $Calls[0].Parent
+        while ($null -ne $Guard -and $Guard -isnot [System.Management.Automation.Language.IfStatementAst]) { $Guard = $Guard.Parent }
+        $Guard | Should -Not -BeNullOrEmpty
+        $Guard.Clauses[0].Item1.Extent.Text | Should -Be '$BatchSubscriptionIds.Count -gt 0'
     }
 
     It 'waits against one deadline taken before the first poll' {
@@ -836,6 +872,7 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         $script:BatchTokenMinutes = 60
         $script:MetricsBatchHttpCalls = 0
         $script:MetricsBatchLastError = $null
+        $script:MetricsSubProfileCache = @{}
         Mock Invoke-RestMethod {
             $script:BatchPosts.Add([string]$Uri)
             $Ids = @((ConvertFrom-Json $Body).resourceids)
@@ -1014,6 +1051,7 @@ Describe 'The per-call metric path queries each subscription through its own ten
                             '$MetricDefs = $Defs'
                             '$MetricCount = @($Defs).Count'
                             '$MetricSubProfiles = @{}'
+                            '$script:MetricsSubProfileCache = @{}'
                             $script:SubProfileBuild.Extent.Text
                             '[pscustomobject]@{ Profiles = $MetricSubProfiles; Lookups = @($Lookups); Diag = @($Diag) }'
                         ) -join [Environment]::NewLine)))
@@ -1074,6 +1112,114 @@ Describe 'The per-call metric path queries each subscription through its own ten
         $script:MetricsSrc.IndexOf("`$CallProfile = Get-RdaMetricCallProfile -ResourceId `$_.Id -SubProfiles `$SubProfiles -PhaseProfile `$AzContext") | Should -BeGreaterThan -1 -Because 'the subscription comes from the definition being queried, not from the phase'
         $script:MetricsSrc.IndexOf("`$MetricArgs['DefaultProfile'] = `$CallProfile") | Should -BeGreaterThan -1
         $script:MetricsSrc.IndexOf("`$MetricArgs['DefaultProfile'] = `$AzContext") | Should -Be -1 -Because 'the phase context is now only the fallback, never the profile every call is given'
+    }
+
+    It 'builds the map inside the try that releases the pool, and after the pool is opened' {
+        # The map's lookups are the first slow step after Open(). Run between the open and that try, a stop
+        # during them left an opened pool, and its cleanup timer, in a standalone session.
+        $script:SubProfileBuild | Should -Not -BeNullOrEmpty
+        $Release = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $null -ne $N.Finally -and $N.Finally.Extent.Text -match 'MetricCallPool\.BeginClose' }, $true))
+        $Release.Count | Should -Be 1
+        $script:SubProfileBuild.Extent.StartOffset | Should -BeGreaterThan $Release[0].Body.Extent.StartOffset -Because 'a stop during the lookups has to reach the release in the finally'
+        $script:SubProfileBuild.Extent.EndOffset | Should -BeLessThan $Release[0].Body.Extent.EndOffset
+        $OpenTry = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.Body.Extent.Text -match '\$MetricCallPool\.Open\(\)' }, $true))
+        $OpenTry.Count | Should -Be 1
+        $script:SubProfileBuild.Extent.StartOffset | Should -BeGreaterThan $OpenTry[0].Extent.EndOffset -Because 'a pool that could not be opened still costs no lookup'
+    }
+}
+
+Describe 'The metrics phase looks each subscription''s profile up once' {
+    # The provider check, every batch service and the per-call map each looked the profile up for
+    # themselves, so with -UseMetricsBatch one subscription could cost eight lookups in one phase. A lookup
+    # is two Get-AzSubscription calls, and a failing one lists every tenant before it gives up.
+    BeforeAll {
+        foreach ($Name in 'Initialize-RdaMetricsBatchPrereq', 'Invoke-RdaMetricsBatch')
+        {
+            $FnAst = $script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $Name }, $true) | Select-Object -First 1
+            if (-not $FnAst) { throw ('{0} was not found in Extension/Metrics.ps1' -f $Name) }
+            . ([scriptblock]::Create($FnAst.Extent.Text))
+        }
+        function Write-MetricsDiag { param($Message) $script:CacheDiag.Add([string]$Message) }
+        function New-RdaMetricObject { param($Def, $MetricResult) [pscustomobject]@{ ID = $Def.Id; Metric = $Def.MetricName } }
+        function Get-AzAccessToken { param($ResourceUrl, $DefaultProfile, $WarningAction) [pscustomobject]@{ Token = 'token'; ExpiresOn = [DateTimeOffset]::UtcNow.AddMinutes(60) } }
+        function Get-AzResourceProvider { param($ProviderNamespace, $DefaultProfile, $ErrorAction) [pscustomobject]@{ RegistrationState = 'Registered' } }
+        function Register-AzResourceProvider { param($ProviderNamespace, $DefaultProfile, $ErrorAction) }
+        function Get-RdaSubscriptionProfile
+        {
+            param([string]$SubscriptionId)
+            $script:CacheLookups.Add([string]$SubscriptionId)
+            if ($SubscriptionId -eq 'sub-broken') { throw ('subscription {0} is not visible to the signed-in identity' -f $SubscriptionId) }
+            ('profile-for-{0}' -f $SubscriptionId)
+        }
+        function New-CacheDef
+        {
+            param([string]$Sub, [string]$Region, [string]$Name)
+            [pscustomobject]@{
+                Id = ('/subscriptions/{0}/resourceGroups/rg/providers/Microsoft.Compute/{1}' -f $Sub, $Name)
+                MetricName = 'Percentage CPU'; Aggregation = 'Average'; Location = $Region
+                Interval = '01:00:00'; StartTime = '2026-10-01T00:00:00Z'; EndTime = '2026-10-02T00:00:00Z'
+            }
+        }
+        # One phase: the provider check, two batch services, then the per-call map, all with one cache.
+        $script:RunPhaseLookups = {
+            param($ProviderIds, $VmDefs, $DiskDefs, $PerCallDefs)
+            # By position, so the same run drives the provider check before and after its parameter rename.
+            Initialize-RdaMetricsBatchPrereq $ProviderIds
+            $null = Invoke-RdaMetricsBatch -Defs $VmDefs -MetricNamespace 'microsoft.compute/virtualMachines'
+            $null = Invoke-RdaMetricsBatch -Defs $DiskDefs -MetricNamespace 'microsoft.compute/disks'
+            $Runner = [scriptblock]::Create(((@(
+                            'param($Defs)'
+                            '$MetricDefs = $Defs'
+                            '$MetricCount = @($Defs).Count'
+                            '$MetricSubProfiles = @{}'
+                            $script:SubProfileBuild.Extent.Text
+                            '$MetricSubProfiles'
+                        ) -join [Environment]::NewLine)))
+            & $Runner $PerCallDefs
+        }
+    }
+
+    BeforeEach {
+        $script:CacheLookups = [System.Collections.Generic.List[string]]::new()
+        $script:CacheDiag = [System.Collections.Generic.List[string]]::new()
+        $script:MetricsBatchHttpCalls = 0
+        $script:MetricsBatchLastError = $null
+        $script:MetricsSubProfileCache = @{}
+        Mock Invoke-RestMethod { [pscustomobject]@{ values = @() } }
+        Mock Start-Sleep { }
+    }
+
+    It 'costs one lookup per subscription across the provider check, every batch service and the per-call map' {
+        $script:SubProfileBuild | Should -Not -BeNullOrEmpty
+        $VmDefs = @((New-CacheDef -Sub 'sub-a' -Region 'westeurope' -Name 'virtualMachines/vm1'), (New-CacheDef -Sub 'sub-a' -Region 'eastus' -Name 'virtualMachines/vm2'), (New-CacheDef -Sub 'sub-b' -Region 'westeurope' -Name 'virtualMachines/vm3'))
+        $DiskDefs = @((New-CacheDef -Sub 'SUB-A' -Region 'westeurope' -Name 'disks/d1'), (New-CacheDef -Sub 'sub-b' -Region 'westeurope' -Name 'disks/d2'))
+        $Profiles = & $script:RunPhaseLookups @('sub-a', 'sub-b') $VmDefs $DiskDefs @($VmDefs + $DiskDefs)
+        @($script:CacheLookups | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object) | Should -Be @('sub-a', 'sub-b') -Because 'the provider check looks each subscription up first, and every later caller of the phase finds it, whatever case its id is written in'
+        $Profiles['sub-a'] | Should -Be 'profile-for-sub-a' -Because 'the per-call map gets the profile the earlier lookup built'
+        $Profiles['sub-b'] | Should -Be 'profile-for-sub-b'
+    }
+
+    It 'keeps a failed lookup as its error, so every caller still reports it and none of them repeats it' {
+        $script:SubProfileBuild | Should -Not -BeNullOrEmpty
+        $VmDefs = @((New-CacheDef -Sub 'sub-a' -Region 'westeurope' -Name 'virtualMachines/vm1'), (New-CacheDef -Sub 'sub-broken' -Region 'westeurope' -Name 'virtualMachines/vm2'))
+        $DiskDefs = @((New-CacheDef -Sub 'sub-broken' -Region 'eastus' -Name 'disks/d1'))
+        $Profiles = & $script:RunPhaseLookups @('sub-a', 'sub-broken') $VmDefs $DiskDefs @($VmDefs + $DiskDefs)
+        @($script:CacheLookups | Where-Object { $_ -eq 'sub-broken' }).Count | Should -Be 1 -Because 'the failing lookup is the expensive one, so it is paid once a phase'
+        @($script:CacheDiag | Where-Object { $_ -like '*could not ensure Microsoft.Insights registration on subscription sub-broken (subscription sub-broken is not visible*' }).Count | Should -Be 1
+        @($script:CacheDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-broken region * (subscription sub-broken is not visible*' }).Count | Should -Be 2 -Because 'each group still reports its own fallback'
+        @($script:CacheDiag | Where-Object { $_ -like 'WARNING: could not scope the metric calls of subscription sub-broken to its own tenant (subscription sub-broken is not visible*' }).Count | Should -Be 1
+        $Profiles.ContainsKey('sub-broken') | Should -BeFalse
+        $Profiles['sub-a'] | Should -Be 'profile-for-sub-a'
+    }
+
+    It 'creates the cache when the phase starts, before its first lookup' {
+        $Created = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$script:MetricsSubProfileCache' }, $true))
+        $Created.Count | Should -Be 1 -Because 'one cache for the phase, created in one place'
+        $Created[0].Right.Extent.Text | Should -Be '@{}'
+        $FirstCheck = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Initialize-RdaMetricsBatchPrereq' }, $true))
+        $FirstCheck.Count | Should -Be 1
+        $Created[0].Extent.StartOffset | Should -BeLessThan $FirstCheck[0].Extent.StartOffset -Because 'the provider check is the first caller of the phase'
+        $Created[0].Extent.StartOffset | Should -BeGreaterThan ($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Initialize-RdaMetricsBatchPrereq' }, $true) | Select-Object -First 1).Extent.EndOffset -Because 'it is created by the phase itself, each time the phase runs, not when a function is defined'
     }
 }
 

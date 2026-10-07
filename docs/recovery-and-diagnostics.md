@@ -254,6 +254,7 @@ Two logs help you see what failed and where.
   included in the ZIP.
 - Subscriptions appear as tokens and identifiers are masked. It lists phase
   timings and one line per health issue: collector failures, metrics auth skips,
+  metrics left incomplete because the worker pool could not be opened,
   and consumption failures. For consumption it records exactly where a pull
   stopped (`PageAtFailure` and `RecordsCollected`), so a short billing sheet is
   obvious instead of something you have to guess at.

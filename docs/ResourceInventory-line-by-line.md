@@ -2026,13 +2026,13 @@ The overall shape here is worth remembering as a pattern: **detect the gap, atte
                     # [comment: fallback when the sub list is unavailable - still record
                     #  one entry so the failure is never silent]
                     $IdLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg; Cause = 'auth' }
                 }
                 else
                 {
                     foreach ($asub in $AffectedSubs)
                     {
-                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg; Cause = 'auth' }
                     }
                 }
                 return
@@ -2056,6 +2056,7 @@ The overall shape here is worth remembering as a pattern: **detect the gap, atte
 That health list is not decoration.
 `Run-AllSubscriptions.Stream.ps1` aggregates it across parallel streams and `Run-AllSubscriptions.ps1` prints it, per subscription, in the final run summary.
 So a metrics auth failure part way down a long subscription list is named explicitly at the end of the run rather than being something the operator has to notice by spotting a thin report.
+Each entry carries a `Cause`, so the wrapper can tell this auth skip apart from the metrics left incomplete when `Extension/Metrics.ps1` cannot open its worker pool, and print the right banner and remedy for each. An entry written before that field existed carries no `Cause` and is still read as an auth skip.
 
 ### The success path (lines 1168-1183)
 
@@ -2381,7 +2382,7 @@ One good error beats sixty repeated ones.
 | 1381 | `$Result = & $Module -Sub ... -Resources ... -Task "Processing" -ResourceIdDictionary ...` | **The actual collector call.** Four named arguments, and this is the fixed contract every collector in `Services/` implements: `-Sub`, `-Resources`, `-Task`, `-ResourceIdDictionary`. Every collector gets the same four and returns an array of flat objects. |
 | 1382 | `$ConsecutiveCollectorFailures = 0` | Reset on success. This is what makes the counter measure *consecutive* failures rather than total. |
 | 1388 | `$ConsecutiveCollectorFailures++` | Increment on failure. |
-| 1393-1397 | `$Global:CollectorFailures += [pscustomobject]@{ Id; Module; Message }` | Structured health record, same lazy initialisation pattern as `$Global:MetricsFailedSubs`. Aggregated across streams and surfaced in the wrapper's final summary, and it drives dedicated wrapper exit codes: 3 for an auth skip, 4 for collector failures, 5 for both. |
+| 1393-1397 | `$Global:CollectorFailures += [pscustomobject]@{ Id; Module; Message }` | Structured health record, same lazy initialisation pattern as `$Global:MetricsFailedSubs`. Aggregated across streams and surfaced in the wrapper's final summary, and it drives dedicated wrapper exit codes: 3 for a requested phase skipped for auth or left incomplete by a metric pool that would not open, 4 for collector failures, 5 for both. |
 | 1399-1400 | two `Error` severity logs | The second one is the one to read. It says the resource type is **missing from this report, not empty because there are none**. That distinction is the entire reason this logging exists: a silently absent collector and a genuinely empty resource type look identical in the output, and only one of them is a problem. |
 | 1402-1405 | the circuit breaker `throw` | Trips at five. The message names the count, the last collector, its error, the three likely systemic causes, why continuing is worse than stopping, and the total failure count across the whole run so far. |
 | 1413 | `$Result = @()` | Critical and easy to miss. Without it, `$Result` would still hold the **previous** collector's output, exactly the aliasing bug described in the discovery section, and that data would be filed under the wrong resource type. Setting it to an explicit empty array also means `$Global:SmaResources.<Name>` exists as an empty JSON array rather than being absent, so downstream parsers see zero rows rather than a missing property. |
@@ -4188,7 +4189,7 @@ Recognising them makes the rest of the script much faster to read.
 | `$Global:PowerShellTranscriptFile` | line 2458 | Transcript path |
 | `$Global:AzMetrics` | `CreateMetricsJob` | Metrics results container |
 | `$Global:SmaResources` | `CreateResourceJobs` | The inventory accumulator |
-| `$Global:MetricsFailedSubs` | `CreateMetricsJob` | Per subscription metrics health |
+| `$Global:MetricsFailedSubs` | `CreateMetricsJob`, and the pool-open failure in `Extension/Metrics.ps1` | Per subscription metrics health; each entry's `Cause` says which of the two wrote it |
 | `$Global:ConsumptionFailedSubs` | `GetResourceConsumption` | Per subscription consumption health |
 | `$Global:ConsumptionRecordCount` | `GetResourceConsumption` | Run wide billing row count |
 | `$Global:CollectorFailures` | `CreateResourceJobs` | Per collector failure health |

@@ -122,7 +122,7 @@ everything" question is answered on the same page:
 | `$FailedSubscriptions` | subs whose run failed | red banner + list |
 | `$SubResourceCounts` Count == 0 | subs that returned 0 resources | amber banner + list (often a Reader-permission gap) |
 | `$Global:ConsumptionFailedSubs` | consumption phase auth issues | amber note (per-sub) |
-| `$Global:MetricsFailedSubs` | metrics phase auth issues | amber note (per-sub) |
+| `$Global:MetricsFailedSubs` | metrics phase auth issues, and metrics left incomplete when the worker pool could not be opened (told apart by the entry's `Cause`) | amber note (per-sub) |
 | `$Global:CollectorFailures` | per-(sub, collector) throws | amber note grouped by sub |
 
 These are the approved health globals (see steering `anti-patterns.md`); the

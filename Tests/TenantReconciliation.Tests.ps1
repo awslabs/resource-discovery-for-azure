@@ -99,6 +99,8 @@ BeforeAll {
             }
             else
             {
+                # Remember the context the session started with, so AfterAll can put it back.
+                $script:OriginalAzContext = $Ctx
                 $null = Set-AzContext -Subscription $script:TargetSub -Tenant $Tenant -ErrorAction SilentlyContinue
                 $Now = Get-AzContext -ErrorAction SilentlyContinue
                 if ($null -eq $Now -or $Now.Subscription.Id -ne $script:TargetSub)
@@ -142,6 +144,11 @@ BeforeAll {
 }
 
 AfterAll {
+    if ($script:OriginalAzContext)
+    {
+        try { $null = Set-AzContext -Context $script:OriginalAzContext -ErrorAction Stop }
+        catch { Write-Warning 'Could not restore the Az context this run started with.' }
+    }
     if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) { Remove-Item -Path $script:ExtractPath -Recurse -Force }
 }
 

@@ -34,8 +34,13 @@ if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge
 }
 
 # -------------------------------------------------------------------------
-# Resolve subscription + tenant (auto-discover the first enabled sub that has
-# metric-eligible resources, so the schema tests actually see metric data).
+# Resolve subscription + tenant. The default target is the sandbox's main
+# subscription, resolved BY NAME at runtime, so every live gate runs against the
+# same subscription and no subscription id is written into this file. Pass
+# -SubscriptionID to override it. When this context cannot see a subscription of
+# that name (another operator, another tenant), fall back to auto-discovering
+# the first enabled sub that has metric-eligible resources, so the schema tests
+# still see metric data.
 # -------------------------------------------------------------------------
 $Ctx = Get-AzContext -ErrorAction SilentlyContinue
 if ($null -eq $Ctx -or $null -eq $Ctx.Account)
@@ -44,9 +49,12 @@ if ($null -eq $Ctx -or $null -eq $Ctx.Account)
 }
 if ([string]::IsNullOrEmpty($TenantID)) { $TenantID = $Ctx.Tenant.Id }
 
+# A NAME, never an id: the id of the sandbox subscription must not appear in a
+# tracked file. Resolved against the live tenant a few lines below.
+$DefaultSubscriptionName = 'Visual Studio Enterprise Subscription'
+
 if ([string]::IsNullOrEmpty($SubscriptionID))
 {
-    Write-Host "Auto-discovering a subscription with metric-eligible resources..." -ForegroundColor Cyan
     $MetricTypes = @(
         'microsoft.compute/virtualmachines'
         'microsoft.storage/storageaccounts'
@@ -55,16 +63,46 @@ if ([string]::IsNullOrEmpty($SubscriptionID))
         'microsoft.documentdb/databaseaccounts'
         'microsoft.web/sites'
     )
-    # First-match selection: stop at the first enabled subscription that has any
-    # metric-eligible resource. If none do, fall back to the first enabled one.
-    $Best = $null; $BestCount = 0
-    foreach ($s in @(Get-AzSubscription -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' }))
+    $Pinned = @(Get-AzSubscription -SubscriptionName $DefaultSubscriptionName -TenantId $TenantID -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -eq 'Enabled' })
+    if ($Pinned.Count -gt 0)
     {
-        $null = Set-AzContext -Subscription $s.Id -ErrorAction SilentlyContinue
-        $C = 0
-        foreach ($t in $MetricTypes) { try { $C += @(Get-AzResource -ResourceType $t -ErrorAction SilentlyContinue).Count } catch {} }
-        if ($null -eq $Best) { $Best = $s; $BestCount = $C }
-        if ($C -gt 0) { $Best = $s; $BestCount = $C; break }
+        $Candidates = @($Pinned[0])
+        Write-Host "Using the default subscription, resolved by name at runtime." -ForegroundColor Cyan
+    }
+    else
+    {
+        $Candidates = @(Get-AzSubscription -TenantId $TenantID -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' })
+        Write-Host "Auto-discovering a subscription with metric-eligible resources..." -ForegroundColor Cyan
+    }
+    # Counting a subscription's resources needs the context pointed at it, and
+    # moving the context is shared state: without -Scope Process it also rewrites
+    # the saved default subscription the operator's NEXT session starts on, and
+    # the probe would otherwise leave the context on whichever candidate it
+    # stopped at. -Scope Process keeps the move inside this process and the
+    # finally puts it back, the same restore the wrapper's preflight does.
+    $OriginalContext = $Ctx
+    # First-match selection: stop at the first candidate that has any
+    # metric-eligible resource. If none do, fall back to the first one.
+    $Best = $null; $BestCount = 0
+    try
+    {
+        foreach ($s in $Candidates)
+        {
+            $null = Set-AzContext -Subscription $s.Id -Scope Process -ErrorAction SilentlyContinue
+            $C = 0
+            foreach ($t in $MetricTypes) { try { $C += @(Get-AzResource -ResourceType $t -ErrorAction SilentlyContinue).Count } catch {} }
+            if ($null -eq $Best) { $Best = $s; $BestCount = $C }
+            if ($C -gt 0) { $Best = $s; $BestCount = $C; break }
+        }
+    }
+    finally
+    {
+        if ($OriginalContext)
+        {
+            try { $null = Set-AzContext -Context $OriginalContext -Scope Process -ErrorAction Stop }
+            catch { Write-Warning "Could not restore the Az context this run started with." }
+        }
     }
     if ($null -eq $Best) { throw "No enabled subscription found in the current context." }
     $SubscriptionID = $Best.Id

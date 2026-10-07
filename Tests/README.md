@@ -238,10 +238,25 @@ type, so an absent section is skipped, not failed - but Tier 2 stays
 name-agnostic and still linkage-checks a renamed section's rows by their IDs.
 In the matrix, a scenario where every schema-contract test skips fails.
 
+### Which subscription it runs against
+
+With no `-SubscriptionID`, the default target is the subscription named
+`Visual Studio Enterprise Subscription` - the sandbox the live gates run
+against. The name is resolved against the live tenant at runtime, so no
+subscription id is stored in the script. When the current context cannot see a
+subscription of that name (another operator, another tenant), it falls back to
+auto-discovering the first enabled subscription that has metric-eligible
+resources, so the schema tests still see metric data.
+
+Picking a subscription has to point the Az context at each candidate to count
+its resources. That move is confined to this process (`-Scope Process`), so the
+saved default subscription the next session starts on is untouched, and the
+context the run started with is restored before the scenarios begin.
+
 ### Run it
 
 ```powershell
-# Auto-discover a subscription (prefers one with metric-eligible resources):
+# Default: the sandbox subscription, resolved by name at runtime:
 pwsh ./Tests/Invoke-ScenarioMatrix.ps1
 
 # Pin a specific subscription / tenant:

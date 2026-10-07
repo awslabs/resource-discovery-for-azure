@@ -635,10 +635,13 @@ function Close-RdaMetricWorkerPool
         # rewording a result cannot silence the warning. The result can already end in a period (an
         # exception message), so the trailing one is trimmed rather than printed as "..".
         # Write-Warning itself is guarded: with a caller $WarningPreference of Stop (or Inquire with no
-        # console) it throws, and every caller runs this from a finally block or from Exit-Wrapper
-        # ahead of Stop-Transcript, where a throw would skip the rest of the cleanup. The pool decision
-        # is already made and the caller still gets its result, so a report that cannot be delivered is
-        # dropped rather than turned into a terminating error.
+        # console) it throws. Most callers run this from a finally block or from Exit-Wrapper ahead of
+        # Stop-Transcript, where a throw would skip the rest of the cleanup. The normal end of
+        # Run-AllSubscriptions.ps1 calls it outside any finally, after Stop-Transcript and on the line
+        # before its exit, where a throw would lose the exit code; on that path the warning reaches the
+        # console only, not the transcript. The pool decision is already made and the caller still gets
+        # its result, so a report that cannot be delivered is dropped rather than turned into a
+        # terminating error.
         try
         {
             Write-Warning ('Metric worker pool {0}. It stays in memory until this PowerShell process ends.' -f ([string]$Result).TrimEnd('.'))
@@ -850,8 +853,8 @@ function Get-RdaSubscriptionProfile
 
     # The signed-in tenant first, which is the common case and does not reach into other tenants. A subscription
     # that lives in another tenant the identity can read is not found there, so it is looked up again without a
-    # tenant. A failure of that second lookup is the real answer and is what the caller sees, with the
-    # first failure's message carried along in the text and the original exception kept as its inner one.
+    # tenant. A failure of that second lookup is the real answer and is what the caller sees, in its own words,
+    # with the original exception kept as its inner one.
     $Subscription = $null
     $TenantLookupError = $null
     try
@@ -860,11 +863,9 @@ function Get-RdaSubscriptionProfile
     }
     catch
     {
-        # Kept for the diagnostics. A lookup without a tenant reports what that lookup found, which can be
+        # Kept for the local debug log. A lookup without a tenant reports what that lookup found, which can be
         # a bare "not found" even when the signed-in tenant failed on a token instead; per-tenant token
         # failures come out of that lookup as warnings, which -WarningAction SilentlyContinue hides.
-        # No caller reads this text (every one of them only logs it), so it only has to tell the operator
-        # which failure came first.
         $TenantLookupError = [string]$_.Exception.Message
         $Subscription = $null
     }
@@ -880,7 +881,14 @@ function Get-RdaSubscriptionProfile
             {
                 throw
             }
-            throw [System.Exception]::new(('{0} (the lookup in tenant {1} had already failed with: {2})' -f $_.Exception.Message, $Current.Tenant.Id, $TenantLookupError), $_.Exception)
+            # The first failure's text, and the tenant it was looked up in, go to the local debug log only.
+            # That text can name the tenant, its domain or a local path, and callers copy this message into
+            # the skip entries that ship in Diagnostics_*.log. The message keeps the second lookup's own
+            # words, as before, and says where the first failure went - but only when a debug log is being
+            # written, which the wrapper's consumption probe runs before.
+            Write-Log -Message ('[Profile] The lookup of subscription {0} in the signed-in tenant {1} failed first, with: {2}' -f $SubscriptionId, $Current.Tenant.Id, $TenantLookupError) -Severity 'Info' -NoConsole -ToDebugLog
+            $DebugLogNote = if ([string]::IsNullOrEmpty($Global:DebugLogFile)) { '' } else { '; its error is in the local debug log' }
+            throw [System.Exception]::new(('{0} (the lookup in the signed-in tenant had also failed{1})' -f $_.Exception.Message, $DebugLogNote), $_.Exception)
         }
     }
     if ($null -eq $Subscription)

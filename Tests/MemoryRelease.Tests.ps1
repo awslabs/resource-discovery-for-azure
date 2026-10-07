@@ -837,9 +837,11 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
         }
 
         It 'Close-RdaMetricWorkerPool still returns its result when the caller has turned warnings into errors' {
-            # Every caller runs it from a finally block or from Exit-Wrapper ahead of Stop-Transcript, so a
-            # throw out of the report would skip the rest of the cleanup. The pool decision is already made
-            # by then and the caller still needs the result it logs.
+            # Most callers run it from a finally block or from Exit-Wrapper ahead of Stop-Transcript, so a throw
+            # out of the report would skip the rest of the cleanup. The normal end of Run-AllSubscriptions.ps1
+            # calls it outside any finally, after Stop-Transcript and on the line before its exit, where a throw
+            # would lose the exit code; on that path the warning reaches the console only. The pool decision is
+            # already made by then and the caller still needs the result it logs.
             $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Opened) 1 2
             $Global:MetricCallPool = $Pool
             $WarningPreference = 'Stop'
@@ -858,13 +860,33 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
             Add-Member -InputObject $Pool -MemberType ScriptMethod -Name BeginClose -Force -Value { param($Callback, $AsyncState) [pscustomobject]@{ IsCompleted = $true; AsyncWaitHandle = $null } }
             $Global:MetricCallPool = $Pool
+            # PowerShell words this error in the language of the host, so the expected text is read from the
+            # same failure here rather than written out in English.
+            $NullCallMessage = $null
+            try { $null.WaitOne(0) } catch { $NullCallMessage = $_.Exception.Message }
+            $NullCallMessage | Should -Not -BeNullOrEmpty
             $Output = @(Close-RdaMetricWorkerPool 3>&1)
             $Warnings = @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
             $Warnings.Count | Should -Be 1
-            $Warnings[0].Message | Should -Be 'Metric worker pool not released: You cannot call a method on a null-valued expression. It stays in memory until this PowerShell process ends.' -Because 'the pool may be Closed or Broken rather than open, and what the operator needs to know is that it is still held'
+            $Warnings[0].Message | Should -Be ('Metric worker pool not released: {0}. It stays in memory until this PowerShell process ends.' -f $NullCallMessage.TrimEnd('.')) -Because 'the pool may be Closed or Broken rather than open, and what the operator needs to know is that it is still held'
             $Warnings[0].Message | Should -Not -Match '\.\.' -Because 'a quoted error message that ends in a period must not produce ".."'
-            @($Output | Where-Object { $_ -is [string] }) | Should -Be @('not released: You cannot call a method on a null-valued expression.') -Because 'the result the caller logs is unchanged'
+            @($Output | Where-Object { $_ -is [string] }) | Should -Be @(('not released: {0}' -f $NullCallMessage)) -Because 'the result the caller logs is unchanged'
             $Pool.DisposeCount | Should -Be 0 -Because 'a pool whose close never finished is not disposed'
+        }
+
+        It 'Close-RdaMetricWorkerPool warns once, and still returns its result, for a pool left in a state it cannot release' {
+            # A pool that is neither open nor broken - closed, closing or still opening - is left alone, and like
+            # any pool that is not released it then stays in memory until the process ends.
+            $Pool = & $script:NewFakePool ([System.Management.Automation.Runspaces.RunspacePoolState]::Closed)
+            $Global:MetricCallPool = $Pool
+            $Output = @(Close-RdaMetricWorkerPool 3>&1)
+            $Warnings = @($Output | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+            $Warnings.Count | Should -Be 1 -Because 'a pool that is not released lives until the process ends, which only the warning shows'
+            $Warnings[0].Message | Should -Be 'Metric worker pool not released: pool state Closed. It stays in memory until this PowerShell process ends.'
+            @($Output | Where-Object { $_ -is [string] }) | Should -Be @('not released: pool state Closed')
+            $Pool.DisposeCount | Should -Be 0
+            $Pool.BeginCloseCount | Should -Be 0 -Because 'only an open pool is asked to close'
+            $Global:MetricCallPool | Should -BeNullOrEmpty
         }
     }
 

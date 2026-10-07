@@ -473,11 +473,13 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         $Current.Tenant.Id | Should -Be $HomeTenantId -Because 'the signed-in context must not be modified'
     }
 
-    It 'keeps the signed-in tenant failure in the error when the lookup without a tenant also fails' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+    It 'keeps the signed-in tenant failure in the local debug log, not in the error, when the lookup without a tenant also fails' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
         # The lookup without a tenant reports what that lookup found, which can be a bare "not found" even
         # when the signed-in tenant actually failed on a token: per-tenant token failures come out of that
-        # lookup as warnings, which -WarningAction SilentlyContinue hides. The caller logs one message, so
-        # that message has to carry both failures or the real cause is lost.
+        # lookup as warnings, which -WarningAction SilentlyContinue hides, so the first failure is what names
+        # the real cause. Its text can name the tenant, its domain or a local path, and callers copy the
+        # error message into skip entries that ship in Diagnostics_*.log, so that text goes to the local
+        # debug log only and the message says where it went.
         Import-Module Az.Accounts -ErrorAction Stop
         $HomeTenantId = [guid]::NewGuid().ToString()
         $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
@@ -491,13 +493,70 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
             if ($TenantId) { throw 'AADSTS50076: the refresh token for the signed-in tenant has expired' }
             throw 'SubscriptionNotFound: the subscription was not found'
         }
+        $DebugLog = Join-Path $TestDrive 'debug-first-lookup.log'
+        $ErrorLog = Join-Path $TestDrive 'error-first-lookup.log'
+        $SavedLogs = @($Global:DebugLogFile, $Global:ErrorLogFile)
+        $Global:DebugLogFile = $DebugLog
+        $Global:ErrorLogFile = $ErrorLog
         $Thrown = $null
         try { $null = Get-RdaSubscriptionProfile -SubscriptionId ([guid]::NewGuid().ToString()) } catch { $Thrown = $_ }
+        finally { $Global:DebugLogFile = $SavedLogs[0]; $Global:ErrorLogFile = $SavedLogs[1] }
         $Thrown | Should -Not -BeNullOrEmpty -Because 'the caller keeps its skip path'
-        $Thrown.Exception.Message | Should -BeLike '*SubscriptionNotFound: the subscription was not found*' -Because 'the second lookup is the real answer'
-        $Thrown.Exception.Message | Should -BeLike '*AADSTS50076*' -Because 'the first failure is what names the real cause'
-        $Thrown.Exception.Message | Should -BeLike ('*tenant {0}*' -f $HomeTenantId) -Because 'the operator needs to know which tenant that first lookup used'
+        $Thrown.Exception.Message | Should -Be 'SubscriptionNotFound: the subscription was not found (the lookup in the signed-in tenant had also failed; its error is in the local debug log)' -Because 'the second lookup is the real answer, in its own words as before, and the message says where the first failure went'
+        $Thrown.Exception.Message | Should -Not -BeLike '*AADSTS50076*' -Because 'the first failure''s text can name the tenant, its domain or a local path, and this message reaches Diagnostics_*.log'
+        $Thrown.Exception.Message | Should -Not -BeLike ('*{0}*' -f $HomeTenantId)
+        $Debug = Get-Content -LiteralPath $DebugLog -Raw
+        $Debug | Should -BeLike '*AADSTS50076: the refresh token for the signed-in tenant has expired*' -Because 'the first failure is what names the real cause'
+        $Debug | Should -BeLike ('*tenant {0}*' -f $HomeTenantId) -Because 'the operator needs to know which tenant that first lookup used'
+        Test-Path -LiteralPath $ErrorLog | Should -BeFalse -Because 'the detail belongs in the local debug log, not in the error log'
         $Thrown.Exception.InnerException | Should -Not -BeNullOrEmpty -Because 'the original failure is kept for anything that inspects the exception rather than its text'
+        $Thrown.Exception.InnerException.Message | Should -Be 'SubscriptionNotFound: the subscription was not found'
+    }
+
+    It 'does not point at a debug log when none is being written' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        # The wrapper's consumption probe looks its subscription up before any inner run has opened a debug log.
+        Import-Module Az.Accounts -ErrorAction Stop
+        $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+        $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+        $Current.Tenant.Id = [guid]::NewGuid().ToString()
+        $Current.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $Current.Subscription.Id = [guid]::NewGuid().ToString()
+        Mock Get-AzContext { $Current }
+        Mock Get-AzSubscription {
+            if ($TenantId) { throw 'AADSTS50076: the refresh token for the signed-in tenant has expired' }
+            throw 'SubscriptionNotFound: the subscription was not found'
+        }
+        $SavedDebugLog = $Global:DebugLogFile
+        $Global:DebugLogFile = $null
+        $Thrown = $null
+        try { $null = Get-RdaSubscriptionProfile -SubscriptionId ([guid]::NewGuid().ToString()) } catch { $Thrown = $_ }
+        finally { $Global:DebugLogFile = $SavedDebugLog }
+        $Thrown.Exception.Message | Should -Be 'SubscriptionNotFound: the subscription was not found (the lookup in the signed-in tenant had also failed)' -Because 'a pointer to a log that does not exist sends the operator looking for nothing'
+    }
+
+    It 'passes the second lookup''s error on untouched when the signed-in tenant simply did not have the subscription' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        # The first lookup found nothing without failing, so there is no first error to keep or point at.
+        Import-Module Az.Accounts -ErrorAction Stop
+        $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+        $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+        $Current.Tenant.Id = [guid]::NewGuid().ToString()
+        $Current.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $Current.Subscription.Id = [guid]::NewGuid().ToString()
+        Mock Get-AzContext { $Current }
+        Mock Get-AzSubscription {
+            if ($TenantId) { return $null }
+            throw 'SubscriptionNotFound: the subscription was not found'
+        }
+        $DebugLog = Join-Path $TestDrive 'debug-no-first-error.log'
+        $SavedDebugLog = $Global:DebugLogFile
+        $Global:DebugLogFile = $DebugLog
+        $Thrown = $null
+        try { $null = Get-RdaSubscriptionProfile -SubscriptionId ([guid]::NewGuid().ToString()) } catch { $Thrown = $_ }
+        finally { $Global:DebugLogFile = $SavedDebugLog }
+        $Thrown.Exception.Message | Should -Be 'SubscriptionNotFound: the subscription was not found'
+        Test-Path -LiteralPath $DebugLog | Should -BeFalse -Because 'there is no first failure to record'
     }
 
     It 'throws when there is no signed-in context, so the phase takes its skip path' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {

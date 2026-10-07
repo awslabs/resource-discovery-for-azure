@@ -383,7 +383,7 @@ foreach ($Name in $Cases)
     Write-Host "  running the wrapper..." -ForegroundColor DarkGray
 
     $Proc = Start-Process -FilePath (Get-Process -Id $PID).Path `
-        -ArgumentList @('-NoProfile', '-File', $DriverPath, '-Repo', $RepoRoot, '-PinnedName', $SubscriptionName, '-Mode', $Case.Mode) `
+        -ArgumentList @('-NoProfile', '-File', ('"{0}"' -f $DriverPath), '-Repo', ('"{0}"' -f $RepoRoot), '-PinnedName', ('"{0}"' -f $SubscriptionName), '-Mode', $Case.Mode) `
         -RedirectStandardOutput $LogPath -RedirectStandardError (Join-Path $WorkRoot "$Name.err.txt") `
         -NoNewWindow -PassThru
     if (-not $Proc.WaitForExit($TimeoutMinutes * 60 * 1000))
@@ -447,6 +447,13 @@ foreach ($Name in $Cases)
     $ExitOk = ($null -ne $ActualExit -and $ActualExit -eq $Case.ExitCode)
     Write-Host ("  exit code: expected {0}, got {1} - {2}" -f $Case.ExitCode, $(if ($null -eq $ActualExit) { 'none' } else { $ActualExit }), $(if ($ExitOk) { 'ok' } else { 'WRONG' })) `
         -ForegroundColor $(if ($ExitOk) { 'Green' } else { 'Red' })
+    if ($null -eq $ActualExit)
+    {
+        # The driver never reached the wrapper's exit. Its lines name subscriptions,
+        # so only their count is printed; the case fails, so its transcript is kept.
+        $LineCount = @(($Captured -split "\r?\n") | Where-Object { $_ }).Count
+        Write-Host ("  the driver printed no exit marker; its {0} line(s) of output are kept in {1}" -f $LineCount, $WorkRoot) -ForegroundColor Red
+    }
 
     $Met = 0
     $Unmet = @()

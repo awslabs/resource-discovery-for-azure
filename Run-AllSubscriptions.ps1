@@ -2935,7 +2935,12 @@ elseif ($MarketplaceRequested -and $MarketplaceRecords -eq 0 -and @($SubResource
     Write-Host ""
 }
 
-$MetricsFailures = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+# Auth skips and a metric worker pool that could not be opened are listed apart: the remedies differ, and
+# Connect-AzAccount is the wrong advice for a host that ran short of memory. An entry with no Cause was
+# written before the field existed, when every entry was an auth skip, so it is listed as one.
+$MetricsFailedAll = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
+$MetricsFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -ne 'pool' })
+$MetricsPoolFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -eq 'pool' })
 if ($MetricsFailures.Count -gt 0)
 {
     Write-Host ""
@@ -2951,6 +2956,23 @@ if ($MetricsFailures.Count -gt 0)
     }
     Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
     Write-Host "  Note: the metrics sheet in the output report will be empty for these subscriptions." -ForegroundColor Yellow
+    Write-Host ""
+}
+if ($MetricsPoolFailures.Count -gt 0)
+{
+    Write-Host ""
+    Write-Host ("Metrics Incomplete:      {0} subscription(s) - per-call metrics NOT collected" -f $MetricsPoolFailures.Count) -ForegroundColor Yellow
+    foreach ($PoolSub in ($MetricsPoolFailures | Sort-Object Name, Id -Unique))
+    {
+        Write-Host ("  - {0} ({1})" -f $PoolSub.Name, $PoolSub.Id) -ForegroundColor Yellow
+    }
+    $FirstPoolMsg = @($MetricsPoolFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
+    if (-not [string]::IsNullOrEmpty($FirstPoolMsg))
+    {
+        Write-Host ("  Reason: {0}" -f $FirstPoolMsg) -ForegroundColor Yellow
+    }
+    Write-Host ("  Free memory on this host, or re-run with fewer -ParallelStreams (this run: {0}) or a lower -ConcurrencyLimit (metric calls per stream, this run: {1})." -f $ParallelStreams, $ConcurrencyLimit) -ForegroundColor Yellow
+    Write-Host "  Note: the per-call metrics of these subscriptions are missing from the metrics sheet; any fetched through -UseMetricsBatch are kept." -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -3256,7 +3278,12 @@ elseif ($UploadToBlobContainerUri)
 }
 
 $AuthSkippedPhases = @()
-if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
+# Only a metrics entry that is not tagged 'pool' is an auth skip. 'pool' means the metric worker pool could not
+# be opened, which has its own banner below and a different remedy. An entry with no Cause was written before
+# the field existed, when every entry was an auth skip, so it still counts as one.
+$MetricsAuthSkipped = @(@($Global:MetricsFailedSubs) | Where-Object { [string]$_.Cause -ne 'pool' })
+$MetricsPoolIncomplete = @(@($Global:MetricsFailedSubs) | Where-Object { [string]$_.Cause -eq 'pool' })
+if ($MetricsAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
 $ConsumptionAuthSkipped = @(
     if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
 ) | Where-Object { $_.Id -eq '(auth)' }
@@ -3270,6 +3297,28 @@ if ($AuthSkippedPhases.Count -gt 0)
     Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
     Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
     Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
+    if (@($FailedSubscriptions).Count -eq 0)
+    {
+        Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host ("A report was still produced for every subscription that completed, but NOT for the {0} under 'Subscriptions Failed' above." -f @($FailedSubscriptions).Count) -ForegroundColor Yellow
+    }
+    Write-Host "=========================================================" -ForegroundColor Red
+}
+
+# A metric worker pool that could not be opened leaves the per-call metrics missing. That is not an auth
+# problem, and Connect-AzAccount would send the operator the wrong way, so it has its own banner and remedy.
+# It keeps exit code 3 (see $AuthSkipped below): a requested data phase is incomplete either way.
+if ($MetricsPoolIncomplete.Count -gt 0)
+{
+    $PoolIncompleteNames = @($MetricsPoolIncomplete | Sort-Object Name, Id -Unique | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id })
+    Write-Host ""
+    Write-Host "============== FAILED (metrics incomplete) ==============" -ForegroundColor Red
+    Write-Host ("Per-call metrics are missing for {0} subscription(s): {1}" -f $PoolIncompleteNames.Count, ($PoolIncompleteNames -join ', ')) -ForegroundColor Red
+    Write-Host "Reason: the metric worker pool could not be opened, usually because the host was short of memory." -ForegroundColor Red
+    Write-Host ("Fix: free memory on this host, or re-run with fewer -ParallelStreams (this run: {0}) or a lower -ConcurrencyLimit (this run: {1})." -f $ParallelStreams, $ConcurrencyLimit) -ForegroundColor Red
     if (@($FailedSubscriptions).Count -eq 0)
     {
         Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
@@ -3334,7 +3383,9 @@ if ($RunHadFailures -or -not [string]::IsNullOrWhiteSpace($UploadToBlobContainer
     Invoke-RdaSupportLogCollectionInTranscript -TranscriptStarted:$WrapperTranscriptStarted -TranscriptFile $WrapperTranscriptFile -InventoryRoot $InventoryRoot -SinceTime $RunStartTime -ContainerUri $UploadToBlobContainerUri -ShardIndex $ShardIndex -ShardCount $ShardCount -Outcome $SupportLogOutcome
 }
 
-$AuthSkipped = $AuthSkippedPhases.Count -gt 0
+# Exit code 3 covers both banners above: a requested data phase skipped for auth, or the metrics left
+# incomplete because the worker pool could not be opened.
+$AuthSkipped = ($AuthSkippedPhases.Count -gt 0) -or ($MetricsPoolIncomplete.Count -gt 0)
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
 

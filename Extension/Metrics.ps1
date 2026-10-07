@@ -968,7 +968,8 @@ if ($Task -eq 'Processing')
                 # OWN count. A standalone run's phase can cover several subscriptions, so an entry that
                 # repeated the phase total would tell each of them that every definition of the run was
                 # its own. The ids are lower-cased so the same subscription written two ways is one entry,
-                # and the first-appearance order is kept for the summary.
+                # and the first-appearance order is kept for the summary. Cause 'pool' keeps the wrapper from
+                # reporting this as an auth skip: the remedy is memory on the host, not Connect-AzAccount.
                 $PoolFailedSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() })
                 $PoolFailedCounts = @{}
                 foreach ($PoolFailedSubId in $PoolFailedSubIds)
@@ -979,7 +980,7 @@ if ($Task -eq 'Processing')
                 $PoolFailedUniqueIds = @($PoolFailedSubIds | Select-Object -Unique)
                 if ($PoolFailedUniqueIds.Count -eq 0)
                 {
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = $PoolSkipMsg }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = $PoolSkipMsg; Cause = 'pool' }
                 }
                 else
                 {
@@ -991,6 +992,7 @@ if ($Task -eq 'Processing')
                             Name    = $PoolFailedSubName
                             Id      = $PoolFailedSubId
                             Message = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) of this subscription were not collected.' -f $PoolOpenError, $PoolFailedCounts[$PoolFailedSubId])
+                            Cause   = 'pool'
                         }
                     }
                 }

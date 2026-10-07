@@ -822,6 +822,8 @@ function ExecuteInventoryProcessing()
 
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                 $MetricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                # Cause tells the wrapper which banner and remedy apply: 'auth' is this skip, re-authenticate
+                # and re-run. Extension/Metrics.ps1 writes 'pool' when its worker pool cannot be opened.
                 $AffectedSubs = @(
                     if (![string]::IsNullOrEmpty($SubscriptionID))
                     {
@@ -835,13 +837,13 @@ function ExecuteInventoryProcessing()
                 if ($AffectedSubs.Count -eq 0)
                 {
                     $IdLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg; Cause = 'auth' }
                 }
                 else
                 {
                     foreach ($asub in $AffectedSubs)
                     {
-                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg; Cause = 'auth' }
                     }
                 }
                 return

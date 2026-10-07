@@ -990,6 +990,20 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Store[0].Extent.StartOffset | Should -BeGreaterThan $Open[0].Extent.EndOffset -Because 'a pool stored before the open could be handed on in a Broken state'
             $Store[0].Extent.StartOffset | Should -BeLessThan $script:PoolOpenTryAst.Body.Extent.EndOffset
         }
+
+        It 'tags every entry it writes with Cause pool, so the wrapper does not report an auth failure' {
+            $Pool = & $script:NewUnopenablePool
+            $null = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup
+            $Entries = @($Global:MetricsFailedSubs)
+            $Entries.Count | Should -Be 2
+            @($Entries | ForEach-Object { [string]$_.Cause }) | Should -Be @('pool', 'pool') -Because 'without the tag the wrapper counts the entry as an auth skip and tells the operator to run Connect-AzAccount'
+
+            $Global:MetricsFailedSubs = @()
+            $Pool = & $script:NewUnopenablePool
+            $Unknown = [System.Collections.Generic.List[object]]@([pscustomobject]@{ Id = 'not-an-arm-id' })
+            $null = & $script:PoolOpen $Pool $true 1 $Unknown $script:OpenSubLookup
+            @($Global:MetricsFailedSubs | ForEach-Object { [string]$_.Cause }) | Should -Be @('pool') -Because 'the unknown-subscription fallback is the same failure'
+        }
     }
 }
 
@@ -1051,5 +1065,46 @@ Describe 'Get-RdaFoundryRetailCatalog holds only what the coverage match reads' 
         $Expected.Matched | Should -Be $ShouldMatch -Because 'the fixture has both a matching and a non-matching case, so the comparison is not vacuous'
         $Actual.Matched | Should -Be $Expected.Matched
         $Actual.RetailMatch | Should -Be $Expected.RetailMatch
+    }
+}
+
+Describe 'The metrics auth skip in ResourceInventory.ps1 says why the metrics are missing' {
+    # CreateMetricsJob records a subscription whose metrics it skipped for want of a usable token. Its entries
+    # share $Global:MetricsFailedSubs with the pool failure in Extension/Metrics.ps1, so each writer tags its
+    # own cause; the wrapper picks the banner and the remedy from that tag. The skip branch is lifted by AST and
+    # run against stubs, so the test runs what the script does.
+    BeforeAll {
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
+        $script:AuthSkipBranch = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq "-not (Test-DataPlaneAuthReady -Phase 'Metrics')" }, $true)
+        $script:RunAuthSkip = {
+            param($Subscriptions, [string]$SubscriptionID)
+            $Runner = [scriptblock]::Create(((@(
+                            'param($Subscriptions, $SubscriptionID)'
+                            'function Test-DataPlaneAuthReady { param($Phase) $false }'
+                            'function Write-Log { param($Message, $Severity) }'
+                            '$Saved = @($Global:MetricsFailedSubs, $Global:Subscriptions, $Global:AzMetrics)'
+                            'try'
+                            '{'
+                            '$Global:MetricsFailedSubs = @()'
+                            '$Global:Subscriptions = $Subscriptions'
+                            '& { ' + $script:AuthSkipBranch.Extent.Text + ' }'
+                            '@($Global:MetricsFailedSubs)'
+                            '}'
+                            'finally { $Global:MetricsFailedSubs = $Saved[0]; $Global:Subscriptions = $Saved[1]; $Global:AzMetrics = $Saved[2] }'
+                        ) -join [Environment]::NewLine)))
+            & $Runner $Subscriptions $SubscriptionID
+        }
+    }
+
+    It 'tags every entry it writes with Cause auth, including the unknown-subscription fallback' {
+        $script:AuthSkipBranch | Should -Not -BeNullOrEmpty
+        $Subs = @([pscustomobject]@{ id = 'aaaa-1'; Name = 'Contoso-Dev' }, [pscustomobject]@{ id = 'bbbb-2'; Name = 'Contoso-Prod' })
+        $All = @(& $script:RunAuthSkip $Subs '')
+        $All.Count | Should -Be 2
+        @($All | ForEach-Object { [string]$_.Cause }) | Should -Be @('auth', 'auth') -Because 'the wrapper reports an auth skip from this tag'
+        $One = @(& $script:RunAuthSkip $Subs 'bbbb-2')
+        @($One | ForEach-Object { '{0}={1}' -f $_.Id, $_.Cause }) | Should -Be @('bbbb-2=auth')
+        $None = @(& $script:RunAuthSkip @() 'zzzz-9')
+        @($None | ForEach-Object { '{0}={1}' -f $_.Id, $_.Cause }) | Should -Be @('zzzz-9=auth') -Because 'the fallback entry is the same skip'
     }
 }

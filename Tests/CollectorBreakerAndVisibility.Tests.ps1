@@ -1997,3 +1997,137 @@ $ResumeStateFile = 'state{1}.json'
         $Shown[0] | Should -BeExactly $Expected
     }
 }
+
+Describe 'A metric worker pool that could not open is reported as metrics incomplete, not as an auth failure' {
+    # Extension/Metrics.ps1 writes a $Global:MetricsFailedSubs entry with Cause 'pool' when its worker pool cannot
+    # be opened, which is a host short of memory. The wrapper used to count every entry as an auth skip, so that
+    # condition printed FAILED (auth) with Connect-AzAccount advice. The wrapper's end-of-run statements are lifted
+    # by AST and run against stand-in entries. A range that is not found leaves its text empty, so the tests that
+    # need it fail on their own instead of taking the whole file down.
+    BeforeAll {
+        . (Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1')
+        $PoolWrapAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $GetRange = {
+            param($Top, [scriptblock]$IsFirst, [scriptblock]$IsLast)
+            $First = -1
+            for ($i = 0; $i -lt $Top.Count; $i++)
+            {
+                if ($First -lt 0 -and (& $IsFirst $Top[$i])) { $First = $i }
+                if ($First -ge 0 -and (& $IsLast $Top[$i])) { return (($Top[$First..$i] | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine) }
+            }
+            return $null
+        }
+        $Top = @($PoolWrapAst.EndBlock.Statements)
+        $script:PoolConsoleText = & $GetRange $Top { param($S) $S -is [System.Management.Automation.Language.AssignmentStatementAst] -and $S.Left.Extent.Text -eq '$MetricsFailedAll' } { param($S) $S -is [System.Management.Automation.Language.IfStatementAst] -and $S.Clauses[0].Item1.Extent.Text -eq '$MetricsPoolFailures.Count -gt 0' }
+        $script:PoolBannerText = & $GetRange $Top { param($S) $S.Extent.Text -eq '$AuthSkippedPhases = @()' } { param($S) $S -is [System.Management.Automation.Language.IfStatementAst] -and $S.Clauses[0].Item1.Extent.Text -eq '$MetricsPoolIncomplete.Count -gt 0' -and $S.Extent.Text -match 'FAILED \(metrics incomplete\)' }
+        $script:PoolExitText = & $GetRange $Top { param($S) $S -is [System.Management.Automation.Language.AssignmentStatementAst] -and $S.Left.Extent.Text -eq '$AuthSkipped' } { param($S) $S -is [System.Management.Automation.Language.AssignmentStatementAst] -and $S.Left.Extent.Text -eq '$WrapperExitCode' -and $S.Right.Extent.Text -match 'Get-WrapperExitCode' }
+        $script:PoolAggregate = $PoolWrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$StreamSummary.MetricsFailedSubs -and $StreamSummary.MetricsFailedSubs.Count -gt 0' }, $true)
+
+        $script:RunPoolEnd = {
+            param($Entries, $Failed = @())
+            $Printed = [System.Collections.Generic.List[string]]::new()
+            $Runner = [scriptblock]::Create(((@(
+                            'param($Entries, $Failed, $Printed)'
+                            'function Write-Host { param($Object, $ForegroundColor) $Printed.Add([string]$Object) }'
+                            '$Saved = @($Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:CollectorFailures)'
+                            'try'
+                            '{'
+                            '$Global:MetricsFailedSubs = @($Entries)'
+                            '$Global:ConsumptionFailedSubs = @()'
+                            '$Global:CollectorFailures = @()'
+                            '$FailedSubscriptions = @($Failed)'
+                            '$ParallelStreams = 3'
+                            '$ConcurrencyLimit = 5'
+                            $script:PoolConsoleText
+                            $script:PoolBannerText
+                            $script:PoolExitText
+                            '[pscustomobject]@{ Printed = ($Printed -join "`n"); Phases = @($AuthSkippedPhases); ExitCode = $WrapperExitCode }'
+                            '}'
+                            'finally { $Global:MetricsFailedSubs = $Saved[0]; $Global:ConsumptionFailedSubs = $Saved[1]; $Global:CollectorFailures = $Saved[2] }'
+                        ) -join [Environment]::NewLine)))
+            & $Runner $Entries $Failed $Printed
+        }
+        $script:AuthEntry = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = 'aaaa-1'; Message = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'; Cause = 'auth' }
+        $script:PoolEntry = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = 'bbbb-2'; Message = 'Metrics: the metric worker pool could not be opened (Insufficient resources); 4 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $script:OldEntry = [pscustomobject]@{ Name = 'Contoso-Old'; Id = 'cccc-3'; Message = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.' }
+    }
+
+    It 'prints FAILED (metrics incomplete) and not FAILED (auth) for pool entries, and still exits 3' {
+        $script:PoolBannerText | Should -Not -BeNullOrEmpty -Because 'the pool failure needs a banner of its own, after the auth one'
+        $script:PoolConsoleText | Should -Not -BeNullOrEmpty
+        $R = & $script:RunPoolEnd @($script:PoolEntry)
+        $R.Printed | Should -Match 'FAILED \(metrics incomplete\)'
+        $R.Printed | Should -Not -Match 'FAILED \(auth\)' -Because 'the host was short of memory; the Azure context was fine'
+        $R.Printed | Should -Not -Match 'Connect-AzAccount' -Because 're-authenticating does not give a host its memory back'
+        $R.Printed | Should -Not -Match 'Metrics Auth Failures'
+        @($R.Phases) | Should -Not -Contain 'Metrics'
+        $R.ExitCode | Should -Be 3 -Because 'a requested data phase is incomplete, which the owner kept on code 3'
+        $R.Printed | Should -Match 'Per-call metrics are missing for 1 subscription\(s\): Contoso-Pool \(bbbb-2\)'
+        $R.Printed | Should -Match 'Metrics Incomplete:\s+1 subscription\(s\)'
+        $R.Printed | Should -Match 'Reason: Metrics: the metric worker pool could not be opened'
+        $R.Printed | Should -Match '-ParallelStreams \(this run: 3\)'
+        $R.Printed | Should -Match '-ConcurrencyLimit \(this run: 5\)'
+        $R.Printed | Should -Match 'The rest of the inventory completed and the report was still produced'
+    }
+
+    It 'keeps an entry with no Cause, written before the field existed, an auth skip' {
+        $script:PoolBannerText | Should -Not -BeNullOrEmpty
+        $R = & $script:RunPoolEnd @($script:OldEntry)
+        $R.Printed | Should -Match 'FAILED \(auth\)' -Because 'an older stream summary has no Cause, and every entry then was an auth skip'
+        $R.Printed | Should -Not -Match 'FAILED \(metrics incomplete\)'
+        $R.Printed | Should -Match 'Metrics Auth Failures:\s+1 subscription\(s\)'
+        @($R.Phases) | Should -Contain 'Metrics'
+        $R.ExitCode | Should -Be 3
+    }
+
+    It 'prints both banners for a run with both kinds, each naming only its own subscriptions' {
+        $script:PoolBannerText | Should -Not -BeNullOrEmpty
+        $R = & $script:RunPoolEnd @($script:AuthEntry, $script:PoolEntry)
+        $R.Printed | Should -Match 'FAILED \(auth\)'
+        $R.Printed | Should -Match 'FAILED \(metrics incomplete\)'
+        $R.Printed | Should -Match 'Metrics Auth Failures:\s+1 subscription\(s\)'
+        $R.Printed | Should -Match 'Metrics Incomplete:\s+1 subscription\(s\)'
+        @($R.Printed -split "`n" | Where-Object { $_ -like 'Per-call metrics are missing*' }) | Should -Be @('Per-call metrics are missing for 1 subscription(s): Contoso-Pool (bbbb-2)') -Because 'the auth-skipped subscription is not a pool failure'
+        $R.ExitCode | Should -Be 3
+    }
+
+    It 'says which reports are missing instead of claiming every report was produced' {
+        $script:PoolBannerText | Should -Not -BeNullOrEmpty
+        $R = & $script:RunPoolEnd @($script:PoolEntry) @('Other-Sub (dddd-4)')
+        $R.Printed | Should -Match "NOT for the 1 under 'Subscriptions Failed'"
+        $R.Printed | Should -Not -Match 'The rest of the inventory completed'
+    }
+
+    It 'keeps the Cause through a stream summary and the parent''s aggregation' {
+        # Parallel streams hand their entries to the wrapper as JSON, so the tag must survive the stream's own
+        # summary, its serialisation and the parent's aggregation, all run here as the sources have them.
+        $script:PoolAggregate | Should -Not -BeNullOrEmpty
+        $StreamPath = Join-Path $script:Repo 'Run-AllSubscriptions.Stream.ps1'
+        $StreamAst = [System.Management.Automation.Language.Parser]::ParseFile($StreamPath, [ref]$null, [ref]$null)
+        $StreamTop = @($StreamAst.EndBlock.Statements)
+        $Inputs = @($StreamTop | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -in @('$MetricsFailedSubs', '$Summary') })
+        $Inputs.Count | Should -Be 2
+        $Depth = [int]([regex]::Match((Get-Content -LiteralPath $StreamPath -Raw), '\$Summary \| ConvertTo-Json -Depth (\d+)').Groups[1].Value)
+        $Depth | Should -BeGreaterThan 2
+        $RoundTrip = [scriptblock]::Create(((@(
+                        'param($Entries, $Depth)'
+                        '$Saved = $Global:MetricsFailedSubs'
+                        'try'
+                        '{'
+                        '$Global:MetricsFailedSubs = @($Entries)'
+                        ($Inputs | ForEach-Object { $_.Extent.Text })
+                        '$StreamSummary = $Summary | ConvertTo-Json -Depth $Depth | ConvertFrom-Json'
+                        '$Global:MetricsFailedSubs = @()'
+                        $script:PoolAggregate.Extent.Text
+                        '@($Global:MetricsFailedSubs)'
+                        '}'
+                        'finally { $Global:MetricsFailedSubs = $Saved }'
+                    ) -join [Environment]::NewLine)))
+        $Arrived = @(& $RoundTrip @($script:PoolEntry, $script:OldEntry) $Depth)
+        @($Arrived | ForEach-Object { [string]$_.Cause }) | Should -Be @('pool', '') -Because 'the tag must reach the wrapper, and an entry without one must arrive without one'
+        $script:PoolBannerText | Should -Not -BeNullOrEmpty
+        $R = & $script:RunPoolEnd $Arrived
+        $R.Printed | Should -Match 'Per-call metrics are missing for 1 subscription\(s\): Contoso-Pool \(bbbb-2\)'
+        $R.Printed | Should -Match 'Metrics Auth Failures:\s+1 subscription\(s\)' -Because 'the untagged entry is still an auth skip after the round trip'
+    }
+}

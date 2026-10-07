@@ -2434,20 +2434,22 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
         $ClearIf = & $FindIf -Condition '$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and ((Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) -or $StateBlobArgs.Count -gt 0)' -Contains 'Resume state cleared (clean run).'
         $script:ClearBlock = [scriptblock]::Create($ClearIf.Extent.Text)
 
-        # A (completed earlier), B (failed, retried now and completed), C (never reached).
+        # A (completed earlier), B (failed, retried now and completed), C (never reached). -EligibleIds is the
+        # start-of-run listing, -EndIds the end-of-run listing.
         function Invoke-OwedCheck
         {
-            param([string[]]$CompletedIds, [string[]]$EndIds)
+            param([string[]]$CompletedIds, [string[]]$EndIds, [string[]]$EligibleIds = @('sub-a', 'sub-b', 'sub-c'))
             $StateFile = Join-Path $TestDrive 'resume-state.json'
             Set-Content -LiteralPath $StateFile -Value '{}'
             Set-Variable -Name ResumeStateFile -Value $StateFile
             Set-Variable -Name StateBlobArgs -Value @{}
             Set-Variable -Name ResumeFailedOnly -Value $true
-            Set-Variable -Name EligibleBeforeRetryFilter -Value @(
+            $Eligible = @(
                 [pscustomobject]@{ Id = 'sub-a'; Name = 'A' }
                 [pscustomobject]@{ Id = 'sub-b'; Name = 'B' }
                 [pscustomobject]@{ Id = 'sub-c'; Name = 'C' }
             )
+            Set-Variable -Name EligibleBeforeRetryFilter -Value @($Eligible | Where-Object { $EligibleIds -contains $_.Id })
             Set-Variable -Name RetriedIds -Value @('sub-b')
             Set-Variable -Name CompletedIds -Value $CompletedIds
             Set-Variable -Name EndIds -Value $EndIds
@@ -2468,9 +2470,17 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
         $R.StateKept | Should -BeFalse
         @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
     }
-    It 'a subscription deleted since the start is not owed' {
+    It 'a subscription missing from the end-of-run listing is still owed, because not listed does not mean deleted' {
         $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b') -EndIds @('sub-a', 'sub-b')
+        $R.StateKept | Should -BeTrue -Because 'it may have moved to another directory or be hidden from this identity'
+        @($R.Printed | Where-Object { $_ -eq 'Never collected, and not retried by -ResumeFailedOnly (1): C (sub-c)' }).Count | Should -Be 1
+        @($R.Printed | Where-Object { $_ -like 'Resume state cleared*' }).Count | Should -Be 0
+    }
+    It 'a subscription missing from the start listing of this run is not owed, so one that is really gone cannot keep the state' {
+        $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b') -EndIds @('sub-a', 'sub-b') -EligibleIds @('sub-a', 'sub-b')
         $R.StateKept | Should -BeFalse
+        @($R.Printed | Where-Object { $_ -like 'Never collected*' }).Count | Should -Be 0
+        @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
     }
 }
 

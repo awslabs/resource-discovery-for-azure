@@ -1972,6 +1972,11 @@ function Write-RdaShareableDiagnosticsLog
 
         $CollectorFails = @(@($Global:CollectorFailures) | Where-Object { $null -ne $_ })
         $MetricsSkips = @(@($Global:MetricsFailedSubs) | Where-Object { $null -ne $_ })
+        # Listed apart because the remedies differ: an auth skip needs a token, metrics left incomplete by a
+        # worker pool that would not open need memory on the host. An entry with no Cause was written before
+        # the field existed, when every entry was an auth skip, so it is still listed as one.
+        $MetricsAuthSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -ne 'pool' })
+        $MetricsPoolSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -eq 'pool' })
         $ConsumpSkips = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
         $MarketplaceSkips = @(@($Global:MarketplaceFailedSubs) | Where-Object { $null -ne $_ })
 
@@ -2009,10 +2014,16 @@ function Write-RdaShareableDiagnosticsLog
             $DiagLines.Add(('  [sub {0}] {1}: {2}' -f (Protect-DiagnosticText ([string]$cfItem.Id) $DiagScrubMap), [string]$cfItem.Module, (Protect-DiagnosticText ([string]$cfItem.Message) $DiagScrubMap)))
         }
         $DiagLines.Add('')
-        $DiagLines.Add(('Metrics auth-skipped subscriptions: {0}' -f $MetricsSkips.Count))
-        foreach ($msItem in $MetricsSkips)
+        $DiagLines.Add(('Metrics auth-skipped subscriptions: {0}' -f $MetricsAuthSkips.Count))
+        foreach ($msItem in $MetricsAuthSkips)
         {
             $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$msItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$msItem.Message) $DiagScrubMap)))
+        }
+        $DiagLines.Add('')
+        $DiagLines.Add(('Metrics incomplete subscriptions: {0}' -f $MetricsPoolSkips.Count))
+        foreach ($mpItem in $MetricsPoolSkips)
+        {
+            $DiagLines.Add(('  [sub {0}] {1}' -f (Protect-DiagnosticText ([string]$mpItem.Id) $DiagScrubMap), (Protect-DiagnosticText ([string]$mpItem.Message) $DiagScrubMap)))
         }
         $DiagLines.Add('')
         $DiagLines.Add(('Consumption failed/incomplete subscriptions: {0}' -f $ConsumpSkips.Count))

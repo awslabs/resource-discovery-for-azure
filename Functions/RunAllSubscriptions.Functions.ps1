@@ -2253,7 +2253,8 @@ function Format-PreflightMatrix
 function Get-InventoryExitCodeMeaning
 {
     # ResourceInventory.ps1's own exit codes, named, so a failure line cannot be misread as one of the
-    # WRAPPER's codes (its 3 means an auth-skipped phase; the inner 3 means an aborted collection).
+    # WRAPPER's codes (its 3 means a requested data phase was skipped for auth or left incomplete because
+    # the metric worker pool could not open; the inner 3 means an aborted collection).
     [CmdletBinding()]
     [OutputType([string])]
     param([int]$Code)
@@ -2671,6 +2672,11 @@ function Get-RunSummaryLogContent
     $Failed = @(@($FailedSubscriptions) | Where-Object { $null -ne $_ })
     $Collector = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
     $Metrics = @(@($MetricsFailedSubs) | Where-Object { $null -ne $_ })
+    # The two writers of this list record different problems, so they are counted and listed apart: an auth
+    # skip needs a token, metrics left incomplete by a worker pool that would not open need memory. An entry
+    # with no Cause was written before the field existed, when every entry was an auth skip, so it is one.
+    $MetricsAuth = @($Metrics | Where-Object { [string]$_.Cause -ne 'pool' })
+    $MetricsPool = @($Metrics | Where-Object { [string]$_.Cause -eq 'pool' })
     $Consumption = @(@($ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
     $Marketplace = @(@($MarketplaceFailedSubs) | Where-Object { $null -ne $_ })
 
@@ -2805,7 +2811,8 @@ function Get-RunSummaryLogContent
     $Lines.Add(('    of which collection aborted : {0}' -f @(@($CollectionAbortedSubs) | Where-Object { $null -ne $_ }).Count))
     $Lines.Add(('    of which archive not written: {0}' -f @(@($ArchiveWriteFailures) | Where-Object { $null -ne $_ }).Count))
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
-    $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
+    $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $MetricsAuth.Count))
+    $Lines.Add(('  Metrics incomplete subs       : {0}' -f $MetricsPool.Count))
     $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))
     $Lines.Add(('  Marketplace failed subs       : {0}' -f $Marketplace.Count))
     if ($UnreportedStreamCount -gt 0)
@@ -2905,11 +2912,17 @@ function Get-RunSummaryLogContent
             $Lines.Add('Collector failures (detail):')
             foreach ($CollectorFail in $Collector) { $Lines.Add(('  - [sub {0}] {1}: {2}' -f [string]$CollectorFail.Id, [string]$CollectorFail.Module, [string]$CollectorFail.Message)) }
         }
-        if ($Metrics.Count -gt 0)
+        if ($MetricsAuth.Count -gt 0)
         {
             $Lines.Add('')
             $Lines.Add('Metrics auth-skipped subscriptions (detail):')
-            foreach ($MetricSub in $Metrics) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$MetricSub.Name, [string]$MetricSub.Id, [string]$MetricSub.Message)) }
+            foreach ($MetricSub in $MetricsAuth) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$MetricSub.Name, [string]$MetricSub.Id, [string]$MetricSub.Message)) }
+        }
+        if ($MetricsPool.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Metrics incomplete subscriptions (detail):')
+            foreach ($MetricPoolSub in $MetricsPool) { $Lines.Add(('  - {0} ({1}): {2}' -f [string]$MetricPoolSub.Name, [string]$MetricPoolSub.Id, [string]$MetricPoolSub.Message)) }
         }
         if ($Consumption.Count -gt 0)
         {

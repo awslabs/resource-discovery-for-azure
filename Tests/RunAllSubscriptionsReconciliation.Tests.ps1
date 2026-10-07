@@ -4549,3 +4549,73 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
         }
     }
 }
+
+Describe 'Get-RunSummaryLogContent separates an auth skip from metrics left incomplete' {
+    # $Global:MetricsFailedSubs now carries a Cause: 'auth' from ResourceInventory.ps1's token skip and
+    # 'pool' from Extension/Metrics.ps1 when the metric worker pool cannot be opened. The run summary used
+    # to call every one of them auth-skipped, which sent the reader after a token when the host was short
+    # of memory. An entry with no Cause was written before the field existed, when every entry really was
+    # an auth skip, so it still counts as one.
+    BeforeAll {
+        $script:SumAuth = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = '11111111-1111-1111-1111-111111111111'; Message = 'no usable token'; Cause = 'auth' }
+        $script:SumPool = [pscustomobject]@{ Name = 'Fabrikam-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'the metric worker pool could not be opened'; Cause = 'pool' }
+        $script:SumOld = [pscustomobject]@{ Name = 'Northwind-Old'; Id = '33333333-3333-3333-3333-333333333333'; Message = 'no usable token' }
+        $script:SumText = {
+            param($Entries, [switch]$Obfuscated)
+            $Params = @{
+                Visible = 5; Excluded = 1; Eligible = 4; Processed = 3; Skipped = 0
+                MetricsFailedSubs = @($Entries)
+            }
+            if ($Obfuscated) { $Params.Obfuscated = $true }
+            (Get-RunSummaryLogContent @Params) -join "`n"
+        }
+    }
+
+    It 'counts a pool failure on its own line and leaves the auth count at zero' {
+        $Text = & $script:SumText @($script:SumPool)
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+0' -Because 'the Azure context was fine; the host ran out of memory'
+        $Text | Should -Match 'Metrics incomplete subs\s+:\s+1'
+        $Text | Should -Match 'Metrics incomplete subscriptions \(detail\):'
+        $Text | Should -Not -Match 'Metrics auth-skipped subscriptions \(detail\):'
+        $Text | Should -Match 'Fabrikam-Pool \(22222222-2222-2222-2222-222222222222\): the metric worker pool could not be opened'
+    }
+
+    It 'keeps the auth label and its detail block for an auth skip' {
+        $Text = & $script:SumText @($script:SumAuth)
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+1'
+        $Text | Should -Match 'Metrics incomplete subs\s+:\s+0'
+        $Text | Should -Match 'Metrics auth-skipped subscriptions \(detail\):'
+        $Text | Should -Not -Match 'Metrics incomplete subscriptions \(detail\):'
+    }
+
+    It 'still counts an entry with no Cause as an auth skip' {
+        $Text = & $script:SumText @($script:SumOld)
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+1' -Because 'a stream summary written before the field existed has no Cause'
+        $Text | Should -Match 'Metrics incomplete subs\s+:\s+0'
+        $Text | Should -Match 'Metrics auth-skipped subscriptions \(detail\):'
+        $Text | Should -Match 'Northwind-Old \(33333333-3333-3333-3333-333333333333\): no usable token'
+    }
+
+    It 'lists a mixed run under both labels, each naming only its own subscriptions' {
+        $Text = & $script:SumText @($script:SumAuth, $script:SumPool, $script:SumOld)
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+2'
+        $Text | Should -Match 'Metrics incomplete subs\s+:\s+1'
+        $Lines = @($Text -split "`n")
+        $AuthAt = [array]::IndexOf($Lines, 'Metrics auth-skipped subscriptions (detail):')
+        $PoolAt = [array]::IndexOf($Lines, 'Metrics incomplete subscriptions (detail):')
+        $AuthAt | Should -BeGreaterThan -1
+        $PoolAt | Should -BeGreaterThan $AuthAt -Because 'the new block follows the one that was always there'
+        @($Lines[($AuthAt + 1)..($PoolAt - 2)]) | Should -Not -Contain '  - Fabrikam-Pool (22222222-2222-2222-2222-222222222222): the metric worker pool could not be opened'
+        @($Lines[($PoolAt + 1)]) | Should -Be @('  - Fabrikam-Pool (22222222-2222-2222-2222-222222222222): the metric worker pool could not be opened')
+    }
+
+    It 'shows both counts and no identifiers in an obfuscated bundle' {
+        $Text = & $script:SumText @($script:SumAuth, $script:SumPool) -Obfuscated
+        $Text | Should -Match 'Metrics auth-skipped subs\s+:\s+1'
+        $Text | Should -Match 'Metrics incomplete subs\s+:\s+1'
+        $Text | Should -Not -Match 'Fabrikam-Pool'
+        $Text | Should -Not -Match '22222222-2222-2222-2222-222222222222'
+        $Text | Should -Not -Match 'the metric worker pool could not be opened'
+        $Text | Should -Not -Match 'Metrics incomplete subscriptions \(detail\):'
+    }
+}

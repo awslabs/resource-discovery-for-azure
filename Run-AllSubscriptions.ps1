@@ -2548,7 +2548,8 @@ if ($CapacityPlan)
 # -ResumeFailedOnly retries only the failed set, so a subscription an interrupted run never reached is
 # still owed. Its record stays, and so do the completions the next -Resume needs to skip. One missing
 # from the end-of-run listing is owed too, because not listed does not mean deleted. One that is really
-# gone cannot keep the state for good: what a run owes comes from its own start-of-run listing.
+# gone is not owed by a later run: what a run owes is this run's own listing ($EligibleBeforeRetryFilter),
+# not the start snapshot that is carried across resumes.
 $OwedOutsideRetry = @()
 if ($ResumeFailedOnly)
 {

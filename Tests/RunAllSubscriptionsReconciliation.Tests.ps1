@@ -2434,8 +2434,8 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
         $ClearIf = & $FindIf -Condition '$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $OwedOutsideRetry.Count -eq 0 -and ((Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) -or $StateBlobArgs.Count -gt 0)' -Contains 'Resume state cleared (clean run).'
         $script:ClearBlock = [scriptblock]::Create($ClearIf.Extent.Text)
 
-        # A (completed earlier), B (failed, retried now and completed), C (never reached). -EligibleIds is the
-        # start-of-run listing, -EndIds the end-of-run listing.
+        # A (completed earlier), B (failed, retried now and completed), C (never reached). -EligibleIds is this
+        # run's own listing, before the failed-set filter; -EndIds is the end-of-run listing.
         function Invoke-OwedCheck
         {
             param([string[]]$CompletedIds, [string[]]$EndIds, [string[]]$EligibleIds = @('sub-a', 'sub-b', 'sub-c'))
@@ -2476,11 +2476,23 @@ Describe 'Run-AllSubscriptions.ps1: -ResumeFailedOnly keeps the resume state whi
         @($R.Printed | Where-Object { $_ -eq 'Never collected, and not retried by -ResumeFailedOnly (1): C (sub-c)' }).Count | Should -Be 1
         @($R.Printed | Where-Object { $_ -like 'Resume state cleared*' }).Count | Should -Be 0
     }
-    It 'a subscription missing from the start listing of this run is not owed, so one that is really gone cannot keep the state' {
+    It 'a subscription that this run did not list is not owed, and the state is cleared' {
         $R = Invoke-OwedCheck -CompletedIds @('sub-a', 'sub-b') -EndIds @('sub-a', 'sub-b') -EligibleIds @('sub-a', 'sub-b')
         $R.StateKept | Should -BeFalse
         @($R.Printed | Where-Object { $_ -like 'Never collected*' }).Count | Should -Be 0
         @($R.Printed | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
+    }
+    It 'what a run owes is copied from its own listing, before the failed-set filter' {
+        # What is owed comes only from this copy. A copy of the start snapshot, which is carried across resumes,
+        # would keep owing a subscription that is really gone, and a copy taken after the filter would owe nothing.
+        $Copies = @($OwedAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$EligibleBeforeRetryFilter' }, $true))
+        $Copies.Count | Should -Be 1 -Because 'nothing else may feed what a run owes'
+        $Copies[0].Right.Extent.Text | Should -Be '@($Subscriptions)'
+        $Filter = & $FindIf -Condition '$ResumeFailedOnly' -Contains 'ResumeFailedOnly: filtered to'
+        $Narrowing = @($Filter.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Extent.Text -eq '$Subscriptions = @($Subscriptions | Where-Object { $FailedIds -contains $_.Id })' }, $true))
+        $Narrowing.Count | Should -Be 1
+        $Copies[0].Extent.StartOffset | Should -BeGreaterThan $Filter.Extent.StartOffset
+        $Copies[0].Extent.StartOffset | Should -BeLessThan $Narrowing[0].Extent.StartOffset -Because 'the copy has to be taken before the list is narrowed to the failed set'
     }
 }
 

@@ -139,6 +139,14 @@ that could affect output (metrics, consumption, obfuscation, schema, packaging,
 auth gating). It generates a fresh zip for each supported flag combination
 against a live subscription and runs the applicable Pester tests against each.
 
+A scenario also fails when its inventory run exits non-zero, throws, or leaves
+an entry in one of the phase-health lists (collector, metrics, consumption,
+Marketplace and Foundry problems do not change the exit code, so the matrix
+reads the lists itself). It fails too when a test file attached to it checked
+nothing because every test skipped. The Front Door and metric-volume tests are
+exempt when the subscription has nothing of that kind (`$DataDependentFiles` in
+the script). Skipped tests are listed under each scenario with their reasons.
+
 ### Scenarios
 
 | Scenario | Flags | Tests run |
@@ -186,6 +194,8 @@ the zip is obfuscated, no live context exists, or the context can't see the
 run's subscription. That keeps it safe inside an offline `Invoke-Pester ./Tests/`
 or CI run; it only actually reconciles inside the `default` scenario (or when you
 point `$env:TEST_ZIP_PATH` at a non-obfuscated zip with a matching live session).
+Inside the matrix, `default` also fails when none of its "Live tenant
+reconciliation" tests ran, so a quiet skip cannot pass as a green run.
 
 ### Schema contract & cross-dataset linkage (`default` + `obfuscate`)
 
@@ -226,6 +236,7 @@ suppressed by a `-Skip*` switch). Output-only limitation: it cannot distinguish
 a *whole-section* rename from a subscription that legitimately has none of that
 type, so an absent section is skipped, not failed - but Tier 2 stays
 name-agnostic and still linkage-checks a renamed section's rows by their IDs.
+In the matrix, a scenario where every schema-contract test skips fails.
 
 ### Run it
 
@@ -243,7 +254,8 @@ pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -Scenarios default,obfuscate
 pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -KeepOutput
 ```
 
-Exit code is `0` only if every scenario passed its applicable tests, else `1`
-(suitable for CI / a pre-merge gate). Generated zips are deleted automatically
+Exit code is `0` only if every scenario passed its applicable tests and the
+`Problems` column of the summary is `0`, else `1` (suitable for CI / a
+pre-merge gate). Generated zips are deleted automatically
 unless `-KeepOutput` is passed, because non-obfuscated zips contain real
 subscription identifiers.

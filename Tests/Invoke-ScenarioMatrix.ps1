@@ -1,5 +1,6 @@
 # Scenario Matrix Runner: generates a fresh output zip for each supported flag combination against a LIVE Azure subscription, then runs the Pester suite against each zip with the correct per-scenario expectations. Standing regression protocol - run after any change affecting output (metrics, consumption, obfuscation, schema, packaging). Contains NO customer data; tenant/subscription come from parameters or the current Az context. Usage: pwsh ./Tests/Invoke-ScenarioMatrix.ps1 [-SubscriptionID <id> -TenantID <id>] [-Scenarios ...] [-KeepOutput].
 # The PII-leak / obfuscation tests only make sense on an -Obfuscate run: a non-obfuscated zip carries raw subscription paths/transcript by design, so those tests are EXPECTED to fail and are NOT attached to non-obfuscated scenarios. Only obfuscated zips are ever shared downstream, so this matches reality.
+# A scenario also fails when its inventory run exits non-zero, throws, or leaves an entry in a phase-health list (a skipped or failed phase can still leave a valid zip), when a test file attached to it checked nothing because every test skipped, and when the 'default' scenario's live tenant reconciliation group did not run. Two files may skip everything for a data reason (Frontdoor.Tests.ps1, MetricsVolumeControls.Tests.ps1; see $DataDependentFiles). Skipped tests are listed with their reasons.
 
 [CmdletBinding()]
 param(
@@ -25,6 +26,8 @@ $InventoryPs1 = Join-Path $RepoRoot 'ResourceInventory.ps1'
 $WorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ScenarioMatrix_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
 if (-not (Test-Path $InventoryPs1)) { throw "Cannot find ResourceInventory.ps1 at $InventoryPs1" }
+# Get-InventoryExitCodeMeaning owns the wording of the inventory script's exit codes.
+. (Join-Path $RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1')
 if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 }))
 {
     throw "Pester v5+ is required. Install-Module Pester -Force -Scope CurrentUser"
@@ -102,7 +105,8 @@ $Catalog = @{
     # MetricsVolumeControls is attached here too: 'default' passes no metric flags,
     # so it is the scenario that proves the Storage Account UsedCapacity metric is
     # genuinely opt-in (see TEST_EXPECT_NO_STORAGE_METRICS below).
-    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests + $SchemaContractTests + @('MetricsVolumeControls.Tests.ps1')) }
+    # The live half of TenantReconciliation self-skips without a live session that can see the run's subscription, so 'default' must show at least one of its tests running (MustPass), or the live gate proved nothing.
+    'default'         = @{ Args = @{}; Tests = ($StructuralTests + $ReconciliationTests + $SchemaContractTests + @('MetricsVolumeControls.Tests.ps1')); MustPass = @(@{ File = 'TenantReconciliation.Tests.ps1'; Describe = 'Live tenant reconciliation' }) }
     'obfuscate'       = @{ Args = @{ Obfuscate = $true }; Tests = ($StructuralTests + $ObfuscationTests + $SchemaContractTests) }
     'skipboth'        = @{ Args = @{ SkipMetrics = $true; SkipConsumption = $true }; Tests = $StructuralTests }
     'skipmetrics'     = @{ Args = @{ SkipMetrics = $true }; Tests = $StructuralTests }
@@ -124,6 +128,97 @@ $Catalog = @{
     'recovery'        = @{ Recovery = $true; Tests = ($StructuralTests + $ObfuscationTests) }
 }
 
+# Health of the run that just finished, read from its exit code and from the phase-health lists the inventory script fills when a phase could not run (no usable token or context) or failed (collectors, metrics, consumption, Marketplace, Foundry). A -Skip* switch leaves them empty. A zip can look fine while a phase was silently left out, so a scenario fails on any of these. The lists are process-wide, so every run starts from empty ones. Only counts are printed: the matrix output is shared, so no names, ids or messages.
+$HealthLists = @('CollectorFailures', 'MetricsFailedSubs', 'ConsumptionFailedSubs', 'MarketplaceFailedSubs', 'FoundryTokenFailedSubs', 'FoundryCoverageFailedSubs')
+# Test files that may skip every test because the subscription has nothing of the kind to check. A file listed here passes the "checked nothing" rule only when at least one of its tests skipped for the named data reason (a regex on the skip reason); a skip for any other reason, for example the matrix not setting an expectation variable, still fails the scenario. Add a file only after reading its tests.
+$DataDependentFiles = @{
+    'Frontdoor.Tests.ps1'             = @{ Why = 'every test needs a Front Door resource in the subscription'; Reason = 'no Front Door' }
+    'MetricsVolumeControls.Tests.ps1' = @{ Why = 'the one check a scenario turns on needs a storage account, or a VM, SQL or open-source database metric series, in the subscription'; Reason = 'owns no storage account|produced no VM/SQL/OSS-DB sampled-series' }
+}
+
+function Reset-RunHealth
+{
+    # A script that ends without an exit statement leaves the previous value in $LASTEXITCODE, so it is cleared before every run.
+    $global:LASTEXITCODE = 0
+    foreach ($Name in $script:HealthLists) { Set-Variable -Name $Name -Scope Global -Value @() }
+}
+
+function Get-RunHealthProblems
+{
+    param([int]$ExitCode, [bool]$Threw = $false)
+    $Problems = @()
+    if ($Threw) { $Problems += 'the run threw an error' }
+    if ($ExitCode -ne 0) { $Problems += ('exit code {0} ({1})' -f $ExitCode, (Get-InventoryExitCodeMeaning -Code $ExitCode)) }
+    foreach ($Name in $script:HealthLists)
+    {
+        # Get-Variable hands the whole array over as one object, so the value is read into a variable first and enumerated from there.
+        $Entries = Get-Variable -Name $Name -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        $Count = @($Entries | Where-Object { $null -ne $_ }).Count
+        if ($Count -gt 0) { $Problems += ('{0}: {1} entr{2}' -f $Name, $Count, $(if ($Count -eq 1) { 'y' } else { 'ies' })) }
+    }
+    return $Problems
+}
+
+function Get-SkipReason
+{
+    # Set-ItResult -Skipped keeps its reason in the test's error record. A test skipped by a -Skip condition has none.
+    param($Test)
+    if (@($Test.ErrorRecord).Count -gt 0) { return (([string]$Test.ErrorRecord[0].Exception.Message) -replace '^is skipped, because\s*', '') }
+    return 'a -Skip condition (on the test or its block) was true'
+}
+
+function Write-ScenarioTestReport
+{
+    # Prints, per test file, which tests skipped and why, and returns the problems that make the scenario fail even though no test failed: a file whose tests all skipped or that ran no tests, and a MustPass group (a Describe whose tests have to run, because it is the only check of something) with no test that ran. A skip is still normal when a fixture has nothing to check, so one skip alone is not a problem.
+    param($Result, [string[]]$Files, $MustPass = @())
+    $Problems = @()
+    $ByFile = @{}
+    foreach ($Test in @($Result.Tests))
+    {
+        $Leaf = if ($Test.ScriptBlock.File) { Split-Path -Path $Test.ScriptBlock.File -Leaf } else { '(no file)' }
+        if (-not $ByFile.ContainsKey($Leaf)) { $ByFile[$Leaf] = @() }
+        $ByFile[$Leaf] += $Test
+    }
+    foreach ($File in $Files)
+    {
+        $Tests = if ($ByFile.ContainsKey($File)) { @($ByFile[$File]) } else { @() }
+        if ($Tests.Count -eq 0)
+        {
+            $Problems += ('no tests ran from {0}' -f $File)
+            continue
+        }
+        $Passed = @($Tests | Where-Object { $_.Result -eq 'Passed' }).Count
+        $Failed = @($Tests | Where-Object { $_.Result -eq 'Failed' }).Count
+        $Skipped = @($Tests | Where-Object { $_.Result -eq 'Skipped' })
+        if ($Skipped.Count -gt 0)
+        {
+            Write-Host ('  skipped in {0}: {1} of {2}' -f $File, $Skipped.Count, $Tests.Count) -ForegroundColor DarkYellow
+            foreach ($Group in @($Skipped | Group-Object -Property { Get-SkipReason $_ }))
+            {
+                $Names = @($Group.Group | ForEach-Object { $_.ExpandedName })
+                $More = if ($Names.Count -gt 8) { '; and {0} more' -f ($Names.Count - 8) } else { '' }
+                Write-Host ('    because {0} ({1}): {2}{3}' -f $Group.Name, $Names.Count, (($Names | Select-Object -First 8) -join '; '), $More) -ForegroundColor DarkYellow
+            }
+        }
+        if ($Passed -eq 0 -and $Failed -eq 0)
+        {
+            $Allowance = $script:DataDependentFiles[$File]
+            $DataSkips = if ($Allowance) { @($Skipped | Where-Object { (Get-SkipReason $_) -match $Allowance.Reason }).Count } else { 0 }
+            if ($DataSkips -gt 0) { Write-Host ('    (allowed: {0})' -f $Allowance.Why) -ForegroundColor DarkYellow }
+            else { $Problems += ('every test in {0} was skipped or did not run, so it checked nothing' -f $File) }
+        }
+    }
+    foreach ($Rule in @($MustPass | Where-Object { $_ }))
+    {
+        $Group = if ($ByFile.ContainsKey($Rule.File)) { @($ByFile[$Rule.File] | Where-Object { $_.Path[0] -eq $Rule.Describe }) } else { @() }
+        if (@($Group | Where-Object { $_.Result -in 'Passed', 'Failed' }).Count -eq 0)
+        {
+            $Problems += ("none of the {0} test(s) under '{1}' in {2} ran, so that check did not run" -f $Group.Count, $Rule.Describe, $Rule.File)
+        }
+    }
+    return $Problems
+}
+
 # Recovery-scenario generator: produces the LIVE gap + seeded-recovery bundles and splices them with Merge-RecoveryData, returning the merged (obfuscated) bundle for the loop. Returns @{ Skip=$true; Reason } when nothing to recover, else @{ Skip=$false; Zip; Dict; Recovered }. Both generations are collector-scoped and skip metrics/consumption (the workflow is about the INVENTORY splice). The recovery run is seeded with the gap bundle's dictionary (-ObfuscationDictionary) so its tokens match exactly - the guarantee Merge-RecoveryData relies on. Fails loud if the splice does not land the key.
 function New-RecoveryMergedBundle
 {
@@ -143,9 +238,12 @@ function New-RecoveryMergedBundle
     $MergedDir = Join-Path $OutDir 'merged'
 
     # 1. Gap bundle: scoped, obfuscated. Metrics/consumption skipped for speed.
+    Reset-RunHealth
     & $InventoryPs1 -TenantID $TenantID -SubscriptionID $SubscriptionID -OutputDirectory $GapDir `
         -Service $GapServices -Obfuscate -SkipMetrics -SkipConsumption `
         -MetricsLookbackDays $MetricsLookbackDays -ConcurrencyLimit $ConcurrencyLimit *>&1 | Out-Null
+    $GapProblems = @(Get-RunHealthProblems -ExitCode $LASTEXITCODE)
+    if ($GapProblems.Count -gt 0) { throw ('recovery scenario: the gap generation had problems: {0}.' -f ($GapProblems -join '; ')) }
 
     $GapInvFile = Get-ChildItem $GapDir -Filter 'Inventory_*.json' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -172,9 +270,12 @@ function New-RecoveryMergedBundle
 
     # 3. Recovery bundle: re-collect ONLY the target service, seeded with the gap
     #    dictionary so obfuscation tokens match exactly (the splice guarantee).
+    Reset-RunHealth
     & $InventoryPs1 -TenantID $TenantID -SubscriptionID $SubscriptionID -OutputDirectory $RecoveryDir `
         -Service $Recovered -Obfuscate -ObfuscationDictionary $GapDictFile.FullName -SkipMetrics -SkipConsumption `
         -MetricsLookbackDays $MetricsLookbackDays -ConcurrencyLimit $ConcurrencyLimit *>&1 | Out-Null
+    $RecoveryProblems = @(Get-RunHealthProblems -ExitCode $LASTEXITCODE)
+    if ($RecoveryProblems.Count -gt 0) { throw ('recovery scenario: the recovery generation had problems: {0}.' -f ($RecoveryProblems -join '; ')) }
 
     # 4. Splice recovery -> gap and re-package.
     . (Join-Path $RepoRoot 'Functions/RecoveryMerge.Functions.ps1')
@@ -230,21 +331,21 @@ try
             catch
             {
                 Write-Host ("  recovery generation error: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = 1; Skipped = 0 }
+                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = 1; Skipped = 0; Problems = 0 }
                 continue
             }
 
             if ($Rec.Skip)
             {
                 Write-Host ("  SKIPPED: {0}." -f $Rec.Reason) -ForegroundColor Yellow
-                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = 0; Skipped = 1 }
+                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = 0; Skipped = 1; Problems = 0 }
                 continue
             }
             if (-not $Rec.Zip)
             {
                 # No usable zip: mirror the shared path's "no zip produced" sentinel (-1).
                 Write-Host "  FAILED: recovery merge produced no zip." -ForegroundColor Red
-                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = -1; Skipped = 0 }
+                $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = -1; Skipped = 0; Problems = 0 }
                 continue
             }
             Write-Host ("  merged bundle produced (recovered '{0}'): {1:N0} bytes" -f $Rec.Recovered, $Rec.Zip.Length) -ForegroundColor Green
@@ -294,8 +395,10 @@ try
             $Color = if ($Failed -eq 0) { 'Green' } else { 'Red' }
             Write-Host ("  Pester: Passed={0} Failed={1} Skipped={2}" -f $Passed, $Failed, $Skipped) -ForegroundColor $Color
             foreach ($t in $RealFailures) { Write-Host ("    FAIL: {0}" -f $t.ExpandedName) -ForegroundColor Red }
+            $Problems = @(Write-ScenarioTestReport -Result $Res -Files $Scenario.Tests -MustPass $Scenario.MustPass)
+            foreach ($Problem in $Problems) { Write-Host ("    PROBLEM: {0}" -f $Problem) -ForegroundColor Red }
 
-            $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $true; Passed = $Passed; Failed = $Failed; Skipped = $Skipped }
+            $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $true; Passed = $Passed; Failed = $Failed; Skipped = $Skipped; Problems = $Problems.Count }
             continue
         }
 
@@ -308,8 +411,16 @@ try
         }
         foreach ($k in $Scenario.Args.Keys) { $Splat[$k] = $Scenario.Args[$k] }
 
+        Reset-RunHealth
+        $GenerationThrew = $false
         try { & $InventoryPs1 @Splat *>&1 | Out-Null }
-        catch { Write-Host ("  generation error: {0}" -f $_.Exception.Message) -ForegroundColor Red }
+        catch
+        {
+            $GenerationThrew = $true
+            Write-Host ("  generation error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        }
+        # Read before Pester runs: the tests may touch the same globals.
+        $RunProblems = @(Get-RunHealthProblems -ExitCode $LASTEXITCODE -Threw $GenerationThrew)
 
         $Zip = Get-ChildItem $OutDir -Filter 'ResourcesReport_*.zip' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -317,7 +428,8 @@ try
         if (-not $Zip)
         {
             Write-Host "  FAILED: no output zip produced." -ForegroundColor Red
-            $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = -1; Skipped = 0 }
+            foreach ($Problem in $RunProblems) { Write-Host ("    PROBLEM: {0}" -f $Problem) -ForegroundColor Red }
+            $Summary += [pscustomobject]@{ Scenario = $name; ZipProduced = $false; Passed = 0; Failed = -1; Skipped = 0; Problems = @($RunProblems).Count }
             continue
         }
         Write-Host ("  zip produced: {0:N0} bytes" -f $Zip.Length) -ForegroundColor Green
@@ -420,6 +532,8 @@ try
         $Color = if ($Failed -eq 0) { 'Green' } else { 'Red' }
         Write-Host ("  Pester: Passed={0} Failed={1} Skipped={2}" -f $Passed, $Failed, $Skipped) -ForegroundColor $Color
         foreach ($t in $RealFailures) { Write-Host ("    FAIL: {0}" -f $t.ExpandedName) -ForegroundColor Red }
+        $Problems = @($RunProblems) + @(Write-ScenarioTestReport -Result $Res -Files $Scenario.Tests -MustPass $Scenario.MustPass)
+        foreach ($Problem in $Problems) { Write-Host ("    PROBLEM: {0}" -f $Problem) -ForegroundColor Red }
 
         $Summary += [pscustomobject]@{
             Scenario    = $name
@@ -427,6 +541,7 @@ try
             Passed      = $Passed
             Failed      = $Failed
             Skipped     = $Skipped
+            Problems    = $Problems.Count
         }
     }
 }
@@ -473,7 +588,7 @@ if ($Summary.Count -eq 0)
     exit 1
 }
 
-$TotalFailed = ($Summary | Where-Object { $_.Failed -ne 0 }).Count
+$TotalFailed = ($Summary | Where-Object { $_.Failed -ne 0 -or [int]$_.Problems -ne 0 }).Count
 if ($TotalFailed -eq 0)
 {
     Write-Host ("All {0} scenario(s) passed their applicable tests." -f $Summary.Count) -ForegroundColor Green

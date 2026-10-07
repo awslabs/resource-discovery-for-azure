@@ -2023,11 +2023,14 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $script:PoolExitText = & $GetRange $Top { param($S) $S -is [System.Management.Automation.Language.AssignmentStatementAst] -and $S.Left.Extent.Text -eq '$AuthSkipped' } { param($S) $S -is [System.Management.Automation.Language.AssignmentStatementAst] -and $S.Left.Extent.Text -eq '$WrapperExitCode' -and $S.Right.Extent.Text -match 'Get-WrapperExitCode' }
         $script:PoolAggregate = $PoolWrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$StreamSummary.MetricsFailedSubs -and $StreamSummary.MetricsFailedSubs.Count -gt 0' }, $true)
 
+        # $ParallelStreams is the stream setting after the wrapper's own fallbacks, and $StreamCount is how many
+        # streams really ran: the parallel path sets it, to 0 when it ran its one subscription in this process,
+        # and the sequential path never sets it. The default stands for a run that used three streams.
         $script:RunPoolEnd = {
-            param($Entries, $Failed = @())
+            param($Entries, $Failed = @(), [int]$ParallelStreams = 3, $StreamCount = 3)
             $Printed = [System.Collections.Generic.List[string]]::new()
             $Runner = [scriptblock]::Create(((@(
-                            'param($Entries, $Failed, $Printed)'
+                            'param($Entries, $Failed, $Printed, $ParallelStreams, $StreamCount)'
                             'function Write-Host { param($Object, $ForegroundColor) $Printed.Add([string]$Object) }'
                             '$Saved = @($Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:CollectorFailures)'
                             'try'
@@ -2036,7 +2039,6 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
                             '$Global:ConsumptionFailedSubs = @()'
                             '$Global:CollectorFailures = @()'
                             '$FailedSubscriptions = @($Failed)'
-                            '$ParallelStreams = 3'
                             '$ConcurrencyLimit = 5'
                             $script:PoolConsoleText
                             $script:PoolBannerText
@@ -2045,7 +2047,7 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
                             '}'
                             'finally { $Global:MetricsFailedSubs = $Saved[0]; $Global:ConsumptionFailedSubs = $Saved[1]; $Global:CollectorFailures = $Saved[2] }'
                         ) -join [Environment]::NewLine)))
-            & $Runner $Entries $Failed $Printed
+            & $Runner $Entries $Failed $Printed $ParallelStreams $StreamCount
         }
         $script:AuthEntry = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = 'aaaa-1'; Message = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'; Cause = 'auth' }
         $script:PoolEntry = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = 'bbbb-2'; Message = 'Metrics: the metric worker pool could not be opened (Insufficient resources); 4 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
@@ -2068,6 +2070,7 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $R.Printed | Should -Match '-ParallelStreams \(this run: 3\)'
         $R.Printed | Should -Match '-ConcurrencyLimit \(this run: 5\)'
         $R.Printed | Should -Match 'The rest of the inventory completed and the report was still produced'
+        $R.Printed | Should -Not -Match '(?i)auth|-appid|-secret' -Because 'no authentication advice of any wording belongs in the output for a host short of memory'
     }
 
     It 'keeps an entry with no Cause, written before the field existed, an auth skip' {
@@ -2129,5 +2132,40 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $R = & $script:RunPoolEnd $Arrived
         $R.Printed | Should -Match 'Per-call metrics are missing for 1 subscription\(s\): Contoso-Pool \(bbbb-2\)'
         $R.Printed | Should -Match 'Metrics Auth Failures:\s+1 subscription\(s\)' -Because 'the untagged entry is still an auth skip after the round trip'
+    }
+
+    It 'gives each subscription its own count and keeps the count out of the shared reason' {
+        # Each pool message ends with that subscription's own count. Quoted under a list of several
+        # subscriptions, the first one's count read as everyone's.
+        $script:PoolConsoleText | Should -Not -BeNullOrEmpty
+        $Second = [pscustomobject]@{ Name = 'Fabrikam-Pool'; Id = 'eeee-5'; Message = 'Metrics: the metric worker pool could not be opened (Insufficient resources); 7 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $R = & $script:RunPoolEnd @($script:PoolEntry, $Second)
+        $Lines = @($R.Printed -split "`n")
+        $Lines | Should -Contain '  - Contoso-Pool (bbbb-2): 4 per-call metric definition(s) not collected'
+        $Lines | Should -Contain '  - Fabrikam-Pool (eeee-5): 7 per-call metric definition(s) not collected'
+        @($Lines | Where-Object { $_ -like '  Reason:*' }) | Should -Be @('  Reason: Metrics: the metric worker pool could not be opened (Insufficient resources)') -Because 'the reason is shared, the counts are not'
+    }
+
+    It 'names -ParallelStreams only when the run really used more than one stream' {
+        $script:PoolConsoleText | Should -Not -BeNullOrEmpty
+        $Sequential = & $script:RunPoolEnd @($script:PoolEntry) @() 1 $null
+        $Sequential.Printed | Should -Not -Match '-ParallelStreams' -Because 'a sequential run cannot use fewer streams'
+        $Sequential.Printed | Should -Match '-ConcurrencyLimit \(this run: 5\)'
+        $InProcess = & $script:RunPoolEnd @($script:PoolEntry) @() 4 0
+        $InProcess.Printed | Should -Not -Match '-ParallelStreams' -Because 'with one subscription to process the parallel path runs it in this process, in one stream'
+        $Clamped = & $script:RunPoolEnd @($script:PoolEntry) @() 4 2
+        $Clamped.Printed | Should -Match '-ParallelStreams \(this run: 2\)' -Because 'the advice quotes the streams that ran, not the number asked for'
+        $Clamped.Printed | Should -Not -Match '-ParallelStreams \(this run: 4\)'
+    }
+
+    It 'points to a re-run that collects the missing metrics, not to a -Resume run that keeps the gap' {
+        # A subscription whose pool could not open still finishes its inventory, so its stream marks it
+        # completed and a -Resume run skips it. The tool cannot re-run the metrics phase alone either.
+        $script:PoolBannerText | Should -Not -BeNullOrEmpty
+        $R = & $script:RunPoolEnd @($script:PoolEntry)
+        $Lines = @($R.Printed -split "`n")
+        @($Lines | Where-Object { $_ -like '*then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each of these subscriptions.' }).Count | Should -Be 2 -Because 'the summary block and the banner give the same remedy'
+        @($Lines | Where-Object { $_ -like '*A -Resume run skips them because their inventory completed, so it would not collect the missing metrics.' }).Count | Should -Be 2
+        $R.Printed | Should -Not -Match 'metrics phase' -Because 'there is no way to re-run only that phase'
     }
 }

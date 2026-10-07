@@ -962,7 +962,9 @@ if ($Task -eq 'Processing')
                 $MetricCallPool = $null
                 $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected.' -f $PoolOpenError, $MetricCount)
                 Write-MetricsDiag ('ERROR: ' + $PoolSkipMsg + ' The rest of the inventory continues.')
-                Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. Re-run the metrics phase for the subscriptions listed as metrics-incomplete once the host can start worker runspaces again.') -Severity 'Error'
+                # The subscription still finishes its inventory, so a wrapper stream marks it completed and a
+                # -Resume run skips it with the metrics still missing; nothing re-runs this phase on its own.
+                Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. To collect the missing metrics, free memory on this host or use a lower -ConcurrencyLimit, then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each subscription listed as metrics incomplete; a -Resume run skips them because their inventory completed.') -Severity 'Error'
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                 # One entry per subscription that had definitions on the per-call path, each carrying its
                 # OWN count. A standalone run's phase can cover several subscriptions, so an entry that

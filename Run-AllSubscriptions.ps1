@@ -2941,6 +2941,14 @@ elseif ($MarketplaceRequested -and $MarketplaceRecords -eq 0 -and @($SubResource
 $MetricsFailedAll = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 $MetricsFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -ne 'pool' })
 $MetricsPoolFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -eq 'pool' })
+# The remedy for metrics left incomplete, shared by the summary block below and the FAILED (metrics incomplete)
+# banner further down, so both say the same thing. -ParallelStreams is named only when more than one stream
+# really ran: $StreamCount is set by the parallel path (to 0 when it ran its one subscription in this
+# process) and never by the sequential one, and a run that used one stream cannot use fewer. The re-run has
+# to be a fresh one, because a -Resume run skips these subscriptions: their inventory completed.
+$PoolStreamsUsed = if ($ParallelStreams -gt 1 -and $StreamCount -ge 2) { [int]$StreamCount } else { 1 }
+$PoolRerunAdvice = 'then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each of these subscriptions.'
+$PoolResumeNote = 'A -Resume run skips them because their inventory completed, so it would not collect the missing metrics.'
 if ($MetricsFailures.Count -gt 0)
 {
     Write-Host ""
@@ -2962,16 +2970,36 @@ if ($MetricsPoolFailures.Count -gt 0)
 {
     Write-Host ""
     Write-Host ("Metrics Incomplete:      {0} subscription(s) - per-call metrics NOT collected" -f $MetricsPoolFailures.Count) -ForegroundColor Yellow
+    # Each message ends with that subscription's own count ('...; N per-call metric definition(s) of this
+    # subscription were not collected.'), so the count goes on the subscription's own line and the shared
+    # reason is quoted without it: under a list of several subscriptions, one count read as everyone's.
+    $PoolCountPattern = ';\s*(\d+ per-call metric definition\(s\))[^;]*$'
     foreach ($PoolSub in ($MetricsPoolFailures | Sort-Object Name, Id -Unique))
     {
-        Write-Host ("  - {0} ({1})" -f $PoolSub.Name, $PoolSub.Id) -ForegroundColor Yellow
+        $PoolSubCount = [regex]::Match([string]$PoolSub.Message, $PoolCountPattern)
+        if ($PoolSubCount.Success)
+        {
+            Write-Host ("  - {0} ({1}): {2} not collected" -f $PoolSub.Name, $PoolSub.Id, $PoolSubCount.Groups[1].Value) -ForegroundColor Yellow
+        }
+        else
+        {
+            Write-Host ("  - {0} ({1})" -f $PoolSub.Name, $PoolSub.Id) -ForegroundColor Yellow
+        }
     }
     $FirstPoolMsg = @($MetricsPoolFailures | Where-Object { -not [string]::IsNullOrEmpty($_.Message) } | Select-Object -First 1).Message
     if (-not [string]::IsNullOrEmpty($FirstPoolMsg))
     {
-        Write-Host ("  Reason: {0}" -f $FirstPoolMsg) -ForegroundColor Yellow
+        Write-Host ("  Reason: {0}" -f [regex]::Replace([string]$FirstPoolMsg, $PoolCountPattern, '')) -ForegroundColor Yellow
     }
-    Write-Host ("  Free memory on this host, or re-run with fewer -ParallelStreams (this run: {0}) or a lower -ConcurrencyLimit (metric calls per stream, this run: {1})." -f $ParallelStreams, $ConcurrencyLimit) -ForegroundColor Yellow
+    if ($PoolStreamsUsed -gt 1)
+    {
+        Write-Host ("  To collect them: free memory on this host, or use fewer -ParallelStreams (this run: {0}) or a lower -ConcurrencyLimit (metric calls per stream, this run: {1}), {2}" -f $PoolStreamsUsed, $ConcurrencyLimit, $PoolRerunAdvice) -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host ("  To collect them: free memory on this host, or use a lower -ConcurrencyLimit (metric calls at a time, this run: {0}), {1}" -f $ConcurrencyLimit, $PoolRerunAdvice) -ForegroundColor Yellow
+    }
+    Write-Host ("  {0}" -f $PoolResumeNote) -ForegroundColor Yellow
     Write-Host "  Note: the per-call metrics of these subscriptions are missing from the metrics sheet; any fetched through -UseMetricsBatch are kept." -ForegroundColor Yellow
     Write-Host ""
 }
@@ -3318,7 +3346,16 @@ if ($MetricsPoolIncomplete.Count -gt 0)
     Write-Host "============== FAILED (metrics incomplete) ==============" -ForegroundColor Red
     Write-Host ("Per-call metrics are missing for {0} subscription(s): {1}" -f $PoolIncompleteNames.Count, ($PoolIncompleteNames -join ', ')) -ForegroundColor Red
     Write-Host "Reason: the metric worker pool could not be opened, usually because the host was short of memory." -ForegroundColor Red
-    Write-Host ("Fix: free memory on this host, or re-run with fewer -ParallelStreams (this run: {0}) or a lower -ConcurrencyLimit (this run: {1})." -f $ParallelStreams, $ConcurrencyLimit) -ForegroundColor Red
+    # $PoolStreamsUsed, $PoolRerunAdvice and $PoolResumeNote are set with the summary block above.
+    if ($PoolStreamsUsed -gt 1)
+    {
+        Write-Host ("Fix: free memory on this host, or use fewer -ParallelStreams (this run: {0}) or a lower -ConcurrencyLimit (this run: {1}), {2}" -f $PoolStreamsUsed, $ConcurrencyLimit, $PoolRerunAdvice) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host ("Fix: free memory on this host, or use a lower -ConcurrencyLimit (this run: {0}), {1}" -f $ConcurrencyLimit, $PoolRerunAdvice) -ForegroundColor Red
+    }
+    Write-Host $PoolResumeNote -ForegroundColor Red
     if (@($FailedSubscriptions).Count -eq 0)
     {
         Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow

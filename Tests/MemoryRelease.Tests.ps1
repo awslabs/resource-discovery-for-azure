@@ -957,6 +957,20 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Errors[0].Message | Should -BeLike '*7 per-call metric definition(s) were not collected*'
         }
 
+        It 'points the operator at a re-run that collects the missing metrics, not at one that keeps the gap' {
+            # A subscription whose pool could not open still finishes its inventory, so a wrapper stream marks
+            # it completed and a -Resume run skips it with its metrics still missing. The tool has no way to
+            # re-run the metrics phase on its own, so the advice names the two runs that do collect them.
+            $Pool = & $script:NewUnopenablePool
+            $Result = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup
+            $ErrorLine = @($Result.Log | Where-Object { $_.Severity -eq 'Error' })[0].Message
+            $ErrorLine | Should -BeLike '*free memory on this host or use a lower -ConcurrencyLimit*'
+            $ErrorLine | Should -BeLike '*re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each subscription listed as metrics incomplete*'
+            $ErrorLine | Should -BeLike '*a -Resume run skips them because their inventory completed.'
+            $ErrorLine | Should -Not -BeLike '*metrics phase*' -Because 'there is no way to re-run only that phase'
+            $ErrorLine | Should -Not -Match '(?i)auth' -Because 'the remedy is memory on the host, not a token'
+        }
+
         It 'names every affected subscription in the wrapper health list, once per subscription' {
             $Pool = & $script:NewUnopenablePool
             $null = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup

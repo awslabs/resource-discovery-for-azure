@@ -2574,7 +2574,7 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $Owed
         catch
         {
             $StateCleared = $false
-            Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+            Write-Host ("WARNING: Could not remove resume state file {0}: {1}" -f $ResumeStateFile, $_) -ForegroundColor Yellow
         }
     }
     if ($StateBlobArgs.Count -gt 0)

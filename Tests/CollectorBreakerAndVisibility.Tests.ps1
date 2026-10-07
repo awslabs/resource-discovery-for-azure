@@ -1912,3 +1912,85 @@ $Logged -join "`n"
         @([regex]::Matches($script:InvSrc, 'Get-RdaCollectionAbortedMarkerPath')).Count | Should -Be 1 -Because 'nowhere else writes it'
     }
 }
+
+Describe 'The resume-state warnings print the error text whatever characters it holds' {
+    # Three warnings put the exception text into the format string and then applied -f, so a brace in that
+    # text made the warning itself fail. A JSON parse error names the token it stopped at, and a path can
+    # hold braces. The formatting error was printed in place of the warning, and inside a caller's try
+    # block, as in these tests and the end-of-run reconciliation, it threw out of the function. The text is
+    # now an argument to -f.
+    BeforeAll {
+        $script:WrapSrc = Get-Content -LiteralPath (Join-Path $script:Repo 'Run-AllSubscriptions.ps1') -Raw
+        $WrapErrors = $null
+        $script:WrapAst = [System.Management.Automation.Language.Parser]::ParseInput($script:WrapSrc, [ref]$null, [ref]$WrapErrors)
+        if ($null -ne $WrapErrors -and $WrapErrors.Count -gt 0) { throw ('Run-AllSubscriptions.ps1 does not parse: {0}' -f $WrapErrors[0].Message) }
+        $script:FunctionsPath = Join-Path $script:Repo 'Functions/RunAllSubscriptions.Functions.ps1'
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+        $script:StateRoot = Join-Path $TmpBase ('ResumeWarnBraces_' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
+        # The two functions under test, run as written with Write-Host captured.
+        $script:FunctionRun = [scriptblock]::Create(@'
+param($FunctionsPath, [string]$Call, [string]$Path)
+. $FunctionsPath
+$Shown = [System.Collections.Generic.List[string]]::new()
+function Write-Host { param($Object, $ForegroundColor, $NoNewline) $Shown.Add([string]$Object) }
+$Result = switch ($Call)
+{
+    'read' { Get-ResumeStateObject -Path $Path -Tenant 'tenant' }
+    'save' { Save-CompletedSubscriptionIds -Path $Path -Tenant 'tenant' -Ids @('a') }
+}
+[pscustomobject]@{ Result = $Result; Shown = @($Shown) }
+'@)
+    }
+
+    AfterAll {
+        if ($script:StateRoot -and (Test-Path -LiteralPath $script:StateRoot)) { Remove-Item -LiteralPath $script:StateRoot -Recurse -Force }
+    }
+
+    It 'a state file that cannot be parsed warns with the parser text and starts fresh' {
+        $Path = Join-Path $script:StateRoot 'corrupt-state.json'
+        Set-Content -LiteralPath $Path -Value '{ "TenantID": }' -Encoding utf8
+        # The parser names the token it stopped at, and here that is a brace. Without one this test proves nothing.
+        $ParserText = try { $null = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json; '' } catch { [string]$_ }
+        $ParserText | Should -Match '[{}]' -Because 'the case that used to break the warning needs a brace in the error text'
+        $Out = & $script:FunctionRun $script:FunctionsPath 'read' $Path
+        $Out.Result | Should -BeNullOrEmpty -Because 'an unreadable state file means start fresh'
+        @($Out.Shown).Count | Should -Be 1
+        $Out.Shown[0] | Should -BeExactly ('Could not read resume state file ({0}); starting fresh. {1}' -f $Path, $ParserText)
+    }
+
+    It 'a save that cannot write warns with the error text and returns' {
+        $Path = Join-Path $script:StateRoot 'no{such}dir/state.json'
+        $Out = & $script:FunctionRun $script:FunctionsPath 'save' $Path
+        @($Out.Shown).Count | Should -Be 1
+        $Out.Shown[0] | Should -Match ('^WARNING: Failed to persist resume state to {0}: ' -f [regex]::Escape($Path))
+        # The missing path appears again inside the error text, braces included: the text reached the warning intact.
+        [regex]::Matches($Out.Shown[0], [regex]::Escape('no{such}dir')).Count | Should -BeGreaterThan 1
+    }
+
+    It 'the wrapper reports the state-file removal of a clean run correctly when the removal fails = <Fails>' -ForEach @(
+        @{ Fails = $true; Expected = 'WARNING: Could not remove resume state file state{1}.json: denied {x}' }
+        @{ Fails = $false; Expected = 'Resume state cleared (clean run).' }
+    ) {
+        $Block = $script:WrapAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -match '^\$FailedSubscriptions\.Count -eq 0 -and \$FailedAttempts\.Count -eq 0 -and \$OwedOutsideRetry\.Count -eq 0 -and \(\(Test-Path -LiteralPath \$ResumeStateFile' }, $true)
+        $Block | Should -Not -BeNullOrEmpty -Because 'the clean-run removal block was not found in Run-AllSubscriptions.ps1'
+        $Run = [scriptblock]::Create(@'
+param($BlockText, [bool]$Fails)
+$Shown = [System.Collections.Generic.List[string]]::new()
+function Write-Host { param($Object, $ForegroundColor) $Shown.Add([string]$Object) }
+function Test-Path { param($LiteralPath, $PathType) $true }
+function Remove-Item { param($LiteralPath, [switch]$Force) if ($Fails) { throw 'denied {x}' } }
+$FailedSubscriptions = @()
+$FailedAttempts = @()
+$OwedOutsideRetry = @()
+# No state blob: only the local file is removed.
+$StateBlobArgs = @{}
+$ResumeStateFile = 'state{1}.json'
+. ([scriptblock]::Create($BlockText))
+@($Shown)
+'@)
+        $Shown = @(& $Run $Block.Extent.Text $Fails)
+        $Shown.Count | Should -Be 1
+        $Shown[0] | Should -BeExactly $Expected
+    }
+}

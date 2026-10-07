@@ -349,11 +349,13 @@ if ($Task -eq 'Processing')
         # process context), so every call below passes that subscription's own profile.
         # The registration of every subscription that needs it is started first, and they are then polled against
         # ONE shared deadline with one sleep per round. N unregistered subscriptions therefore cost at most one
-        # 60 second wait between them, not one each.
-        param([Parameter(Mandatory = $true)][string[]]$SubscriptionId)
+        # 60 second wait between them, not one each. The parameter is not called $SubscriptionId: Write-Log
+        # tags every line with the $SubscriptionID it finds in its callers' scopes, and a list of ids under
+        # that name, found before the caller's own, garbled the tag of every line written here.
+        param([Parameter(Mandatory = $true)][string[]]$SubscriptionIds)
 
         $Pending = [System.Collections.Generic.List[object]]::new()
-        foreach ($Sub in @($SubscriptionId))
+        foreach ($Sub in @($SubscriptionIds))
         {
             try
             {
@@ -812,7 +814,7 @@ if ($Task -eq 'Processing')
             $BatchSubscriptionIds = @($BatchGroups.Values | ForEach-Object { $_ } | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
             if ($BatchSubscriptionIds.Count -gt 0)
             {
-                Initialize-RdaMetricsBatchPrereq -SubscriptionId $BatchSubscriptionIds
+                Initialize-RdaMetricsBatchPrereq -SubscriptionIds $BatchSubscriptionIds
             }
 
             foreach ($Service in $BatchGroups.Keys)

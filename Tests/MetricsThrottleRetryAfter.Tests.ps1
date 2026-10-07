@@ -704,19 +704,19 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
     }
 
     It 'looks the provider up through the profile of the subscription it was given' {
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds 'sub-a'
         @($script:PrereqCalls) | Should -Be @('Get:profile-for-sub-a')
     }
 
     It 'registers the provider on that subscription when it is not registered' {
         $script:PrereqState = 'NotRegistered'
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds 'sub-a'
         @($script:PrereqCalls | Where-Object { $_ -like 'Register:*' }) | Should -Be @('Register:profile-for-sub-a')
     }
 
     It 'polls and registers through the same profile, in the order look up, register, look up again' {
         $script:PrereqState = 'NotRegistered'
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'sub-a'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds 'sub-a'
         @($script:PrereqCalls) | Should -Be @('Get:profile-for-sub-a', 'Register:profile-for-sub-a', 'Get:profile-for-sub-a') -Because 'a polling call without the profile would read the provider state of the process''s current subscription'
     }
 
@@ -736,25 +736,25 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
     }
 
     It 'makes no provider call, and says which subscription it skipped, when the profile cannot be built' {
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'broken'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds 'broken'
         $script:PrereqCalls.Count | Should -Be 0
         @($script:PrereqDiag | Where-Object { $_ -like '*broken*' }).Count | Should -BeGreaterThan 0 -Because 'the operator has to be able to see which subscription was skipped'
     }
 
     It 'names the subscription in the remediation hint, because Register-AzResourceProvider has no subscription parameter' {
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId 'broken'
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds 'broken'
         @($script:PrereqDiag | Where-Object { $_ -like '*register the provider on subscription broken: select that subscription, then run Register-AzResourceProvider*' }).Count | Should -Be 1 -Because 'the cmdlet acts on the admin session''s current subscription, so a bare command repeats the bug this function fixes'
     }
 
     It 'leaves the other subscriptions alone when one of them has no profile' {
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'broken', 'sub-b')
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds @('sub-a', 'broken', 'sub-b')
         @($script:PrereqCalls) | Should -Be @('Get:profile-for-sub-a', 'Get:profile-for-sub-b')
         @($script:PrereqDiag | Where-Object { $_ -like '*could not ensure*broken*' }).Count | Should -Be 1
     }
 
     It 'starts the registration of every subscription that needs it before waiting for any of them' {
         $script:PrereqState = 'NotRegistered'
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'sub-b')
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds @('sub-a', 'sub-b')
         $Order = @($script:PrereqCalls)
         $Order[0..3] | Should -Be @('Get:profile-for-sub-a', 'Register:profile-for-sub-a', 'Get:profile-for-sub-b', 'Register:profile-for-sub-b') -Because 'a wait between the registrations is what made N unregistered subscriptions cost N waits'
         @($Order[4..($Order.Count - 1)] | Sort-Object) | Should -Be @('Get:profile-for-sub-a', 'Get:profile-for-sub-b') -Because 'both are polled in the same round'
@@ -762,7 +762,7 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
 
     It 'sleeps once for several unregistered subscriptions, not once each' {
         $script:PrereqState = 'NotRegistered'
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'sub-b', 'sub-c')
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds @('sub-a', 'sub-b', 'sub-c')
         Should -Invoke Start-Sleep -Times 1 -Exactly -Because 'one shared deadline and one sleep per round means three unregistered subscriptions cost one wait'
         @($script:PrereqDiag | Where-Object { $_ -like '*registration state on subscription*after wait: Registered' }).Count | Should -Be 3 -Because 'each subscription still reports its own result'
     }
@@ -770,7 +770,7 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
     It 'reports a subscription whose registration is refused without holding up the others' {
         $script:PrereqState = 'NotRegistered'
         $script:PrereqRegisterFails = @('profile-for-sub-b')
-        Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'sub-b')
+        Initialize-RdaMetricsBatchPrereq -SubscriptionIds @('sub-a', 'sub-b')
         @($script:PrereqDiag | Where-Object { $_ -like '*could not ensure*sub-b*the registration was refused*' }).Count | Should -Be 1
         @($script:PrereqDiag | Where-Object { $_ -like '*subscription sub-a after wait: Registered' }).Count | Should -Be 1 -Because 'one failing subscription never skips the others'
     }
@@ -787,7 +787,7 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         $script:SleepCount = 0
         Mock Start-Sleep { $script:SleepCount++; if ($script:SleepCount -gt 5) { throw 'the wait never ended' } }
         $Thrown = $null
-        try { Initialize-RdaMetricsBatchPrereq -SubscriptionId @('sub-a', 'sub-b') } catch { $Thrown = $_ }
+        try { Initialize-RdaMetricsBatchPrereq -SubscriptionIds @('sub-a', 'sub-b') } catch { $Thrown = $_ }
         $Thrown | Should -BeNullOrEmpty -Because 'the shared deadline ends the wait'
         Should -Invoke Start-Sleep -Times 1 -Exactly -Because 'the first round already reads a clock past the deadline'
         @($script:PrereqDiag | Where-Object { $_ -like '*registration state on subscription sub-b after wait: NotRegistered' }).Count | Should -Be 1 -Because 'the subscription that never registered is reported with the state it was left in'
@@ -799,7 +799,7 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
                 Where-Object { $_.Extent.StartOffset -lt $script:PrereqAst.Extent.StartOffset -or $_.Extent.StartOffset -gt $script:PrereqAst.Extent.EndOffset })
         $Calls.Count | Should -Be 1
         $Named = @($Calls[0].CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
-        $Named | Should -Contain 'SubscriptionId'
+        $Named | Should -Contain 'SubscriptionIds'
         @($Calls[0].CommandElements | ForEach-Object { $_.Extent.Text }) | Should -Contain '$BatchSubscriptionIds' -Because 'the whole de-duplicated list goes in, so the registrations start before any wait'
         $InLoop = $false
         for ($Node = $Calls[0].Parent; $null -ne $Node; $Node = $Node.Parent)
@@ -821,6 +821,44 @@ Describe 'Initialize-RdaMetricsBatchPrereq checks the Microsoft.Insights provide
         $Sleeps = @($script:PrereqAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Start-Sleep' }, $true))
         $Sleeps.Count | Should -Be 1
         $Deadlines[0].Extent.StartOffset | Should -BeLessThan $Sleeps[0].Extent.StartOffset
+    }
+}
+
+Describe 'The provider check tags its debug lines with the subscription being inventoried' {
+    # Write-Log tags every line with the first eight characters of the $SubscriptionID it finds in its
+    # callers' scopes. A parameter of the provider check spelt the same way, but holding a list of ids,
+    # was found first and garbled that tag. Run with the real Write-MetricsDiag and Write-Log, so the
+    # line is read back from a debug log as it is written.
+    BeforeAll {
+        $PrereqAst = $script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Initialize-RdaMetricsBatchPrereq' }, $true) | Select-Object -First 1
+        if (-not $PrereqAst) { throw 'Initialize-RdaMetricsBatchPrereq was not found in Extension/Metrics.ps1' }
+        . ([scriptblock]::Create($PrereqAst.Extent.Text))
+        $DiagAst = $script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Write-MetricsDiag' }, $true) | Select-Object -First 1
+        if (-not $DiagAst) { throw 'Write-MetricsDiag was not found in Extension/Metrics.ps1' }
+        . ([scriptblock]::Create($DiagAst.Extent.Text))
+        $CommonAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'), [ref]$null, [ref]$null)
+        $LogAst = $CommonAst.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Global:Write-Log' }, $true) | Select-Object -First 1
+        if (-not $LogAst) { throw 'Write-Log was not found in Functions/Common.Functions.ps1' }
+        . ([scriptblock]::Create($LogAst.Extent.Text))
+        function Get-RdaSubscriptionProfile { param([string]$SubscriptionId) 'profile' }
+        function Get-AzResourceProvider { param($ProviderNamespace, $DefaultProfile, $ErrorAction) [pscustomobject]@{ RegistrationState = 'Registered' } }
+    }
+
+    BeforeEach {
+        $script:MetricsSubProfileCache = @{}
+    }
+
+    It 'writes the first eight characters of the subscription, as every other debug line of the run does' {
+        $SubscriptionID = '11111111-1111-1111-1111-111111111111'
+        $DebugLog = Join-Path $TestDrive 'debug-provider-tag.log'
+        $SavedDebugLog = $Global:DebugLogFile
+        $Global:DebugLogFile = $DebugLog
+        # By position, so the same test runs against the code before the parameter was renamed.
+        try { Initialize-RdaMetricsBatchPrereq @($SubscriptionID) }
+        finally { $Global:DebugLogFile = $SavedDebugLog }
+        $Line = @(Get-Content -LiteralPath $DebugLog | Where-Object { $_ -like '*Microsoft.Insights resource provider already registered*' })
+        $Line.Count | Should -Be 1
+        $Line[0] | Should -Match '^\[[^\]]+\] \[11111111\] \[Metrics\] \[batch\] ' -Because 'the tag comes from the subscription the inner script is inventorying, not from a list of ids'
     }
 }
 

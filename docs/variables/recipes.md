@@ -225,8 +225,10 @@ re-scanning the subscriptions that already completed.
 - `-Resume` reads the state file
   (`InventoryReports/.resume-state-<TenantID>.json`) and skips subscriptions that
   already finished; it re-runs the one that was in progress plus any not yet
-  attempted. Without `-Resume`, the wrapper processes every subscription and
-  leaves existing state untouched.
+  attempted. Without `-Resume`, a user signed in at a console is asked whether
+  to resume the earlier run or start fresh (see the README section *Resuming an
+  interrupted run*); any other run processes every subscription and notes that
+  the state exists.
 - `-ResumeFailedOnly` is the narrower retry: it re-runs **only** subscriptions
   that failed in a prior run (e.g. transient throttling), skipping both completed
   and never-attempted ones. Use it after a run finishes with a handful of

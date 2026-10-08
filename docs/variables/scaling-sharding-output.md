@@ -359,11 +359,14 @@ whether it insists on seeing the whole tenant.
 same tenant/shard. After each subscription's per-subscription ZIP is written, its
 id is recorded in a resume-state JSON file
 (`InventoryReports/.resume-state-<TenantID>.json`, or
-`.resume-state-<TenantID>-shard-<i>of<n>.json` when sharding —
-`Run-AllSubscriptions.ps1` line ~339–343). `-Resume` reads that file, reports how
-many will be skipped (line ~836–848), and processes the rest. Without `-Resume`
-the file is left untouched and every subscription is processed; the wrapper still
-notes the file exists so you know the option is available (line ~850–855). On
+`.resume-state-<TenantID>-shard-<i>of<n>.json` when sharding). `-Resume` reads that file, reports how
+many will be skipped, and processes the rest. Without `-Resume`, a user signed in
+at a console is asked whether to resume the earlier run or start fresh. Start
+fresh writes a backup beside the state file, named after it with
+`.backup-<yyyyMMdd-HHmmss>` added (so a shard run's backup names the shard too),
+and then clears the state. Any other run without `-Resume` processes every
+subscription and notes that the file exists, so you know the option is
+available. On
 every start, with or without `-Resume`, it also folds any per-stream state files
 left by an interrupted *parallel* run into the resume-state file, and removes
 them once that file is confirmed to hold them, so a later `-Resume` skips what

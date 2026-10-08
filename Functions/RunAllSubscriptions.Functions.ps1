@@ -939,6 +939,185 @@ function Confirm-PartialAccessContinue
     return ($Answer -match '^(y|yes)$')
 }
 
+function Read-ResumeOrFreshChoice
+{
+    # Asks the person at the console whether to resume an earlier run that left resume state, or to
+    # start fresh. Returns 'Resume' or 'Fresh'. Returns $null WITHOUT asking when nobody can answer,
+    # so the caller behaves exactly as it did before this prompt existed: a sign-in that is not a user
+    # (the rule Confirm-PartialAccessContinue uses), or no person watching a real terminal. Unlike
+    # Confirm-PartialAccessContinue, redirected output also counts as nobody watching (the test
+    # Test-RdaFinalScreenClearable uses): this question comes up on an ordinary re-run, and one
+    # written into a log file would wait for an answer nobody can see. A prompt that cannot be read
+    # (pwsh -NonInteractive) also returns $null, after one line saying no answer was waited for,
+    # because the question is already on the screen by then.
+    # Enter, R or resume means resume; F or fresh means start fresh (any letter case, spaces
+    # ignored); anything else asks again. -UncarriedCount is how many done subscriptions have no
+    # report a resumed run could carry into its bundle. When it is above 0 the question says so and
+    # Enter means start fresh instead, because resuming would leave those reports out.
+    # -StartedAt is when the earlier run started: a [datetime] (as ConvertFrom-Json returns it) or a
+    # round-trip string. When it is missing or unreadable the start time is left out.
+    param(
+        [Parameter(Mandatory = $true)][int]$CompletedCount,
+        [int]$FailedCount = 0,
+        [int]$UncarriedCount = 0,
+        [object]$StartedAt = $null,
+        [string]$AccountType,
+        [bool]$IsInteractive = ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected)
+    )
+
+    if (-not $IsInteractive -or $AccountType -ne 'User')
+    {
+        return $null
+    }
+
+    $Invariant = [Globalization.CultureInfo]::InvariantCulture
+    $StartedText = ''
+    if ($StartedAt -is [datetime])
+    {
+        $StartedLocal = if ($StartedAt.Kind -eq [DateTimeKind]::Utc) { $StartedAt.ToLocalTime() } else { $StartedAt }
+        $StartedText = ' (started {0})' -f $StartedLocal.ToString('yyyy-MM-dd HH:mm', $Invariant)
+    }
+    else
+    {
+        $ParsedStart = [datetimeoffset]::MinValue
+        if ([datetimeoffset]::TryParse([string]$StartedAt, $Invariant, [Globalization.DateTimeStyles]::None, [ref]$ParsedStart))
+        {
+            $StartedText = ' (started {0})' -f $ParsedStart.LocalDateTime.ToString('yyyy-MM-dd HH:mm', $Invariant)
+        }
+    }
+
+    $FreshByDefault = ($UncarriedCount -gt 0)
+    $ResumeDefault = if ($FreshByDefault) { '' } else { ' (default)' }
+    $FreshDefault = if ($FreshByDefault) { ' (default)' } else { '' }
+    $PromptText = if ($FreshByDefault) { 'Choice [r/F]' } else { 'Choice [R/f]' }
+
+    Write-Host ""
+    Write-Host ("Found an earlier run for this tenant{0}:" -f $StartedText) -ForegroundColor Yellow
+    Write-Host ("  {0} subscription(s) done, {1} failed." -f $CompletedCount, $FailedCount)
+    if ($FreshByDefault)
+    {
+        Write-Host ("  {0} of the done subscription(s) have no report this run can carry, so resuming would leave them out of the bundle." -f $UncarriedCount) -ForegroundColor Yellow
+    }
+    Write-Host ("  [R] Resume - skip the {0} done subscription(s){1}" -f $CompletedCount, $ResumeDefault)
+    Write-Host ("  [F] Start fresh - collect all again; the earlier state is kept as a backup{0}" -f $FreshDefault)
+    while ($true)
+    {
+        try
+        {
+            $Answer = [string](Read-Host $PromptText -ErrorAction Stop)
+        }
+        catch
+        {
+            # pwsh -NonInteractive at a terminal: nobody can answer, so behave as without the prompt.
+            Write-Host "  No answer can be read in this session (pwsh -NonInteractive, for example), so the run goes on as if it had not asked." -ForegroundColor Yellow
+            return $null
+        }
+        $Answer = $Answer.Trim()
+        if ($Answer -eq '')
+        {
+            if ($FreshByDefault) { return 'Fresh' }
+            return 'Resume'
+        }
+        if ($Answer -match '^(r|resume)$')
+        {
+            return 'Resume'
+        }
+        if ($Answer -match '^(f|fresh)$')
+        {
+            return 'Fresh'
+        }
+        Write-Host "  Type R to resume or F to start fresh." -ForegroundColor Yellow
+    }
+}
+
+function Clear-RdaResumeStateForFresh
+{
+    # Clears the resume state once the person at the console chose to start fresh and the backup of
+    # the earlier state is written. Saves an empty state carrying this run's start listing (the file
+    # and, with blob-backed state, the blob), then reads both back, because saving the state only
+    # warns when it fails. It removes no per-stream copy: only Remove-RdaMergedStreamState does that,
+    # once the saved state holds what the copy recorded. A copy that is still there (one the startup
+    # merge kept, or one it could not read) is named instead, because a later start merges it back.
+    # A blob that cannot be read back or checked is named too, as still holding the state. Returns one
+    # description for each place that still holds the earlier run's records, and nothing when the
+    # clear held.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$ResumeStateFile,
+        [Parameter(Mandatory = $true)][string]$Tenant,
+        $StartSnapshot = $null,
+        [string[]]$StreamFilePaths = @(),
+        [string[]]$StreamBlobNames = @(),
+        $BlobContext = $null, [string]$BlobContainer = $null, [string]$BlobName = $null
+    )
+
+    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $Tenant -Ids @() -FailedAttempts @() -Reports @() -StartSnapshot $StartSnapshot `
+        -BlobContext $BlobContext -BlobContainer $BlobContainer -BlobName $BlobName
+
+    $Held = @()
+    if (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
+    {
+        # A save that failed leaves the earlier file in place, so a file that cannot be read still holds it.
+        $LocalState = $null
+        try { $LocalState = Get-Content -LiteralPath $ResumeStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { Write-Verbose ("Could not read back the resume state at {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) }
+        if ($null -eq $LocalState -or @($LocalState.CompletedSubscriptionIds).Count -gt 0 -or @($LocalState.FailedAttempts | Where-Object { $null -ne $_ }).Count -gt 0)
+        {
+            $Held += 'the state file {0}' -f $ResumeStateFile
+        }
+    }
+    # Lists the blob by its full name, which (unlike a read) does not fail for a blob that is not
+    # there; a listing that fails cannot rule the blob out, so it counts as still holding the state.
+    $BlobCheck = {
+        param([string]$Name)
+        try
+        {
+            $Found = @(Get-AzStorageBlob -Container $BlobContainer -Prefix $Name -Context $BlobContext -ErrorAction Stop | Where-Object { $_.Name -eq $Name })
+            if ($Found.Count -gt 0) { return 'Present' }
+            return 'Absent'
+        }
+        catch
+        {
+            Write-Verbose ("Could not check the state blob {0}: {1}" -f $Name, $_.Exception.Message)
+            return 'Unknown'
+        }
+    }
+    if ($BlobContext -and $BlobContainer -and $BlobName)
+    {
+        # The next start reads the blob before the file, so a blob the save did not replace still counts.
+        $BlobState = Read-StateBlob -Context $BlobContext -Container $BlobContainer -BlobName $BlobName
+        if ($null -ne $BlobState)
+        {
+            if (@($BlobState.CompletedSubscriptionIds).Count -gt 0 -or @($BlobState.FailedAttempts | Where-Object { $null -ne $_ }).Count -gt 0)
+            {
+                $Held += 'the state blob {0}' -f $BlobName
+            }
+        }
+        else
+        {
+            # Nothing read back: either there is no blob, or it is there and could not be read.
+            $BlobFound = & $BlobCheck $BlobName
+            if ($BlobFound -eq 'Present') { $Held += 'the state blob {0} (it could not be read back, so treat it as still holding the state)' -f $BlobName }
+            elseif ($BlobFound -eq 'Unknown') { $Held += 'the state blob {0} (it could not be checked, so treat it as still holding the state)' -f $BlobName }
+        }
+    }
+    foreach ($StreamPath in @($StreamFilePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }))
+    {
+        if (Test-Path -LiteralPath $StreamPath -PathType Leaf) { $Held += 'the per-stream state file {0}' -f $StreamPath }
+    }
+    if ($BlobContext -and $BlobContainer)
+    {
+        foreach ($StreamBlob in @($StreamBlobNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }))
+        {
+            $StreamFound = & $BlobCheck $StreamBlob
+            if ($StreamFound -eq 'Present') { $Held += 'the per-stream state blob {0}' -f $StreamBlob }
+            elseif ($StreamFound -eq 'Unknown') { $Held += 'the per-stream state blob {0} (it could not be checked, so treat it as still holding the state)' -f $StreamBlob }
+        }
+    }
+    return $Held
+}
+
 function Get-RdaMgSubscriptionId
 {
     param($Node)

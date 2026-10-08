@@ -844,9 +844,11 @@ if (-not $Preflight)
     # both, so recovery does too: otherwise a parallel -Resume after an eviction collects again every
     # subscription the killed run had completed. Read-StateBlob warns about a blob it cannot read.
     $StrandedReadBlobs = @()
+    $StrandedStreamBlobNames = @()
     if ($null -ne $StateBlobParts)
     {
-        foreach ($StrandedBlobName in @(Get-StateBlobNames -Context $StateBlobCtx -Container $StateBlobParts.Container -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount))
+        $StrandedStreamBlobNames = @(Get-StateBlobNames -Context $StateBlobCtx -Container $StateBlobParts.Container -Prefix $StateBlobParts.Prefix -Tenant $TenantID -ShardIndex $ShardIndex -ShardCount $ShardCount)
+        foreach ($StrandedBlobName in $StrandedStreamBlobNames)
         {
             $StrandedBlob = Read-StateBlob -Context $StateBlobCtx -Container $StateBlobParts.Container -BlobName $StrandedBlobName
             if ($null -ne $StrandedBlob)
@@ -880,6 +882,63 @@ if (-not $Preflight)
     }
 }
 
+# A user at the console is asked whether to resume an earlier run's state (below) and at each
+# partial-access stop point further down; any other sign-in is unattended and behaves as before
+# (Read-ResumeOrFreshChoice, Confirm-PartialAccessContinue).
+$PartialAccessAccountType = [string](Get-AzContext -ErrorAction SilentlyContinue).Account.Type
+# Whether a person is watching a real terminal: the same test as Read-ResumeOrFreshChoice's default,
+# worked out once so the report check below is skipped when the question will not be asked.
+$ResumeQuestionInteractive = ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected)
+# Without -Resume, a user at the console is asked whether to resume the earlier run or start fresh.
+# Only a state listing at least one completed subscription is asked about: with failures alone, both
+# answers collect the same subscriptions, and this run retries the failures either way.
+# Resume turns on -Resume for the rest of the run. Start fresh first writes a backup of the earlier
+# state beside the state file and checks it exists. The state itself (file and blob) is cleared
+# further down, after the coverage and access gates, so a run those gates stop keeps the earlier
+# state live; until then this run's own variables already start over. If the backup cannot be
+# written the state is left as it is, as without the prompt. -ResumeFailedOnly and -Preflight never ask.
+$ResumeChoice = $null
+$ResumeBackupFile = $null
+if (-not $Resume -and -not $ResumeFailedOnly -and -not $Preflight -and $CompletedIds.Count -gt 0)
+{
+    # A resumed run carries each skipped subscription's recorded report into its bundle. The check
+    # opens each recorded archive, so it runs only when the question will be put: a user sign-in with
+    # a person watching the terminal.
+    $ResumeUncarriedCount = 0
+    if ($PartialAccessAccountType -eq 'User' -and $ResumeQuestionInteractive)
+    {
+        $ResumeWouldSkip = @($Subscriptions | Where-Object { $CompletedIds -contains $_.Id })
+        $ResumeUncarriedCount = @((Get-RdaResumeCarriedReports -SkippedSubscriptions $ResumeWouldSkip -Reports $CompletedReports -Obfuscated ([bool]$Obfuscate)).Missing).Count
+    }
+    $ResumeChoice = Read-ResumeOrFreshChoice -CompletedCount $CompletedIds.Count -FailedCount @($FailedAttempts).Count -UncarriedCount $ResumeUncarriedCount -StartedAt $SeedState.EnumeratedAtStart.CapturedUtc -AccountType $PartialAccessAccountType -IsInteractive $ResumeQuestionInteractive
+    if ($ResumeChoice -eq 'Resume')
+    {
+        $Resume = [switch]$true
+    }
+    elseif ($ResumeChoice -eq 'Fresh')
+    {
+        # Kept local, also with blob-backed state: it is for the person who chose to start fresh, and
+        # nothing reads it back.
+        $ResumeBackupCandidate = '{0}.backup-{1}' -f $ResumeStateFile, (Get-Date -Format 'yyyyMMdd-HHmmss')
+        Save-CompletedSubscriptionIds -Path $ResumeBackupCandidate -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports -StartSnapshot $StartSnapshot
+        if (Test-Path -LiteralPath $ResumeBackupCandidate -PathType Leaf)
+        {
+            $ResumeBackupFile = $ResumeBackupCandidate
+            $CompletedIds = @()
+            $FailedAttempts = @()
+            $CompletedReports = @()
+            $StartSnapshot = [pscustomobject]@{ CapturedUtc = (Get-Date).ToString('o'); SubscriptionIds = @($AllSubscriptions.Id) }
+            $StateSaveArgs = @{ StartSnapshot = $StartSnapshot } + $StateBlobArgs
+            $BackupWhere = if ($StateBlobArgs.Count -gt 0) { ' (a local file only)' } else { '' }
+            Write-Host ("Starting fresh: every subscription will be collected again. The earlier state is backed up at {0}{1}, and is cleared once the start-up checks pass." -f $ResumeBackupFile, $BackupWhere) -ForegroundColor Cyan
+        }
+        else
+        {
+            Write-Host ("WARNING: could not write a backup of the earlier state to {0}, so the earlier state is left in place. Every subscription will be collected again." -f $ResumeBackupCandidate) -ForegroundColor Yellow
+        }
+    }
+}
+
 if ($Resume)
 {
     if ($CompletedIds.Count -gt 0)
@@ -893,7 +952,7 @@ if ($Resume)
 }
 else
 {
-    if ($CompletedIds.Count -gt 0)
+    if ($CompletedIds.Count -gt 0 -and $ResumeChoice -ne 'Fresh')
     {
         Write-Host ("Note: resume state file exists at {0} ({1} previously completed). Pass -Resume to skip them." -f $ResumeStateFile, $CompletedIds.Count) -ForegroundColor Yellow
     }
@@ -922,9 +981,6 @@ if ($ResumeFailedOnly)
 }
 
 Write-Host "Verifying full subscription coverage (tenant-root management group)..." -ForegroundColor Cyan
-# A user at the console is asked at each stop point below before the run stops; any other sign-in
-# is unattended and stops as before (Confirm-PartialAccessContinue).
-$PartialAccessAccountType = [string](Get-AzContext -ErrorAction SilentlyContinue).Account.Type
 $PreflightCoverageMsg = $null
 $Coverage = Get-TenantSubscriptionId -TenantId $TenantID
 if ($null -eq $Coverage.Ids)
@@ -1290,6 +1346,19 @@ if ($PSBoundParameters.ContainsKey('MetricsLookbackDays')) { $InventoryPassthrou
 if ($Service.Count -gt 0) { $InventoryPassthrough['Service'] = $Service }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = [bool]$PSBoundParameters['Debug'] }
+
+# Start fresh (asked further up) clears the earlier run's state here, after the coverage and access
+# gates, so a run they stop keeps that state live; the backup holds it either way. The clear is read
+# back, and anything still holding the earlier run's records is named.
+if ($ResumeChoice -eq 'Fresh' -and $null -ne $ResumeBackupFile)
+{
+    $FreshHeld = @(Clear-RdaResumeStateForFresh -ResumeStateFile $ResumeStateFile -Tenant $TenantID -StartSnapshot $StartSnapshot `
+            -StreamFilePaths @($StrandedStreamFiles | ForEach-Object { $_.FullName }) -StreamBlobNames @($StrandedStreamBlobNames) @StateBlobArgs)
+    if ($FreshHeld.Count -gt 0)
+    {
+        Write-Host ("WARNING: the earlier run's state is still in {0}, so a later run can still act on it. This run still collects every subscription; the earlier state is backed up at {1}." -f ($FreshHeld -join ', '), $ResumeBackupFile) -ForegroundColor Yellow
+    }
+}
 
 $SkippedCount = 0
 # The subscriptions skipped as completed by an earlier run; their recorded reports join this bundle.
@@ -2252,7 +2321,7 @@ $WriteMissingReportBanners = {
             Write-Host ("  - {0} ({1}): {2}" -f $U.Name, $U.Id, $U.Reason) -ForegroundColor Red
         }
         Write-Host "Their reports are NOT in the consolidated bundle. Re-run without -Resume to collect every subscription" -ForegroundColor Red
-        Write-Host "again, or collect each one listed above directly with:" -ForegroundColor Red
+        Write-Host "again (answer F if it asks to resume or start fresh), or collect each one listed above directly with:" -ForegroundColor Red
         Write-Host "  ./ResourceInventory.ps1 -TenantID <tenant> -SubscriptionID <the id listed above>" -ForegroundColor Red
         Write-Host "================================================================" -ForegroundColor Red
     }
@@ -2897,6 +2966,14 @@ try
 catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
 
 $RunSummaryLocalFile = $null
+# A run resumed at the console behaves exactly as with -Resume, so its summary lists -Resume too.
+$SummaryInvocationParameters = $PSBoundParameters
+if ($ResumeChoice -eq 'Resume' -and -not $PSBoundParameters.ContainsKey('Resume'))
+{
+    $SummaryInvocationParameters = @{}
+    foreach ($ParamKey in $PSBoundParameters.Keys) { $SummaryInvocationParameters[$ParamKey] = $PSBoundParameters[$ParamKey] }
+    $SummaryInvocationParameters['Resume'] = [switch]$true
+}
 try
 {
     $ConsumptionRecordTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global:ConsumptionRecordCount } else { 0 }
@@ -2904,7 +2981,7 @@ try
     $ConsumptionRowsFetchedTotal = if ($null -ne $Global:ConsumptionRowsFetchedCount) { [int]$Global:ConsumptionRowsFetchedCount } else { $ConsumptionRecordTotal }
     $MetricsApiCallTotal = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
     $RunSummaryLines = Get-RunSummaryLogContent `
-        -InvocationParameters $PSBoundParameters `
+        -InvocationParameters $SummaryInvocationParameters `
         -Version $BundleVer `
         -StartTime $RunStartTime -EndTime (Get-Date) `
         -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `

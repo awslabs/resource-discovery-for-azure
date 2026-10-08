@@ -23,7 +23,7 @@ BeforeAll {
     # Guard: the functions under test must be defined by the shared file. If a
     # future change renames or removes one, fail loudly here rather than with a
     # confusing "command not found" mid-test.
-    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Invoke-RdaSupportLogCollectionInTranscript', 'Test-RdaFinalScreenClearable', 'Get-RdaFinalScreenLines', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
+    $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Read-ResumeOrFreshChoice', 'Clear-RdaResumeStateForFresh', 'Get-RdaResumeCarriedReports', 'Invoke-RdaSupportLogCollectionInTranscript', 'Test-RdaFinalScreenClearable', 'Get-RdaFinalScreenLines', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
         'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
         'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks', 'Get-RunSummaryLogContent', 'Write-RdaHostLinesInTranscript')
     foreach ($Fn in $TargetFunctions)
@@ -423,6 +423,7 @@ Describe 'Run-AllSubscriptions.ps1: the partial-access stop points ask a user be
         $Tokens = $null
         $ParseErrors = $null
         $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        if (@($ParseErrors).Count -gt 0) { throw ('Run-AllSubscriptions.ps1 does not parse: {0}' -f $ParseErrors[0].Message) }
 
         function Get-SingleWrapperIf
         {
@@ -616,6 +617,686 @@ Describe 'Run-AllSubscriptions.ps1: the partial-access stop points ask a user be
             $R.Lines[-1] | Should -Be '  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s).'
             Should -Invoke Confirm-PartialAccessContinue -Exactly -Times 0
         }
+    }
+}
+
+Describe 'Read-ResumeOrFreshChoice (ask whether to resume an earlier run or start fresh)' {
+    # A user at the console is asked. Anyone else gets nothing back and sees nothing, so a
+    # headless run prints exactly what it printed before the prompt existed.
+    BeforeAll {
+        # Runs the function and splits what it printed from what it returned.
+        function Invoke-Choice
+        {
+            param([hashtable]$Arguments)
+            $Out = @(Read-ResumeOrFreshChoice @Arguments 6>&1)
+            [pscustomobject]@{
+                Result = ($Out | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+                Lines  = @($Out | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_ })
+            }
+        }
+
+        # The default value text of one parameter of a loaded function.
+        function Get-ParameterDefaultText
+        {
+            param([string]$Command, [string]$Name)
+            $Parameters = @((Get-Command $Command).ScriptBlock.Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ParameterAst] -and $args[0].Name.VariablePath.UserPath -eq $Name }, $true))
+            if ($Parameters.Count -ne 1) { throw ("expected one -{0} parameter on {1}, found {2}" -f $Name, $Command, $Parameters.Count) }
+            return $Parameters[0].DefaultValue.Extent.Text
+        }
+    }
+
+    BeforeEach {
+        # Each case queues the answers it gives. One call too many throws, which the function treats as
+        # a prompt it cannot read, so a regression that stops recognising an answer fails the case at
+        # once instead of asking forever.
+        $script:Answers = [System.Collections.Generic.Queue[object]]::new()
+        Mock Read-Host {
+            if ($script:Answers.Count -eq 0) { throw 'Read-Host was called more often than this case answers' }
+            $script:Answers.Dequeue()
+        }
+    }
+
+    It 'does not ask, prints nothing and returns nothing when <Case>' -ForEach @(
+        @{ Case = 'the session is not interactive'; AccountType = 'User'; IsInteractive = $false }
+        @{ Case = 'the sign-in is a service principal'; AccountType = 'ServicePrincipal'; IsInteractive = $true }
+        @{ Case = 'the sign-in is a managed identity'; AccountType = 'ManagedService'; IsInteractive = $true }
+        @{ Case = 'the sign-in type is unknown'; AccountType = ''; IsInteractive = $true }
+    ) {
+        $script:Answers.Enqueue('f')
+        $R = Invoke-Choice @{ CompletedCount = 3; FailedCount = 1; AccountType = $AccountType; IsInteractive = $IsInteractive }
+        $R.Result | Should -BeNullOrEmpty
+        $R.Lines.Count | Should -Be 0
+        Should -Invoke Read-Host -Exactly -Times 0 -Because 'nobody can answer, so the run must go on without waiting for input'
+    }
+
+    It 'asks a user at the console once and returns <Expected> for <Label>' -ForEach @(
+        @{ Label = 'Enter'; Answer = ''; Expected = 'Resume' }
+        @{ Label = 'spaces only'; Answer = '   '; Expected = 'Resume' }
+        @{ Label = 'the end of input'; Answer = $null; Expected = 'Resume' }
+        @{ Label = '"r"'; Answer = 'r'; Expected = 'Resume' }
+        @{ Label = '"R"'; Answer = 'R'; Expected = 'Resume' }
+        @{ Label = '" R "'; Answer = ' R '; Expected = 'Resume' }
+        @{ Label = '"resume"'; Answer = 'resume'; Expected = 'Resume' }
+        @{ Label = '"f"'; Answer = 'f'; Expected = 'Fresh' }
+        @{ Label = '"F"'; Answer = 'F'; Expected = 'Fresh' }
+        @{ Label = '"fresh"'; Answer = 'fresh'; Expected = 'Fresh' }
+        @{ Label = '"FRESH"'; Answer = 'FRESH'; Expected = 'Fresh' }
+    ) {
+        $script:Answers.Enqueue($Answer)
+        $R = Invoke-Choice @{ CompletedCount = 3; AccountType = 'User'; IsInteractive = $true }
+        $R.Result | Should -Be $Expected
+        Should -Invoke Read-Host -Exactly -Times 1 -ParameterFilter { $Prompt -eq 'Choice [R/f]' }
+    }
+
+    It 'asks again after an answer it does not know' {
+        foreach ($Answer in 'x', 'yes', 'f') { $script:Answers.Enqueue($Answer) }
+        $R = Invoke-Choice @{ CompletedCount = 3; AccountType = 'User'; IsInteractive = $true }
+        $R.Result | Should -Be 'Fresh'
+        Should -Invoke Read-Host -Exactly -Times 3
+        @($R.Lines | Where-Object { $_ -eq '  Type R to resume or F to start fresh.' }).Count | Should -Be 2
+    }
+
+    It 'returns nothing, and asks once only, when the prompt cannot be read (pwsh -NonInteractive)' {
+        Mock Read-Host { throw [System.Management.Automation.PSInvalidOperationException]::new('PowerShell is in NonInteractive mode. Read and Prompt functionality is not available.') }
+        $R = Invoke-Choice @{ CompletedCount = 3; AccountType = 'User'; IsInteractive = $true }
+        $R.Result | Should -BeNullOrEmpty -Because 'nobody can answer, so the caller behaves as without the prompt'
+        Should -Invoke Read-Host -Exactly -Times 1
+        $R.Lines[-1] | Should -Be '  No answer can be read in this session (pwsh -NonInteractive, for example), so the run goes on as if it had not asked.' -Because 'the question is already on the screen, so it must say that nobody was waited for'
+    }
+
+    It 'counts redirected input or output as nobody watching, the same test the final screen uses' {
+        $Default = Get-ParameterDefaultText -Command 'Read-ResumeOrFreshChoice' -Name 'IsInteractive'
+        $Default | Should -Be (Get-ParameterDefaultText -Command 'Test-RdaFinalScreenClearable' -Name 'IsConsole')
+        $Default | Should -Match 'IsInputRedirected'
+        $Default | Should -Match 'IsOutputRedirected'
+    }
+
+    It 'shows the counts, the start time and both choices' {
+        $script:Answers.Enqueue('r')
+        $Start = [datetime]::new(2026, 10, 8, 9, 12, 0, [DateTimeKind]::Local)
+        $R = Invoke-Choice @{ CompletedCount = 3; FailedCount = 1; StartedAt = $Start; AccountType = 'User'; IsInteractive = $true }
+        $R.Lines | Should -Be @(
+            ''
+            'Found an earlier run for this tenant (started 2026-10-08 09:12):'
+            '  3 subscription(s) done, 1 failed.'
+            '  [R] Resume - skip the 3 done subscription(s) (default)'
+            '  [F] Start fresh - collect all again; the earlier state is kept as a backup'
+        )
+    }
+
+    It 'says how many reports cannot be carried and makes start fresh the default' {
+        $script:Answers.Enqueue('')
+        $R = Invoke-Choice @{ CompletedCount = 3; FailedCount = 1; UncarriedCount = 2; AccountType = 'User'; IsInteractive = $true }
+        $R.Result | Should -Be 'Fresh'
+        $R.Lines | Should -Be @(
+            ''
+            'Found an earlier run for this tenant:'
+            '  3 subscription(s) done, 1 failed.'
+            '  2 of the done subscription(s) have no report this run can carry, so resuming would leave them out of the bundle.'
+            '  [R] Resume - skip the 3 done subscription(s)'
+            '  [F] Start fresh - collect all again; the earlier state is kept as a backup (default)'
+        )
+        Should -Invoke Read-Host -Exactly -Times 1 -ParameterFilter { $Prompt -eq 'Choice [r/F]' }
+    }
+
+    It 'still resumes on R when some reports cannot be carried' {
+        $script:Answers.Enqueue('R')
+        $R = Invoke-Choice @{ CompletedCount = 3; UncarriedCount = 2; AccountType = 'User'; IsInteractive = $true }
+        $R.Result | Should -Be 'Resume'
+    }
+
+    It 'shows the start time in local time when it is given as <Case>' -ForEach @(
+        @{ Case = 'a round-trip string'; Kind = 'String' }
+        @{ Case = 'a UTC time'; Kind = 'Utc' }
+    ) {
+        $script:Answers.Enqueue('r')
+        $Local = [datetime]::new(2026, 10, 8, 9, 12, 0, [DateTimeKind]::Local)
+        $StartedAt = if ($Kind -eq 'String') { $Local.ToString('o') } else { $Local.ToUniversalTime() }
+        $R = Invoke-Choice @{ CompletedCount = 3; StartedAt = $StartedAt; AccountType = 'User'; IsInteractive = $true }
+        $R.Lines[1] | Should -Be 'Found an earlier run for this tenant (started 2026-10-08 09:12):'
+    }
+
+    It 'shows the start time with a colon in a culture that separates time with a dot (<Kind>)' -ForEach @(
+        @{ Kind = 'DateTime' }
+        @{ Kind = 'String' }
+    ) {
+        $Finnish = $null
+        try { $Finnish = [cultureinfo]::new('fi-FI') } catch { $Finnish = $null }
+        if ($null -eq $Finnish -or $Finnish.DateTimeFormat.TimeSeparator -eq ':')
+        {
+            Set-ItResult -Skipped -Because 'this host has no culture data with another time separator'
+            return
+        }
+        $script:Answers.Enqueue('r')
+        $Local = [datetime]::new(2026, 10, 8, 9, 12, 0, [DateTimeKind]::Local)
+        $StartedAt = if ($Kind -eq 'String') { $Local.ToString('o') } else { $Local }
+        $Before = [cultureinfo]::CurrentCulture
+        try
+        {
+            [cultureinfo]::CurrentCulture = $Finnish
+            $R = Invoke-Choice @{ CompletedCount = 3; StartedAt = $StartedAt; AccountType = 'User'; IsInteractive = $true }
+        }
+        finally
+        {
+            [cultureinfo]::CurrentCulture = $Before
+        }
+        $R.Lines[1] | Should -Be 'Found an earlier run for this tenant (started 2026-10-08 09:12):'
+    }
+
+    It 'leaves the start time out when it is <Case>' -ForEach @(
+        @{ Case = 'missing'; StartedAt = $null }
+        @{ Case = 'empty'; StartedAt = '' }
+        @{ Case = 'not a date'; StartedAt = 'not a date' }
+    ) {
+        $script:Answers.Enqueue('r')
+        $R = Invoke-Choice @{ CompletedCount = 3; StartedAt = $StartedAt; AccountType = 'User'; IsInteractive = $true }
+        $R.Lines[1] | Should -Be 'Found an earlier run for this tenant:'
+    }
+}
+
+Describe 'Clear-RdaResumeStateForFresh (clear the earlier state after a start-fresh choice)' {
+    BeforeEach {
+        $script:ClearDir = Join-Path $script:TestRoot ('fresh-clear-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:ClearDir -Force | Out-Null
+        $script:ClearState = Join-Path $script:ClearDir '.resume-state-t1.json'
+        Save-CompletedSubscriptionIds -Path $script:ClearState -Tenant 't1' -Ids @('s1') -FailedAttempts @(Add-FailedAttempt -Existing @() -Id 's2' -Name 's2' -Reason 'throttled')
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:ClearDir) { Remove-Item -LiteralPath $script:ClearDir -Recurse -Force }
+    }
+
+    It 'empties the state file, keeps the start listing it is given, and returns nothing' {
+        $Start = [pscustomobject]@{ CapturedUtc = '2026-10-08T09:12:00.0000000+00:00'; SubscriptionIds = @('s1', 's2') }
+        $Held = @(Clear-RdaResumeStateForFresh -ResumeStateFile $script:ClearState -Tenant 't1' -StartSnapshot $Start)
+        $Held.Count | Should -Be 0
+        $After = Get-Content -LiteralPath $script:ClearState -Raw | ConvertFrom-Json
+        $After.TenantID | Should -Be 't1'
+        @($After.CompletedSubscriptionIds).Count | Should -Be 0
+        @($After.FailedAttempts).Count | Should -Be 0
+        @($After.Reports).Count | Should -Be 0
+        @($After.EnumeratedAtStart.SubscriptionIds) | Should -Be @('s1', 's2')
+    }
+
+    It 'names a per-stream state blob that is still there, and only that one' {
+        Mock Save-StateBlob { $true }
+        Mock Read-StateBlob { $null }
+        # Answers only for the container and context the clear was given; a listing by prefix also
+        # returns longer names, which do not count.
+        function Get-AzStorageBlob
+        {
+            [CmdletBinding()]
+            param($Container, $Prefix, $Context)
+            if ($Container -ne 'state' -or $Context -ne 'ctx') { return }
+            if ($Prefix -eq 'rda/t1-stream-1.json') { [pscustomobject]@{ Name = 'rda/t1-stream-1.json.old' } }
+            if ($Prefix -eq 'rda/t1-stream-2.json') { [pscustomobject]@{ Name = 'rda/t1-stream-2.json' } }
+        }
+        $Held = @(Clear-RdaResumeStateForFresh -ResumeStateFile $script:ClearState -Tenant 't1' -StreamBlobNames @('rda/t1-stream-1.json', 'rda/t1-stream-2.json') -BlobContext 'ctx' -BlobContainer 'state' -BlobName 'rda/t1.json')
+        $Held | Should -Be @('the per-stream state blob rda/t1-stream-2.json')
+        Should -Invoke Save-StateBlob -Exactly -Times 1 -ParameterFilter { $BlobName -eq 'rda/t1.json' -and $File -eq $script:ClearState }
+    }
+
+    It 'counts a blob it cannot check as still holding the state' {
+        Mock Save-StateBlob { $true }
+        Mock Read-StateBlob { $null }
+        function Get-AzStorageBlob
+        {
+            [CmdletBinding()]
+            param($Container, $Prefix, $Context)
+            if ($Prefix -eq 'rda/t1-stream-1.json') { throw 'This request is not authorized to perform this operation.' }
+        }
+        $Held = @(Clear-RdaResumeStateForFresh -ResumeStateFile $script:ClearState -Tenant 't1' -StreamBlobNames @('rda/t1-stream-1.json') -BlobContext 'ctx' -BlobContainer 'state' -BlobName 'rda/t1.json')
+        $Held | Should -Be @('the per-stream state blob rda/t1-stream-1.json (it could not be checked, so treat it as still holding the state)')
+    }
+
+    It 'names the state blob when it reads nothing back and the blob is <Case>' -ForEach @(
+        @{ Case = 'there'; Listing = 'Present'; Expected = @('the state blob rda/t1.json (it could not be read back, so treat it as still holding the state)') }
+        @{ Case = 'not checkable'; Listing = 'Throw'; Expected = @('the state blob rda/t1.json (it could not be checked, so treat it as still holding the state)') }
+        @{ Case = 'not there'; Listing = 'Absent'; Expected = @() }
+    ) {
+        Mock Save-StateBlob { $true }
+        Mock Read-StateBlob { $null }
+        $script:Listing = $Listing
+        function Get-AzStorageBlob
+        {
+            [CmdletBinding()]
+            param($Container, $Prefix, $Context)
+            if ($script:Listing -eq 'Throw') { throw 'The remote server returned an error: (503) Server Unavailable.' }
+            if ($script:Listing -eq 'Present' -and $Container -eq 'state' -and $Context -eq 'ctx' -and $Prefix -eq 'rda/t1.json') { [pscustomobject]@{ Name = 'rda/t1.json' } }
+        }
+        $Held = @(Clear-RdaResumeStateForFresh -ResumeStateFile $script:ClearState -Tenant 't1' -BlobContext 'ctx' -BlobContainer 'state' -BlobName 'rda/t1.json')
+        ($Held -join ' | ') | Should -BeExactly ($Expected -join ' | ')
+        $Held.Count | Should -Be $Expected.Count
+    }
+
+    It 'names the state file when it cannot be read back' {
+        Set-Content -LiteralPath $script:ClearState -Value '{ not json'
+        $script:ClearTmp = '{0}.tmp' -f $script:ClearState
+        Mock Set-Content -ParameterFilter { $LiteralPath -eq $script:ClearTmp } { throw 'disk full' }
+        $Held = @(Clear-RdaResumeStateForFresh -ResumeStateFile $script:ClearState -Tenant 't1' 6>$null)
+        $Held | Should -Be @(('the state file {0}' -f $script:ClearState))
+    }
+}
+
+Describe "Run-AllSubscriptions.ps1: an earlier run's state asks a user to resume or start fresh" {
+    # The wrapper's code from the question up to its resume-mode lines is lifted from the parsed
+    # source, and so is the start-fresh clear that runs after the coverage and access gates. They run
+    # against a real state file. Headless runs and runs that pass -Resume, -ResumeFailedOnly or
+    # -Preflight must print exactly what they printed before and leave the state alone.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        if (@($ParseErrors).Count -gt 0) { throw ('Run-AllSubscriptions.ps1 does not parse: {0}' -f $ParseErrors[0].Message) }
+        $script:WrapperText = $WrapperAst.Extent.Text
+
+        $AskCondition = '-not $Resume -and -not $ResumeFailedOnly -and -not $Preflight -and $CompletedIds.Count -gt 0'
+        $AskIfs = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $AskCondition }, $true))
+        if ($AskIfs.Count -ne 1) { throw ("expected exactly one 'if ({0})' in Run-AllSubscriptions.ps1, found {1}" -f $AskCondition, $AskIfs.Count) }
+        $script:AskIf = $AskIfs[0]
+        $ChoiceInits = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Extent.Text -eq '$ResumeChoice = $null' }, $true))
+        if ($ChoiceInits.Count -ne 1) { throw ("expected exactly one '`$ResumeChoice = `$null' in Run-AllSubscriptions.ps1, found {0}" -f $ChoiceInits.Count) }
+        $AskEnd = $script:AskIf.Extent.EndOffset
+        $ResumeIf = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$Resume' -and $args[0].Extent.StartOffset -gt $AskEnd }, $true) |
+                Sort-Object { $_.Extent.StartOffset } | Select-Object -First 1)
+        if ($ResumeIf.Count -ne 1) { throw "expected an 'if (`$Resume)' after the resume-or-fresh question in Run-AllSubscriptions.ps1" }
+        $RegionStart = $ChoiceInits[0].Extent.StartOffset
+        $script:AskRegionEnd = $ResumeIf[0].Extent.EndOffset
+        $AskRegionText = $script:WrapperText.Substring($RegionStart, $script:AskRegionEnd - $RegionStart)
+
+        $ClearCondition = '$ResumeChoice -eq ''Fresh'' -and $null -ne $ResumeBackupFile'
+        $ClearIfs = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $ClearCondition }, $true))
+        if ($ClearIfs.Count -ne 1) { throw ("expected exactly one 'if ({0})' in Run-AllSubscriptions.ps1, found {1}" -f $ClearCondition, $ClearIfs.Count) }
+        $script:ClearIf = $ClearIfs[0]
+
+        # The question alone is a run that a gate stopped before any work; with the clear after it, a
+        # run the gates let through.
+        $script:AskRegion = [scriptblock]::Create($AskRegionText)
+        $script:ResumeRegion = [scriptblock]::Create($AskRegionText + [Environment]::NewLine + $script:ClearIf.Extent.Text)
+        $script:AccountTypeReads = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$PartialAccessAccountType' }, $true))
+        $script:InteractiveReads = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$ResumeQuestionInteractive' }, $true))
+
+        # Every way the run can stop between the question and the start of the per-subscription loops.
+        $LoopIfs = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1' -and $args[0].Extent.StartOffset -gt $script:ClearIf.Extent.EndOffset }, $true) |
+                Sort-Object { $_.Extent.StartOffset } | Select-Object -First 1)
+        if ($LoopIfs.Count -ne 1) { throw "expected an 'if (`$ParallelStreams -le 1)' after the start-fresh clear in Run-AllSubscriptions.ps1" }
+        $script:LoopStart = $LoopIfs[0].Extent.StartOffset
+        $script:StopPoints = @($WrapperAst.FindAll({
+                    ($args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Exit-Wrapper') -or
+                    $args[0] -is [System.Management.Automation.Language.ExitStatementAst] -or
+                    $args[0] -is [System.Management.Automation.Language.ThrowStatementAst]
+                }, $true) | Where-Object { $_.Extent.StartOffset -gt $script:AskRegionEnd -and $_.Extent.StartOffset -lt $script:LoopStart })
+
+        # What the run summary lists as the run's parameters. Its own -Obfuscate and -Resume stand in
+        # for the wrapper's, because a lifted block reads the parameters of whatever runs it.
+        $SummaryInits = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Extent.Text -eq '$SummaryInvocationParameters = $PSBoundParameters' }, $true))
+        if ($SummaryInits.Count -ne 1) { throw ("expected exactly one '`$SummaryInvocationParameters = `$PSBoundParameters' in Run-AllSubscriptions.ps1, found {0}" -f $SummaryInits.Count) }
+        $SummaryCondition = '$ResumeChoice -eq ''Resume'' -and -not $PSBoundParameters.ContainsKey(''Resume'')'
+        $SummaryIfs = @($WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq $SummaryCondition }, $true))
+        if ($SummaryIfs.Count -ne 1) { throw ("expected exactly one 'if ({0})' in Run-AllSubscriptions.ps1, found {1}" -f $SummaryCondition, $SummaryIfs.Count) }
+        $script:SummaryParams = [scriptblock]::Create(('param([switch]$Obfuscate, [switch]$Resume)', $SummaryInits[0].Extent.Text, $SummaryIfs[0].Extent.Text, '$SummaryInvocationParameters') -join [Environment]::NewLine)
+
+        # The wrapper variables the region reads, built from the state file the way the wrapper
+        # builds them. $Override replaces or adds entries for one case.
+        function New-ResumeVars
+        {
+            param([hashtable]$Override = @{})
+            $Seed = Get-ResumeStateObject -Path $script:StatePath -Tenant 't1'
+            $Start = Get-StartSnapshot -Path $script:StatePath -Tenant 't1' -State $Seed
+            if ($null -eq $Start)
+            {
+                $Start = [pscustomobject]@{ CapturedUtc = (Get-Date).ToString('o'); SubscriptionIds = @('s1', 's2', 's3', 's4') }
+            }
+            $Subs = @('s1', 's2', 's3', 's4' | ForEach-Object { [pscustomobject]@{ Id = $_; Name = $_ } })
+            $Vars = @{
+                Resume                   = $false
+                ResumeFailedOnly         = $false
+                Preflight                = $false
+                Obfuscate                = $false
+                TenantID                 = 't1'
+                ResumeStateFile          = $script:StatePath
+                AllSubscriptions         = $Subs
+                Subscriptions            = $Subs
+                SeedState                = $Seed
+                CompletedIds             = @(Get-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't1' -State $Seed)
+                FailedAttempts           = @(Get-FailedAttempts -Path $script:StatePath -Tenant 't1' -State $Seed)
+                CompletedReports         = @($Seed.Reports | Where-Object { $null -ne $_ })
+                StartSnapshot            = $Start
+                StateBlobArgs            = @{}
+                StrandedStreamFiles      = @()
+                StrandedStreamBlobNames  = @()
+                PartialAccessAccountType = 'User'
+                ResumeQuestionInteractive = $true
+            }
+            foreach ($Key in $Override.Keys) { $Vars[$Key] = $Override[$Key] }
+            if (-not $Override.ContainsKey('StateSaveArgs')) { $Vars['StateSaveArgs'] = @{ StartSnapshot = $Vars['StartSnapshot'] } + $Vars['StateBlobArgs'] }
+            return $Vars
+        }
+
+        # Runs the lifted code in this function's scope with $Vars as its variables, and returns what
+        # it printed and the state variables it left behind. -StoppedByGate runs the question alone.
+        function Invoke-ResumeRegion
+        {
+            param([hashtable]$Vars, [switch]$StoppedByGate)
+            foreach ($Name in $Vars.Keys) { Set-Variable -Name $Name -Value $Vars[$Name] }
+            $Lifted = if ($StoppedByGate) { $script:AskRegion } else { $script:ResumeRegion }
+            $Lines = [System.Collections.Generic.List[string]]::new()
+            . $Lifted 6>&1 | ForEach-Object { $Lines.Add([string]$_) }
+            # Read whole: wrapping these in @() would nest each array one level deeper.
+            [pscustomobject]@{
+                Lines            = @($Lines)
+                Resume           = [bool](Get-Variable -Name 'Resume' -ValueOnly)
+                CompletedIds     = (Get-Variable -Name 'CompletedIds' -ValueOnly)
+                FailedAttempts   = (Get-Variable -Name 'FailedAttempts' -ValueOnly)
+                CompletedReports = (Get-Variable -Name 'CompletedReports' -ValueOnly)
+                StartSnapshot    = Get-Variable -Name 'StartSnapshot' -ValueOnly
+                StateSaveArgs    = Get-Variable -Name 'StateSaveArgs' -ValueOnly
+                ResumeBackupFile = Get-Variable -Name 'ResumeBackupFile' -ValueOnly
+            }
+        }
+
+        function Get-BackupFiles
+        {
+            return @(Get-ChildItem -LiteralPath $script:CaseDir -Filter '.resume-state-t1.json.backup-*' -File -Force)
+        }
+
+        # The warning printed when something still holds the earlier run's records after the clear.
+        function Get-HeldWarning
+        {
+            param([string]$Where, [string]$Backup)
+            return ("WARNING: the earlier run's state is still in {0}, so a later run can still act on it. This run still collects every subscription; the earlier state is backed up at {1}." -f $Where, $Backup)
+        }
+
+        # The line printed once the backup is written.
+        function Get-FreshLine
+        {
+            param([string]$Backup, [string]$Where = '')
+            return ('Starting fresh: every subscription will be collected again. The earlier state is backed up at {0}{1}, and is cleared once the start-up checks pass.' -f $Backup, $Where)
+        }
+    }
+
+    BeforeEach {
+        # An earlier run that finished s1 and s2 and failed s3, out of the three it listed at start.
+        $script:CaseDir = Join-Path $script:TestRoot ('resume-choice-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:CaseDir -Force | Out-Null
+        $script:StatePath = Join-Path $script:CaseDir '.resume-state-t1.json'
+        $OldStart = [pscustomobject]@{ CapturedUtc = '2026-10-01T09:12:00.0000000+00:00'; SubscriptionIds = @('s1', 's2', 's3') }
+        $OldFailed = @(Add-FailedAttempt -Existing @() -Id 's3' -Name 's3' -Reason 'throttled')
+        # Inside the case folder, so whether they exist does not depend on where Pester runs.
+        $script:OldZips = @((Join-Path $script:CaseDir 'one.zip'), (Join-Path $script:CaseDir 'two.zip'))
+        $OldReports = @(
+            [pscustomobject]@{ Name = 's1'; Id = 's1'; Count = 4; Zip = $script:OldZips[0] }
+            [pscustomobject]@{ Name = 's2'; Id = 's2'; Count = 7; Zip = $script:OldZips[1] }
+        )
+        Save-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't1' -Ids @('s1', 's2') -FailedAttempts $OldFailed -Reports $OldReports -StartSnapshot $OldStart
+        $script:StateBefore = Get-Content -LiteralPath $script:StatePath -Raw
+        $script:NoteLine = 'Note: resume state file exists at {0} (2 previously completed). Pass -Resume to skip them.' -f $script:StatePath
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:CaseDir) { Remove-Item -LiteralPath $script:CaseDir -Recurse -Force }
+    }
+
+    It 'reads the sign-in type once, before the question, as a top-level statement' {
+        $script:AccountTypeReads.Count | Should -Be 1
+        $script:AccountTypeReads[0].Extent.StartOffset | Should -BeLessThan $script:AskIf.Extent.StartOffset
+        $script:AccountTypeReads[0].Parent | Should -BeOfType ([System.Management.Automation.Language.NamedBlockAst]) -Because 'inside a branch, a later prompt could run without the sign-in type'
+    }
+
+    It 'reads whether a person watches the terminal once, before the question, with the question''s own test' {
+        $script:InteractiveReads.Count | Should -Be 1
+        $script:InteractiveReads[0].Extent.StartOffset | Should -BeLessThan $script:AskIf.Extent.StartOffset
+        $script:InteractiveReads[0].Parent | Should -BeOfType ([System.Management.Automation.Language.NamedBlockAst])
+        $Default = (Get-Command Read-ResumeOrFreshChoice).ScriptBlock.Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ParameterAst] -and $args[0].Name.VariablePath.UserPath -eq 'IsInteractive' }, $true)[0].DefaultValue.Extent.Text
+        $script:InteractiveReads[0].Right.Extent.Text | Should -Be $Default -Because 'the report check is skipped exactly when the question would not be asked'
+    }
+
+    It 'clears the state only after every check that can stop the run before the subscriptions start' {
+        foreach ($Gate in 'Verifying full subscription coverage', 'Verifying subscription access up front')
+        {
+            $GateAt = $script:WrapperText.IndexOf($Gate, [System.StringComparison]::Ordinal)
+            $GateAt | Should -BeGreaterThan $script:AskRegionEnd -Because ('"{0}" comes after the question' -f $Gate)
+            $GateAt | Should -BeLessThan $script:ClearIf.Extent.StartOffset -Because ('a run that "{0}" stops must keep the earlier state' -f $Gate)
+        }
+        # The coverage, access, consumption, blob-upload and -Service checks each stop with exit code 1.
+        @($script:StopPoints | Where-Object { $_.Extent.Text -eq 'Exit-Wrapper -Code 1' }).Count | Should -BeGreaterOrEqual 7
+        foreach ($Stop in $script:StopPoints)
+        {
+            $Stop.Extent.EndOffset | Should -BeLessThan $script:ClearIf.Extent.StartOffset -Because ('a run that stops at "{0}" (offset {1}) must keep the earlier state' -f $Stop.Extent.Text, $Stop.Extent.StartOffset)
+        }
+    }
+
+    It 'headless (<AccountType>): prints the note it always printed and leaves the state alone' -ForEach @(
+        @{ AccountType = 'ServicePrincipal' }
+        @{ AccountType = 'ManagedService' }
+        @{ AccountType = '' }
+    ) {
+        Mock Read-Host { throw 'a headless run must not ask' }
+        Mock Get-RdaResumeCarriedReports { throw 'a headless run must not open the recorded reports' }
+        # A wrapper that handed the question a user sign-in here would start fresh on any host, so the
+        # line, state and backup checks below fail even where this test's own console is redirected.
+        Mock Read-ResumeOrFreshChoice -ParameterFilter { $AccountType -eq 'User' } { 'Fresh' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars @{ PartialAccessAccountType = $AccountType })
+        $R.Lines | Should -Be @($script:NoteLine)
+        $R.Resume | Should -BeFalse
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        (Get-BackupFiles).Count | Should -Be 0
+        Should -Invoke Get-RdaResumeCarriedReports -Exactly -Times 0
+    }
+
+    It 'a user with nobody watching the terminal: prints the note, opens no report and leaves the state alone' {
+        Mock Read-ResumeOrFreshChoice { $null }
+        Mock Get-RdaResumeCarriedReports { throw 'nobody is asked, so no report check' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars @{ ResumeQuestionInteractive = $false })
+        $R.Lines | Should -Be @($script:NoteLine)
+        $R.Resume | Should -BeFalse
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        (Get-BackupFiles).Count | Should -Be 0
+        Should -Invoke Get-RdaResumeCarriedReports -Exactly -Times 0
+        Should -Invoke Read-ResumeOrFreshChoice -Exactly -Times 1 -ParameterFilter { $AccountType -eq 'User' -and $IsInteractive -eq $false -and $UncarriedCount -eq 0 }
+    }
+
+    It 'a user who answers resume skips what is done, as -Resume does' {
+        Mock Read-ResumeOrFreshChoice { 'Resume' }
+        $Vars = New-ResumeVars
+        $R = Invoke-ResumeRegion -Vars $Vars
+        $R.Resume | Should -BeTrue
+        $R.Lines | Should -Be @('Resume mode: 2 previously completed subscription(s) will be skipped.')
+        @($R.CompletedIds) | Should -Be @('s1', 's2')
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        (Get-BackupFiles).Count | Should -Be 0
+        $script:ExpectedStart = $Vars.SeedState.EnumeratedAtStart.CapturedUtc
+        # Neither recorded archive exists, so neither report could be carried.
+        Should -Invoke Read-ResumeOrFreshChoice -Exactly -Times 1 -ParameterFilter { $CompletedCount -eq 2 -and $FailedCount -eq 1 -and $UncarriedCount -eq 2 -and $AccountType -eq 'User' -and $StartedAt -eq $script:ExpectedStart }
+    }
+
+    It 'checks the reports of the done subscriptions in scope, in this run''s privacy mode' {
+        Mock Get-RdaResumeCarriedReports { [pscustomobject]@{ Carried = @(); Missing = @([pscustomobject]@{ Id = 's2'; Name = 's2'; Reason = 'gone' }) } }
+        Mock Read-ResumeOrFreshChoice { 'Resume' }
+        $InScope = @('s2', 's3', 's4' | ForEach-Object { [pscustomobject]@{ Id = $_; Name = $_ } })
+        $null = Invoke-ResumeRegion -Vars (New-ResumeVars @{ Obfuscate = $true; Subscriptions = $InScope })
+        Should -Invoke Get-RdaResumeCarriedReports -Exactly -Times 1 -ParameterFilter { $Obfuscated -eq $true -and (@($SkippedSubscriptions | ForEach-Object { $_.Id }) -join ',') -eq 's2' -and @($Reports).Count -eq 2 }
+        Should -Invoke Read-ResumeOrFreshChoice -Exactly -Times 1 -ParameterFilter { $UncarriedCount -eq 1 }
+    }
+
+    It 'passes no start time when the earlier state has no start listing' {
+        Save-CompletedSubscriptionIds -Path $script:StatePath -Tenant 't1' -Ids @('s1', 's2')
+        Mock Read-ResumeOrFreshChoice { 'Resume' }
+        $null = Invoke-ResumeRegion -Vars (New-ResumeVars)
+        Should -Invoke Read-ResumeOrFreshChoice -Exactly -Times 1 -ParameterFilter { $null -eq $StartedAt } -Because 'the fallback start listing is this run''s, not the earlier run''s'
+    }
+
+    It 'a user who answers fresh gets a backup of the earlier state and, once the gates pass, an empty state' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars)
+
+        $Backups = @(Get-BackupFiles)
+        $Backups.Count | Should -Be 1
+        $Backups[0].Name | Should -Match '^\.resume-state-t1\.json\.backup-\d{8}-\d{6}$'
+        $R.ResumeBackupFile | Should -Be $Backups[0].FullName
+        $R.Lines | Should -Be @((Get-FreshLine -Backup $Backups[0].FullName))
+        $R.Resume | Should -BeFalse
+
+        # The backup holds everything the earlier run recorded.
+        $Backup = Get-Content -LiteralPath $Backups[0].FullName -Raw | ConvertFrom-Json
+        $Backup.TenantID | Should -Be 't1'
+        @($Backup.CompletedSubscriptionIds) | Should -Be @('s1', 's2')
+        @($Backup.FailedAttempts | ForEach-Object { $_.Id }) | Should -Be @('s3')
+        @($Backup.Reports | ForEach-Object { $_.Zip }) | Should -Be $script:OldZips
+        @($Backup.EnumeratedAtStart.SubscriptionIds) | Should -Be @('s1', 's2', 's3')
+
+        # The state on disk and in memory starts over, with this run's start listing.
+        $After = Get-ResumeStateObject -Path $script:StatePath -Tenant 't1'
+        @($After.CompletedSubscriptionIds).Count | Should -Be 0
+        @($After.FailedAttempts).Count | Should -Be 0
+        @($After.Reports).Count | Should -Be 0
+        @($After.EnumeratedAtStart.SubscriptionIds) | Should -Be @('s1', 's2', 's3', 's4')
+        $R.CompletedIds.Count | Should -Be 0
+        $R.FailedAttempts.Count | Should -Be 0
+        $R.CompletedReports.Count | Should -Be 0
+        @($R.StartSnapshot.SubscriptionIds) | Should -Be @('s1', 's2', 's3', 's4')
+        $R.StateSaveArgs.StartSnapshot | Should -Be $R.StartSnapshot
+
+        # A later run reads neither the backup nor a leftover temp file as state.
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:CaseDir -Tenant 't1').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $script:CaseDir -Filter '*.tmp' -File -Force).Count | Should -Be 0
+        $Next = New-ResumeVars
+        $Next.CompletedIds.Count | Should -Be 0
+        $Next.FailedAttempts.Count | Should -Be 0
+    }
+
+    It 'a user who answers fresh keeps the earlier state live when a gate stops the run' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars) -StoppedByGate
+        (Get-BackupFiles).Count | Should -Be 1
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        $R.CompletedIds.Count | Should -Be 0 -Because 'this run itself already starts over'
+    }
+
+    It 'a user who answers fresh with blob-backed state backs up what it read, clears the blob, and keeps the backup local' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        Mock Save-StateBlob { $true }
+        Mock Read-StateBlob { Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json }
+        $Vars = New-ResumeVars @{ StateBlobArgs = @{ BlobContext = 'context'; BlobContainer = 'state'; BlobName = 'rda/t1.json' } }
+        # The earlier state came from the blob, so the local file can be missing.
+        Remove-Item -LiteralPath $script:StatePath -Force
+        $R = Invoke-ResumeRegion -Vars $Vars
+
+        $Backups = @(Get-BackupFiles)
+        $Backups.Count | Should -Be 1
+        $R.Lines | Should -Be @((Get-FreshLine -Backup $Backups[0].FullName -Where ' (a local file only)'))
+        $Backup = Get-Content -LiteralPath $Backups[0].FullName -Raw | ConvertFrom-Json
+        @($Backup.CompletedSubscriptionIds) | Should -Be @('s1', 's2')
+        @($Backup.FailedAttempts | ForEach-Object { $_.Id }) | Should -Be @('s3')
+        @($Backup.EnumeratedAtStart.SubscriptionIds) | Should -Be @('s1', 's2', 's3')
+        Should -Invoke Save-StateBlob -Exactly -Times 1
+        Should -Invoke Save-StateBlob -Exactly -Times 1 -ParameterFilter { $BlobName -eq 'rda/t1.json' -and $File -eq $script:StatePath }
+        $R.StateSaveArgs.BlobName | Should -Be 'rda/t1.json'
+    }
+
+    It 'warns when the state blob still holds the earlier run after the clear' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        # The real Save-StateBlob runs and its upload fails, as an expired token or a lost role does.
+        function Set-AzStorageBlobContent
+        {
+            [CmdletBinding()]
+            param($File, $Container, $Blob, $Context, [switch]$Force)
+            throw 'This request is not authorized to perform this operation.'
+        }
+        $script:OldBlob = $script:StateBefore | ConvertFrom-Json
+        Mock Read-StateBlob { $script:OldBlob }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars @{ StateBlobArgs = @{ BlobContext = 'context'; BlobContainer = 'state'; BlobName = 'rda/t1.json' } })
+        $Backup = @(Get-BackupFiles)[0].FullName
+        $R.Lines | Should -Be @(
+            (Get-FreshLine -Backup $Backup -Where ' (a local file only)')
+            'WARNING: could not mirror resume state to blob state/rda/t1.json: This request is not authorized to perform this operation.'
+            (Get-HeldWarning -Where 'the state blob rda/t1.json' -Backup $Backup)
+        )
+    }
+
+    It 'warns when the state file still holds the earlier run after the clear' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        $script:LiveTmp = '{0}.tmp' -f $script:StatePath
+        Mock Set-Content -ParameterFilter { $LiteralPath -eq $script:LiveTmp } { throw 'disk full' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars)
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        $Backup = @(Get-BackupFiles)[0].FullName
+        $R.Lines | Should -Be @(
+            (Get-FreshLine -Backup $Backup)
+            ('WARNING: Failed to persist resume state to {0}: disk full' -f $script:StatePath)
+            (Get-HeldWarning -Where ('the state file {0}' -f $script:StatePath) -Backup $Backup)
+        )
+    }
+
+    It 'names every per-stream copy still there (kept or unreadable), and leaves them for the merge to remove' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        $Kept = Join-Path $script:CaseDir '.resume-state-t1-stream-1.json'
+        Set-Content -LiteralPath $Kept -Value '{"Completed":["s1"]}'
+        $Unreadable = Join-Path $script:CaseDir '.resume-state-t1-stream-2.json'
+        Set-Content -LiteralPath $Unreadable -Value '{ not json'
+        $Merged = Join-Path $script:CaseDir '.resume-state-t1-stream-3.json'
+        $Found = @($Kept, $Unreadable, $Merged | ForEach-Object { [System.IO.FileInfo]::new($_) })
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars @{ StrandedStreamFiles = $Found })
+        $Backup = @(Get-BackupFiles)[0].FullName
+        $R.Lines[-1] | Should -Be (Get-HeldWarning -Where ('the per-stream state file {0}, the per-stream state file {1}' -f $Kept, $Unreadable) -Backup $Backup) -Because 'a copy the startup merge already removed holds nothing'
+        Test-Path -LiteralPath $Kept | Should -BeTrue -Because 'only Remove-RdaMergedStreamState removes a stream copy'
+        Test-Path -LiteralPath $Unreadable | Should -BeTrue
+    }
+
+    It 'a user who answers fresh keeps the earlier state when the backup cannot be written' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        # A half-written temp file is left behind before the failure, as a full disk leaves one. Not
+        # Set-Content inside the mock: that would call this mock again.
+        Mock Set-Content -ParameterFilter { $LiteralPath -like '*.backup-*' } { [System.IO.File]::WriteAllText($LiteralPath, '{'); throw 'disk full' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars)
+        $R.Lines.Count | Should -Be 2
+        $R.Lines[0] | Should -Match ('^WARNING: Failed to persist resume state to {0}\.backup-\d{{8}}-\d{{6}}: disk full$' -f [regex]::Escape($script:StatePath))
+        $R.Lines[1] | Should -Match ('^WARNING: could not write a backup of the earlier state to {0}\.backup-\d{{8}}-\d{{6}}, so the earlier state is left in place\. Every subscription will be collected again\.$' -f [regex]::Escape($script:StatePath))
+        $R.Resume | Should -BeFalse
+        $R.ResumeBackupFile | Should -BeNullOrEmpty
+        @($R.CompletedIds) | Should -Be @('s1', 's2')
+        @($R.FailedAttempts | ForEach-Object { $_.Id }) | Should -Be @('s3')
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        (Get-BackupFiles).Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $script:CaseDir -Filter '*.tmp' -File -Force).Count | Should -Be 0
+    }
+
+    It 'does not ask when <Switch> is set' -ForEach @(
+        @{ Switch = 'ResumeFailedOnly'; Expected = 'Note' }
+        @{ Switch = 'Preflight'; Expected = 'Note' }
+        @{ Switch = 'Resume'; Expected = 'Resume mode: 2 previously completed subscription(s) will be skipped.' }
+    ) {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        Mock Get-RdaResumeCarriedReports { throw 'no question, so no report check' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars @{ $Switch = $true })
+        $ExpectedLine = if ($Expected -eq 'Note') { $script:NoteLine } else { $Expected }
+        $R.Lines | Should -Be @($ExpectedLine)
+        Get-Content -LiteralPath $script:StatePath -Raw | Should -Be $script:StateBefore
+        (Get-BackupFiles).Count | Should -Be 0
+        Should -Invoke Read-ResumeOrFreshChoice -Exactly -Times 0
+        Should -Invoke Get-RdaResumeCarriedReports -Exactly -Times 0
+    }
+
+    It 'does not ask when no subscription was completed' {
+        Mock Read-ResumeOrFreshChoice { 'Fresh' }
+        $R = Invoke-ResumeRegion -Vars (New-ResumeVars @{ CompletedIds = @() })
+        $R.Lines.Count | Should -Be 0
+        Should -Invoke Read-ResumeOrFreshChoice -Exactly -Times 0
+    }
+
+    It 'the run summary lists -Resume when the run was resumed at the console (<Case>)' -ForEach @(
+        @{ Case = 'resumed at the prompt'; Choice = 'Resume'; PassResume = $false; Expected = 'Obfuscate,Resume' }
+        @{ Case = 'started fresh at the prompt'; Choice = 'Fresh'; PassResume = $false; Expected = 'Obfuscate' }
+        @{ Case = 'not asked'; Choice = $null; PassResume = $false; Expected = 'Obfuscate' }
+        @{ Case = '-Resume passed'; Choice = $null; PassResume = $true; Expected = 'Obfuscate,Resume' }
+    ) {
+        $InvokeArgs = @{ Obfuscate = $true }
+        if ($PassResume) { $InvokeArgs['Resume'] = $true }
+        # Read by the lifted block, which runs in a child scope.
+        Set-Variable -Name ResumeChoice -Value $Choice
+        $Params = & $script:SummaryParams @InvokeArgs
+        (@($Params.Keys | Sort-Object) -join ',') | Should -Be $Expected
+        if ($Expected -like '*Resume') { $Params['Resume'].IsPresent | Should -BeTrue }
     }
 }
 

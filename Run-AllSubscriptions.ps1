@@ -3432,9 +3432,15 @@ if ($AuthSkippedPhases.Count -gt 0)
     Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
     Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
     Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
-    Write-Host "The command to re-run each of them on its own is listed under 'Metrics Auth Failures' above." -ForegroundColor Red
-    Write-Host $MetricsAuthRetryNote -ForegroundColor Red
-    Write-Host $MetricsAuthSkipNote -ForegroundColor Red
+    # All three lines below are about the metrics skip: the re-run lines are printed by the "Metrics Auth
+    # Failures" block, and the retry list and -SkipMetrics only answer a metrics gap. Consumption alone
+    # also raises this banner, and then that block never ran, so there is nothing to point at.
+    if ($MetricsAuthSkipped.Count -gt 0)
+    {
+        Write-Host "The command to re-run each of them on its own is listed under 'Metrics Auth Failures' above." -ForegroundColor Red
+        Write-Host $MetricsAuthRetryNote -ForegroundColor Red
+        Write-Host $MetricsAuthSkipNote -ForegroundColor Red
+    }
     if (@($FailedSubscriptions).Count -eq 0)
     {
         Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow

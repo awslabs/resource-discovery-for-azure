@@ -2064,17 +2064,17 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         # streams really ran: the parallel path sets it, to 0 when it ran its one subscription in this process,
         # and the sequential path never sets it. The default stands for a run that used three streams.
         $script:RunPoolEnd = {
-            param($Entries, $Failed = @(), [int]$ParallelStreams = 3, $StreamCount = 3, $Passthrough = $null, $Reports = @())
+            param($Entries, $Failed = @(), [int]$ParallelStreams = 3, $StreamCount = 3, $Passthrough = $null, $Reports = @(), $ConsumptionEntries = @())
             $Printed = [System.Collections.Generic.List[string]]::new()
             $UsePassthrough = if ($null -ne $Passthrough) { $Passthrough } else { @{ ConcurrencyLimit = 5 } }
             $Runner = [scriptblock]::Create(((@(
-                            'param($Entries, $Failed, $Printed, $ParallelStreams, $StreamCount, $InventoryPassthrough, $SubResourceCounts)'
+                            'param($Entries, $Failed, $Printed, $ParallelStreams, $StreamCount, $InventoryPassthrough, $SubResourceCounts, $ConsumptionEntries)'
                             'function Write-Host { param($Object, $ForegroundColor) $Printed.Add([string]$Object) }'
                             '$Saved = @($Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:CollectorFailures)'
                             'try'
                             '{'
                             '$Global:MetricsFailedSubs = @($Entries)'
-                            '$Global:ConsumptionFailedSubs = @()'
+                            '$Global:ConsumptionFailedSubs = @($ConsumptionEntries)'
                             '$Global:CollectorFailures = @()'
                             '$FailedSubscriptions = @($Failed)'
                             '$ConcurrencyLimit = 5'
@@ -2087,7 +2087,7 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
                             '}'
                             'finally { $Global:MetricsFailedSubs = $Saved[0]; $Global:ConsumptionFailedSubs = $Saved[1]; $Global:CollectorFailures = $Saved[2] }'
                         ) -join [Environment]::NewLine)))
-            & $Runner $Entries $Failed $Printed $ParallelStreams $StreamCount $UsePassthrough @($Reports)
+            & $Runner $Entries $Failed $Printed $ParallelStreams $StreamCount $UsePassthrough @($Reports) @($ConsumptionEntries)
         }
         $script:AuthEntry = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = 'aaaa-1'; Message = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'; Cause = 'auth' }
         $script:PoolEntry = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = 'bbbb-2'; Message = 'Metrics: the metric worker pool could not be opened (Insufficient resources); 4 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
@@ -2292,5 +2292,25 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $R = & $script:RunPoolEnd @($script:PoolEntry)
         $R.Printed | Should -Not -Match 'credential' -Because 'the pool remedy is memory on the host'
         $R.Printed | Should -Not -Match '-SkipMetrics' -Because 'skipping metrics is not the remedy for a host short of memory'
+    }
+
+    It 'a billing-only auth skip says nothing about metrics it never printed a block for' {
+        # Consumption alone puts a phase in the auth list, so the banner fires with no metrics entry at
+        # all: the "Metrics Auth Failures" block never ran, so there is no re-run line to point at and
+        # nothing of this run is in the retry list over metrics.
+        $Billing = [pscustomobject]@{ Name = 'Contoso-Bill'; Id = '(auth)'; Message = 'Consumption phase skipped: no usable Azure context/token.' }
+        $R = & $script:RunPoolEnd @() @() 1 $null $null @() @($Billing)
+        $R.Phases | Should -Be @('Consumption') -Because 'only the billing phase was skipped'
+        $R.Printed | Should -Match 'FAILED \(auth\)'
+        $R.Printed | Should -Not -Match "listed under 'Metrics Auth Failures' above" -Because 'that block never printed, so there is no line to find there'
+        $R.Printed | Should -Not -Match 'retry list' -Because 'no metrics gap of this run put anything in it'
+        $R.Printed | Should -Not -Match '-SkipMetrics' -Because 'skipping metrics does not repair a billing credential'
+
+        # With a metrics entry beside it, all three are back.
+        $Both = & $script:RunPoolEnd @($script:AuthEntry) @() 1 $null $null @() @($Billing)
+        $Both.Phases | Should -Be @('Metrics', 'Consumption')
+        $Both.Printed | Should -Match "listed under 'Metrics Auth Failures' above"
+        $Both.Printed | Should -Match 'retry list'
+        $Both.Printed | Should -Match '-SkipMetrics'
     }
 }

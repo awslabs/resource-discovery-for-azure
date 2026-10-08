@@ -222,6 +222,50 @@ Merge-RecoveryData `
 
 See also consumption-data.md, "Recovering from a consumption crash".
 
+### The metrics of a subscription were left incomplete
+
+Symptom: the run ends with exit code 3 and a "FAILED (metrics incomplete)"
+banner, the "Metrics Incomplete" block names the subscriptions, and the metric
+worker pool could not be opened - usually because the host was short of memory.
+The inventory itself finished, so each report is in the bundle; only the
+per-call metrics are missing.
+
+Those subscriptions are left in the retry list rather than the completed list,
+so the simplest repair is another run of the same command with `-Resume` or
+`-ResumeFailedOnly` added: it collects exactly those subscriptions again, in
+full, and the new bundle carries their new reports. Prefer `-Resume`, whose
+bundle carries every subscription once; after `-ResumeFailedOnly` a retried
+subscription appears in its own bundle as well as in the earlier one.
+
+```powershell
+# Free memory first, or lower the metric call concurrency, then:
+./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -ConcurrencyLimit 4 -Resume
+```
+
+To repair one subscription on its own instead, the "Metrics Incomplete" block
+prints a ready line per subscription. Paste it into a new PowerShell 7 session;
+its report goes to a new folder and is **not** added to the original bundle, and
+the next `-Resume` collects that subscription again. Merge it back in with
+`-RecoverMetrics`:
+
+```powershell
+# 1. Paste the line the run printed for that subscription, for example
+./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID <sub-id> -ConcurrencyLimit 4 -Obfuscate `
+    -ObfuscationDictionary "<original run folder>\ObfuscationDictionary_<stamp>.json"
+
+# 2. Merge only the metrics back in
+. ./Functions/RecoveryMerge.Functions.ps1
+Merge-RecoveryData `
+    -GapBundlePath      "<original run folder>" `
+    -RecoveryBundlePath "<step 1 folder>" `
+    -OutputPath         "<new folder>" `
+    -RecoverMetrics
+```
+
+An obfuscated re-run needs `-ObfuscationDictionary` pointing at the dictionary
+the original run wrote for that subscription; without it the re-run mints its own
+tokens and the two reports cannot be lined up.
+
 ### A failed collector and interrupted billing together
 
 ```powershell
@@ -259,6 +303,10 @@ Two logs help you see what failed and where.
   and consumption failures. For consumption it records exactly where a pull
   stopped (`PageAtFailure` and `RecordsCollected`), so a short billing sheet is
   obvious instead of something you have to guess at.
+- A subscription whose metrics were left incomplete stays in the retry list in
+  the resume state, so `-Resume` and `-ResumeFailedOnly` both collect it again.
+  The log never carries the re-run command the console prints: that line holds a
+  local path and the tenant id, and this log ships with the bundle.
 - It is a plain `.log`, not `.json`, on purpose, so the ingestion pipeline treats
   it as an attachment and not as report data.
 

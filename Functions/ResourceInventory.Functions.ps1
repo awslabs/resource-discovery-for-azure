@@ -1852,9 +1852,14 @@ function Invoke-AzGraphQuerySafe
 
     if ($Lowercase -and $Rows.Count -gt 0)
     {
-        $Json = ($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant()
-        $Json = [regex]::Replace($Json, '(?<=[{,]\s*)""(?=\s*:)', ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
-        $Rows = @($Json | ConvertFrom-Json)
+        # One row at a time: a whole 1,000-row page as one JSON text is copied three times, and that dead text held a large share of the memory peak.
+        $Lowered = foreach ($Row in $Rows)
+        {
+            $Json = ($Row | ConvertTo-Json -Depth 100).ToLowerInvariant()
+            $Json = [regex]::Replace($Json, '(?<=[{,]\s*)""(?=\s*:)', ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
+            $Json | ConvertFrom-Json
+        }
+        $Rows = @($Lowered)
     }
 
     return [pscustomobject]@{ data = $Rows }

@@ -1507,6 +1507,24 @@ $Warned = @(. ([scriptblock]::Create($Text)) 3>&1 | Where-Object { $_ -is [Syste
             $Mixed.FileKept | Should -BeTrue -Because 'the file added nothing to what was checked'
             $Mixed.Completed | Should -Be @('sub-done', 'sub-earlier')
 
+            # A stranded failure for an id the SAVED state calls completed. Without the revoke, the
+            # merge drops that entry because the id is in the completed list, and the next -Resume
+            # skips a subscription whose metrics are still owed and whose partial report was withheld.
+            & $Reset '{ "Completed": ["sub-file"], "FailedAttempts": [ { "Id": "sub-earlier", "Name": "E", "Reason": "Metrics incomplete: the metric worker pool could not be opened (out of memory).", "LastFailedAt": "2026-01-01T00:00:00Z", "Attempts": 1 } ] }'
+            $Revoked = & $Run $Block $false $Dir $true $true
+            $Revoked.Failed | Should -Be @('sub-earlier') -Because 'a failure an interrupted run recorded outranks an older completion, as the end-of-run fold treats one'
+            $Revoked.Completed | Should -Be @('sub-file') -Because 'the id it is still owed metrics for is dropped from the completed set'
+            $Revoked.FileKept | Should -BeFalse -Because 'the saved state now holds the entry, so the copy can go'
+            $Revoked.Warned.Count | Should -Be 0
+
+            # But a copy that lists the id as completed ITSELF still supersedes its own failure record,
+            # so the revoke is not a blanket one.
+            & $Reset '{ "Completed": ["sub-earlier"], "FailedAttempts": [ { "Id": "sub-earlier", "Name": "E", "Reason": "r", "LastFailedAt": "2026-01-01T00:00:00Z", "Attempts": 1 } ] }'
+            $SameCopy = & $Run $Block $false $Dir $true $true
+            $SameCopy.Failed.Count | Should -Be 0 -Because 'that run finished the subscription after the failure it recorded'
+            $SameCopy.Completed | Should -Be @('sub-earlier')
+            $SameCopy.FileKept | Should -BeFalse
+
             # -Preflight changes no state.
             & $Reset
             $Pre = & $Run $Block $true $Dir $true $true $true $true

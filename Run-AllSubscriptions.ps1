@@ -868,6 +868,12 @@ if (-not $Preflight)
             # After the saved state's own records, so the interrupted run's newer report wins.
             $CompletedReports = @(@($CompletedReports) + @($StrandedReports))
         }
+        # A failure an interrupted run recorded outranks an older completion, exactly as the end-of-run
+        # fold treats one, or Merge-FailedAttempts drops the very entry that would repair the
+        # subscription and the next -Resume skips it. An id that same stranded state lists as completed
+        # is exempt: that run finished it after the failure it recorded.
+        $StrandedFailedIds = @($StrandedFailed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } | Where-Object { $StrandedCompleted -notcontains $_ })
+        $CompletedIds = @($CompletedIds | Where-Object { $StrandedFailedIds -notcontains $_ })
         $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
         # A stream leaves a local file and, with blob-backed state, a blob too: count subscriptions, not copies.
         Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f @($StrandedCompleted | Sort-Object -Unique).Count, @($StrandedFailed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } | Sort-Object -Unique).Count) -ForegroundColor Cyan

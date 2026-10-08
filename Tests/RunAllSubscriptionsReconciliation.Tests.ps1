@@ -4830,3 +4830,128 @@ Describe 'The parallel fold does not let a shipped report cover a subscription t
         @($Result.CompletedIds | Sort-Object) | Should -Be @('sub-1', 'sub-2')
     }
 }
+
+Describe 'Get-RdaInventoryRerunCommand builds one pasteable line' {
+    BeforeAll {
+        $script:RerunTenant = '11111111-1111-1111-1111-111111111111'
+        $script:RerunSub = '22222222-2222-2222-2222-222222222222'
+        # Parse the line back the way a new pwsh session would, so the test proves the quoting survives
+        # rather than just comparing strings.
+        function script:Get-RerunBinding
+        {
+            param([string]$Command)
+            $Errors = $null
+            $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Command, [ref]$null, [ref]$Errors)
+            @($Errors).Count | Should -Be 0 -Because ('the line must parse: ' + $Command)
+            $Cmd = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.CommandAst] }, $true)
+            $Elements = @($Cmd.CommandElements)
+            [pscustomobject]@{
+                Path  = $Elements[0].Value
+                Names = @($Elements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+                Text  = $Command
+            }
+        }
+    }
+
+    It 'round-trips a path with a space, an apostrophe, a dollar and a backtick, on either platform' {
+        foreach ($Path in @("/opt/rda tools/Bob's copy/ResourceInventory.ps1", 'C:\Program Files\rda''s $tools\Resource`Inventory.ps1'))
+        {
+            $Command = Get-RdaInventoryRerunCommand -ScriptPath $Path -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ ConcurrencyLimit = 6 }
+            $Binding = script:Get-RerunBinding -Command $Command
+            $Binding.Path | Should -Be $Path -Because 'a single-quoted path with its quotes doubled comes back unchanged'
+            $Binding.Names | Should -Be @('TenantID', 'SubscriptionID', 'ConcurrencyLimit') -Because 'the run is identified first, then the passthrough in name order'
+        }
+    }
+
+    It 'prints a switch that is on, leaves out one that is off, and never adds -RunAllSubs' {
+        $Passthrough = @{ ConcurrencyLimit = 6; Debug = $false; Obfuscate = $false; UseMetricsBatch = $true; RunAllSubs = $true; SkipDiskMetrics = $true }
+        $Command = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough $Passthrough
+        $Binding = script:Get-RerunBinding -Command $Command
+        $Binding.Names | Should -Be @('TenantID', 'SubscriptionID', 'ConcurrencyLimit', 'SkipDiskMetrics', 'UseMetricsBatch')
+        $Binding.Names | Should -Not -Contain 'Debug'
+        $Binding.Names | Should -Not -Contain 'Obfuscate'
+        $Binding.Names | Should -Not -Contain 'RunAllSubs' -Because 'the line runs one subscription on its own'
+        $Command | Should -Not -Match '\$false'
+    }
+
+    It 'writes a multi-value parameter as separate values, not one joined string' {
+        $Command = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Service = @('Virtual Machines', "O'Brien") }
+        $Command | Should -Match ([regex]::Escape("-Service 'Virtual Machines','O''Brien'"))
+        $Errors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Command, [ref]$null, [ref]$Errors)
+        @($Errors).Count | Should -Be 0
+        $Array = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.ArrayLiteralAst] }, $true)
+        @($Array.Elements | ForEach-Object { $_.Value }) | Should -Be @('Virtual Machines', "O'Brien") -Because 'a joined string would reach the inner script as one service name'
+    }
+
+    It 'returns nothing rather than a line it cannot build correctly' {
+        Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId 'not-a-guid' -Passthrough @{} | Should -BeNullOrEmpty
+        Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId '' -Passthrough @{} | Should -BeNullOrEmpty
+        Get-RdaInventoryRerunCommand -ScriptPath '' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{} | Should -BeNullOrEmpty
+        Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId '' -SubscriptionId $script:RerunSub -Passthrough @{} | Should -BeNullOrEmpty
+        $Secret = ConvertTo-SecureString 'not-a-real-value' -AsPlainText -Force
+        Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Secret = $Secret } | Should -BeNullOrEmpty -Because 'a credential must never reach a printed line'
+        $Credential = [System.Management.Automation.PSCredential]::new('someone', $Secret)
+        Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Login = $Credential } | Should -BeNullOrEmpty
+    }
+
+    It 'adds the dictionary only for an obfuscated run' {
+        $Plain = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ ConcurrencyLimit = 6 } -DictionaryPath '/tmp/ObfuscationDictionary_X_1.json'
+        $Plain | Should -Not -Match '-ObfuscationDictionary' -Because 'a plain run has no tokens to line up'
+        $Obfuscated = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true } -DictionaryPath '/tmp/ObfuscationDictionary_X_1.json'
+        (script:Get-RerunBinding -Command $Obfuscated).Names | Should -Be @('TenantID', 'SubscriptionID', 'Obfuscate', 'ObfuscationDictionary')
+        $Blind = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true }
+        $Blind | Should -Match ([regex]::Escape('-ObfuscationDictionary ''<the ObfuscationDictionary_*.json this run wrote for that subscription>'''))
+        $Carried = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true; ObfuscationDictionary = '/tmp/stale.json' } -DictionaryPath '/tmp/ObfuscationDictionary_X_1.json'
+        ([regex]::Matches($Carried, '-ObfuscationDictionary')).Count | Should -Be 1 -Because 'the dictionary is chosen once, from the archive this run wrote'
+        $Carried | Should -Not -Match 'stale.json'
+    }
+
+    It 'is built from the passthrough table alone, never from the command line the operator typed' {
+        # Code only: the comment in the function names both of these to say why it avoids them.
+        $Tokens = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput((Get-Command Get-RdaInventoryRerunCommand).ScriptBlock.ToString(), [ref]$Tokens, [ref]$null)
+        $Code = @($Tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text }) -join ' '
+        $Code | Should -Not -Match 'PSBoundParameters' -Because 'those are the wrapper parameters, and on a standalone run they can hold a secret'
+        $Code | Should -Not -Match 'MyInvocation'
+        $Code | Should -Match 'TryParse' -Because 'an id that is not a GUID gets no line at all'
+    }
+
+    It 'is printed to the console only, never into a file that ships or an entry message' {
+        $Repo = Split-Path $PSScriptRoot -Parent
+        $Callers = @()
+        foreach ($File in @('Run-AllSubscriptions.ps1', 'Run-AllSubscriptions.Stream.ps1', 'ResourceInventory.ps1', 'Extension/Metrics.ps1', 'Functions/RunAllSubscriptions.Functions.ps1', 'Functions/Common.Functions.ps1', 'Functions/ResourceInventory.Functions.ps1'))
+        {
+            $Path = Join-Path $Repo $File
+            if (-not (Test-Path -LiteralPath $Path)) { continue }
+            $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            foreach ($Call in @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Get-RdaInventoryRerunCommand' }, $true)))
+            {
+                $Callers += [pscustomobject]@{ File = $File; Ast = $Call }
+            }
+        }
+        $Callers.Count | Should -Be 1 -Because ('the line is built in one place: {0}' -f (($Callers | ForEach-Object { $_.File }) -join ', '))
+        $Callers[0].File | Should -Be 'Run-AllSubscriptions.ps1'
+        # Inside the console scriptblock, so it cannot be reached by a file writer.
+        $Wrapper = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Repo 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $Holder = $Wrapper.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '$RerunCommandLines' }, $true)
+        $Holder | Should -Not -BeNullOrEmpty
+        $Callers[0].Ast.Extent.StartOffset | Should -BeGreaterThan $Holder.Extent.StartOffset
+        $Callers[0].Ast.Extent.EndOffset | Should -BeLessThan $Holder.Extent.EndOffset
+        # The writers of the files that ship, and of the health entries, must not reach it.
+        foreach ($Writer in @('Get-RunSummaryLogContent', 'Write-RdaShareableDiagnosticsLog'))
+        {
+            $Command = Get-Command $Writer -CommandType Function -ErrorAction SilentlyContinue
+            if ($null -eq $Command) { continue }
+            $Command.ScriptBlock.ToString() | Should -Not -Match 'Get-RdaInventoryRerunCommand' -Because ("{0} writes a file that ships with the bundle" -f $Writer)
+            $Command.ScriptBlock.ToString() | Should -Not -Match 'RerunCommandLines'
+        }
+        # And it never goes into a health entry's Message, which RunSummary.log and the shareable
+        # diagnostics log both render.
+        $Entries = @($Wrapper.FindAll({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] -and $N.Extent.Text -match '\bMessage\s*=' }, $true))
+        foreach ($Entry in $Entries)
+        {
+            $Entry.Extent.Text | Should -Not -Match 'RerunCommand|Get-RdaInventoryRerunCommand'
+        }
+    }
+}

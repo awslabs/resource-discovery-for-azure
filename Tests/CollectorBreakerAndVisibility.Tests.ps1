@@ -2046,10 +2046,11 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         # streams really ran: the parallel path sets it, to 0 when it ran its one subscription in this process,
         # and the sequential path never sets it. The default stands for a run that used three streams.
         $script:RunPoolEnd = {
-            param($Entries, $Failed = @(), [int]$ParallelStreams = 3, $StreamCount = 3)
+            param($Entries, $Failed = @(), [int]$ParallelStreams = 3, $StreamCount = 3, $Passthrough = $null, $Reports = @())
             $Printed = [System.Collections.Generic.List[string]]::new()
+            $UsePassthrough = if ($null -ne $Passthrough) { $Passthrough } else { @{ ConcurrencyLimit = 5 } }
             $Runner = [scriptblock]::Create(((@(
-                            'param($Entries, $Failed, $Printed, $ParallelStreams, $StreamCount)'
+                            'param($Entries, $Failed, $Printed, $ParallelStreams, $StreamCount, $InventoryPassthrough, $SubResourceCounts)'
                             'function Write-Host { param($Object, $ForegroundColor) $Printed.Add([string]$Object) }'
                             '$Saved = @($Global:MetricsFailedSubs, $Global:ConsumptionFailedSubs, $Global:CollectorFailures)'
                             'try'
@@ -2059,6 +2060,8 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
                             '$Global:CollectorFailures = @()'
                             '$FailedSubscriptions = @($Failed)'
                             '$ConcurrencyLimit = 5'
+                            '$TenantID = ''11111111-1111-1111-1111-111111111111'''
+                            '$InventoryScriptPath = ''/opt/rda tools/ResourceInventory.ps1'''
                             $script:PoolConsoleText
                             $script:PoolBannerText
                             $script:PoolExitText
@@ -2066,7 +2069,7 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
                             '}'
                             'finally { $Global:MetricsFailedSubs = $Saved[0]; $Global:ConsumptionFailedSubs = $Saved[1]; $Global:CollectorFailures = $Saved[2] }'
                         ) -join [Environment]::NewLine)))
-            & $Runner $Entries $Failed $Printed $ParallelStreams $StreamCount
+            & $Runner $Entries $Failed $Printed $ParallelStreams $StreamCount $UsePassthrough @($Reports)
         }
         $script:AuthEntry = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = 'aaaa-1'; Message = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'; Cause = 'auth' }
         $script:PoolEntry = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = 'bbbb-2'; Message = 'Metrics: the metric worker pool could not be opened (Insufficient resources); 4 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
@@ -2188,5 +2191,71 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $R.Printed | Should -Not -Match 'without -Resume' -Because 'a fresh run is no longer the remedy'
         $R.Printed | Should -Not -Match 'skips them because their inventory completed' -Because 'a resume run no longer skips them'
         $R.Printed | Should -Not -Match 'metrics phase' -Because 'there is no way to re-run only that phase'
+    }
+
+    It 'prints one re-run command per subscription in both blocks, and the banners point at them' {
+        $PoolGuid = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'Metrics: the metric worker pool could not be opened (Insufficient resources); 4 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $AuthGuid = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = '33333333-3333-3333-3333-333333333333'; Message = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'; Cause = 'auth' }
+        $R = & $script:RunPoolEnd @($PoolGuid, $AuthGuid)
+        $Lines = @($R.Printed -split "`n")
+        $Commands = @($Lines | Where-Object { $_ -match '^\s*& ' })
+        $Commands.Count | Should -Be 2 -Because 'one line for the incomplete subscription and one for the auth-skipped one'
+        @($Commands | Where-Object { $_ -match [regex]::Escape("-SubscriptionID '22222222-2222-2222-2222-222222222222'") }).Count | Should -Be 1
+        @($Commands | Where-Object { $_ -match [regex]::Escape("-SubscriptionID '33333333-3333-3333-3333-333333333333'") }).Count | Should -Be 1
+        foreach ($Command in $Commands)
+        {
+            $Command | Should -Match ([regex]::Escape("& '/opt/rda tools/ResourceInventory.ps1'")) -Because 'a path with a space must survive being pasted'
+            $Command | Should -Match ([regex]::Escape("-TenantID '11111111-1111-1111-1111-111111111111'"))
+            $Command | Should -Match '-ConcurrencyLimit 5'
+            $Command | Should -Not -Match '-RunAllSubs' -Because 'the line runs one subscription on its own'
+            $Command | Should -Not -Match '"' -Because 'a double-quoted path would re-expand a $ in the path'
+        }
+        @($Lines | Where-Object { $_ -eq "The command to re-run each of them on its own is listed under 'Metrics Incomplete' above." }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -eq "The command to re-run each of them on its own is listed under 'Metrics Auth Failures' above." }).Count | Should -Be 1
+    }
+
+    It 'keeps the printed commands free of a false switch and of any credential' {
+        $PoolGuid = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'pool failed; 1 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $Passthrough = @{ ConcurrencyLimit = 5; Debug = $false; SkipConsumption = $true; Service = @('Compute', 'Storage'); MetricsLookbackDays = 14 }
+        $R = & $script:RunPoolEnd @($PoolGuid) @() 1 $null $Passthrough
+        $Command = @($R.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' })[0]
+        $Command | Should -Not -BeNullOrEmpty
+        $Command | Should -Not -Match '-Debug' -Because 'a switch that was off must not be printed as if it had been passed'
+        $Command | Should -Match '-SkipConsumption' -Because 'a switch that was on is printed bare'
+        $Command | Should -Match ([regex]::Escape("-Service 'Compute','Storage'")) -Because 'a two-value -Service must bind as two values'
+        $Command | Should -Match '-MetricsLookbackDays 14'
+        # The parameters follow the two that identify the run, then alphabetical order.
+        $Command.IndexOf('-TenantID') | Should -BeLessThan $Command.IndexOf('-SubscriptionID')
+        $Command.IndexOf('-SubscriptionID') | Should -BeLessThan $Command.IndexOf('-ConcurrencyLimit')
+        $Command.IndexOf('-ConcurrencyLimit') | Should -BeLessThan $Command.IndexOf('-MetricsLookbackDays')
+        $R.Printed | Should -Not -Match '(?i)-appid|-secret'
+    }
+
+    It 'says so instead of printing a line it cannot build, and leaves the dictionary out of a plain run' {
+        $NoGuid = [pscustomobject]@{ Name = 'Contoso-Odd'; Id = 'bbbb-2'; Message = 'pool failed; 1 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $R = & $script:RunPoolEnd @($NoGuid)
+        $R.Printed | Should -Match 'no line can be built for this subscription'
+        @($R.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' }).Count | Should -Be 0
+        $R.Printed | Should -Not -Match '-ObfuscationDictionary' -Because 'only an obfuscated run can use one'
+    }
+
+    It 'asks an obfuscated re-run for this run dictionary, and says why' {
+        $PoolGuid = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'pool failed; 1 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $Dir = Join-Path $TestDrive ('dict-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $Dictionary = Join-Path $Dir 'ObfuscationDictionary_Contoso_1.json'
+        '{}' | Set-Content -LiteralPath $Dictionary -Encoding utf8
+        $Reports = @([pscustomobject]@{ Id = '22222222-2222-2222-2222-222222222222'; Zip = (Join-Path $Dir 'report.zip') })
+        $R = & $script:RunPoolEnd @($PoolGuid) @() 1 $null @{ ConcurrencyLimit = 5; Obfuscate = $true } $Reports
+        $Command = @($R.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' })[0]
+        $Command | Should -Match '-Obfuscate'
+        $Command | Should -Match ([regex]::Escape(("-ObfuscationDictionary '{0}'" -f $Dictionary))) -Because 'the one dictionary beside that subscription archive is the right one'
+        $R.Printed | Should -Match 'cannot be lined up'
+
+        # No archive recorded for the subscription, so the dictionary cannot be found: a placeholder that
+        # names what is needed rather than a line that would quietly mint new tokens.
+        $Blind = & $script:RunPoolEnd @($PoolGuid) @() 1 $null @{ ConcurrencyLimit = 5; Obfuscate = $true } @()
+        $BlindCommand = @($Blind.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' })[0]
+        $BlindCommand | Should -Match ([regex]::Escape('-ObfuscationDictionary ''<the ObfuscationDictionary_*.json this run wrote for that subscription>'''))
     }
 }

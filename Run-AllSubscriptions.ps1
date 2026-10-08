@@ -1329,6 +1329,10 @@ if ($Service.Count -gt 0)
 }
 
 $InventoryPassthrough = @{}
+# The one spelling of the inner script's path for the re-run lines the end-of-run blocks print. The
+# invocations below build their own path inline, and the source guard counts those, so this stays a
+# reader rather than a replacement for them.
+$InventoryScriptPath = Join-Path $PSScriptRoot 'ResourceInventory.ps1'
 if ($DeviceLogin) { $InventoryPassthrough['DeviceLogin'] = $true }
 if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
@@ -2993,6 +2997,43 @@ $MetricsPoolFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -eq
 $PoolStreamsUsed = if ($ParallelStreams -gt 1 -and $StreamCount -ge 2) { [int]$StreamCount } else { 1 }
 $PoolRerunAdvice = 'then re-run the same command with -Resume (or -ResumeFailedOnly) added: it collects these subscriptions again in full and the new bundle carries their new reports.'
 $PoolResumeNote = 'They are in the retry list until their metrics are collected, so neither resume mode skips them.'
+# One pasteable line per subscription, for an operator who wants just one of them back without a whole
+# resume run. Console only: the line carries a local path and the tenant id, so it never goes into
+# RunSummary.log, into an entry Message, or into the shareable Diagnostics log. It is built from
+# $InventoryPassthrough itself, so it stays in step with what the wrapper really passed.
+$RerunCommandLines = {
+    param($RerunEntries)
+    $Lines = @()
+    $Lines += '  To re-run only one of them, outside the bundle, start a new PowerShell 7 session (pwsh) and paste its line. It uses that session sign-in to this tenant or asks for one; a session signed in to another tenant is signed out first. Its report goes to a new folder and is NOT added to this run bundle, and the next resume collects the subscription again.'
+    foreach ($RerunEntry in @($RerunEntries | Sort-Object Name, Id -Unique))
+    {
+        $RerunDictionary = ''
+        if ($InventoryPassthrough['Obfuscate'])
+        {
+            $RerunZip = @($SubResourceCounts | Where-Object { [string]$_.Id -eq [string]$RerunEntry.Id } | Select-Object -First 1).Zip
+            if (-not [string]::IsNullOrWhiteSpace($RerunZip))
+            {
+                $RerunDictionaries = @(Get-ChildItem -LiteralPath (Split-Path -Parent $RerunZip) -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue)
+                if ($RerunDictionaries.Count -eq 1) { $RerunDictionary = $RerunDictionaries[0].FullName }
+            }
+        }
+        $RerunCommand = Get-RdaInventoryRerunCommand -ScriptPath $InventoryScriptPath -TenantId $TenantID -SubscriptionId $RerunEntry.Id -Passthrough $InventoryPassthrough -DictionaryPath $RerunDictionary
+        if ([string]::IsNullOrWhiteSpace($RerunCommand))
+        {
+            $Lines += ('    # {0} ({1}): no line can be built for this subscription, so re-run the whole set instead.' -f $RerunEntry.Name, $RerunEntry.Id)
+        }
+        else
+        {
+            $Lines += ('    # {0}' -f $RerunEntry.Name)
+            $Lines += ('    ' + $RerunCommand)
+        }
+    }
+    if ($InventoryPassthrough['Obfuscate'])
+    {
+        $Lines += '    -ObfuscationDictionary gives the re-run this run tokens for that subscription; without the right file the two reports cannot be lined up.'
+    }
+    $Lines
+}
 if ($MetricsFailures.Count -gt 0)
 {
     Write-Host ""
@@ -3007,6 +3048,10 @@ if ($MetricsFailures.Count -gt 0)
         Write-Host ("  Reason: {0}" -f $FirstMsg) -ForegroundColor Yellow
     }
     Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
+    foreach ($AuthRerunLine in @(& $RerunCommandLines $MetricsFailures))
+    {
+        Write-Host $AuthRerunLine -ForegroundColor Yellow
+    }
     Write-Host "  Note: the metrics sheet in the output report will be empty for these subscriptions." -ForegroundColor Yellow
     Write-Host ""
 }
@@ -3044,6 +3089,10 @@ if ($MetricsPoolFailures.Count -gt 0)
         Write-Host ("  To collect them: free memory on this host, or use a lower -ConcurrencyLimit (metric calls at a time, this run: {0}), {1}" -f $ConcurrencyLimit, $PoolRerunAdvice) -ForegroundColor Yellow
     }
     Write-Host ("  {0}" -f $PoolResumeNote) -ForegroundColor Yellow
+    foreach ($PoolRerunLine in @(& $RerunCommandLines $MetricsPoolFailures))
+    {
+        Write-Host $PoolRerunLine -ForegroundColor Yellow
+    }
     Write-Host "  Note: the per-call metrics of these subscriptions are missing from the metrics sheet; any fetched through -UseMetricsBatch are kept." -ForegroundColor Yellow
     Write-Host ""
 }
@@ -3369,6 +3418,7 @@ if ($AuthSkippedPhases.Count -gt 0)
     Write-Host "Reason: no usable Azure context/token (even after one reconnect attempt)." -ForegroundColor Red
     Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
     Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
+    Write-Host "The command to re-run each of them on its own is listed under 'Metrics Auth Failures' above." -ForegroundColor Red
     if (@($FailedSubscriptions).Count -eq 0)
     {
         Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow
@@ -3400,6 +3450,7 @@ if ($MetricsPoolIncomplete.Count -gt 0)
         Write-Host ("Fix: free memory on this host, or use a lower -ConcurrencyLimit (this run: {0}), {1}" -f $ConcurrencyLimit, $PoolRerunAdvice) -ForegroundColor Red
     }
     Write-Host $PoolResumeNote -ForegroundColor Red
+    Write-Host "The command to re-run each of them on its own is listed under 'Metrics Incomplete' above." -ForegroundColor Red
     if (@($FailedSubscriptions).Count -eq 0)
     {
         Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow

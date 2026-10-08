@@ -1909,6 +1909,72 @@ function Get-RdaMetricsRetryReason
     return ('Metrics incomplete: {0}' -f ($Messages -join ' '))
 }
 
+function Get-RdaInventoryRerunCommand
+{
+    # One pasteable line that re-runs ResourceInventory.ps1 for ONE subscription, for an operator whose
+    # metrics were left incomplete. It is built from the SAME passthrough table the wrapper hands the
+    # inner script, never from $PSBoundParameters or $MyInvocation.Line: those carry whatever was typed,
+    # which on a standalone run can include a secret, and the wrapper's own switches are not the inner
+    # script's. -RunAllSubs is never added: the line is a single-subscription run on its own.
+    # Returns $null rather than a line it cannot build correctly: an unparseable subscription id, or a
+    # value that would print a credential.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [string]$ScriptPath,
+        [string]$TenantId,
+        [string]$SubscriptionId,
+        [object]$Passthrough,
+        [string]$DictionaryPath
+    )
+    if ([string]::IsNullOrWhiteSpace($ScriptPath) -or [string]::IsNullOrWhiteSpace($TenantId)) { return $null }
+    $ParsedId = [guid]::Empty
+    if (-not [guid]::TryParse([string]$SubscriptionId, [ref]$ParsedId)) { return $null }
+    # Single quotes, with any quote in the value doubled: a path with a space, an apostrophe, a $ or a
+    # backtick then survives being pasted into a new session unchanged.
+    $Quote = { param($Value) "'" + ([string]$Value -replace "'", "''") + "'" }
+    $Parts = @(
+        ('& {0}' -f (& $Quote $ScriptPath))
+        ('-TenantID {0}' -f (& $Quote $TenantId))
+        ('-SubscriptionID {0}' -f (& $Quote $SubscriptionId)))
+    $Table = if ($Passthrough -is [System.Collections.IDictionary]) { $Passthrough } else { @{} }
+    foreach ($Key in @($Table.Keys | ForEach-Object { [string]$_ } | Sort-Object))
+    {
+        if ($Key -eq 'RunAllSubs' -or $Key -eq 'ObfuscationDictionary') { continue }
+        $Value = $Table[$Key]
+        if ($Value -is [System.Security.SecureString] -or $Value -is [System.Management.Automation.PSCredential]) { return $null }
+        if ($Value -is [bool] -or $Value -is [System.Management.Automation.SwitchParameter])
+        {
+            # A switch is written bare when it is on and left out when it is off, so -Debug:$false and
+            # the like never appear on a line an operator is told to paste.
+            if ([bool]$Value) { $Parts += ('-{0}' -f $Key) }
+            continue
+        }
+        if ($Value -is [int] -or $Value -is [long] -or $Value -is [double])
+        {
+            $Parts += ('-{0} {1}' -f $Key, ([string]$Value))
+            continue
+        }
+        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string])
+        {
+            $Items = @($Value | Where-Object { $null -ne $_ } | ForEach-Object { & $Quote $_ })
+            if ($Items.Count -eq 0) { continue }
+            $Parts += ('-{0} {1}' -f $Key, ($Items -join ','))
+            continue
+        }
+        if ([string]::IsNullOrEmpty([string]$Value)) { continue }
+        $Parts += ('-{0} {1}' -f $Key, (& $Quote $Value))
+    }
+    if ($Table['Obfuscate'])
+    {
+        # Only an obfuscated run needs it, and only it can use it: without the dictionary of the original
+        # run the re-run mints its own tokens and the two reports cannot be lined up.
+        $Dictionary = if ([string]::IsNullOrWhiteSpace($DictionaryPath)) { '<the ObfuscationDictionary_*.json this run wrote for that subscription>' } else { $DictionaryPath }
+        $Parts += ('-ObfuscationDictionary {0}' -f (& $Quote $Dictionary))
+    }
+    return ($Parts -join ' ')
+}
+
 function Add-FailedAttempt
 {
     param(

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $NetApp = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.NetApp/netAppAccounts/capacityPools/volumes' }
+    $NetApp = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'Microsoft.NetApp/netAppAccounts/capacityPools/volumes') { $Row } }
 
     if ($NetApp)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $APIM = $Resources | Where-Object { $_.TYPE -eq 'microsoft.apimanagement/service' }
+    $APIM = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.apimanagement/service') { $Row } }
 
     if ($APIM)
     {

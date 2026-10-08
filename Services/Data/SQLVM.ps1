@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $SQLVM = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sqlvirtualmachine/sqlvirtualmachines' }
+    $SQLVM = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.sqlvirtualmachine/sqlvirtualmachines') { $Row } }
 
     if ($SQLVM)
     {

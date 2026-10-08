@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $IOTHubs = $Resources | Where-Object { $_.TYPE -eq 'microsoft.devices/iothubs' }
+    $IOTHubs = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.devices/iothubs') { $Row } }
 
     if ($IOTHubs)
     {

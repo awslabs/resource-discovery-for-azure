@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Streamanalytics = $Resources | Where-Object { $_.TYPE -eq 'microsoft.streamanalytics/streamingjobs' }
+    $Streamanalytics = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.streamanalytics/streamingjobs') { $Row } }
 
     if ($Streamanalytics)
     {

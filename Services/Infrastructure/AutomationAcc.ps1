@@ -2,8 +2,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Runbook = $Resources | Where-Object { $_.TYPE -eq 'microsoft.automation/automationaccounts/runbooks' }
-    $Autacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.automation/automationaccounts' }
+    $Runbook = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.automation/automationaccounts/runbooks') { $Row } }
+    $Autacc = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.automation/automationaccounts') { $Row } }
 
     if ($Autacc)
     {

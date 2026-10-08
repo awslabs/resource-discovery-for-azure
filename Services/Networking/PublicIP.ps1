@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $PublicIP = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/publicipaddresses' }
+    $PublicIP = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/publicipaddresses') { $Row } }
 
     if ($PublicIP)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $MySQL = $Resources | Where-Object { $_.TYPE -eq 'microsoft.dbformysql/servers' }
+    $MySQL = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.dbformysql/servers') { $Row } }
 
     if ($MySQL)
     {

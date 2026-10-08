@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $DataBricks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.databricks/workspaces' }
+    $DataBricks = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.databricks/workspaces') { $Row } }
 
     if ($DataBricks)
     {

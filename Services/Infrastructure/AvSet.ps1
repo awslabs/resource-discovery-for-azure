@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AvSet = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/availabilitysets' }
+    $AvSet = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/availabilitysets') { $Row } }
 
     if ($AvSet)
     {

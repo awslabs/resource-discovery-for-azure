@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Evthub = $Resources | Where-Object { $_.TYPE -eq 'microsoft.eventhub/namespaces' }
+    $Evthub = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.eventhub/namespaces') { $Row } }
 
     if ($Evthub)
     {

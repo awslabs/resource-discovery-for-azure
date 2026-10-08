@@ -2,9 +2,13 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $FRONTDOOR = $Resources | Where-Object {
-        $_.TYPE -eq 'microsoft.network/frontdoors' -or
-        ($_.TYPE -eq 'microsoft.cdn/profiles' -and $_.sku.name -match '^(Standard|Premium)_AzureFrontDoor$')
+    $FRONTDOOR = foreach ($Row in $Resources)
+    {
+        if ($Row.TYPE -eq 'microsoft.network/frontdoors' -or
+            ($Row.TYPE -eq 'microsoft.cdn/profiles' -and $Row.sku.name -match '^(Standard|Premium)_AzureFrontDoor$'))
+        {
+            $Row
+        }
     }
 
     if ($FRONTDOOR)

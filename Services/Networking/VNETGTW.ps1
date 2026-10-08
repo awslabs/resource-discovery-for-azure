@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $VNETGTW = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/virtualnetworkgateways' }
+    $VNETGTW = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/virtualnetworkgateways') { $Row } }
 
     if ($VNETGTW)
     {

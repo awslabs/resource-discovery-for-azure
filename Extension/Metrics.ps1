@@ -1024,9 +1024,17 @@ if ($Task -eq 'Processing')
                         $PoolRetryMsg = ('Metrics: the metric worker pool could not be opened ({0}). Compacting memory and retrying once in {1}s with the same pool size.' -f $PoolOpenError, $MetricPoolOpenRetryDelaySeconds)
                         Write-MetricsDiag ('WARNING: ' + $PoolRetryMsg)
                         Write-Log -Message $PoolRetryMsg -Severity 'Warning'
-                        Write-RdaMemorySnapshot -Phase 'Metric worker pool open failed' -Compact
+                        # Compact, drain the finalizers, take what they released, and only then read: the
+                        # same four steps ResourceInventory.ps1 runs around a consumption page that ran out
+                        # of memory. A long-lived session never compacts the large object heap on its own,
+                        # so a plain collect can leave it too fragmented for the next pool. The reading goes
+                        # last, so the debug line reports what the retry actually freed rather than what the
+                        # process held before it; -Compact would collect again and read inside that collect.
+                        [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                        [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
                         [System.GC]::WaitForPendingFinalizers()
                         [System.GC]::Collect()
+                        Write-RdaMemorySnapshot -Phase 'Metric worker pool open failed'
                         Start-Sleep -Seconds $MetricPoolOpenRetryDelaySeconds
                         $MetricPoolOpenPending = $true
                     }

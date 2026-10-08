@@ -1071,6 +1071,10 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $BlockText = $RetryBlock[0].Extent.Text
             $FactoryCount = ([regex]::Matches($BlockText, [regex]::Escape($FactoryText))).Count
             if ($FactoryCount -ne 1) { throw ('Expected exactly one runspace factory call in the pool block; found {0}. A second one would build a pool the stand-in queue never sees.' -f $FactoryCount) }
+            # The branch taken when there is still a retry left, for the ordering pins below.
+            $RetryIf = @($RetryBlock[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$MetricPoolOpenRetriesLeft -gt 0' }, $true))
+            if ($RetryIf.Count -ne 1) { throw ('Expected one branch that decides whether a retry is left; found {0}.' -f $RetryIf.Count) }
+            $script:PoolRetryBranchAst = $RetryIf[0].Clauses[0].Item2
             $script:PoolRetry = [scriptblock]::Create((@(
                         'param($PoolQueue, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup, $MetricPoolOpenRetryDelaySeconds = 0, $ConcurrencyLimit = 2, $MetricMaxRetries = 0)'
                         '$MetricCallPool = $null'
@@ -1079,15 +1083,16 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
                         '$RetryLog = [System.Collections.Generic.List[object]]::new()'
                         '$RetrySleeps = [System.Collections.Generic.List[object]]::new()'
                         '$RetrySnapshots = [System.Collections.Generic.List[string]]::new()'
+                        '$RetryCompact = [System.Collections.Generic.List[bool]]::new()'
                         '$RetryPoolHeldAtWait = [System.Collections.Generic.List[object]]::new()'
                         '$RetryFactoryCalls = [System.Collections.Generic.List[object]]::new()'
                         'function Write-MetricsDiag { param($Message) $RetryDiag.Add([string]$Message) }'
                         'function Write-Log { param($Message, $Severity, [switch]$NoConsole, [switch]$ToDebugLog) $RetryLog.Add([pscustomobject]@{ Message = [string]$Message; Severity = [string]$Severity }) }'
-                        'function Write-RdaMemorySnapshot { param($Phase, [switch]$Compact, [switch]$Record) $RetrySnapshots.Add([string]$Phase); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
+                        'function Write-RdaMemorySnapshot { param($Phase, [switch]$Compact, [switch]$Record) $RetrySnapshots.Add([string]$Phase); $RetryCompact.Add([bool]$Compact); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
                         'function Start-Sleep { param([int]$Seconds, [int]$Milliseconds) $RetrySleeps.Add($Seconds); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
                         'function New-RdaStandInPool { if ($PoolQueue.Count -eq 0) { throw ''the pool block asked for more pools than this test queued'' }; $Next = $PoolQueue.Dequeue(); $RetryFactoryCalls.Add($Next); $Next }'
                         $BlockText.Replace($FactoryText, '(New-RdaStandInPool)')
-                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; PoolFailed = $MetricPerCallPoolFailed; Diag = @($RetryDiag); Log = @($RetryLog); Sleeps = @($RetrySleeps); Snapshots = @($RetrySnapshots); HeldAtWait = @($RetryPoolHeldAtWait); Factory = @($RetryFactoryCalls) }'
+                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; PoolFailed = $MetricPerCallPoolFailed; Diag = @($RetryDiag); Log = @($RetryLog); Sleeps = @($RetrySleeps); Snapshots = @($RetrySnapshots); Compact = @($RetryCompact); HeldAtWait = @($RetryPoolHeldAtWait); Factory = @($RetryFactoryCalls) }'
                     ) -join [Environment]::NewLine))
             # A stand-in rather than a real pool: a real one made to fail its open keeps this process
             # from exiting. An empty OpenError means that attempt succeeds.
@@ -1145,11 +1150,30 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Queue.Enqueue((& $script:NewQueuedPool ''))
             $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
 
-            $Result.Snapshots | Should -Be @('Metric worker pool open failed') -Because 'one compacting reading, so the debug log shows what the host had at the moment the open failed'
+            $Result.Snapshots | Should -Be @('Metric worker pool open failed') -Because 'one reading, so the debug log shows what the host had at the moment the open failed'
+            $Result.Compact | Should -Be @($false) -Because 'the reading is taken AFTER the collection, so it reports what the retry freed; -Compact would read inside its own first collect, before the finalizers have run'
             $Result.Sleeps | Should -Be @(0) -Because 'it waits once, reading the constant the caller passes'
             $Result.HeldAtWait.Count | Should -Be 2 -Because 'the snapshot and the wait each record what the block was still holding'
             @($Result.HeldAtWait | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'the broken pool is disposed and dropped before the wait, so nothing holds its memory while the host is asked for more'
             $Global:MetricCallPool | Should -Not -BeNullOrEmpty
+
+            # The order the repo already uses for an out-of-memory recovery (ResourceInventory.ps1 does the
+            # same four steps around a consumption page): compact, drain the finalizers, collect what they
+            # released, and only then read.
+            $RetryBranch = $script:PoolRetryBranchAst
+            $CompactOnce = $RetryBranch.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq '[System.Runtime.GCSettings]::LargeObjectHeapCompactionMode' -and $N.Right.Extent.Text -match '::CompactOnce$' }, $true)
+            $CompactOnce | Should -Not -BeNullOrEmpty -Because 'a plain collect does not compact the large object heap, which is what a long session fragments'
+            $Forced = $RetryBranch.Find({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '[System.GC]' -and $N.Member.Extent.Text -eq 'Collect' -and $N.Arguments.Count -gt 1 }, $true)
+            $Wait = $RetryBranch.Find({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '[System.GC]' -and $N.Member.Extent.Text -eq 'WaitForPendingFinalizers' }, $true)
+            $Plain = @($RetryBranch.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '[System.GC]' -and $N.Member.Extent.Text -eq 'Collect' -and $N.Arguments.Count -eq 0 }, $true))
+            $Snapshot = $RetryBranch.Find({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Write-RdaMemorySnapshot' }, $true)
+            foreach ($Step in @($Forced, $Wait, $Snapshot)) { $Step | Should -Not -BeNullOrEmpty }
+            $Plain.Count | Should -Be 1 -Because 'one collect after the finalizers, to take what they released'
+            $CompactOnce.Extent.EndOffset | Should -BeLessThan $Forced.Extent.StartOffset
+            $Forced.Extent.EndOffset | Should -BeLessThan $Wait.Extent.StartOffset
+            $Wait.Extent.EndOffset | Should -BeLessThan $Plain[0].Extent.StartOffset
+            $Plain[0].Extent.EndOffset | Should -BeLessThan $Snapshot.Extent.StartOffset -Because 'the reading is the last step, or the line understates what was freed'
+            $Snapshot.Extent.Text | Should -Not -Match '-Compact' -Because 'that would collect again and read inside that collection'
         }
 
         It 'gives up after the second failure with the same skip it has today, quoting the second error' {

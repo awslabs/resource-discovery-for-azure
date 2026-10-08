@@ -1075,6 +1075,7 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $RetryIf = @($RetryBlock[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$MetricPoolOpenRetriesLeft -gt 0' }, $true))
             if ($RetryIf.Count -ne 1) { throw ('Expected one branch that decides whether a retry is left; found {0}.' -f $RetryIf.Count) }
             $script:PoolRetryBranchAst = $RetryIf[0].Clauses[0].Item2
+            $script:PoolRetryGiveUpAst = $RetryIf[0].ElseClause
             $script:PoolRetry = [scriptblock]::Create((@(
                         'param($PoolQueue, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup, $MetricPoolOpenRetryDelaySeconds = 0, $ConcurrencyLimit = 2, $MetricMaxRetries = 0)'
                         '$MetricCallPool = $null'
@@ -1236,6 +1237,62 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $First = & $script:PoolRetry $Clean $true 7 $script:RetryDefs $script:RetrySubLookup
             $First.Diag.Count | Should -Be 0 -Because 'a first-time open is the ordinary case and says nothing'
             $First.Sleeps.Count | Should -Be 0
+        }
+
+        It 'releases a pool left in the global in a state it can no longer serve, when it gives up' {
+            # The store to the global only happens after a successful open, and the give-up path leaves
+            # $MetricCallPool null, so the phase-end teardown is skipped by its own null guard and never
+            # clears the global. A pool stranded there is then neither disposed nor cleared, and every
+            # later subscription repeats both failed opens past it.
+            $Stale = [pscustomobject]@{ DisposeCount = 0; RunspacePoolStateInfo = [pscustomobject]@{ State = [System.Management.Automation.Runspaces.RunspacePoolState]::Broken } }
+            Add-Member -InputObject $Stale -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+            $Global:MetricCallPool = $Stale
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'first open failed'))
+            $Queue.Enqueue((& $script:NewQueuedPool 'second open failed too'))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Stale.DisposeCount | Should -Be 1 -Because 'only Dispose removes the cleanup timer that keeps it, and its runspaces hold the Az modules, for the life of the process'
+            $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a pool that cannot serve a call must not be handed to the next subscription'
+            $Result.PoolFailed | Should -BeTrue
+            @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 1 -Because 'a pool found broken between subscriptions is unexpected and says so in the debug log'
+
+            # The state test cannot be reached behaviourally with an OPENED pool - the reuse guard takes that
+            # pool and never reaches this branch - so it is pinned on the source. Without it, giving up would
+            # dispose a working pool that every later subscription of the run was going to share.
+            $GiveUp = @($script:PoolRetryGiveUpAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$Global:MetricCallPool' -and $N.Member.Extent.Text -eq 'Dispose' }, $true))
+            $GiveUp.Count | Should -Be 1 -Because 'one release of a stranded pool, on the path that abandons the phase'
+            $Guard = $null
+            $Up = $GiveUp[0].Parent
+            while ($null -ne $Up)
+            {
+                if ($Up -is [System.Management.Automation.Language.IfStatementAst] -and $Up.Clauses[0].Item1.Extent.Text -match '\$Global:MetricCallPool\.RunspacePoolStateInfo\.State') { $Guard = $Up; break }
+                $Up = $Up.Parent
+            }
+            $Guard | Should -Not -BeNullOrEmpty -Because 'the release has to read the state of the pool it is about to dispose'
+            $Guard.Clauses[0].Item1.Extent.Text | Should -Match '-ne \[System\.Management\.Automation\.Runspaces\.RunspacePoolState\]::Opened' -Because 'only a pool that can serve no call is released here'
+            $Guard.Clauses[0].Item1.Extent.Text | Should -Match '^\$ReuseWorkerPool -and' -Because 'without the switch the global belongs to another caller'
+        }
+
+        It 'leaves an open pool in the global alone when it gives up, and never disposes one it did not build' {
+            # Give-up with nothing stale: the global was already empty, so there is nothing to release and
+            # nothing to say about it.
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'first open failed'))
+            $Queue.Enqueue((& $script:NewQueuedPool 'second open failed too'))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+            @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 0
+
+            # And a standalone run never touches the global, whatever it holds.
+            $Open = [pscustomobject]@{ DisposeCount = 0; RunspacePoolStateInfo = [pscustomobject]@{ State = [System.Management.Automation.Runspaces.RunspacePoolState]::Broken } }
+            Add-Member -InputObject $Open -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+            $Global:MetricCallPool = $Open
+            $Solo = [System.Collections.Queue]::new()
+            $Solo.Enqueue((& $script:NewQueuedPool 'first open failed'))
+            $Solo.Enqueue((& $script:NewQueuedPool 'second open failed too'))
+            $null = & $script:PoolRetry $Solo $false 7 $script:RetryDefs $script:RetrySubLookup
+            $Open.DisposeCount | Should -Be 0 -Because 'without -ReuseWorkerPool the global is another caller business'
+            [object]::ReferenceEquals($Global:MetricCallPool, $Open) | Should -BeTrue
         }
 
         It 'keeps the retry wording free of auth and of a phase that cannot be re-run on its own' {

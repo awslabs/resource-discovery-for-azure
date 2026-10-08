@@ -1975,6 +1975,11 @@ function Write-RdaShareableDiagnosticsLog
         # Listed apart because the remedies differ: an auth skip needs a token, metrics left incomplete by a
         # worker pool that would not open need memory on the host. An entry with no Cause was written before
         # the field existed, when every entry was an auth skip, so it is still listed as one.
+        # LIMITATION (the same one the consumption list below documents): $Global:MetricsFailedSubs is reset once
+        # per run (once per stream with -ParallelStreams), not per subscription, so a later subscription's
+        # log repeats the entries of earlier ones. Each entry is tagged with its own masked subscription id,
+        # so the log never says the wrong subscription is incomplete. This function is not told which
+        # subscription it writes for, so it cannot filter the list without a new parameter.
         $MetricsAuthSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -ne 'pool' })
         $MetricsPoolSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -eq 'pool' })
         $ConsumpSkips = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })

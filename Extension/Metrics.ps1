@@ -308,7 +308,10 @@ if ($Task -eq 'Processing')
                         # connection failure - and the total can slightly overstate what the metric-query
                         # meter bills. Counting only on success under-reported every failed run.
                         $script:MetricsBatchHttpCalls++
-                        $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -ErrorAction Stop
+                        # Bounded like a per-call query: with no limit one hung connection held the main thread,
+                        # and with it the whole metrics phase. A timeout throws into the chunk catch below, so it
+                        # costs only this chunk, which falls back to per-call.
+                        $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -TimeoutSec 120 -ErrorAction Stop
 
                         foreach ($ResourceResult in @($Response.values))
                         {

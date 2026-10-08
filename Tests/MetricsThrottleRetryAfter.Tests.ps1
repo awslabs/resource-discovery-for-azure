@@ -964,6 +964,12 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         $script:MetricsBatchHttpCalls | Should -Be 1 -Because 'every request issued is counted, a failed one included'
     }
 
+    It 'bounds every POST with a timeout' {
+        $Defs = @(1..60 | ForEach-Object { New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index $_ })
+        $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
+        Should -Invoke Invoke-RestMethod -Times 2 -Exactly -ParameterFilter { $TimeoutSec -gt 0 } -Because 'with no limit one hung connection holds the whole metrics phase'
+    }
+
     It 'skips a group with no subscription segment and still batches the rest' {
         $Bad = New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 9
         $Bad.Id = 'not-an-arm-id'

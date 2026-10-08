@@ -1837,12 +1837,31 @@ Describe 'A stream worker records each finished report, so its parent can ship i
         # Unconditional within the try: its statement sits directly in the try body.
         [object]::ReferenceEquals($InTry[0].Parent.Parent, $Try.Body) | Should -BeTrue -Because 'no condition may skip the write after a success'
         $Clear = $StreamAst.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Extent.Text -match '^\$FailedAttempts = Remove-FailedAttempt' }, $true)
-        [object]::ReferenceEquals($Clear.Parent, $Try.Body) | Should -BeTrue -Because 'a success clears the failure record even for a subscription already marked completed'
+        # The clear now sits in the complete branch of the metrics-retry decision, and that decision sits
+        # directly in the try: a success still clears the record for a subscription already marked
+        # completed, and only a metrics gap takes the other branch.
+        $ReasonIf = $StreamAst.Find({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$null -eq $MetricsRetryReason' }, $true)
+        $ReasonIf | Should -Not -BeNullOrEmpty -Because 'the worker decides from the reason, not from the exit code alone'
+        [object]::ReferenceEquals($ReasonIf.Parent, $Try.Body) | Should -BeTrue -Because 'no other condition may skip the decision after a success'
+        [object]::ReferenceEquals($Clear.Parent, $ReasonIf.Clauses[0].Item2) | Should -BeTrue -Because 'the record is cleared only when nothing is still owed'
+        [object]::ReferenceEquals($FirstTime.Parent, $ReasonIf.Clauses[0].Item2) | Should -BeTrue -Because 'a subscription is added to Completed in the same branch'
+        $Adds = @($StreamAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Extent.Text -match '^\$FailedAttempts = Add-FailedAttempt' }, $true))
+        $Adds.Count | Should -Be 2 -Because 'a metrics gap in the try and an outright failure in the catch, and nothing else'
+        $InTryAdd = @($Adds | Where-Object { $_.Extent.StartOffset -gt $Try.Body.Extent.StartOffset -and $_.Extent.EndOffset -lt $Try.Body.Extent.EndOffset })
+        $InTryAdd.Count | Should -Be 1
+        [object]::ReferenceEquals($InTryAdd[0].Parent, $ReasonIf.ElseClause) | Should -BeTrue -Because 'the retry entry belongs to the metrics-gap branch'
+        $DropCompleted = $StreamAst.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Extent.Text -eq '$Completed = @($Completed | Where-Object { $_ -ne $SubId })' }, $true)
+        $DropCompleted | Should -Not -BeNullOrEmpty -Because 'an older completion must not survive a run that still owes the metrics'
+        [object]::ReferenceEquals($DropCompleted.Parent, $ReasonIf.ElseClause) | Should -BeTrue
+        $DropCompleted.Extent.EndOffset | Should -BeLessThan $InTry[0].Extent.StartOffset -Because 'the completion is dropped before the state is written'
+        $InTryAdd[0].Extent.EndOffset | Should -BeLessThan $InTry[0].Extent.StartOffset
+        $ReasonIf.ElseClause.Extent.Text | Should -Not -Match 'Remove-FailedAttempt' -Because 'removing the entry first would reset the attempt count'
         $Catch = $Try.CatchClauses[0].Body
         $InCatch = @($Writes | Where-Object { $_.Extent.StartOffset -gt $Catch.Extent.StartOffset -and $_.Extent.EndOffset -lt $Catch.Extent.EndOffset })
         $InCatch.Count | Should -Be 1 -Because 'a failure is recorded before the worker can die later in its slice'
-        $AddFailure = $StreamAst.Find({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Extent.Text -match '^\$FailedAttempts = Add-FailedAttempt' }, $true)
-        $InCatch[0].Extent.StartOffset | Should -BeGreaterThan $AddFailure.Extent.EndOffset
+        $AddFailure = @($Adds | Where-Object { $_.Extent.StartOffset -gt $Catch.Extent.StartOffset -and $_.Extent.EndOffset -lt $Catch.Extent.EndOffset })
+        $AddFailure.Count | Should -Be 1
+        $InCatch[0].Extent.StartOffset | Should -BeGreaterThan $AddFailure[0].Extent.EndOffset
         [object]::ReferenceEquals($InCatch[0].Parent.Parent, $Catch) | Should -BeTrue
         # The worker and the parent spell the state file the same way.
         (Get-Content -LiteralPath $StreamPath -Raw) | Should -Match '\$StreamStateFile = Get-StreamStateFilePath -InventoryRoot \$InventoryRoot -Tenant \$TenantID -StreamId \$StreamId'
@@ -2158,14 +2177,16 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $Clamped.Printed | Should -Not -Match '-ParallelStreams \(this run: 4\)'
     }
 
-    It 'points to a re-run that collects the missing metrics, not to a -Resume run that keeps the gap' {
-        # A subscription whose pool could not open still finishes its inventory, so its stream marks it
-        # completed and a -Resume run skips it. The tool cannot re-run the metrics phase alone either.
+    It 'points to a resume run, which now collects the missing metrics instead of skipping them' {
+        # A subscription whose pool could not open finishes its inventory, but the wrapper now leaves it
+        # in the retry list rather than the completed list, so both resume modes collect it again.
         $script:PoolBannerText | Should -Not -BeNullOrEmpty
         $R = & $script:RunPoolEnd @($script:PoolEntry)
         $Lines = @($R.Printed -split "`n")
-        @($Lines | Where-Object { $_ -like '*then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each of these subscriptions.' }).Count | Should -Be 2 -Because 'the summary block and the banner give the same remedy'
-        @($Lines | Where-Object { $_ -like '*A -Resume run skips them because their inventory completed, so it would not collect the missing metrics.' }).Count | Should -Be 2
+        @($Lines | Where-Object { $_ -like '*then re-run the same command with -Resume (or -ResumeFailedOnly) added: it collects these subscriptions again in full and the new bundle carries their new reports.' }).Count | Should -Be 2 -Because 'the summary block and the banner give the same remedy'
+        @($Lines | Where-Object { $_ -like '*They are in the retry list until their metrics are collected, so neither resume mode skips them.' }).Count | Should -Be 2
+        $R.Printed | Should -Not -Match 'without -Resume' -Because 'a fresh run is no longer the remedy'
+        $R.Printed | Should -Not -Match 'skips them because their inventory completed' -Because 'a resume run no longer skips them'
         $R.Printed | Should -Not -Match 'metrics phase' -Because 'there is no way to re-run only that phase'
     }
 }

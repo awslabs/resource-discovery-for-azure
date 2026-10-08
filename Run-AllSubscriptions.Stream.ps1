@@ -264,6 +264,10 @@ for ($i = 0; $i -lt $PairCount; $i++)
             # starts only once the shared check admits it.
             $null = Enter-StreamAdmission -State $AdmissionState -Holder $AdmissionHolder -Subscription ("{0} ({1})" -f $SubName, $SubId)
         }
+        # Counted before the call, so a metrics-health entry is attributed to THIS subscription by the
+        # call that appended it, never by the Id it carries. Under Runspace isolation this list is the
+        # stream's own.
+        $MetricsHealthBefore = @($Global:MetricsFailedSubs | Where-Object { $null -ne $_ }).Count
         $global:LASTEXITCODE = 0
         $Global:ZipOutputFile = $null
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
@@ -286,13 +290,27 @@ for ($i = 0; $i -lt $PairCount; $i++)
             Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
         }
 
-        if (-not ($Completed -contains $SubId))
+        $MetricsRetryReason = Get-RdaMetricsRetryReason -Entries $Global:MetricsFailedSubs -Before $MetricsHealthBefore
+        if ($null -eq $MetricsRetryReason)
         {
-            $Completed += $SubId
+            if (-not ($Completed -contains $SubId))
+            {
+                $Completed += $SubId
+            }
+            # A success clears the subscription's failure record, and the state is written after every
+            # success, so the parent can ship this report even if this worker dies before its summary.
+            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
         }
-        # A success clears the subscription's failure record, and the state is written after every
-        # success, so the parent can ship this report even if this worker dies before its summary.
-        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
+        else
+        {
+            # The inventory finished and its report is still recorded, so the parent ships it, but the
+            # metrics phase left a gap: the subscription goes into the retry list and out of this
+            # stream's completed set, so both resume modes collect it again. The entry is added without
+            # being removed first, so Attempts counts every try. The stream's Failed list is untouched.
+            Write-Stream ("metrics incomplete: {0} stays in the retry list" -f $SubName) 'Yellow'
+            $Completed = @($Completed | Where-Object { $_ -ne $SubId })
+            $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $SubId -Name $SubName -Reason $MetricsRetryReason
+        }
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $ResourceCounts @StreamBlobArgs
     }
     catch

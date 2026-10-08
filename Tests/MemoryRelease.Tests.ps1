@@ -984,18 +984,29 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Errors[0].Message | Should -BeLike '*7 per-call metric definition(s) were not collected*'
         }
 
-        It 'points the operator at a re-run that collects the missing metrics, not at one that keeps the gap' {
-            # A subscription whose pool could not open still finishes its inventory, so a wrapper stream marks
-            # it completed and a -Resume run skips it with its metrics still missing. The tool has no way to
-            # re-run the metrics phase on its own, so the advice names the two runs that do collect them.
+        It 'points the operator at a resume run, which now collects the missing metrics' {
+            # A subscription whose pool could not open still finishes its inventory, but the wrapper keeps
+            # it in the retry list instead of the completed list, so both resume modes collect it again.
             $Pool = & $script:NewUnopenablePool
             $Result = & $script:PoolOpen $Pool $true 7 $script:OpenDefs $script:OpenSubLookup
             $ErrorLine = @($Result.Log | Where-Object { $_.Severity -eq 'Error' })[0].Message
             $ErrorLine | Should -BeLike '*free memory on this host or use a lower -ConcurrencyLimit*'
-            $ErrorLine | Should -BeLike '*re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each subscription listed as metrics incomplete*'
-            $ErrorLine | Should -BeLike '*a -Resume run skips them because their inventory completed.'
+            $ErrorLine | Should -BeLike '*then re-run with -Resume or -ResumeFailedOnly, which collects every subscription listed as metrics incomplete again.'
+            $ErrorLine | Should -Not -BeLike '*without -Resume*' -Because 'a fresh run is no longer the remedy'
+            $ErrorLine | Should -Not -BeLike '*skips them*' -Because 'a resume run no longer skips them'
             $ErrorLine | Should -Not -BeLike '*metrics phase*' -Because 'there is no way to re-run only that phase'
             $ErrorLine | Should -Not -Match '(?i)auth' -Because 'the remedy is memory on the host, not a token'
+        }
+
+        It 'tells a standalone run to run its own command again, since it has no resume state' {
+            $Pool = & $script:NewUnopenablePool
+            $Result = & $script:PoolOpen $Pool $false 7 $script:OpenDefs $script:OpenSubLookup
+            $ErrorLine = @($Result.Log | Where-Object { $_.Severity -eq 'Error' })[0].Message
+            $ErrorLine | Should -BeLike '*run the same ResourceInventory.ps1 command again in a new PowerShell 7 session and use its report instead of this one.'
+            $ErrorLine | Should -Not -BeLike '*-Resume*' -Because 'ResourceInventory.ps1 has no resume mode to offer'
+            $ErrorLine | Should -Not -BeLike '*metrics phase*'
+            $ErrorLine | Should -Not -Match '(?i)auth'
+            $Global:MetricCallPool | Should -BeNullOrEmpty
         }
 
         It 'names every affected subscription in the wrapper health list, once per subscription' {

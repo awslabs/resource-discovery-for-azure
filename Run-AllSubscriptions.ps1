@@ -831,7 +831,7 @@ if (-not $Preflight)
             $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
             if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
-            if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
+            if ($null -ne $Obj.Reports) { $StrandedReports += @(Select-RdaStrandedReports -Copy $Obj) }
             $StrandedReadFiles += $StreamFile
         }
         catch
@@ -855,7 +855,7 @@ if (-not $Preflight)
             {
                 if ($null -ne $StrandedBlob.Completed) { $StrandedCompleted += @($StrandedBlob.Completed) }
                 if ($null -ne $StrandedBlob.FailedAttempts) { $StrandedFailed += @($StrandedBlob.FailedAttempts) }
-                if ($null -ne $StrandedBlob.Reports) { $StrandedReports += @($StrandedBlob.Reports) }
+                if ($null -ne $StrandedBlob.Reports) { $StrandedReports += @(Select-RdaStrandedReports -Copy $StrandedBlob) }
                 $StrandedReadBlobs += $StrandedBlobName
             }
         }
@@ -970,7 +970,7 @@ if ($ResumeFailedOnly)
     $EligibleBeforeRetryFilter = @($Subscriptions)
     $BeforeCount = $Subscriptions.Count
     $Subscriptions = @($Subscriptions | Where-Object { $FailedIds -contains $_.Id })
-    Write-Host ("ResumeFailedOnly: filtered to {0} previously-failed subscription(s) (was {1})." -f $Subscriptions.Count, $BeforeCount) -ForegroundColor Cyan
+    Write-Host ("ResumeFailedOnly: filtered to {0} subscription(s) in the retry list (was {1})." -f $Subscriptions.Count, $BeforeCount) -ForegroundColor Cyan
     # Kept here: in the sequential path the inner script's $Global:Subscriptions replaces $Subscriptions.
     $RetriedIds = @($Subscriptions | ForEach-Object { [string]$_.Id })
     if ($Subscriptions.Count -eq 0)
@@ -1394,6 +1394,9 @@ if ($ParallelStreams -le 1)
 
             try
             {
+                # Counted before the call, so a metrics-health entry is attributed to THIS
+                # subscription by the call that appended it, never by the Id it carries.
+                $MetricsHealthBefore = @($Global:MetricsFailedSubs | Where-Object { $null -ne $_ }).Count
                 $global:LASTEXITCODE = 0
                 $Global:ZipOutputFile = $null
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
@@ -1423,20 +1426,38 @@ if ($ParallelStreams -le 1)
 
                 Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
 
-                # This run's report replaces any earlier one recorded for the subscription, so the state is
-                # saved even when the id was already recorded as completed.
-                $CompletedReports += $SubResourceCounts[-1]
-                $StateChanged = $true
-                if (-not ($CompletedIds -contains $Sub.Id))
+                $MetricsRetryReason = Get-RdaMetricsRetryReason -Entries $Global:MetricsFailedSubs -Before $MetricsHealthBefore
+                if ($null -eq $MetricsRetryReason)
                 {
-                    $CompletedIds += $Sub.Id
+                    # This run's report replaces any earlier one recorded for the subscription, so the state is
+                    # saved even when the id was already recorded as completed.
+                    $CompletedReports += $SubResourceCounts[-1]
                     $StateChanged = $true
+                    if (-not ($CompletedIds -contains $Sub.Id))
+                    {
+                        $CompletedIds += $Sub.Id
+                        $StateChanged = $true
+                    }
+                    $BeforeFailedCount = @($FailedAttempts).Count
+                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+                    if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
+                    if ($StateChanged)
+                    {
+                        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+                    }
                 }
-                $BeforeFailedCount = @($FailedAttempts).Count
-                $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
-                if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
-                if ($StateChanged)
+                else
                 {
+                    # The inventory finished and its report still ships, but the metrics phase left a gap, so
+                    # the subscription goes into the retry list instead of the completed list and both -Resume
+                    # and -ResumeFailedOnly collect it again. The state records no report for it until its
+                    # metrics are complete, and the entry is added without being removed first, so Attempts
+                    # counts every try. It is NOT added to the failed lists: its inventory did not fail.
+                    Write-Host ("Metrics incomplete for '{0}': it stays in the retry list, so -Resume or -ResumeFailedOnly collects it again." -f $Sub.Name) -ForegroundColor Yellow
+                    $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
+                        -Id $Sub.Id -Name $Sub.Name `
+                        -Reason $MetricsRetryReason
+                    $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
                 }
             }
@@ -1606,6 +1627,9 @@ else
             Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
             try
             {
+                # Counted before the call, so a metrics-health entry is attributed to THIS
+                # subscription by the call that appended it, never by the Id it carries.
+                $MetricsHealthBefore = @($Global:MetricsFailedSubs | Where-Object { $null -ne $_ }).Count
                 $global:LASTEXITCODE = 0
                 $Global:ZipOutputFile = $null
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
@@ -1625,14 +1649,29 @@ else
                 {
                     Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
                 }
-                $CompletedReports += $SubResourceCounts[-1]
-                if (-not ($CompletedIds -contains $Sub.Id))
+                $MetricsRetryReason = Get-RdaMetricsRetryReason -Entries $Global:MetricsFailedSubs -Before $MetricsHealthBefore
+                if ($null -eq $MetricsRetryReason)
                 {
-                    $CompletedIds += $Sub.Id
-                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+                    $CompletedReports += $SubResourceCounts[-1]
+                    if (-not ($CompletedIds -contains $Sub.Id))
+                    {
+                        $CompletedIds += $Sub.Id
+                        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+                    }
+                    # Saved even when the id was already recorded: this run's report replaces the earlier one.
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
                 }
-                # Saved even when the id was already recorded: this run's report replaces the earlier one.
-                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+                else
+                {
+                    # Same as the sequential loop: the report ships, the subscription stays in the retry list
+                    # and off the completed and failed lists, and no report is recorded in the state for it.
+                    Write-Host ("Metrics incomplete for '{0}': it stays in the retry list, so -Resume or -ResumeFailedOnly collects it again." -f $Sub.Name) -ForegroundColor Yellow
+                    $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
+                        -Id $Sub.Id -Name $Sub.Name `
+                        -Reason $MetricsRetryReason
+                    $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
+                }
             }
             catch
             {
@@ -2179,8 +2218,12 @@ else
             }
             # A subscription this run collected again and failed outranks a completion an earlier run
             # recorded, so -Resume and -ResumeFailedOnly retry it instead of skipping it.
-            $CompletedThisRun = @($SubResourceCounts | ForEach-Object { [string]$_.Id })
-            $FailedThisRun = @(@($FailedSubscriptionIds) + @(Get-RdaFailedSinceIds -FailedAttempts $AllFailedFromStreams -SinceTime $RunStartTime) |
+            $FailedSinceStart = @(Get-RdaFailedSinceIds -FailedAttempts $AllFailedFromStreams -SinceTime $RunStartTime)
+            # A report this run shipped normally means the subscription completed. One a stream put back
+            # in the retry list this run is still owed its metrics, so it is NOT exempt and its older
+            # completion is dropped too.
+            $CompletedThisRun = @($SubResourceCounts | ForEach-Object { [string]$_.Id } | Where-Object { $FailedSinceStart -notcontains $_ })
+            $FailedThisRun = @(@($FailedSubscriptionIds) + $FailedSinceStart |
                     Where-Object { $CompletedThisRun -notcontains $_ })
             $CompletedIds = @($CompletedIds | Where-Object { $FailedThisRun -notcontains $_ })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
@@ -2944,11 +2987,12 @@ $MetricsPoolFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -eq
 # The remedy for metrics left incomplete, shared by the summary block below and the FAILED (metrics incomplete)
 # banner further down, so both say the same thing. -ParallelStreams is named only when more than one stream
 # really ran: $StreamCount is set by the parallel path (to 0 when it ran its one subscription in this
-# process) and never by the sequential one, and a run that used one stream cannot use fewer. The re-run has
-# to be a fresh one, because a -Resume run skips these subscriptions: their inventory completed.
+# process) and never by the sequential one, and a run that used one stream cannot use fewer. A resume run is
+# the remedy now: a subscription whose metrics are incomplete is left in the retry list instead of the
+# completed list, so both resume modes collect it again.
 $PoolStreamsUsed = if ($ParallelStreams -gt 1 -and $StreamCount -ge 2) { [int]$StreamCount } else { 1 }
-$PoolRerunAdvice = 'then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each of these subscriptions.'
-$PoolResumeNote = 'A -Resume run skips them because their inventory completed, so it would not collect the missing metrics.'
+$PoolRerunAdvice = 'then re-run the same command with -Resume (or -ResumeFailedOnly) added: it collects these subscriptions again in full and the new bundle carries their new reports.'
+$PoolResumeNote = 'They are in the retry list until their metrics are collected, so neither resume mode skips them.'
 if ($MetricsFailures.Count -gt 0)
 {
     Write-Host ""
@@ -3043,7 +3087,7 @@ if ($FailedSubscriptions.Count -gt 0)
 }
 elseif ($FailedAttempts.Count -gt 0)
 {
-    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
+    Write-Host ("Pending Retries:         {0} subscription(s) in the retry list - -Resume or -ResumeFailedOnly collects them again" -f $FailedAttempts.Count) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green

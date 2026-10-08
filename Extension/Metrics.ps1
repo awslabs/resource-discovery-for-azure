@@ -1034,9 +1034,18 @@ if ($Task -eq 'Processing')
                     {
                         $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected.' -f $PoolOpenError, $MetricCount)
                         Write-MetricsDiag ('ERROR: ' + $PoolSkipMsg + ' The rest of the inventory continues.')
-                        # The subscription still finishes its inventory, so a wrapper stream marks it completed and a
-                        # -Resume run skips it with the metrics still missing; nothing re-runs this phase on its own.
-                        Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. To collect the missing metrics, free memory on this host or use a lower -ConcurrencyLimit, then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each subscription listed as metrics incomplete; a -Resume run skips them because their inventory completed.') -Severity 'Error'
+                        # The subscription still finishes its inventory, but the wrapper keeps it in the retry list
+                        # instead of the completed list, so both resume modes collect it again. A standalone run has
+                        # no resume state, so its only remedy is to run the same command again.
+                        $PoolRemedy = if ($ReuseWorkerPool)
+                        {
+                            'To collect the missing metrics, free memory on this host or use a lower -ConcurrencyLimit, then re-run with -Resume or -ResumeFailedOnly, which collects every subscription listed as metrics incomplete again.'
+                        }
+                        else
+                        {
+                            'To collect the missing metrics, free memory on this host or use a lower -ConcurrencyLimit, then run the same ResourceInventory.ps1 command again in a new PowerShell 7 session and use its report instead of this one.'
+                        }
+                        Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. ' + $PoolRemedy) -Severity 'Error'
                         if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                         # One entry per subscription that had definitions on the per-call path, each carrying its
                         # OWN count. A standalone run's phase can cover several subscriptions, so an entry that

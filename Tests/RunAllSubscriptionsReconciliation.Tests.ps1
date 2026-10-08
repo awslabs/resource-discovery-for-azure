@@ -25,7 +25,8 @@ BeforeAll {
     # confusing "command not found" mid-test.
     $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Read-ResumeOrFreshChoice', 'Clear-RdaResumeStateForFresh', 'Get-RdaResumeCarriedReports', 'Invoke-RdaSupportLogCollectionInTranscript', 'Test-RdaFinalScreenClearable', 'Get-RdaFinalScreenLines', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
         'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
-        'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks', 'Get-RunSummaryLogContent', 'Write-RdaHostLinesInTranscript')
+        'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks', 'Get-RunSummaryLogContent', 'Write-RdaHostLinesInTranscript',
+        'Get-RdaMetricsRetryReason', 'Select-RdaStrandedReports')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -4617,5 +4618,215 @@ Describe 'Get-RunSummaryLogContent separates an auth skip from metrics left inco
         $Text | Should -Not -Match '22222222-2222-2222-2222-222222222222'
         $Text | Should -Not -Match 'the metric worker pool could not be opened'
         $Text | Should -Not -Match 'Metrics incomplete subscriptions \(detail\):'
+    }
+}
+
+Describe 'Get-RdaMetricsRetryReason: the one owner of the metrics-incomplete signal' {
+    BeforeAll {
+        $script:PoolEntryOne = [pscustomobject]@{ Name = 'Sub One'; Id = 'sub-1'; Message = 'Metrics: the metric worker pool could not be opened (out of memory); 4 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $script:AuthEntryTwo = [pscustomobject]@{ Name = 'Sub Two'; Id = 'sub-2'; Message = 'Metrics skipped: no usable Azure context.'; Cause = 'auth' }
+        $script:UnknownEntry = [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = 'Metrics: the metric worker pool could not be opened (out of memory); 2 per-call metric definition(s) were not collected.'; Cause = 'pool' }
+    }
+
+    It 'says nothing when the call appended nothing' {
+        Get-RdaMetricsRetryReason -Entries @() -Before 0 | Should -BeNullOrEmpty
+        Get-RdaMetricsRetryReason -Entries $null -Before 0 | Should -BeNullOrEmpty
+        Get-RdaMetricsRetryReason -Entries @($script:PoolEntryOne) -Before 1 | Should -BeNullOrEmpty -Because 'the only entry was already there before this subscription ran'
+        Get-RdaMetricsRetryReason -Entries @($script:PoolEntryOne, $script:AuthEntryTwo) -Before 2 | Should -BeNullOrEmpty
+    }
+
+    It 'reports only what was appended after the count it was given' {
+        $Reason = Get-RdaMetricsRetryReason -Entries @($script:PoolEntryOne, $script:AuthEntryTwo) -Before 1
+        $Reason | Should -BeLike 'Metrics incomplete: *'
+        $Reason | Should -BeLike '*no usable Azure context*' -Because 'the second entry is the one this call wrote'
+        $Reason | Should -Not -BeLike '*worker pool could not be opened*' -Because 'the first entry belongs to an earlier subscription'
+    }
+
+    It 'attributes by the count, not by the Id, so an entry that names no subscription still counts' {
+        # The pool writes '(unknown)' when no metric definition carried a subscription id, and a standalone
+        # phase can cover several subscriptions. Reading the Id would lose both.
+        $Reason = Get-RdaMetricsRetryReason -Entries @($script:UnknownEntry) -Before 0
+        $Reason | Should -BeLike 'Metrics incomplete: *worker pool could not be opened*'
+        $Other = Get-RdaMetricsRetryReason -Entries @($script:PoolEntryOne) -Before 0
+        $Other | Should -Not -BeNullOrEmpty -Because 'an entry carrying another subscription id is still this call output'
+    }
+
+    It 'takes a single entry that is not in a list, and a negative count, without throwing' {
+        Get-RdaMetricsRetryReason -Entries $script:PoolEntryOne -Before 0 | Should -BeLike 'Metrics incomplete: *'
+        Get-RdaMetricsRetryReason -Entries $script:PoolEntryOne -Before -3 | Should -BeLike 'Metrics incomplete: *'
+    }
+
+    It 'folds repeated messages into one and still says something when an entry carries no message' {
+        $Twice = Get-RdaMetricsRetryReason -Entries @($script:PoolEntryOne, $script:PoolEntryOne) -Before 0
+        ([regex]::Matches($Twice, [regex]::Escape('worker pool could not be opened'))).Count | Should -Be 1
+        $Blank = Get-RdaMetricsRetryReason -Entries @([pscustomobject]@{ Id = 'sub-9'; Message = '  ' }) -Before 0
+        $Blank | Should -BeLike 'Metrics incomplete: *' -Because 'the subscription is still owed its metrics'
+    }
+}
+
+Describe 'Select-RdaStrandedReports keeps a partial report out of the resume state' {
+    It 'takes only the reports the copy itself lists as completed' {
+        $Copy = [pscustomobject]@{
+            Completed      = @('sub-1')
+            FailedAttempts = @([pscustomobject]@{ Id = 'sub-2'; Reason = 'Metrics incomplete: out of memory' })
+            Reports        = @(
+                [pscustomobject]@{ Id = 'sub-1'; Name = 'Sub One'; Zip = 'one.zip' }
+                [pscustomobject]@{ Id = 'sub-2'; Name = 'Sub Two'; Zip = 'two-partial.zip' })
+        }
+        $Kept = @(Select-RdaStrandedReports -Copy $Copy)
+        @($Kept | ForEach-Object { [string]$_.Id }) | Should -Be @('sub-1') -Because 'sub-2 is still owed its metrics, so its report must not replace a complete one'
+    }
+
+    It 'takes nothing from a copy with no completed ids, and nothing from no copy at all' {
+        @(Select-RdaStrandedReports -Copy ([pscustomobject]@{ Completed = @(); Reports = @([pscustomobject]@{ Id = 'sub-1' }) })).Count | Should -Be 0
+        @(Select-RdaStrandedReports -Copy ([pscustomobject]@{ Completed = $null; Reports = @([pscustomobject]@{ Id = 'sub-1' }) })).Count | Should -Be 0
+        @(Select-RdaStrandedReports -Copy $null).Count | Should -Be 0
+    }
+}
+
+Describe 'A stream worker leaves a subscription whose metrics are incomplete in the retry list' {
+    # The real worker runs against a stub ResourceInventory.ps1, as the worker Context above does, so the
+    # branch under test is the shipped one and not a mirror of it.
+    BeforeAll {
+        $script:GapRepo = Split-Path $PSScriptRoot -Parent
+        $script:GapWorker = Join-Path $script:GapRepo 'Run-AllSubscriptions.Stream.ps1'
+        $script:GapTree = Join-Path $script:TestRoot 'gap-tree'
+        New-Item -ItemType Directory -Path $script:GapTree -Force | Out-Null
+        # The stub finishes the inventory and, for the subscriptions named in RDA_TEST_METRIC_GAP,
+        # appends the health entry the metrics phase would have appended. It exits 0 either way.
+        Set-Content -LiteralPath (Join-Path $script:GapTree 'ResourceInventory.ps1') -Value @'
+param($TenantID, $SubscriptionID, [switch]$RunAllSubs, $ConcurrencyLimit)
+$Global:ResourceCount = 3
+$Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
+$Gap = @(($env:RDA_TEST_METRIC_GAP -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($Gap -contains [string]$SubscriptionID)
+{
+    if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = 'Metrics: the metric worker pool could not be opened (out of memory); 2 per-call metric definition(s) were not collected.'; Cause = 'pool' }
+}
+'@
+        function script:Invoke-GapStream
+        {
+            param([string]$Root, [string[]]$SubIds, [string[]]$SubNames, [string]$Gap = '')
+            New-Item -ItemType Directory -Path $Root -Force | Out-Null
+            $Prior = $env:RDA_TEST_METRIC_GAP
+            $env:RDA_TEST_METRIC_GAP = $Gap
+            try
+            {
+                $null = & $script:GapWorker -TenantID 'tenant-g' -StreamId '0' -InventoryRoot $Root `
+                    -ScriptRoot $script:GapTree -AzContextPath (Join-Path $Root 'snapshot.json') `
+                    -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.log') `
+                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess 6>&1
+            }
+            finally
+            {
+                $env:RDA_TEST_METRIC_GAP = $Prior
+            }
+            [pscustomobject]@{
+                Summary = (Get-Content -Raw -LiteralPath (Join-Path $Root 'summary.json') | ConvertFrom-Json)
+                State   = (Get-Content -Raw -LiteralPath (Get-StreamStateFilePath -InventoryRoot $Root -Tenant 'tenant-g' -StreamId '0') | ConvertFrom-Json)
+            }
+        }
+    }
+
+    BeforeEach {
+        $script:GapPriorMetrics = $Global:MetricsFailedSubs
+    }
+
+    AfterEach {
+        $Global:MetricsFailedSubs = $script:GapPriorMetrics
+    }
+
+    It 'completes the others, records the gap as a retry, and keeps it off the failed list' {
+        $Root = Join-Path $script:TestRoot 'gap-run-1'
+        $Run = script:Invoke-GapStream -Root $Root -SubIds @('sub-1', 'sub-2', 'sub-3') -SubNames @('Sub One', 'Sub Two', 'Sub Three') -Gap 'sub-2'
+        @($Run.Summary.Completed | Sort-Object) | Should -Be @('sub-1', 'sub-3') -Because 'sub-2 is still owed its metrics'
+        @($Run.Summary.Failed).Count | Should -Be 0 -Because 'its inventory did not fail, so it is not a failed subscription'
+        @($Run.Summary.ResourceCounts | ForEach-Object { [string]$_.Id } | Sort-Object) | Should -Be @('sub-1', 'sub-2', 'sub-3') -Because 'the report of a subscription with incomplete metrics still ships'
+        $Entries = @($Run.State.FailedAttempts | Where-Object { $null -ne $_ })
+        @($Entries | ForEach-Object { [string]$_.Id }) | Should -Be @('sub-2')
+        [string]$Entries[0].Reason | Should -BeLike 'Metrics incomplete: *worker pool could not be opened*'
+        [int]$Entries[0].Attempts | Should -Be 1
+        @($Run.State.Completed | Sort-Object) | Should -Be @('sub-1', 'sub-3')
+        @($Run.State.Reports | ForEach-Object { [string]$_.Id } | Sort-Object) | Should -Be @('sub-1', 'sub-2', 'sub-3')
+    }
+
+    It 'a clean retry over that one subscription completes it and clears the entry' {
+        $Root = Join-Path $script:TestRoot 'gap-run-2'
+        $First = script:Invoke-GapStream -Root $Root -SubIds @('sub-1', 'sub-2') -SubNames @('Sub One', 'Sub Two') -Gap 'sub-2'
+        @($First.State.FailedAttempts | ForEach-Object { [string]$_.Id }) | Should -Be @('sub-2')
+        $Retry = script:Invoke-GapStream -Root (Join-Path $script:TestRoot 'gap-run-2b') -SubIds @('sub-2') -SubNames @('Sub Two')
+        @($Retry.Summary.Completed) | Should -Be @('sub-2')
+        @($Retry.State.FailedAttempts | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'the metrics are in, so nothing is owed'
+    }
+
+    It 'counts the attempts when the retry leaves the same gap, because the entry is never removed first' {
+        $Root = Join-Path $script:TestRoot 'gap-run-3'
+        $Again = script:Invoke-GapStream -Root $Root -SubIds @('sub-2', 'sub-2') -SubNames @('Sub Two', 'Sub Two') -Gap 'sub-2'
+        $Entries = @($Again.State.FailedAttempts | Where-Object { $null -ne $_ })
+        $Entries.Count | Should -Be 1
+        [int]$Entries[0].Attempts | Should -Be 2 -Because 'removing the entry before adding it would reset the count to 1'
+        @($Again.State.Completed | Where-Object { $null -ne $_ }).Count | Should -Be 0
+    }
+
+    It 'attributes the gap to the subscription that ran, not to the id the entry carries' {
+        # The stub writes an entry whose Id is '(unknown)'. Only sub-1 may be recorded as owing metrics.
+        $Root = Join-Path $script:TestRoot 'gap-run-4'
+        $Run = script:Invoke-GapStream -Root $Root -SubIds @('sub-1', 'sub-2') -SubNames @('Sub One', 'Sub Two') -Gap 'sub-1'
+        @($Run.State.FailedAttempts | ForEach-Object { [string]$_.Id }) | Should -Be @('sub-1')
+        @($Run.State.Completed) | Should -Be @('sub-2')
+    }
+}
+
+Describe 'The parallel fold does not let a shipped report cover a subscription that is back in the retry list' {
+    # The three statements are lifted from the wrapper so the test runs what the wrapper runs.
+    BeforeAll {
+        $script:FoldWrapper = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
+        $FoldAst = [System.Management.Automation.Language.Parser]::ParseFile($script:FoldWrapper, [ref]$null, [ref]$null)
+        $Names = @('$FailedSinceStart', '$CompletedThisRun', '$FailedThisRun')
+        $Lifted = @()
+        foreach ($Name in $Names)
+        {
+            $Found = @($FoldAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq $Name }.GetNewClosure(), $true))
+            if ($Found.Count -ne 1) { throw ('Expected one assignment to {0} in the wrapper; found {1}.' -f $Name, $Found.Count) }
+            $Lifted += $Found[0].Extent.Text
+        }
+        $Revoke = @($FoldAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Extent.Text -eq '$CompletedIds = @($CompletedIds | Where-Object { $FailedThisRun -notcontains $_ })' }, $true))
+        if ($Revoke.Count -ne 1) { throw 'Expected one revoke of the completed set in the parallel fold.' }
+        $script:RunFold = [scriptblock]::Create((@(
+                    'param($SubResourceCounts, $AllFailedFromStreams, $FailedSubscriptionIds, $CompletedIds, $RunStartTime)'
+                ) + $Lifted + @(
+                    $Revoke[0].Extent.Text
+                    '[pscustomobject]@{ CompletedThisRun = @($CompletedThisRun); FailedThisRun = @($FailedThisRun); CompletedIds = @($CompletedIds) }'
+                ) -join [Environment]::NewLine))
+    }
+
+    It 'drops an older completion of a subscription a stream put back in the retry list this run' {
+        $Now = Get-Date
+        $Shipped = @([pscustomobject]@{ Id = 'sub-2'; Zip = 'two.zip' })
+        $Retry = @([pscustomobject]@{ Id = 'sub-2'; Reason = 'Metrics incomplete: out of memory'; LastFailedAt = $Now.AddSeconds(5).ToString('o') })
+        $Result = & $script:RunFold $Shipped $Retry @() @('sub-1', 'sub-2') $Now
+        $Result.CompletedThisRun | Should -Not -Contain 'sub-2' -Because 'a shipped report does not settle a subscription that is still owed its metrics'
+        $Result.FailedThisRun | Should -Contain 'sub-2'
+        $Result.CompletedIds | Should -Be @('sub-1') -Because 'the completion an earlier run recorded is revoked'
+    }
+
+    It 'still exempts a subscription this run shipped and did not put in the retry list' {
+        $Now = Get-Date
+        $Shipped = @([pscustomobject]@{ Id = 'sub-2'; Zip = 'two.zip' })
+        $Other = @([pscustomobject]@{ Id = 'sub-9'; Reason = 'collection failed'; LastFailedAt = $Now.AddSeconds(5).ToString('o') })
+        $Result = & $script:RunFold $Shipped $Other @() @('sub-1', 'sub-2') $Now
+        $Result.CompletedThisRun | Should -Contain 'sub-2'
+        $Result.FailedThisRun | Should -Not -Contain 'sub-2'
+        @($Result.CompletedIds | Sort-Object) | Should -Be @('sub-1', 'sub-2')
+    }
+
+    It 'leaves an entry from an earlier run alone' {
+        $Now = Get-Date
+        $Shipped = @([pscustomobject]@{ Id = 'sub-2'; Zip = 'two.zip' })
+        $Old = @([pscustomobject]@{ Id = 'sub-2'; Reason = 'Metrics incomplete: out of memory'; LastFailedAt = $Now.AddHours(-3).ToString('o') })
+        $Result = & $script:RunFold $Shipped $Old @() @('sub-1', 'sub-2') $Now
+        $Result.CompletedThisRun | Should -Contain 'sub-2' -Because 'this run shipped its report and recorded nothing new against it'
+        @($Result.CompletedIds | Sort-Object) | Should -Be @('sub-1', 'sub-2')
     }
 }

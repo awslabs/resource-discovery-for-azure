@@ -1889,6 +1889,26 @@ function Save-CompletedSubscriptionIds
     }
 }
 
+function Get-RdaMetricsRetryReason
+{
+    # The reason to put a subscription in the retry list when its inventory completed but its metrics
+    # did not. -Entries is $Global:MetricsFailedSubs and -Before is how many entries that list held
+    # immediately BEFORE ResourceInventory.ps1 was called for this subscription, so an entry is
+    # attributed to the call that wrote it and never by its Id: the metrics phase writes '(unknown)'
+    # when no metric definition named a subscription, a standalone phase can cover several, and under
+    # Runspace isolation each stream reads its own list. Returns $null when that call appended nothing,
+    # which is the ordinary case and leaves every caller on its existing path.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([object]$Entries, [int]$Before = 0)
+    $List = @($Entries | Where-Object { $null -ne $_ })
+    $From = if ($Before -gt 0) { $Before } else { 0 }
+    if ($List.Count -le $From) { return $null }
+    $Messages = @($List | Select-Object -Skip $From | ForEach-Object { [string]$_.Message } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    if ($Messages.Count -eq 0) { $Messages = @('the metrics phase reported no detail.') }
+    return ('Metrics incomplete: {0}' -f ($Messages -join ' '))
+}
+
 function Add-FailedAttempt
 {
     param(
@@ -2429,6 +2449,21 @@ function Remove-RdaMergedStreamState
             Write-Warning ("The resume state blob {0} does not hold everything {1} per-stream state blob(s) recorded, so they are kept. {2}" -f $BlobName, $Blobs.Count, $KeptNote)
         }
     }
+}
+
+function Select-RdaStrandedReports
+{
+    # The reports a per-stream state copy left by an interrupted run may contribute to the resume
+    # state: only those for ids that same copy lists as completed. A copy can carry a report for a
+    # subscription it had NOT finished - one whose metrics are still owed is recorded with its report
+    # but kept out of Completed - and folding that in would let a partial report replace a complete
+    # one an earlier run recorded.
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param($Copy)
+    if ($null -eq $Copy) { return @() }
+    $CopyCompleted = @($Copy.Completed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    return @($Copy.Reports | Where-Object { $null -ne $_ -and $CopyCompleted -contains [string]$_.Id })
 }
 
 function Select-RdaShippableReports

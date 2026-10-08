@@ -931,6 +931,10 @@ if ($Task -eq 'Processing')
     # How long the phase end waits for every pool worker to finish before deciding whether the pool
     # can be released. An idle pool passes at once; only a call still blocked in a network read waits.
     $MetricPoolReleaseGraceSeconds = 10
+    # How long to wait before the one retry of a pool open that failed. The phase already gives its
+    # workers this long before it decides about releasing a pool, and the wait is paid only after a
+    # failure, so a host with memory to spare never meets it.
+    $MetricPoolOpenRetryDelaySeconds = 10
     $MetricMaxRetries = 3
     $MetricMaxThrottleRetries = 6
     $MetricMaxRetryAfterSeconds = 120
@@ -965,77 +969,113 @@ if ($Task -eq 'Processing')
         }
         else
         {
-            $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
-            [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
-            # Open() is the only step here that can fail, and the pool it leaves behind is Broken: it has
-            # already registered its process-wide cleanup timer, so it has to be disposed, and it can serve
-            # no call, so it is never stored for the next subscription. Without this the failure either
-            # throws out of the phase under -ErrorAction Stop and leaks that pool, or is swallowed under the
-            # default preference and every worker then fails on its own at BeginInvoke. Only the per-call
-            # collection of this subscription is given up: the batch records already written and the rest of
-            # the inventory are untouched, and the subscription is named in the wrapper's run summary.
-            try
+            # A pool open that fails for want of memory can succeed a moment later, so it is tried
+            # once more: the broken pool is disposed first, this process compacts its heap, and the
+            # wait gives whatever else on the host held that memory time to let go of it. The retry
+            # builds a fresh pool of the SAME size, because Open() allocates runspaces on demand and
+            # a smaller maximum only brings back calls that time out while queued. The loop carries
+            # the decision rather than a break or a continue: the open try is lifted on its own by
+            # the tests, and outside a loop either jump unwinds into whatever loop the caller runs.
+            $MetricPoolOpenRetriesLeft = 1
+            $MetricPoolOpenPending = $true
+            while ($MetricPoolOpenPending)
             {
-                $MetricCallPool.Open()
-                if ($ReuseWorkerPool)
-                {
-                    $Global:MetricCallPool = $MetricCallPool
-                }
-            }
-            catch
-            {
-                $PoolOpenError = $_.Exception.Message
+                $MetricPoolOpenPending = $false
+                $MetricCallPool = [runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())
+                [void]$MetricCallPool.SetMaxRunspaces([math]::Max(1, [int]$ConcurrencyLimit) * ([math]::Max(1, [int]$MetricMaxRetries) + 1))
+                # Open() is the only step here that can fail, and the pool it leaves behind is Broken: it has
+                # already registered its process-wide cleanup timer, so it has to be disposed, and it can serve
+                # no call, so it is never stored for the next subscription. Without this the failure either
+                # throws out of the phase under -ErrorAction Stop and leaks that pool, or is swallowed under the
+                # default preference and every worker then fails on its own at BeginInvoke. Only the per-call
+                # collection of this subscription is given up: the batch records already written and the rest of
+                # the inventory are untouched, and the subscription is named in the wrapper's run summary.
                 try
                 {
-                    $MetricCallPool.Dispose()
+                    $MetricCallPool.Open()
+                    if ($ReuseWorkerPool)
+                    {
+                        $Global:MetricCallPool = $MetricCallPool
+                    }
+                    if ($MetricPoolOpenRetriesLeft -eq 0)
+                    {
+                        Write-MetricsDiag 'Metric worker pool opened on the second attempt.'
+                        Write-Log -Message 'Metrics: the metric worker pool opened on the second attempt, after compacting memory and waiting. The per-call metric collection of this subscription continues.' -Severity 'Info'
+                    }
                 }
                 catch
                 {
-                    Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
-                }
-                $MetricCallPool = $null
-                $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected.' -f $PoolOpenError, $MetricCount)
-                Write-MetricsDiag ('ERROR: ' + $PoolSkipMsg + ' The rest of the inventory continues.')
-                # The subscription still finishes its inventory, so a wrapper stream marks it completed and a
-                # -Resume run skips it with the metrics still missing; nothing re-runs this phase on its own.
-                Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. To collect the missing metrics, free memory on this host or use a lower -ConcurrencyLimit, then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each subscription listed as metrics incomplete; a -Resume run skips them because their inventory completed.') -Severity 'Error'
-                if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
-                # One entry per subscription that had definitions on the per-call path, each carrying its
-                # OWN count. A standalone run's phase can cover several subscriptions, so an entry that
-                # repeated the phase total would tell each of them that every definition of the run was
-                # its own. The ids are lower-cased so the same subscription written two ways is one entry,
-                # and the first-appearance order is kept for the summary. Cause 'pool' keeps the wrapper from
-                # reporting this as an auth skip: the remedy is memory on the host, not Connect-AzAccount.
-                $PoolFailedSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() })
-                $PoolFailedCounts = @{}
-                foreach ($PoolFailedSubId in $PoolFailedSubIds)
-                {
-                    if (-not $PoolFailedCounts.ContainsKey($PoolFailedSubId)) { $PoolFailedCounts[$PoolFailedSubId] = 0 }
-                    $PoolFailedCounts[$PoolFailedSubId]++
-                }
-                $PoolFailedUniqueIds = @($PoolFailedSubIds | Select-Object -Unique)
-                if ($PoolFailedUniqueIds.Count -eq 0)
-                {
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = $PoolSkipMsg; Cause = 'pool' }
-                }
-                else
-                {
-                    foreach ($PoolFailedSubId in $PoolFailedUniqueIds)
+                    $PoolOpenError = $_.Exception.Message
+                    try
                     {
-                        $PoolFailedSub = $SubLookup[$PoolFailedSubId]
-                        $PoolFailedSubName = if ($null -ne $PoolFailedSub -and ![string]::IsNullOrEmpty($PoolFailedSub.Name)) { $PoolFailedSub.Name } else { '(subscription)' }
-                        $Global:MetricsFailedSubs += [pscustomobject]@{
-                            Name    = $PoolFailedSubName
-                            Id      = $PoolFailedSubId
-                            Message = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) of this subscription were not collected.' -f $PoolOpenError, $PoolFailedCounts[$PoolFailedSubId])
-                            Cause   = 'pool'
+                        $MetricCallPool.Dispose()
+                    }
+                    catch
+                    {
+                        Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
+                    }
+                    $MetricCallPool = $null
+                    if ($MetricPoolOpenRetriesLeft -gt 0)
+                    {
+                        # Nothing is given up yet, so no health entry, no Error line and nothing in the
+                        # global: this failure is only reported if the retry fails too. $Resources and
+                        # $MetricDefs are still needed, so the broken pool is all there is to release.
+                        $MetricPoolOpenRetriesLeft--
+                        $PoolRetryMsg = ('Metrics: the metric worker pool could not be opened ({0}). Compacting memory and retrying once in {1}s with the same pool size.' -f $PoolOpenError, $MetricPoolOpenRetryDelaySeconds)
+                        Write-MetricsDiag ('WARNING: ' + $PoolRetryMsg)
+                        Write-Log -Message $PoolRetryMsg -Severity 'Warning'
+                        Write-RdaMemorySnapshot -Phase 'Metric worker pool open failed' -Compact
+                        [System.GC]::WaitForPendingFinalizers()
+                        [System.GC]::Collect()
+                        Start-Sleep -Seconds $MetricPoolOpenRetryDelaySeconds
+                        $MetricPoolOpenPending = $true
+                    }
+                    else
+                    {
+                        $PoolSkipMsg = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) were not collected.' -f $PoolOpenError, $MetricCount)
+                        Write-MetricsDiag ('ERROR: ' + $PoolSkipMsg + ' The rest of the inventory continues.')
+                        # The subscription still finishes its inventory, so a wrapper stream marks it completed and a
+                        # -Resume run skips it with the metrics still missing; nothing re-runs this phase on its own.
+                        Write-Log -Message ($PoolSkipMsg + ' The rest of the inventory continues. To collect the missing metrics, free memory on this host or use a lower -ConcurrencyLimit, then re-run without -Resume, or run ResourceInventory.ps1 -SubscriptionID <id> for each subscription listed as metrics incomplete; a -Resume run skips them because their inventory completed.') -Severity 'Error'
+                        if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
+                        # One entry per subscription that had definitions on the per-call path, each carrying its
+                        # OWN count. A standalone run's phase can cover several subscriptions, so an entry that
+                        # repeated the phase total would tell each of them that every definition of the run was
+                        # its own. The ids are lower-cased so the same subscription written two ways is one entry,
+                        # and the first-appearance order is kept for the summary. Cause 'pool' keeps the wrapper from
+                        # reporting this as an auth skip: the remedy is memory on the host, not Connect-AzAccount.
+                        $PoolFailedSubIds = @($MetricDefs | ForEach-Object { (([string]$_.Id) -split '/')[2] } | Where-Object { -not [string]::IsNullOrEmpty($_) } | ForEach-Object { $_.ToLowerInvariant() })
+                        $PoolFailedCounts = @{}
+                        foreach ($PoolFailedSubId in $PoolFailedSubIds)
+                        {
+                            if (-not $PoolFailedCounts.ContainsKey($PoolFailedSubId)) { $PoolFailedCounts[$PoolFailedSubId] = 0 }
+                            $PoolFailedCounts[$PoolFailedSubId]++
                         }
+                        $PoolFailedUniqueIds = @($PoolFailedSubIds | Select-Object -Unique)
+                        if ($PoolFailedUniqueIds.Count -eq 0)
+                        {
+                            $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = $PoolSkipMsg; Cause = 'pool' }
+                        }
+                        else
+                        {
+                            foreach ($PoolFailedSubId in $PoolFailedUniqueIds)
+                            {
+                                $PoolFailedSub = $SubLookup[$PoolFailedSubId]
+                                $PoolFailedSubName = if ($null -ne $PoolFailedSub -and ![string]::IsNullOrEmpty($PoolFailedSub.Name)) { $PoolFailedSub.Name } else { '(subscription)' }
+                                $Global:MetricsFailedSubs += [pscustomobject]@{
+                                    Name    = $PoolFailedSubName
+                                    Id      = $PoolFailedSubId
+                                    Message = ('Metrics: the metric worker pool could not be opened ({0}); {1} per-call metric definition(s) of this subscription were not collected.' -f $PoolOpenError, $PoolFailedCounts[$PoolFailedSubId])
+                                    Cause   = 'pool'
+                                }
+                            }
+                        }
+                        # Nothing in this phase repairs the pool, so the per-call loop is skipped rather than run
+                        # against a pool that is gone. The counts below then report what was really collected.
+                        $MetricCount = 0
+                        $MetricPerCallPoolFailed = $true
                     }
                 }
-                # Nothing in this phase repairs the pool, so the per-call loop is skipped rather than run
-                # against a pool that is gone. The counts below then report what was really collected.
-                $MetricCount = 0
-                $MetricPerCallPoolFailed = $true
             }
         }
     }

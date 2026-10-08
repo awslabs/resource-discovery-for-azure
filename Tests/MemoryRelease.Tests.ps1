@@ -930,6 +930,9 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
                         'param($Pool, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup)'
                         '$MetricCallPool = $Pool'
                         '$MetricPerCallPoolFailed = $false'
+                        # This harness drives the LAST attempt: with no retry left the catch takes the
+                        # give-up branch, which is the one every assertion below is about.
+                        '$MetricPoolOpenRetriesLeft = 0'
                         '$OpenDiag = [System.Collections.Generic.List[string]]::new()'
                         '$OpenLog = [System.Collections.Generic.List[object]]::new()'
                         'function Write-MetricsDiag { param($Message) $OpenDiag.Add([string]$Message) }'
@@ -1041,6 +1044,174 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Unknown = [System.Collections.Generic.List[object]]@([pscustomobject]@{ Id = 'not-an-arm-id' })
             $null = & $script:PoolOpen $Pool $true 1 $Unknown $script:OpenSubLookup
             @($Global:MetricsFailedSubs | ForEach-Object { [string]$_.Cause }) | Should -Be @('pool') -Because 'the unknown-subscription fallback is the same failure'
+        }
+    }
+
+    Context 'a worker pool whose first open fails' {
+        BeforeAll {
+            # The retry is driven over the WHOLE create-and-open block, not the open try alone, because
+            # the retry is what decides whether that block runs a second time. The one runspace factory
+            # call is swapped for a stand-in queue so an open can be made to fail on demand, and the
+            # swap is asserted to hit exactly one site, so a second factory call cannot slip past it.
+            $RetryAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
+            $RetryBlock = @($RetryAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$MetricCount -gt 0' -and $N.Extent.Text -match 'CreateRunspacePool' }, $true))
+            if ($RetryBlock.Count -ne 1) { throw ('Expected one block that builds the metrics pool; found {0}.' -f $RetryBlock.Count) }
+            $FactoryText = '[runspacefactory]::CreateRunspacePool([initialsessionstate]::CreateDefault2())'
+            $BlockText = $RetryBlock[0].Extent.Text
+            $FactoryCount = ([regex]::Matches($BlockText, [regex]::Escape($FactoryText))).Count
+            if ($FactoryCount -ne 1) { throw ('Expected exactly one runspace factory call in the pool block; found {0}. A second one would build a pool the stand-in queue never sees.' -f $FactoryCount) }
+            $script:PoolRetry = [scriptblock]::Create((@(
+                        'param($PoolQueue, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup, $MetricPoolOpenRetryDelaySeconds = 0, $ConcurrencyLimit = 2, $MetricMaxRetries = 0)'
+                        '$MetricCallPool = $null'
+                        '$MetricPerCallPoolFailed = $false'
+                        '$RetryDiag = [System.Collections.Generic.List[string]]::new()'
+                        '$RetryLog = [System.Collections.Generic.List[object]]::new()'
+                        '$RetrySleeps = [System.Collections.Generic.List[object]]::new()'
+                        '$RetrySnapshots = [System.Collections.Generic.List[string]]::new()'
+                        '$RetryPoolHeldAtWait = [System.Collections.Generic.List[object]]::new()'
+                        '$RetryFactoryCalls = [System.Collections.Generic.List[object]]::new()'
+                        'function Write-MetricsDiag { param($Message) $RetryDiag.Add([string]$Message) }'
+                        'function Write-Log { param($Message, $Severity, [switch]$NoConsole, [switch]$ToDebugLog) $RetryLog.Add([pscustomobject]@{ Message = [string]$Message; Severity = [string]$Severity }) }'
+                        'function Write-RdaMemorySnapshot { param($Phase, [switch]$Compact, [switch]$Record) $RetrySnapshots.Add([string]$Phase); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
+                        'function Start-Sleep { param([int]$Seconds, [int]$Milliseconds) $RetrySleeps.Add($Seconds); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
+                        'function New-RdaStandInPool { if ($PoolQueue.Count -eq 0) { throw ''the pool block asked for more pools than this test queued'' }; $Next = $PoolQueue.Dequeue(); $RetryFactoryCalls.Add($Next); $Next }'
+                        $BlockText.Replace($FactoryText, '(New-RdaStandInPool)')
+                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; PoolFailed = $MetricPerCallPoolFailed; Diag = @($RetryDiag); Log = @($RetryLog); Sleeps = @($RetrySleeps); Snapshots = @($RetrySnapshots); HeldAtWait = @($RetryPoolHeldAtWait); Factory = @($RetryFactoryCalls) }'
+                    ) -join [Environment]::NewLine))
+            # A stand-in rather than a real pool: a real one made to fail its open keeps this process
+            # from exiting. An empty OpenError means that attempt succeeds.
+            $script:NewQueuedPool = {
+                param([string]$Message)
+                $Pool = [pscustomobject]@{ OpenCount = 0; DisposeCount = 0; OpenError = $Message; MaxRunspaces = 0 }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name Open -Value { $this.OpenCount++; if (-not [string]::IsNullOrEmpty($this.OpenError)) { throw $this.OpenError } }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+                Add-Member -InputObject $Pool -MemberType ScriptMethod -Name SetMaxRunspaces -Value { param($Count) $this.MaxRunspaces = [int]$Count; $true }
+                $Pool
+            }
+            $script:RetryDefs = [System.Collections.Generic.List[object]]@(
+                [pscustomobject]@{ Id = '/subscriptions/aaaa-1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1' }
+                [pscustomobject]@{ Id = '/subscriptions/bbbb-2/resourceGroups/rg/providers/Microsoft.Sql/servers/s1/databases/d1' })
+            $script:RetrySubLookup = @{ 'aaaa-1' = [pscustomobject]@{ id = 'aaaa-1'; Name = 'Contoso-Dev' }; 'bbbb-2' = [pscustomobject]@{ id = 'bbbb-2'; Name = 'Contoso-Prod' } }
+        }
+
+        BeforeEach {
+            $script:PriorRetryFailedSubs = $Global:MetricsFailedSubs
+            $Global:MetricsFailedSubs = @()
+        }
+
+        AfterEach {
+            # A stand-in pool is not a runspace pool, so the real closer in the enclosing AfterEach
+            # must never be handed one.
+            $Global:MetricCallPool = $null
+            $Global:MetricsFailedSubs = $script:PriorRetryFailedSubs
+        }
+
+        It 'opens on the second attempt, and the subscription keeps its per-call collection' {
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'Insufficient resources to start a runspace.'))
+            $Queue.Enqueue((& $script:NewQueuedPool ''))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Result.Factory.Count | Should -Be 2 -Because 'the retry builds a fresh pool; the broken one can serve no call'
+            $Result.Factory[0].DisposeCount | Should -Be 1 -Because 'the pool that failed its open has already registered the cleanup timer that only Dispose removes'
+            $Result.Factory[1].DisposeCount | Should -Be 0
+            $Result.Factory[1].OpenCount | Should -Be 1
+            [object]::ReferenceEquals($Result.Pool, $Result.Factory[1]) | Should -BeTrue
+            [object]::ReferenceEquals($Global:MetricCallPool, $Result.Factory[1]) | Should -BeTrue -Because 'the pool that did open is the one handed to the next subscription'
+            $Result.Factory[1].MaxRunspaces | Should -Be $Result.Factory[0].MaxRunspaces -Because 'Open allocates runspaces on demand, so a smaller retry pool would only bring back calls that time out while queued'
+            $Result.Count | Should -Be 7 -Because 'the per-call loop runs, so nothing is given up'
+            $Result.PoolFailed | Should -BeFalse
+            @($Global:MetricsFailedSubs).Count | Should -Be 0 -Because 'an open that succeeded on the retry left no gap to report'
+            @($Result.Log | Where-Object { $_.Severity -eq 'Error' }).Count | Should -Be 0 -Because 'the first failure is a warning; only giving up is an error'
+            @($Result.Log | Where-Object { $_.Severity -eq 'Warning' }).Count | Should -Be 1
+            @($Result.Log | Where-Object { $_.Severity -eq 'Warning' })[0].Message | Should -BeLike '*Insufficient resources to start a runspace.*'
+            @($Result.Diag | Where-Object { $_ -like 'ERROR: *' }).Count | Should -Be 0
+        }
+
+        It 'disposes the broken pool and compacts memory before it waits' {
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'Insufficient resources to start a runspace.'))
+            $Queue.Enqueue((& $script:NewQueuedPool ''))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Result.Snapshots | Should -Be @('Metric worker pool open failed') -Because 'one compacting reading, so the debug log shows what the host had at the moment the open failed'
+            $Result.Sleeps | Should -Be @(0) -Because 'it waits once, reading the constant the caller passes'
+            $Result.HeldAtWait.Count | Should -Be 2 -Because 'the snapshot and the wait each record what the block was still holding'
+            @($Result.HeldAtWait | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'the broken pool is disposed and dropped before the wait, so nothing holds its memory while the host is asked for more'
+            $Global:MetricCallPool | Should -Not -BeNullOrEmpty
+        }
+
+        It 'gives up after the second failure with the same skip it has today, quoting the second error' {
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'first open failed'))
+            $Queue.Enqueue((& $script:NewQueuedPool 'second open failed too'))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Result.Factory.Count | Should -Be 2
+            @($Result.Factory | ForEach-Object { $_.DisposeCount }) | Should -Be @(1, 1) -Because 'both pools registered the cleanup timer'
+            $Result.Pool | Should -BeNullOrEmpty
+            $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a pool that cannot be opened must never serve the next subscription'
+            $Result.Count | Should -Be 0
+            $Result.PoolFailed | Should -BeTrue
+            $Errors = @($Result.Log | Where-Object { $_.Severity -eq 'Error' })
+            $Errors.Count | Should -Be 1
+            $Errors[0].Message | Should -BeLike '*second open failed too*' -Because 'the operator needs the error the last attempt hit, not the one already superseded'
+            @($Result.Log | Where-Object { $_.Severity -eq 'Warning' }).Count | Should -Be 1 -Because 'the warning belongs to the first failure only'
+            $Result.Sleeps | Should -Be @(0)
+            $Entries = @($Global:MetricsFailedSubs)
+            $Entries.Count | Should -Be 2 -Because 'the health entry is written only after the retry has failed too'
+            @($Entries | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('aaaa-1', 'bbbb-2')
+            @($Entries | ForEach-Object { [string]$_.Cause }) | Should -Be @('pool', 'pool')
+        }
+
+        It 'never asks for a third pool' {
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'first open failed'))
+            $Queue.Enqueue((& $script:NewQueuedPool 'second open failed too'))
+            $Queue.Enqueue((& $script:NewQueuedPool ''))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Result.Factory.Count | Should -Be 2 -Because 'one retry, not a loop that keeps trying while the host stays short of memory'
+            $Queue.Count | Should -Be 1 -Because 'the third pool was never requested'
+            $Result.Pool | Should -BeNullOrEmpty
+        }
+
+        It 'builds no pool at all when an open one is already in the global' {
+            $Open = [pscustomobject]@{ MaxRunspaces = 0; RunspacePoolStateInfo = [pscustomobject]@{ State = [System.Management.Automation.Runspaces.RunspacePoolState]::Opened } }
+            Add-Member -InputObject $Open -MemberType ScriptMethod -Name SetMaxRunspaces -Value { param($Count) $this.MaxRunspaces = [int]$Count; $true }
+            $Global:MetricCallPool = $Open
+            $Queue = [System.Collections.Queue]::new()
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Result.Factory.Count | Should -Be 0 -Because 'the retry must not turn a reused pool into a rebuilt one'
+            $Result.Sleeps.Count | Should -Be 0
+            [object]::ReferenceEquals($Result.Pool, $Open) | Should -BeTrue
+        }
+
+        It 'says in the debug log that the pool opened on the second attempt, and stays silent on a first-attempt open' {
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'Insufficient resources to start a runspace.'))
+            $Queue.Enqueue((& $script:NewQueuedPool ''))
+            $Retried = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+            @($Retried.Diag | Where-Object { $_ -like '*opened on the second attempt*' }).Count | Should -Be 1
+
+            $Global:MetricCallPool = $null
+            $Clean = [System.Collections.Queue]::new()
+            $Clean.Enqueue((& $script:NewQueuedPool ''))
+            $First = & $script:PoolRetry $Clean $true 7 $script:RetryDefs $script:RetrySubLookup
+            $First.Diag.Count | Should -Be 0 -Because 'a first-time open is the ordinary case and says nothing'
+            $First.Sleeps.Count | Should -Be 0
+        }
+
+        It 'keeps the retry wording free of auth and of a phase that cannot be re-run on its own' {
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool 'Insufficient resources to start a runspace.'))
+            $Queue.Enqueue((& $script:NewQueuedPool ''))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+            $Said = @(@($Result.Log | ForEach-Object { $_.Message }) + @($Result.Diag)) -join ' '
+            $Said | Should -Not -Match '(?i)auth' -Because 'the remedy is memory on the host, not a token'
+            $Said | Should -Not -Match '(?i)Connect-AzAccount'
+            $Said | Should -Not -Match '(?i)metrics phase' -Because 'there is no way to re-run only that phase'
         }
     }
 }

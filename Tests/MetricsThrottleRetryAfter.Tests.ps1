@@ -268,6 +268,24 @@ Describe 'Per-attempt timeout - pooled call, not a ThreadJob per attempt' {
         $PoolBinds[0].Extent.StartOffset | Should -BeGreaterThan $Creates[0].Extent.StartOffset -Because 'the call is constructed first, then bound'
         $script:MetricsSrc | Should -Match "AddCommand\('Get-AzMetric'\)\.AddParameters\(\`$MetricArgs\)"
     }
+    It 'waits once, on the constant, before the single retry of a failed pool open' {
+        $PoolBlock = @($script:Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$MetricCount -gt 0' -and $N.Extent.Text -match 'CreateRunspacePool' }, $true))
+        $PoolBlock.Count | Should -Be 1 -Because 'one block builds the pool, and the retry loop goes around it'
+        $Sleeps = @($PoolBlock[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Start-Sleep' }, $true))
+        $Sleeps.Count | Should -Be 1 -Because 'the open is retried once, so it waits once; a wait per attempt stalls every subscription on a host that stays short of memory'
+        $Sleeps[0].Extent.Text | Should -Be 'Start-Sleep -Seconds $MetricPoolOpenRetryDelaySeconds' -Because 'the wait reads the constant, so the length is stated in one place'
+        $script:MetricsSrc | Should -Match '\$MetricPoolOpenRetryDelaySeconds = 10'
+        # The wait belongs to the failure path, after the broken pool has been disposed - never on the
+        # way in to an open that has not failed yet.
+        $OpenTry = @($PoolBlock[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.Body.Extent.Text -match '\$MetricCallPool\.Open\(\)' }, $true))
+        $OpenTry.Count | Should -Be 1
+        $Sleeps[0].Extent.StartOffset | Should -BeGreaterThan $OpenTry[0].CatchClauses[0].Extent.StartOffset
+        $Sleeps[0].Extent.EndOffset | Should -BeLessThan $OpenTry[0].CatchClauses[0].Extent.EndOffset
+        # No break or continue: the memory-release tests lift the open try on its own, and outside a
+        # loop either one unwinds into whatever loop the caller is running - under Pester, its own.
+        $Jumps = @($PoolBlock[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.BreakStatementAst] -or $N -is [System.Management.Automation.Language.ContinueStatementAst] }, $true))
+        $Jumps.Count | Should -Be 0 -Because 'a break or continue outside a loop unwinds into the caller loop'
+    }
     It 'stops a timed-out attempt without waiting and keeps it out of the classifier' {
         $script:MetricsSrc | Should -Not -Match '\$Call\.(Stop|EndStop)\(' -Because 'a synchronous stop waits for a call blocked in a network read'
         # 'elseif', not 'if': an undispatched call is short-circuited first, so it is never waited on

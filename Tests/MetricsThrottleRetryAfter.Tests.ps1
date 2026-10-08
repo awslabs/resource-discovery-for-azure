@@ -1007,16 +1007,29 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         @($script:BatchTokens | Select-Object -Unique) | Should -Be @('profile-for-sub-a') -Because 'a refresh without the profile would swap in a token for the process tenant halfway through'
     }
 
-    It 'skips only the groups of a subscription whose profile cannot be built' {
+    It 'batches a subscription whose profile cannot be built with the process context' {
+        # The failure is kept for the phase, so skipping its groups sent every batch definition of the
+        # subscription to the per-call path after a single transient lookup error.
         $Defs = @(
             (New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index 1)
             (New-BatchDef -Sub 'sub-broken' -Region 'westeurope' -Index 2)
             (New-BatchDef -Sub 'sub-broken' -Region 'eastus' -Index 3))
         $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
-        @($Records | ForEach-Object { $_.ID }) | Should -Be @($Defs[0].Id)
-        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-broken*is not visible*' }).Count | Should -Be 2
-        @($script:BatchTokens) | Should -Be @('profile-for-sub-a') -Because 'no token is minted for a subscription whose profile could not be built'
+        @($Records | ForEach-Object { $_.ID } | Sort-Object) | Should -Be @($Defs | ForEach-Object { $_.Id } | Sort-Object) -Because 'a subscription the signed-in context can read is read in full'
+        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: could not scope the metrics batch of subscription sub-broken region * to its own tenant (*is not visible*); its 1 metric def(s) are batched with the process context*' }).Count | Should -Be 2 -Because 'each group says it is not scoped to its own tenant'
+        @($script:BatchDiag | Where-Object { $_ -like '*batch group skipped*' }).Count | Should -Be 0
+        @($script:BatchTokens | Sort-Object) | Should -Be @('', '', 'profile-for-sub-a') -Because 'with no profile the parameter is left out, so the scoped profile the caller pins still applies'
+        $script:MetricsBatchLastError | Should -BeNullOrEmpty -Because 'nothing left the batch'
         @($script:BatchProfileLookups) | Should -Be @('sub-a', 'sub-broken') -Because 'a lookup that threw is remembered too, so a subscription with several groups pays it once - and the failing lookup is the expensive one, since its second call enumerates every tenant before throwing'
+    }
+
+    It 'still sends a chunk the process context cannot read to the per-call path' {
+        $Defs = @((New-BatchDef -Sub 'sub-broken' -Region 'westeurope' -Index 1))
+        $script:BatchFailOn = @('*westeurope*')
+        $Records = @(Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines')
+        $Records.Count | Should -Be 0
+        $script:MetricsBatchLastError | Should -Not -BeNullOrEmpty -Because 'the call site reads it to say why the definitions fell back'
+        @($script:BatchDiag | Where-Object { $_ -like 'WARNING: metrics batch chunk skipped for subscription sub-broken region westeurope*' }).Count | Should -Be 1
     }
 
     It 'passes the profile through the parameter the installed Az.Accounts really has' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
@@ -1260,7 +1273,7 @@ Describe 'The metrics phase looks each subscription''s profile up once' {
         $Profiles = & $script:RunPhaseLookups @('sub-a', 'sub-broken') $VmDefs $DiskDefs @($VmDefs + $DiskDefs)
         @($script:CacheLookups | Where-Object { $_ -eq 'sub-broken' }).Count | Should -Be 1 -Because 'the failing lookup is the expensive one, so it is paid once a phase'
         @($script:CacheDiag | Where-Object { $_ -like '*could not ensure Microsoft.Insights registration on subscription sub-broken (subscription sub-broken is not visible*' }).Count | Should -Be 1
-        @($script:CacheDiag | Where-Object { $_ -like 'WARNING: metrics batch group skipped for subscription sub-broken region * (subscription sub-broken is not visible*' }).Count | Should -Be 2 -Because 'each group still reports its own fallback'
+        @($script:CacheDiag | Where-Object { $_ -like 'WARNING: could not scope the metrics batch of subscription sub-broken region * to its own tenant (subscription sub-broken is not visible*' }).Count | Should -Be 2 -Because 'each group still reports that it runs without its own tenant'
         @($script:CacheDiag | Where-Object { $_ -like 'WARNING: could not scope the metric calls of subscription sub-broken to its own tenant (subscription sub-broken is not visible*' }).Count | Should -Be 1
         $Profiles.ContainsKey('sub-broken') | Should -BeFalse
         $Profiles['sub-a'] | Should -Be 'profile-for-sub-a'

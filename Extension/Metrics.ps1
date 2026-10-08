@@ -250,26 +250,25 @@ if ($Task -eq 'Processing')
             # metrics data plane rejects. Get-RdaSubscriptionProfile returns the scoped context
             # container that -DefaultProfile takes, with the subscription's tenant already swapped in,
             # and throws when the subscription is not visible.
+            # A failed lookup is kept for the whole phase, so a transient one - a throttled or timed-out
+            # Get-AzSubscription - would otherwise send every batch definition of the subscription to the
+            # per-call path, many times the calls against its metric-query budget. Its groups are batched
+            # with the process context instead, as every batch was before the profile, and as the per-call
+            # map does on the same failure: the usual subscription, in the signed-in tenant, is read in
+            # full, and a chunk that context cannot read falls back to per-call on its own.
             $SubProfile = $null
-            $SubProfileFailed = $false
-            $SubProfileError = $null
             try
             {
                 $SubProfile = Get-RdaMetricsSubscriptionProfile -SubscriptionId $SubscriptionId
             }
             catch
             {
-                $SubProfileFailed = $true
-                $SubProfileError = $_.Exception.Message
+                Write-MetricsDiag ("WARNING: could not scope the metrics batch of subscription {0} region {1} to its own tenant ({2}); its {3} metric def(s) are batched with the process context, and a chunk that context cannot read falls back to per-call." -f $SubscriptionId, $Region, $_.Exception.Message, @($Group.Group).Count)
             }
-            if ($SubProfileFailed)
-            {
-                # Every group of this subscription still reports its own fallback, because each one is a
-                # distinct set of definitions leaving the batch; only the lookup is not repeated.
-                $script:MetricsBatchLastError = $SubProfileError
-                Write-MetricsDiag ("WARNING: metrics batch group skipped for subscription {0} region {1} ({2}). Its {3} metric def(s) fall back to per-call." -f $SubscriptionId, $Region, $script:MetricsBatchLastError, @($Group.Group).Count)
-                continue
-            }
+            # Left out rather than passed as null when there is no profile: an explicit null opts out of
+            # the scoped profile the caller pins in $PSDefaultParameterValues.
+            $TokenArgs = @{ ResourceUrl = 'https://metrics.monitor.azure.com'; WarningAction = 'SilentlyContinue' }
+            if ($null -ne $SubProfile) { $TokenArgs['DefaultProfile'] = $SubProfile }
 
             try
             {
@@ -280,7 +279,7 @@ if ($Task -eq 'Processing')
                 $EndIso = ([datetime]$First.EndTime).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
                 $IntervalIso = [System.Xml.XmlConvert]::ToString([TimeSpan]$First.Interval)
 
-                $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -DefaultProfile $SubProfile -WarningAction SilentlyContinue
+                $TokenObj = Get-AzAccessToken @TokenArgs
                 $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
 
                 $NamesParam = (($MetricNames | ForEach-Object { [uri]::EscapeDataString($_) }) -join ',')
@@ -295,7 +294,7 @@ if ($Task -eq 'Processing')
                     {
                         if ($null -ne $TokenObj.ExpiresOn -and $TokenObj.ExpiresOn -lt [DateTimeOffset]::UtcNow.AddMinutes(5))
                         {
-                            $TokenObj = Get-AzAccessToken -ResourceUrl 'https://metrics.monitor.azure.com' -DefaultProfile $SubProfile -WarningAction SilentlyContinue
+                            $TokenObj = Get-AzAccessToken @TokenArgs
                             $BearerToken = if ($TokenObj.Token -is [securestring]) { [System.Net.NetworkCredential]::new('', $TokenObj.Token).Password } else { [string]$TokenObj.Token }
                         }
 

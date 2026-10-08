@@ -3003,6 +3003,12 @@ $MetricsPoolFailures = @($MetricsFailedAll | Where-Object { [string]$_.Cause -eq
 $PoolStreamsUsed = if ($ParallelStreams -gt 1 -and $StreamCount -ge 2) { [int]$StreamCount } else { 1 }
 $PoolRerunAdvice = 'then re-run the same command with -Resume (or -ResumeFailedOnly) added: it collects these subscriptions again in full and the new bundle carries their new reports.'
 $PoolResumeNote = 'They are in the retry list until their metrics are collected, so neither resume mode skips them.'
+# An auth skip puts its subscriptions in the retry list too, but it is a different situation from a pool
+# failure and needs saying: the token is the problem, not this host's memory, so EVERY subscription of the
+# run is affected and the resume state cannot clear until the credential works. These two lines are shared
+# by the "Metrics Auth Failures" block below and the FAILED (auth) banner further down, so both say the same.
+$MetricsAuthRetryNote = 'They are now in the retry list, so -Resume or -ResumeFailedOnly collects them again. This skip is a credential problem, not a per-subscription one, so that is every subscription this run covered.'
+$MetricsAuthSkipNote = 'While the credential cannot be fixed, add -SkipMetrics: that run completes, collects everything else, and clears the resume state.'
 # One pasteable line per subscription, for an operator who wants just one of them back without a whole
 # resume run. Console only: the line carries a local path and the tenant id, so it never goes into
 # RunSummary.log, into an entry Message, or into the shareable Diagnostics log. It is built from
@@ -3054,6 +3060,8 @@ if ($MetricsFailures.Count -gt 0)
         Write-Host ("  Reason: {0}" -f $FirstMsg) -ForegroundColor Yellow
     }
     Write-Host "  Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run." -ForegroundColor Yellow
+    Write-Host ("  {0}" -f $MetricsAuthRetryNote) -ForegroundColor Yellow
+    Write-Host ("  {0}" -f $MetricsAuthSkipNote) -ForegroundColor Yellow
     foreach ($AuthRerunLine in @(& $RerunCommandLines $MetricsFailures))
     {
         Write-Host $AuthRerunLine -ForegroundColor Yellow
@@ -3425,6 +3433,8 @@ if ($AuthSkippedPhases.Count -gt 0)
     Write-Host "These were requested (no matching -Skip switch) but returned no data." -ForegroundColor Red
     Write-Host "Fix: run Connect-AzAccount (or pass -appid/-secret/-tenant), then re-run." -ForegroundColor Red
     Write-Host "The command to re-run each of them on its own is listed under 'Metrics Auth Failures' above." -ForegroundColor Red
+    Write-Host $MetricsAuthRetryNote -ForegroundColor Red
+    Write-Host $MetricsAuthSkipNote -ForegroundColor Red
     if (@($FailedSubscriptions).Count -eq 0)
     {
         Write-Host "The rest of the inventory completed and the report was still produced." -ForegroundColor Yellow

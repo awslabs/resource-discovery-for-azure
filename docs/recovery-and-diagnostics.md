@@ -224,22 +224,34 @@ See also consumption-data.md, "Recovering from a consumption crash".
 
 ### The metrics of a subscription were left incomplete
 
-Symptom: the run ends with exit code 3 and a "FAILED (metrics incomplete)"
-banner, the "Metrics Incomplete" block names the subscriptions, and the metric
-worker pool could not be opened - usually because the host was short of memory.
-The inventory itself finished, so each report is in the bundle; only the
-per-call metrics are missing.
+Symptom: the run ends with exit code 3, the inventory itself finished so each
+report is in the bundle, and only the per-call metrics are missing. Two
+different causes land here, and the banner tells you which one you have.
 
-Those subscriptions are left in the retry list rather than the completed list,
-so the simplest repair is another run of the same command with `-Resume` or
-`-ResumeFailedOnly` added: it collects exactly those subscriptions again, in
-full, and the new bundle carries their new reports. Prefer `-Resume`, whose
-bundle carries every subscription once; after `-ResumeFailedOnly` a retried
-subscription appears in its own bundle as well as in the earlier one.
+- "FAILED (metrics incomplete)", with the subscriptions named under "Metrics
+  Incomplete": the metric worker pool could not be opened, usually because the
+  host was short of memory. It typically affects a few subscriptions.
+- "FAILED (auth)", with the subscriptions named under "Metrics Auth Failures":
+  no usable Azure context or token. This one is a credential problem rather than
+  a per-subscription one, so it affects **every** subscription of the run, and
+  no resume run can clear it until the credential works. If you cannot fix the
+  credential now, add `-SkipMetrics`: that run completes, collects everything
+  else, and clears the resume state.
+
+Either way those subscriptions are left in the retry list rather than the
+completed list, so the simplest repair is another run of the same command with
+`-Resume` or `-ResumeFailedOnly` added: it collects exactly those subscriptions
+again, in full, and the new bundle carries their new reports. Prefer `-Resume`,
+whose bundle carries every subscription once; after `-ResumeFailedOnly` a
+retried subscription appears in its own bundle as well as in the earlier one.
 
 ```powershell
-# Free memory first, or lower the metric call concurrency, then:
+# For the pool cause, free memory first or lower the metric call concurrency, then:
 ./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -ConcurrencyLimit 4 -Resume
+
+# For the auth cause, sign in again first, then the same resume run:
+Connect-AzAccount -Tenant <tenant-id>
+./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -Resume
 ```
 
 To repair one subscription on its own instead, the "Metrics Incomplete" block

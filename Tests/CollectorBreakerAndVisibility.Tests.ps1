@@ -2276,4 +2276,21 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $BlindCommand = @($Blind.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' })[0]
         $BlindCommand | Should -Match ([regex]::Escape('-ObfuscationDictionary ''<the ObfuscationDictionary_*.json this run wrote for that subscription>'''))
     }
+
+    It 'says in both places that an auth skip fills the retry list, and how to finish a run without the credential' {
+        # The auth skip is a credential problem, not a per-subscription one, so every subscription of the
+        # run lands in the retry list and each -Resume re-walks the whole tenant while the credential is
+        # broken. -SkipMetrics is the only way to a clean run until it is fixed.
+        $R = & $script:RunPoolEnd @($script:AuthEntry)
+        $Lines = @($R.Printed -split "`n")
+        @($Lines | Where-Object { $_ -like '*They are now in the retry list, so -Resume or -ResumeFailedOnly collects them again. This skip is a credential problem, not a per-subscription one, so that is every subscription this run covered.' }).Count | Should -Be 2 -Because 'the summary block and the banner say the same thing'
+        @($Lines | Where-Object { $_ -like '*While the credential cannot be fixed, add -SkipMetrics: that run completes, collects everything else, and clears the resume state.' }).Count | Should -Be 2
+        $R.ExitCode | Should -Be 3
+    }
+
+    It 'says neither of those for a pool failure, whose remedy is memory and whose scope is a few subscriptions' {
+        $R = & $script:RunPoolEnd @($script:PoolEntry)
+        $R.Printed | Should -Not -Match 'credential' -Because 'the pool remedy is memory on the host'
+        $R.Printed | Should -Not -Match '-SkipMetrics' -Because 'skipping metrics is not the remedy for a host short of memory'
+    }
 }

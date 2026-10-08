@@ -1930,6 +1930,11 @@ function Get-RdaInventoryRerunCommand
     if ([string]::IsNullOrWhiteSpace($ScriptPath) -or [string]::IsNullOrWhiteSpace($TenantId)) { return $null }
     $ParsedId = [guid]::Empty
     if (-not [guid]::TryParse([string]$SubscriptionId, [ref]$ParsedId)) { return $null }
+    # TryParse also takes the braced, parenthesised and undashed spellings, but ResourceInventory.ps1
+    # validates -SubscriptionID against the dashed pattern, so the PARSED value is emitted rather than
+    # whatever was handed in: otherwise a line could print that dies at parameter binding. 'D' is the
+    # dashed lower-case form.
+    $SubscriptionId = $ParsedId.ToString('D')
     # Single quotes, with any quote in the value doubled: a path with a space, an apostrophe, a $ or a
     # backtick then survives being pasted into a new session unchanged.
     $Quote = { param($Value) "'" + ([string]$Value -replace "'", "''") + "'" }
@@ -1942,6 +1947,10 @@ function Get-RdaInventoryRerunCommand
     {
         if ($Key -eq 'RunAllSubs' -or $Key -eq 'ObfuscationDictionary') { continue }
         $Value = $Table[$Key]
+        # By name as well as by type: no passthrough carries a credential today, and the wrapper has no
+        # -Appid or -Secret of its own, but whoever adds one next will not necessarily make it a
+        # SecureString, and a plain string would otherwise be printed verbatim.
+        if ($Key -match '(?i)secret|password|credential|token|key|appid') { return $null }
         if ($Value -is [System.Security.SecureString] -or $Value -is [System.Management.Automation.PSCredential]) { return $null }
         if ($Value -is [bool] -or $Value -is [System.Management.Automation.SwitchParameter])
         {
@@ -1968,9 +1977,18 @@ function Get-RdaInventoryRerunCommand
     if ($Table['Obfuscate'])
     {
         # Only an obfuscated run needs it, and only it can use it: without the dictionary of the original
-        # run the re-run mints its own tokens and the two reports cannot be lined up.
-        $Dictionary = if ([string]::IsNullOrWhiteSpace($DictionaryPath)) { '<the ObfuscationDictionary_*.json this run wrote for that subscription>' } else { $DictionaryPath }
-        $Parts += ('-ObfuscationDictionary {0}' -f (& $Quote $Dictionary))
+        # run the re-run mints its own tokens and the two reports cannot be lined up. A real path is a
+        # quoted literal; the placeholder is deliberately NOT quoted, because '<' is reserved in
+        # PowerShell, so pasting the line unchanged is a parse error rather than a run against a path
+        # that is not there, which the operator would only notice from the inner script's own complaint.
+        if ([string]::IsNullOrWhiteSpace($DictionaryPath))
+        {
+            $Parts += '-ObfuscationDictionary <the ObfuscationDictionary_*.json this run wrote for that subscription>'
+        }
+        else
+        {
+            $Parts += ('-ObfuscationDictionary {0}' -f (& $Quote $DictionaryPath))
+        }
     }
     return ($Parts -join ' ')
 }

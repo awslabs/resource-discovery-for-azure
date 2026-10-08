@@ -3016,7 +3016,7 @@ $MetricsAuthSkipNote = 'While the credential cannot be fixed, add -SkipMetrics: 
 $RerunCommandLines = {
     param($RerunEntries)
     $Lines = @()
-    $Lines += '  To re-run only one of them, outside the bundle, start a new PowerShell 7 session (pwsh) and paste its line. It uses that session sign-in to this tenant or asks for one; a session signed in to another tenant is signed out first. Its report goes to a new folder and is NOT added to this run bundle, and the next resume collects the subscription again.'
+    $Unbuildable = @()
     foreach ($RerunEntry in @($RerunEntries | Sort-Object Name, Id -Unique))
     {
         $RerunDictionary = ''
@@ -3032,7 +3032,7 @@ $RerunCommandLines = {
         $RerunCommand = Get-RdaInventoryRerunCommand -ScriptPath $InventoryScriptPath -TenantId $TenantID -SubscriptionId $RerunEntry.Id -Passthrough $InventoryPassthrough -DictionaryPath $RerunDictionary
         if ([string]::IsNullOrWhiteSpace($RerunCommand))
         {
-            $Lines += ('    # {0} ({1}): no line can be built for this subscription, so re-run the whole set instead.' -f $RerunEntry.Name, $RerunEntry.Id)
+            $Unbuildable += ('    # {0} ({1}): no line can be built for this subscription, so re-run the whole set instead.' -f $RerunEntry.Name, $RerunEntry.Id)
         }
         else
         {
@@ -3040,11 +3040,18 @@ $RerunCommandLines = {
             $Lines += ('    ' + $RerunCommand)
         }
     }
-    if ($InventoryPassthrough['Obfuscate'])
+    # The instructions come first for the reader, but they are only worth printing once at least one line
+    # exists: telling an operator to paste a line and then printing none sends them looking for something
+    # that is not there. A subscription that got no line is still named, so the gap is not silent.
+    if ($Lines.Count -gt 0)
     {
-        $Lines += '    -ObfuscationDictionary gives the re-run this run tokens for that subscription; without the right file the two reports cannot be lined up.'
+        $Lines = @('  To re-run only one of them, outside the bundle, start a new PowerShell 7 session (pwsh) and paste its line. It uses that session sign-in to this tenant or asks for one; a session signed in to another tenant is signed out first. Its report goes to a new folder and is NOT added to this run bundle, and the next resume collects the subscription again.') + $Lines
+        if ($InventoryPassthrough['Obfuscate'])
+        {
+            $Lines += '    -ObfuscationDictionary gives the re-run this run tokens for that subscription; without the right file the two reports cannot be lined up.'
+        }
     }
-    $Lines
+    @($Lines) + @($Unbuildable)
 }
 if ($MetricsFailures.Count -gt 0)
 {

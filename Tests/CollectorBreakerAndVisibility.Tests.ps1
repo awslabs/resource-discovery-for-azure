@@ -2249,12 +2249,20 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $R.Printed | Should -Not -Match '(?i)-appid|-secret'
     }
 
-    It 'says so instead of printing a line it cannot build, and leaves the dictionary out of a plain run' {
+    It 'says so instead of printing a line it cannot build, and then skips the paste instructions entirely' {
         $NoGuid = [pscustomobject]@{ Name = 'Contoso-Odd'; Id = 'bbbb-2'; Message = 'pool failed; 1 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
         $R = & $script:RunPoolEnd @($NoGuid)
         $R.Printed | Should -Match 'no line can be built for this subscription'
         @($R.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' }).Count | Should -Be 0
         $R.Printed | Should -Not -Match '-ObfuscationDictionary' -Because 'only an obfuscated run can use one'
+        $R.Printed | Should -Not -Match 'paste its line' -Because 'telling the operator to paste a line, when the block then prints none, sends them looking for something that is not there'
+
+        # With one buildable subscription beside it, the instructions are back and both are listed.
+        $Good = [pscustomobject]@{ Name = 'Contoso-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'pool failed; 1 per-call metric definition(s) of this subscription were not collected.'; Cause = 'pool' }
+        $Mixed = & $script:RunPoolEnd @($NoGuid, $Good)
+        $Mixed.Printed | Should -Match 'paste its line'
+        $Mixed.Printed | Should -Match 'no line can be built for this subscription'
+        @($Mixed.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' }).Count | Should -Be 1
     }
 
     It 'asks an obfuscated re-run for this run dictionary, and says why' {
@@ -2274,7 +2282,10 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         # names what is needed rather than a line that would quietly mint new tokens.
         $Blind = & $script:RunPoolEnd @($PoolGuid) @() 1 $null @{ ConcurrencyLimit = 5; Obfuscate = $true } @()
         $BlindCommand = @($Blind.Printed -split "`n" | Where-Object { $_ -match '^\s*& ' })[0]
-        $BlindCommand | Should -Match ([regex]::Escape('-ObfuscationDictionary ''<the ObfuscationDictionary_*.json this run wrote for that subscription>'''))
+        $BlindCommand | Should -Match ([regex]::Escape('-ObfuscationDictionary <the ObfuscationDictionary_*.json this run wrote for that subscription>'))
+        $BlindErrors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput($BlindCommand, [ref]$null, [ref]$BlindErrors)
+        @($BlindErrors).Count | Should -BeGreaterThan 0 -Because 'the placeholder is left unquoted so pasting it is a parse error rather than a run against a path that is not there'
     }
 
     It 'says in both places that an auth skip fills the retry list, and how to finish a run without the credential' {

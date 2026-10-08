@@ -26,7 +26,7 @@ BeforeAll {
     $TargetFunctions = @('Get-StreamResumeStateFiles', 'Merge-FailedAttempts', 'Get-WrapperExitCode', 'Add-FailedAttempt', 'Remove-FailedAttempt', 'Get-ConsumptionAccessOutcome', 'Resolve-AccessPreflight', 'Confirm-PartialAccessContinue', 'Read-ResumeOrFreshChoice', 'Clear-RdaResumeStateForFresh', 'Get-RdaResumeCarriedReports', 'Invoke-RdaSupportLogCollectionInTranscript', 'Test-RdaFinalScreenClearable', 'Get-RdaFinalScreenLines', 'Test-SubscriptionAccessAll', 'Expand-ServiceFilter', 'Test-BackgroundJobSupport', 'Save-CompletedSubscriptionIds', 'Get-FailedAttempts', 'Test-ReportArchiveUsable',
         'Split-BlobContainerUri', 'Get-CompletedSubscriptionIds', 'Get-StartSnapshot', 'Resolve-ResumeState', 'Get-ResumeStateObject',
         'Get-StreamImportMarkerPath', 'Get-StaleAzContextSnapshot', 'Test-AzContextSnapshotReleasable', 'Invoke-PreFlightChecks', 'Get-RunSummaryLogContent', 'Write-RdaHostLinesInTranscript',
-        'Get-RdaMetricsRetryReason', 'Select-RdaStrandedReports')
+        'Get-RdaMetricsRetryReason', 'Select-RdaStrandedReports', 'Get-RdaInventoryRerunCommand')
     foreach ($Fn in $TargetFunctions)
     {
         if (-not (Get-Command $Fn -CommandType Function -ErrorAction SilentlyContinue))
@@ -4895,13 +4895,61 @@ Describe 'Get-RdaInventoryRerunCommand builds one pasteable line' {
         Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Login = $Credential } | Should -BeNullOrEmpty
     }
 
+    It 'normalises the subscription id to the dashed form the inner script accepts' {
+        # [guid]::TryParse also accepts the braced, parenthesised and undashed spellings, but
+        # ResourceInventory.ps1 validates -SubscriptionID against the dashed pattern, so echoing back what
+        # was handed in could print a line that dies at parameter binding - the opposite of this function
+        # promise to return nothing rather than a line it cannot build correctly.
+        foreach ($Spelling in @('{22222222-2222-2222-2222-222222222222}', '(22222222-2222-2222-2222-222222222222)', '22222222222222222222222222222222', '22222222-2222-2222-2222-222222222222'.ToUpperInvariant()))
+        {
+            $Command = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $Spelling -Passthrough @{}
+            $Command | Should -Match ([regex]::Escape("-SubscriptionID '22222222-2222-2222-2222-222222222222'")) -Because ('the dashed lower-case form is the only one the inner script takes; got it from {0}' -f $Spelling)
+        }
+        # The inner script's own pattern, read from its param block rather than restated here.
+        $InvSrc = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1')
+        $Pattern = [regex]::Match($InvSrc, "ValidatePattern\('(\^\[0-9a-fA-F\]\{8\}[^']+)'")
+        $Pattern.Success | Should -BeTrue -Because 'the test must check against the real contract, not a copy of it'
+        $Emitted = [regex]::Match((Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId '{22222222-2222-2222-2222-222222222222}' -Passthrough @{}), "-SubscriptionID '([^']+)'").Groups[1].Value
+        $Emitted | Should -Match $Pattern.Groups[1].Value
+    }
+
+    It 'refuses by parameter name as well as by type, so a plain-string secret is not printed' {
+        foreach ($Key in @('Secret', 'secret', 'Password', 'Credential', 'Token', 'KEY', 'Appid', 'ClientSecret', 'AccessToken'))
+        {
+            $Table = @{ ConcurrencyLimit = 6 }
+            $Table[$Key] = 'a-plain-string-value'
+            Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough $Table | Should -BeNullOrEmpty -Because ('whoever adds a {0} passthrough next will not necessarily make it a SecureString' -f $Key)
+        }
+        # Names that merely contain an innocent substring are not refused.
+        foreach ($Key in @('SkipMetrics', 'Service', 'ConcurrencyLimit', 'MetricsLookbackDays'))
+        {
+            $Table = @{ }
+            $Table[$Key] = if ($Key -eq 'SkipMetrics') { $true } elseif ($Key -eq 'Service') { @('Compute') } else { 6 }
+            Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough $Table | Should -Not -BeNullOrEmpty -Because ('{0} carries no credential' -f $Key)
+        }
+    }
+
+    It 'prints the dictionary placeholder so a paste fails loudly instead of running against a path that is not there' {
+        $Blind = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true }
+        $Blind | Should -Match ([regex]::Escape('-ObfuscationDictionary <the ObfuscationDictionary_*.json this run wrote for that subscription>'))
+        $Blind | Should -Not -Match ([regex]::Escape("-ObfuscationDictionary '<")) -Because 'quoted, the line parses and hands the inner script a path that does not exist, and the operator finds out only from whatever it does about a missing dictionary'
+        $Errors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput($Blind, [ref]$null, [ref]$Errors)
+        @($Errors).Count | Should -BeGreaterThan 0 -Because 'unquoted, the reserved < makes the paste a parse error, which is the loud failure'
+        ($Errors | ForEach-Object { $_.Message }) -join ' ' | Should -Match "'<' operator is reserved"
+        # A real dictionary path is still a quoted literal, so a space or an apostrophe in it survives.
+        $Real = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true } -DictionaryPath "/tmp/Bob's run/ObfuscationDictionary_X_1.json"
+        $RealErrors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput($Real, [ref]$null, [ref]$RealErrors)
+        @($RealErrors).Count | Should -Be 0
+        $Real | Should -Match ([regex]::Escape("-ObfuscationDictionary '/tmp/Bob''s run/ObfuscationDictionary_X_1.json'"))
+    }
+
     It 'adds the dictionary only for an obfuscated run' {
         $Plain = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ ConcurrencyLimit = 6 } -DictionaryPath '/tmp/ObfuscationDictionary_X_1.json'
         $Plain | Should -Not -Match '-ObfuscationDictionary' -Because 'a plain run has no tokens to line up'
         $Obfuscated = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true } -DictionaryPath '/tmp/ObfuscationDictionary_X_1.json'
         (script:Get-RerunBinding -Command $Obfuscated).Names | Should -Be @('TenantID', 'SubscriptionID', 'Obfuscate', 'ObfuscationDictionary')
-        $Blind = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true }
-        $Blind | Should -Match ([regex]::Escape('-ObfuscationDictionary ''<the ObfuscationDictionary_*.json this run wrote for that subscription>'''))
         $Carried = Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ Obfuscate = $true; ObfuscationDictionary = '/tmp/stale.json' } -DictionaryPath '/tmp/ObfuscationDictionary_X_1.json'
         ([regex]::Matches($Carried, '-ObfuscationDictionary')).Count | Should -Be 1 -Because 'the dictionary is chosen once, from the archive this run wrote'
         $Carried | Should -Not -Match 'stale.json'
@@ -4920,10 +4968,19 @@ Describe 'Get-RdaInventoryRerunCommand builds one pasteable line' {
     It 'is printed to the console only, never into a file that ships or an entry message' {
         $Repo = Split-Path $PSScriptRoot -Parent
         $Callers = @()
-        foreach ($File in @('Run-AllSubscriptions.ps1', 'Run-AllSubscriptions.Stream.ps1', 'ResourceInventory.ps1', 'Extension/Metrics.ps1', 'Functions/RunAllSubscriptions.Functions.ps1', 'Functions/Common.Functions.ps1', 'Functions/ResourceInventory.Functions.ps1'))
+        # Every script in the repo except the tests, so a second call site in any file is found, not only
+        # in the files that were thought of when this guard was written. A cheap text match comes first so
+        # only a file that names the function is parsed.
+        $RepoFull = (Resolve-Path -LiteralPath $Repo).ProviderPath
+        $Scripts = @(Get-ChildItem -LiteralPath $RepoFull -Recurse -File -Filter '*.ps1' -ErrorAction SilentlyContinue | Where-Object {
+                $Relative = $_.FullName.Substring($RepoFull.Length).TrimStart('\', '/')
+                $Relative -notmatch '^(Tests|\.git|\.kiro|\.exploration|InventoryReports|node_modules)[\\/]'
+            })
+        foreach ($ScriptFile in $Scripts)
         {
-            $Path = Join-Path $Repo $File
-            if (-not (Test-Path -LiteralPath $Path)) { continue }
+            $File = $ScriptFile.FullName.Substring($RepoFull.Length).TrimStart('\', '/') -replace '\\', '/'
+            $Path = $ScriptFile.FullName
+            if (-not [System.IO.File]::ReadAllText($Path).Contains('Get-RdaInventoryRerunCommand')) { continue }
             $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
             foreach ($Call in @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Get-RdaInventoryRerunCommand' }, $true)))
             {

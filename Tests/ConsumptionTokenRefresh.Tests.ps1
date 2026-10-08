@@ -406,7 +406,7 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
     }
 
     It 'gives each scoping phase a function-local PSDefaultParameterValues before it sets the profile' {
-        foreach ($Name in 'GetResourceConsumption', 'GetMarketplaceConsumption', 'GetFoundryTokenConsumption', 'GetFoundryModelCoverage')
+        foreach ($Name in 'GetResourceConsumption', 'GetMarketplaceConsumption', 'GetFoundryModelCoverage')
         {
             $Fn = Get-Fn $script:InvAst $Name
             $Fn | Should -Not -BeNullOrEmpty -Because $Name

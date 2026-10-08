@@ -167,7 +167,7 @@ own resume-state file, summary and report folders.
   stream's metrics worker pool is released when the stream ends.
 
 **Why it exists.** A stream process loads PowerShell and the Az modules again
-before it collects anything: a `pwsh` with the six Az modules and the function
+before it collects anything: a `pwsh` with the five Az modules and the function
 files measured 220 MB of working set, against 19 MB for one more runspace with
 the same modules and functions. With 3 streams on 3 subscriptions the runspace
 streams used about half the threads and 16-38% less peak memory than stream

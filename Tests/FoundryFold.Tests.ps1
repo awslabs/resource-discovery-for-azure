@@ -19,15 +19,29 @@
 
     WHY MOCKED / SOURCE-ASSERTED. Exactly like MarketplaceCollector.Tests.ps1: the only
     available test subscription cannot purchase a Claude-on-Foundry Marketplace offer and
-    exposes no live Foundry per-deployment token metrics, so the row-mapping and the
-    Tier 2 degrade path can only be proven with representative fakes + the real pure code
-    paths. Fully offline. No Azure calls.
+    exposes no live Foundry per-deployment token metrics, so the row-mapping can only be
+    proven with representative fakes + the real pure code paths. Fully offline. No Azure calls.
 
     UNVERIFIED-SPELLING CAVEAT (mirrored from the code). The exact Azure Foundry token-meter
     MeterName spellings and Unit strings are NOT yet verified against a live Claude-on-Foundry
     deployment. These tests assert the CONTRACT a downstream cost tool documents (MeterCategory exact match;
     role substrings in MeterName; token Unit passed through as discovered), not a live spelling.
 #>
+
+# These three suppressions cover the AST-execution regression test in the
+# 'GetFoundryFoldConsumption ... null captured row' Describe, which runs the REAL
+# fold function body extracted verbatim from ResourceInventory.ps1 rather than a
+# re-implementation. Inline suppression is not honored inside Pester scriptblocks,
+# so they are declared at file scope. They target load-bearing test scaffolding, not
+# defects: Invoke-Expression materializes the real body; Write-Log is a required fake;
+# $Obfuscate is consumed inside that Invoke-Expression'd body (invisible to the analyzer).
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingInvokeExpression', '',
+    Justification = 'Executes the REAL fold function body extracted verbatim from source via the AST, not a re-implementation.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Write-Log is a required test fake for the extracted fold function body, not an accidental override.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'Obfuscate',
+    Justification = 'Consumed inside the fold function body executed via Invoke-Expression, which the analyzer cannot see statically.')]
+param()
 
 BeforeAll {
     $script:Repo = Split-Path $PSScriptRoot -Parent
@@ -228,6 +242,29 @@ Describe 'Foundry fold collector wiring (ResourceInventory.ps1)' {
         $NeverCalled = @($Defined | Where-Object { $Invoked -notcontains $_ })
         $NeverCalled -join ', ' | Should -BeNullOrEmpty -Because 'GetFoundryFoldConsumption must have a live call site'
     }
+
+    It 'the fold collector is a DIRECT child of ExecuteInventoryProcessing, so it is in scope at its call site' {
+        # REGRESSION: GetFoundryFoldConsumption was once defined nested INSIDE the sibling
+        # GetMarketplaceConsumption, so it parsed and FindAll(...,$true) still located it, but at
+        # runtime it was out of scope where ExecuteInventoryProcessing calls it -> a terminating
+        # 'not recognized' error that aborted the rest of the consumption block. The 'no dead
+        # wiring' test above cannot catch this because it does not check the enclosing-function
+        # chain, so assert that the collector's NEAREST enclosing function is ExecuteInventoryProcessing.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$null)
+        $Outer = $Ast.FindAll(
+            { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'ExecuteInventoryProcessing' },
+            $true) | Select-Object -First 1
+        $Outer | Should -Not -BeNullOrEmpty
+
+        $Def = $Outer.FindAll(
+            { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'GetFoundryFoldConsumption' },
+            $true) | Select-Object -First 1
+        $Def | Should -Not -BeNullOrEmpty -Because 'GetFoundryFoldConsumption must be defined within ExecuteInventoryProcessing'
+
+        $Parent = $Def.Parent
+        while ($null -ne $Parent -and -not ($Parent -is [System.Management.Automation.Language.FunctionDefinitionAst])) { $Parent = $Parent.Parent }
+        $Parent.Name | Should -Be 'ExecuteInventoryProcessing' -Because 'GetFoundryFoldConsumption is called from the ExecuteInventoryProcessing body, so it must be a direct child there to be in scope'
+    }
 }
 
 Describe 'End-to-end: folded rows land in a Consumption CSV alongside a native row' {
@@ -279,5 +316,93 @@ Describe 'End-to-end: folded rows land in a Consumption CSV alongside a native r
         ($Foundry[0].AdditionalInfo | ConvertFrom-Json).'Microsoft.Resources'.additionalInfo.PretaxCost | Should -Be 87.33
         # And the native row is untouched.
         @($Rows | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).Count | Should -Be 1
+    }
+}
+
+Describe 'GetFoundryFoldConsumption: a null captured row must not abort the phase (regression)' {
+    # REGRESSION (live). The fold captured Claude Marketplace rows and, for each, called the
+    # pure helper ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row. That -Row is [Parameter(Mandatory)],
+    # so a null captured row threw a TERMINATING "Cannot bind argument to parameter 'Row' because it
+    # is null." Under the run's default $ErrorActionPreference=SilentlyContinue that terminating error
+    # aborted the whole consumption block, so the phases after the fold never ran.
+    #
+    # This test executes the REAL fold function body (extracted verbatim from ResourceInventory.ps1
+    # via the AST, not a re-implementation) with a capture list that mixes a null Row and a valid
+    # Claude row, under SilentlyContinue, and asserts observable behavior: the fold returns normally
+    # (no terminating abort), a following phase flag is reached, and the valid row is still folded.
+
+    BeforeAll {
+        $ErrParse = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$ErrParse)
+        $FoldDef = $Ast.FindAll(
+            { param($Node) $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'GetFoundryFoldConsumption' },
+            $true) | Select-Object -First 1
+        # Materialize the real nested function at script scope so we can invoke its actual body.
+        Invoke-Expression $FoldDef.Extent.Text
+    }
+
+    It 'folds a valid Claude row and skips a null captured row without a terminating abort' {
+        $ErrorActionPreference = 'SilentlyContinue'
+
+        # Minimal fakes for the globals/vars the fold body touches.
+        function Write-Log { param($Message, $Severity) }
+        $Global:ResourceIdDictionary = @{}
+        $Global:FoundryFoldRecordCount = $null
+        $script:FoundryFoldRecordsThisRun = $null
+        $Obfuscate = [pscustomobject]@{ IsPresent = $false }
+        $Global:ConsumptionFileCsv = Join-Path ([System.IO.Path]::GetTempPath()) ("rda_fold_regression_{0}.csv" -f ([guid]::NewGuid()))
+
+        $ValidRow = [pscustomobject]@{
+            PublisherName = 'Anthropic'; OfferName = 'Claude Sonnet 4.5 offer'; PlanName = 'payg'
+            InstanceId = '/subscriptions/11111111-1111-1111-1111-111111111111/rg/foo'; MeterId = 'm1'
+            ConsumedQuantity = 42.0; UnitOfMeasure = '1M Tokens'; PretaxCost = 1.0; Currency = 'USD'
+            SubscriptionGuid = '11111111-1111-1111-1111-111111111111'; SubscriptionName = 'Sub'; ResourceGroup = 'rg'
+        }
+        $script:FoundryFoldClaudeRows = [System.Collections.ArrayList]::new()
+        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = 's'; SubName = 'S'; Row = $null })
+        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = 's2'; SubName = 'S2'; Row = $ValidRow })
+
+        # Model the call-site sequence (the fold, then the next phase) in one block with no
+        # isolation, exactly as ExecuteInventoryProcessing does: a terminating fold error would leave
+        # $NextPhaseReached = $false, reproducing the abort.
+        $NextPhaseReached = $false
+        try
+        {
+            GetFoundryFoldConsumption
+            $NextPhaseReached = $true
+        }
+        catch
+        {
+            $NextPhaseReached = $false
+        }
+
+        try
+        {
+            $NextPhaseReached | Should -BeTrue -Because 'a null captured row must not abort the phase before the next phase runs'
+            $Global:FoundryFoldRecordCount | Should -Be 1 -Because 'the one VALID Claude row is still folded; only the null row is skipped'
+            Test-Path -LiteralPath $Global:ConsumptionFileCsv | Should -BeTrue
+            $Rows = @(Import-Csv -LiteralPath $Global:ConsumptionFileCsv)
+            $Rows.Count | Should -Be 1
+            $Rows[0].MeterCategory | Should -BeExactly 'Foundry Models'
+        }
+        finally
+        {
+            if (Test-Path -LiteralPath $Global:ConsumptionFileCsv) { Remove-Item -LiteralPath $Global:ConsumptionFileCsv -Force }
+        }
+    }
+
+    It 'reports a confirmed zero, not one row, when the Marketplace phase captured nothing' {
+        # The capture list is only created when a Claude row is seen, so a run with none leaves it $null.
+        $script:FoldLog = [System.Collections.Generic.List[string]]::new()
+        function Write-Log { param($Message, $Severity) $script:FoldLog.Add([string]$Message) }
+        $Global:FoundryFoldRecordCount = $null
+        $script:FoundryFoldRecordsThisRun = $null
+        $Obfuscate = [pscustomobject]@{ IsPresent = $false }
+        $script:FoundryFoldClaudeRows = $null
+
+        GetFoundryFoldConsumption
+
+        @($script:FoldLog | Where-Object { $_ -like 'Foundry fold: folding*' }).Count | Should -Be 0
+        @($script:FoldLog | Where-Object { $_ -like '*This is a CONFIRMED ZERO*' }).Count | Should -Be 1
     }
 }

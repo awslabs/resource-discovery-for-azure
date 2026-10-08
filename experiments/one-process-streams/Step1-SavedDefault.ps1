@@ -42,7 +42,7 @@ Note ('A3. a process disabled autosave for itself (what each parallel stream doe
 
 # B. The inventory script, standalone, on the other subscription.
 $Inv = Join-Path $Tree 'ResourceInventory.ps1'
-$Common = "-TenantID '{1}' -SubscriptionID '{0}' -SkipMetrics -SkipMarketplace -SkipFoundryCoverage -SkipFoundryTokens -ReportName Step1" -f $OtherSub.Id, $OtherSub.TenantId
+$Common = "-TenantID '{1}' -SubscriptionID '{0}' -SkipMetrics -SkipMarketplace -SkipFoundryCoverage -ReportName Step1" -f $OtherSub.Id, $OtherSub.TenantId
 Set-SavedDefault $HomeSub.Id
 $null = Invoke-Child ("& '{0}' {1} -SkipConsumption" -f $Inv, $Common)
 Note ('B1. ResourceInventory.ps1 on <other> with every billing phase skipped; the next new session sees: {0}' -f (Get-SavedDefault))

@@ -4232,6 +4232,8 @@ if ([System.GC].GetMethod('GetConfigurationVariables')) { $Limit = [double][Syst
             # The wrapper's own param block, run on its own, so the declared default and range are what is tested.
             $script:AdParamBlock = [scriptblock]::Create($AdAst.ParamBlock.Extent.Text + ' $StreamMemoryGB')
             $script:AdParamNames = @($AdAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+            # A switch never takes a position, so only the other parameters bind positionally.
+            $script:AdPositionalNames = @($AdAst.ParamBlock.Parameters | Where-Object { $_.StaticType -ne [switch] } | ForEach-Object { $_.Name.VariablePath.UserPath })
 
             # A worker that records one admission in the state it was given, under the state's lock, and reports
             # whether it got one.
@@ -4259,7 +4261,7 @@ if ($null -ne $AdmissionState)
             { & $script:AdParamBlock -StreamMemoryGB -1 } | Should -Throw
         }
 
-        It 'keeps every parameter of main''s wrapper at main''s position, so positional calls bind as before' {
+        It 'keeps every positional parameter of main''s wrapper at main''s position, so positional calls bind as before' {
             $Git = Get-Command -Name git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
             $MainSource = $null
             if ($Git)
@@ -4273,9 +4275,11 @@ if ($null -ne $AdmissionState)
                 return
             }
             $MainAst = [System.Management.Automation.Language.Parser]::ParseInput(($MainSource -join "`n"), [ref]$null, [ref]$null)
-            $MainNames = @($MainAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-            $MainNames.Count | Should -BeGreaterThan 20
-            @($script:AdParamNames | Select-Object -First $MainNames.Count) | Should -Be $MainNames -Because 'a parameter added before one of main''s would shift the position that one binds from'
+            # Switches are left out: they never bind by position, so adding or removing one cannot
+            # shift a positional call.
+            $MainNames = @($MainAst.ParamBlock.Parameters | Where-Object { $_.StaticType -ne [switch] } | ForEach-Object { $_.Name.VariablePath.UserPath })
+            $MainNames.Count | Should -BeGreaterThan 10
+            @($script:AdPositionalNames | Select-Object -First $MainNames.Count) | Should -Be $MainNames -Because 'a positional parameter added before one of main''s would shift the position that one binds from'
         }
 
         It 'Runspace: the wrapper creates one state from -StreamMemoryGB and every stream thread job gets that same instance' {
@@ -4966,15 +4970,15 @@ Describe 'Get-RdaInventoryRerunCommand builds one pasteable line' {
             Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough $Table | Should -BeNullOrEmpty -Because ('whoever adds a {0} passthrough next will not necessarily make it a SecureString' -f $Key)
         }
         # Names that merely contain an innocent substring are not refused.
-        foreach ($Key in @('SkipMetrics', 'Service', 'ConcurrencyLimit', 'MetricsLookbackDays', 'SkipFoundryTokens'))
+        foreach ($Key in @('SkipMetrics', 'Service', 'ConcurrencyLimit', 'MetricsLookbackDays', 'SkipModelTokens'))
         {
             $Table = @{ }
-            $Table[$Key] = if ($Key -eq 'SkipMetrics' -or $Key -eq 'SkipFoundryTokens') { $true } elseif ($Key -eq 'Service') { @('Compute') } else { 6 }
+            $Table[$Key] = if ($Key -eq 'SkipMetrics' -or $Key -eq 'SkipModelTokens') { $true } elseif ($Key -eq 'Service') { @('Compute') } else { 6 }
             Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough $Table | Should -Not -BeNullOrEmpty -Because ('{0} carries no credential' -f $Key)
         }
         # Every key the wrapper really passes through, read from its source, so each switch it has now or
-        # adds later is checked too: a real switch once matched the bare 'token' and cost every run with it
-        # its re-run lines. ConcurrencyLimit is passed on every run, so finding it shows the read works.
+        # adds later is checked too: a switch whose name contains 'token' must keep its re-run lines.
+        # ConcurrencyLimit is passed on every run, so finding it shows the read works.
         $WrapperText = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
         $RealKeys = @([regex]::Matches($WrapperText, '\$InventoryPassthrough\[''(\w+)''\] =') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
         $RealKeys | Should -Contain 'ConcurrencyLimit' -Because 'the source read must find the keys it is meant to check'

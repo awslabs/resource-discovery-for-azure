@@ -301,7 +301,6 @@ $Switches = @{
     SkipConsumption     = $true
     SkipMarketplace     = $true
     SkipFoundryCoverage = $true
-    SkipFoundryTokens   = $true
     AllowPartialAccess  = $true
 }
 if ($Mode -eq 'obfuscate') { $Switches.Obfuscate = $true }

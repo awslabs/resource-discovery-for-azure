@@ -167,7 +167,7 @@ $Catalog = @{
 }
 
 # Health of the run that just finished, read from its exit code and from the phase-health lists the inventory script fills when a phase could not run (no usable token or context) or failed (collectors, metrics, consumption, Marketplace, Foundry). A -Skip* switch leaves them empty. A zip can look fine while a phase was silently left out, so a scenario fails on any of these. The lists are process-wide, so every run starts from empty ones. Only counts are printed: the matrix output is shared, so no names, ids or messages.
-$HealthLists = @('CollectorFailures', 'MetricsFailedSubs', 'ConsumptionFailedSubs', 'MarketplaceFailedSubs', 'FoundryTokenFailedSubs', 'FoundryCoverageFailedSubs')
+$HealthLists = @('CollectorFailures', 'MetricsFailedSubs', 'ConsumptionFailedSubs', 'MarketplaceFailedSubs', 'FoundryCoverageFailedSubs')
 # Test files that may skip every test because the subscription has nothing of the kind to check. A file listed here passes the "checked nothing" rule only when at least one of its tests skipped for the named data reason (a regex on the skip reason); a skip for any other reason, for example the matrix not setting an expectation variable, still fails the scenario. Add a file only after reading its tests.
 $DataDependentFiles = @{
     'Frontdoor.Tests.ps1'             = @{ Why = 'every test needs a Front Door resource in the subscription'; Reason = 'no Front Door' }

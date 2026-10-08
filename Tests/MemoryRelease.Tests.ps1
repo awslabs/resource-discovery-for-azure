@@ -1075,7 +1075,7 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $RetryIf = @($RetryBlock[0].FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$MetricPoolOpenRetriesLeft -gt 0' }, $true))
             if ($RetryIf.Count -ne 1) { throw ('Expected one branch that decides whether a retry is left; found {0}.' -f $RetryIf.Count) }
             $script:PoolRetryBranchAst = $RetryIf[0].Clauses[0].Item2
-            $script:PoolRetryGiveUpAst = $RetryIf[0].ElseClause
+            $script:PoolRetryBlockAst = $RetryBlock[0]
             $script:PoolRetry = [scriptblock]::Create((@(
                         'param($PoolQueue, $ReuseWorkerPool, $MetricCount, $MetricDefs, $SubLookup, $MetricPoolOpenRetryDelaySeconds = 0, $ConcurrencyLimit = 2, $MetricMaxRetries = 0)'
                         '$MetricCallPool = $null'
@@ -1258,12 +1258,15 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 1 -Because 'a pool found broken between subscriptions is unexpected and says so in the debug log'
 
             # The state test cannot be reached behaviourally with an OPENED pool - the reuse guard takes that
-            # pool and never reaches this branch - so it is pinned on the source. Without it, giving up would
-            # dispose a working pool that every later subscription of the run was going to share.
-            $GiveUp = @($script:PoolRetryGiveUpAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$Global:MetricCallPool' -and $N.Member.Extent.Text -eq 'Dispose' }, $true))
-            $GiveUp.Count | Should -Be 1 -Because 'one release of a stranded pool, on the path that abandons the phase'
+            # pool and never reaches this branch - so it is pinned on the source. Without it, building a new
+            # pool would dispose a working pool that every later subscription of the run was going to share.
+            $Release = @($script:PoolRetryBlockAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $N.Expression.Extent.Text -eq '$Global:MetricCallPool' -and $N.Member.Extent.Text -eq 'Dispose' }, $true))
+            $Release.Count | Should -Be 1 -Because 'one release of a stranded pool, whatever the open then does'
+            $OpenLoop = @($script:PoolRetryBlockAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.WhileStatementAst] -and $N.Condition.Extent.Text -eq '$MetricPoolOpenPending' }, $true))
+            $OpenLoop.Count | Should -Be 1
+            $Release[0].Extent.EndOffset | Should -BeLessThan $OpenLoop[0].Extent.StartOffset -Because 'released after a successful open, the global would already have been overwritten; released after a failed one, it held its memory through both attempts and the wait'
             $Guard = $null
-            $Up = $GiveUp[0].Parent
+            $Up = $Release[0].Parent
             while ($null -ne $Up)
             {
                 if ($Up -is [System.Management.Automation.Language.IfStatementAst] -and $Up.Clauses[0].Item1.Extent.Text -match '\$Global:MetricCallPool\.RunspacePoolStateInfo\.State') { $Guard = $Up; break }
@@ -1272,6 +1275,25 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Guard | Should -Not -BeNullOrEmpty -Because 'the release has to read the state of the pool it is about to dispose'
             $Guard.Clauses[0].Item1.Extent.Text | Should -Match '-ne \[System\.Management\.Automation\.Runspaces\.RunspacePoolState\]::Opened' -Because 'only a pool that can serve no call is released here'
             $Guard.Clauses[0].Item1.Extent.Text | Should -Match '^\$ReuseWorkerPool -and' -Because 'without the switch the global belongs to another caller'
+        }
+
+        It 'releases a pool left in the global in a state it can no longer serve, when the new pool opens' {
+            # The successful open stores the new pool in the global. Released only on the give-up path,
+            # the stranded pool was overwritten here and stayed reachable by nothing, the wrapper's exit
+            # closer included, for the life of the process.
+            $Stale = [pscustomobject]@{ DisposeCount = 0; RunspacePoolStateInfo = [pscustomobject]@{ State = [System.Management.Automation.Runspaces.RunspacePoolState]::Broken } }
+            Add-Member -InputObject $Stale -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+            $Global:MetricCallPool = $Stale
+            $Queue = [System.Collections.Queue]::new()
+            $Queue.Enqueue((& $script:NewQueuedPool ''))
+            $Result = & $script:PoolRetry $Queue $true 7 $script:RetryDefs $script:RetrySubLookup
+
+            $Stale.DisposeCount | Should -Be 1 -Because 'the new pool takes its place in the global, so this is the last moment it can be released'
+            [object]::ReferenceEquals($Global:MetricCallPool, $Result.Pool) | Should -BeTrue -Because 'the pool that opened is the one kept for the next subscription'
+            $Result.Factory.Count | Should -Be 1
+            $Result.PoolFailed | Should -BeFalse
+            $Result.Count | Should -Be 7
+            @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 1
         }
 
         It 'leaves an open pool in the global alone when it gives up, and never disposes one it did not build' {

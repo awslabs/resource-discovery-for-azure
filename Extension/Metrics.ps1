@@ -976,6 +976,27 @@ if ($Task -eq 'Processing')
             # a smaller maximum only brings back calls that time out while queued. The loop carries
             # the decision rather than a break or a continue: the open try is lifted on its own by
             # the tests, and outside a loop either jump unwinds into whatever loop the caller runs.
+            # A pool kept for the next subscription is reused only when it is Opened, so one found here
+            # in the global is in a state it cannot serve. It is released before the new pool is built,
+            # whatever the open then does: a successful open would otherwise overwrite the global and
+            # leave it neither disposed - which is the only thing that removes its cleanup timer and
+            # releases the runspaces holding the Az modules - nor reachable by the closer at wrapper
+            # exit, and a failed open would hold its memory through both attempts and the wait that is
+            # meant to free memory. The reuse guard above already treats a pool in any other state as
+            # unexpected, so this says so rather than passing over it quietly.
+            if ($ReuseWorkerPool -and $null -ne $Global:MetricCallPool -and $Global:MetricCallPool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
+            {
+                Write-MetricsDiag ('Releasing the metric worker pool left from an earlier subscription in state {0}; it can serve no call.' -f $Global:MetricCallPool.RunspacePoolStateInfo.State)
+                try
+                {
+                    $Global:MetricCallPool.Dispose()
+                }
+                catch
+                {
+                    Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
+                }
+                $Global:MetricCallPool = $null
+            }
             $MetricPoolOpenRetriesLeft = 1
             $MetricPoolOpenPending = $true
             while ($MetricPoolOpenPending)
@@ -1091,26 +1112,6 @@ if ($Task -eq 'Processing')
                         # against a pool that is gone. The counts below then report what was really collected.
                         $MetricCount = 0
                         $MetricPerCallPoolFailed = $true
-                        # A pool kept for the next subscription is stored only after a successful open, and this
-                        # path leaves $MetricCallPool null, so the phase-end teardown skips itself and never
-                        # clears the global. One stranded there in a state it cannot serve would then be neither
-                        # disposed - which is the only thing that removes its cleanup timer and releases the
-                        # runspaces holding the Az modules - nor cleared, and every later subscription would
-                        # repeat both failed opens past it. The reuse guard above already treats a pool in any
-                        # other state as unexpected, so this says so rather than passing over it quietly.
-                        if ($ReuseWorkerPool -and $null -ne $Global:MetricCallPool -and $Global:MetricCallPool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
-                        {
-                            Write-MetricsDiag ('Releasing the metric worker pool left from an earlier subscription in state {0}; it can serve no call.' -f $Global:MetricCallPool.RunspacePoolStateInfo.State)
-                            try
-                            {
-                                $Global:MetricCallPool.Dispose()
-                            }
-                            catch
-                            {
-                                Write-MetricsDiag ("Pool teardown reported: {0}" -f $_.Exception.Message)
-                            }
-                            $Global:MetricCallPool = $null
-                        }
                     }
                 }
             }

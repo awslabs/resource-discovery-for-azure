@@ -2,8 +2,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $APPSvcPlan = $Resources | Where-Object { $_.TYPE -eq 'microsoft.web/serverfarms' }
-    $APPAutoScale = $Resources | Where-Object { $_.TYPE -eq "microsoft.insights/autoscalesettings" -and $_.Properties.enabled -eq 'true' }
+    $APPSvcPlan = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.web/serverfarms') { $Row } }
+    $APPAutoScale = foreach ($Row in $Resources) { if ($Row.TYPE -eq "microsoft.insights/autoscalesettings" -and $Row.Properties.enabled -eq 'true') { $Row } }
 
     if ($APPSvcPlan)
     {

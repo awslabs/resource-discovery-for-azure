@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $ARO = $Resources | Where-Object { $_.TYPE -eq 'microsoft.redhatopenshift/openshiftclusters' }
+    $ARO = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.redhatopenshift/openshiftclusters') { $Row } }
 
     if ($ARO)
     {

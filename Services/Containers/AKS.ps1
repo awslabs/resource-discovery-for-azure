@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AKS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerservice/managedclusters' }
+    $AKS = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerservice/managedclusters') { $Row } }
 
     if ($AKS)
     {

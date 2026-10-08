@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $DataExplorer = $Resources | Where-Object { $_.TYPE -eq 'microsoft.kusto/clusters' }
+    $DataExplorer = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.kusto/clusters') { $Row } }
 
     if ($DataExplorer)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Synapse = $Resources | Where-Object { $_.TYPE -eq 'microsoft.synapse/workspaces' }
+    $Synapse = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.synapse/workspaces') { $Row } }
 
     if ($Synapse)
     {

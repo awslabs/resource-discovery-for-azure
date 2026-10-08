@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Purview = $Resources | Where-Object { $_.TYPE -eq 'microsoft.purview/accounts' }
+    $Purview = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.purview/accounts') { $Row } }
 
     if ($Purview)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Storageacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
+    $Storageacc = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.storage/storageaccounts') { $Row } }
 
     if ($Storageacc)
     {

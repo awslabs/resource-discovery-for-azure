@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $RECOVAULT = $Resources | Where-Object { $_.TYPE -eq 'microsoft.recoveryservices/vaults' }
+    $RECOVAULT = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.recoveryservices/vaults') { $Row } }
 
     if ($RECOVAULT)
     {

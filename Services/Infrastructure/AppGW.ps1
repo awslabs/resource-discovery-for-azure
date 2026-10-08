@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $APPGTW = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/applicationgateways' }
+    $APPGTW = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/applicationgateways') { $Row } }
 
     if ($APPGTW)
     {

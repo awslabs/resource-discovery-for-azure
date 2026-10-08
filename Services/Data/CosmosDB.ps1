@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $COSMOS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.documentdb/databaseaccounts' }
+    $COSMOS = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.documentdb/databaseaccounts') { $Row } }
 
     if ($COSMOS)
     {

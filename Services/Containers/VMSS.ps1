@@ -2,10 +2,10 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Vmss = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachinescalesets' }
-    $AutoScale = $Resources | Where-Object { $_.TYPE -eq "microsoft.insights/autoscalesettings" -and $_.Properties.enabled -eq 'true' }
-    $AKS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerservice/managedclusters' }
-    $SFC = $Resources | Where-Object { $_.TYPE -eq 'microsoft.servicefabric/clusters' }
+    $Vmss = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/virtualmachinescalesets') { $Row } }
+    $AutoScale = foreach ($Row in $Resources) { if ($Row.TYPE -eq "microsoft.insights/autoscalesettings" -and $Row.Properties.enabled -eq 'true') { $Row } }
+    $AKS = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerservice/managedclusters') { $Row } }
+    $SFC = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.servicefabric/clusters') { $Row } }
 
     $Vmsizemap = @{}
 

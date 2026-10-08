@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $AppSvc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.web/sites' }
+    $AppSvc = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.web/sites') { $Row } }
 
     if ($AppSvc)
     {

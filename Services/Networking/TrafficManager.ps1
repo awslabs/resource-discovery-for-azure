@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $TrafficManager = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/trafficmanagerprofiles' }
+    $TrafficManager = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/trafficmanagerprofiles') { $Row } }
 
     if ($TrafficManager)
     {

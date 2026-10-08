@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $PostgreSQLFlexible = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.DBforPostgreSQL/flexibleServers' }
+    $PostgreSQLFlexible = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'Microsoft.DBforPostgreSQL/flexibleServers') { $Row } }
 
     if ($PostgreSQLFlexible)
     {

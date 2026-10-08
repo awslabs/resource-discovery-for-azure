@@ -459,7 +459,9 @@ A default run adds it to the ZIP, with a warning on the console, because that re
 
 Every run also produces a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP.
 It is human-readable and scrubbed: in an `-Obfuscate` run subscriptions appear as their obfuscated tokens and other identifiers are masked, and in a default run it masks GUIDs and email addresses, though the report beside it carries real names.
-It summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, metrics left incomplete because the worker pool could not be opened, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer). A subscription whose metrics were left incomplete is kept in the retry list, so `-Resume` or `-ResumeFailedOnly` collects it again; the console also prints a ready line per subscription for repairing one on its own, and that line stays out of every file that ships because it carries a local path and the tenant id.
+It summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, metrics left incomplete because the worker pool could not be opened, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer).
+The console also prints a ready line per subscription for repairing one on its own, and that line stays out of every file that ships because it carries a local path and the tenant id.
+A subscription whose metrics were left incomplete stays in the retry list (see the `-Resume` and `-ResumeFailedOnly` rows below).
 The one from an `-Obfuscate` run is safe to share, so it can go to the AWS team alongside the report to explain any gaps without exposing real names.
 It is a plain `.log` on purpose so the ingestion pipeline treats it as an attachment, not as report data.
 

@@ -51,33 +51,23 @@ What each mode costs, and what a shared process gives up, is under [`-StreamIsol
 
 ## Two scripts, two jobs (not a thin loop)
 
-The wrapper is not a small `foreach` around the inner script. On its own it is
-over four fifths of the inner script's size, and with the helper file it loads
-it is the larger side:
+The wrapper is not a small `foreach` around the inner script.
+On its own it is nearly as large as the inner script, and with the helper file it loads it is the larger side:
 
-| Script | Lines | Role |
-|---|---|---|
-| `Run-AllSubscriptions.ps1` | 3270 | Tenant-wide orchestrator |
-| `ResourceInventory.ps1` | 3956 | Single-subscription worker |
-| `Functions/RunAllSubscriptions.Functions.ps1` | 3113 | Helpers the wrapper loads |
+| Script | Role |
+|---|---|
+| `Run-AllSubscriptions.ps1` | Tenant-wide orchestrator |
+| `ResourceInventory.ps1` | Single-subscription worker |
+| `Functions/RunAllSubscriptions.Functions.ps1` | Helpers the wrapper loads |
 
-(`wc -l`, current main.) The helper file, `Functions/RunAllSubscriptions.Functions.ps1`,
-defines **83 functions** (`grep -c '^function '`) that exist only to orchestrate a
-multi-subscription, multi-machine run — work the inner script never does. It
-defines only 5 functions of its own by comparison. Representative orchestration
-concerns and the functions that implement them:
+The helper file, `Functions/RunAllSubscriptions.Functions.ps1`, defines many functions that exist only to orchestrate a multi-subscription, multi-machine run - work the inner script never does.
+The inner script defines only a handful of functions of its own by comparison.
+Representative orchestration concerns and the functions that implement them:
 
-- **Sharding across machines** - `Get-ShardKeyForSubscription` (line 1002),
-  `Select-ShardSubscriptions` (line 1016), `Get-WeightedInventoryPlan` (line 1273).
-- **Resume / failure state** - `Save-CompletedSubscriptionIds` (line 1660),
-  `Get-FailedAttempts` (line 1636), `Merge-FailedAttempts` (line 1813).
-- **Parallel-stream orchestration** - `Test-BackgroundJobSupport` (line 477),
-  plus the `Start-Job` fan-out (`Run-AllSubscriptions.ps1` line 1769).
-- **Preflight / tenant resolution** - `Resolve-TenantId` (line 1517),
-  `Invoke-PreFlightChecks` (line 1380).
-
-(All line numbers in `Functions/RunAllSubscriptions.Functions.ps1`, except the
-`Start-Job` fan-out.)
+- **Sharding across machines** - `Get-ShardKeyForSubscription`, `Select-ShardSubscriptions`, `Get-WeightedInventoryPlan`.
+- **Resume / failure state** - `Save-CompletedSubscriptionIds`, `Get-FailedAttempts`, `Merge-FailedAttempts`.
+- **Parallel-stream orchestration** - `Test-BackgroundJobSupport`, plus the `Start-Job` fan-out in `Run-AllSubscriptions.ps1`.
+- **Preflight / tenant resolution** - `Resolve-TenantId`, `Invoke-PreFlightChecks`.
 
 The wrapper also **consolidates** every per-subscription ZIP into a single outer
 bundle and builds an aggregate cross-subscription summary — neither of which a
@@ -363,7 +353,7 @@ These lines appear in the local `DebugLog_*.log`, after the `[Metrics]` prefix:
 | `Metric worker pool released: every worker had finished (waited N ms).` | The pool was released at the end of the phase, as in a standalone run. |
 | `Metric worker pool was Broken: disposed without a close so it does not stay registered in the process.` | The pool had failed, so it was not asked to close; it is disposed, which is what removes its cleanup timer. |
 | `WARNING: metric worker pool NOT released after Ns - idle=..., abandoned calls still running=..., pool state=...` | A worker was still busy, so the pool was left in memory rather than risk a hang. |
-| `ERROR: Metrics: the metric worker pool could not be opened (...); N per-call metric definition(s) were not collected.` | The pool could not start its runspaces, usually because the host is short of memory. The pool is disposed, the per-call metric collection is skipped, and every subscription that had definitions on that path is listed as metrics-incomplete in the wrapper's summary, each with its own count. The run log gets the same message at `Error` severity, without the `ERROR:` prefix and followed by the remedy: free memory on the host or use a lower `-ConcurrencyLimit`, then re-run without `-Resume` (a `-Resume` run skips these subscriptions because their inventory completed), or run `ResourceInventory.ps1 -SubscriptionID <id>` for each one. |
+| `ERROR: Metrics: the metric worker pool could not be opened (...); N per-call metric definition(s) were not collected.` | The pool could not start its runspaces, usually because the host is short of memory. The pool is disposed, the per-call metric collection is skipped, and every subscription that had definitions on that path is listed as metrics-incomplete in the wrapper's summary, each with its own count. The run log gets the same message at `Error` severity, without the `ERROR:` prefix and followed by the remedy: free memory on the host or use a lower `-ConcurrencyLimit`, then re-run with `-Resume` or `-ResumeFailedOnly` (under a wrapper; both collect a subscription listed as metrics incomplete again, because it stays in the retry list), or run the same `ResourceInventory.ps1` command again in a new PowerShell 7 session (standalone). |
 | `WARNING: could not convert the Az context for the metric workers (...)` | The one-time conversion failed, so calls fall back to converting the raw context themselves. |
 | `WARNING: could not scope the metric calls of subscription S to its own tenant (...)` | No profile could be built for that subscription, so its per-call metric queries use the process context. They succeed when the subscription is in the signed-in tenant and fail when it is homed elsewhere. |
 | `Per-call metrics collection skipped: the metric worker pool could not be opened, as the ERROR above reports.` | Nothing was collected on the per-call path. Read the `ERROR:` line above it for how many definitions were given up. |

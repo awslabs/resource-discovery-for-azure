@@ -233,7 +233,8 @@ different causes land here, and the banner tells you which one you have.
   host was short of memory. It typically affects a few subscriptions.
 - "FAILED (auth)", with the subscriptions named under "Metrics Auth Failures":
   no usable Azure context or token. This one is a credential problem rather than
-  a per-subscription one, so it affects **every** subscription of the run, and
+  a per-subscription one, so it usually affects every subscription from the
+  point the credential stopped working, and
   no resume run can clear it until the credential works. If you cannot fix the
   credential now, add `-SkipMetrics`: that run completes, collects everything
   else, and clears the resume state.

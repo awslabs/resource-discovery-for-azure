@@ -68,7 +68,7 @@ five are derived from the `AdditionalInfo` JSON on each record.
 
 | Column | Source | Meaning |
 |--------|--------|---------|
-| `AdditionalInfo` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. **This column was renamed from `InstanceData` so it binds to a downstream consumer field of the same name** (a downstream cost-analysis tool reads VM Windows/AHB + SQL vCore licensing detail from `AdditionalInfo`). The raw Azure `Get-UsageAggregates` payload still names the source field `InstanceData`; RDA maps it onto this `AdditionalInfo` column at ingest. |
+| `AdditionalInfo` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. **This column was renamed from `InstanceData` to `AdditionalInfo`** (VM Windows/AHB + SQL vCore licensing detail is read from `AdditionalInfo`). The raw Azure `Get-UsageAggregates` payload still names the source field `InstanceData`; RDA maps it onto this `AdditionalInfo` column as the rows are read. |
 | `MeterCategory` | usage record | Top-level meter grouping, e.g. `Virtual Machines`, `Storage`, `Stream Analytics`. |
 | `MeterId` | usage record | Azure's global meter GUID. Same for every customer using that meter — **not** customer-specific. |
 | `MeterName` | usage record | Specific meter, e.g. `Standard Streaming Unit`, `P10 Disks`. |
@@ -280,23 +280,22 @@ For the parameters that turn these phases off (`-SkipConsumption`,
 
 ## Foundry fold — Claude/Anthropic usage folded into the Consumption CSV
 
-a downstream cost-analysis tool that consumes RDA output reads **only** `Consumption_*.csv`;
-it has no reader for `Marketplace_*.csv`. So Claude/Anthropic usage collected by the
-Marketplace phase above would be silently dropped downstream. To close that gap,
-RDA runs an **additive** *Foundry fold* step immediately after the Marketplace phase
+Claude/Anthropic usage collected by the Marketplace phase above lands only in
+`Marketplace_*.csv`. So RDA also runs an **additive** *Foundry fold* step
+immediately after the Marketplace phase
 (under the **same** `-SkipConsumption` / `-SkipMarketplace` gate) that folds each
-Claude/Anthropic Marketplace row into the **same** `Consumption_*.csv`, tagged so the
-server's Foundry→Bedrock path picks it up. The first-party consumption rows and their
+Claude/Anthropic Marketplace row into the **same** `Consumption_*.csv`, tagged as a
+Foundry cost row. The first-party consumption rows and their
 semantics are untouched; folded rows are simply **appended** with the identical
 15-column schema.
 
 A folded row is a normal consumption row with:
 
-- `MeterCategory` = **`Foundry Models`** (the exact string a downstream cost tool keys the
-  Foundry→Bedrock path on — Claude has no first-party Azure retail meter, so RDA sets
+- `MeterCategory` = **`Foundry Models`** (the exact string that marks a Foundry cost
+  row - Claude has no first-party Azure retail meter, so RDA sets
   this explicitly).
 - `MeterName` = the **Claude model identity** parsed from the Marketplace
-  `OfferName`/`PlanName` (e.g. `Claude Sonnet 4.5`), so a downstream cost tool can resolve the
+  `OfferName`/`PlanName` (e.g. `Claude Sonnet 4.5`), so the row names the
   model. The model identity stays **readable** under `-Obfuscate` (it is product
   identity, not a customer secret), exactly like the Marketplace product fields.
 - `ResourceId` + `MeterId` are always **non-empty**: the Marketplace row's own ids are
@@ -311,8 +310,8 @@ A folded row is a normal consumption row with:
 
 The fold emits a **Tier 1 (CCU / cost)** row for every captured Claude Marketplace
 row, marked **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Marketplace
-unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). a downstream consumer attributes
-the Azure cost but does **not** compute a token price from it.
+unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The row carries an
+Azure cost, not a token count.
 
 If the Marketplace phase collected no Claude/Anthropic rows, the fold logs a
 **confirmed zero** (the phase ran; there was simply nothing to fold), not a silent

@@ -108,13 +108,13 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
         }
     }
 
-    Context 'Ingestion contract at the outer root' {
+    Context 'Data-file layout at the outer root' {
 
-        # The per-subscription ingestible members live INSIDE the inner zips. The
+        # The per-subscription data members live INSIDE the inner zips. The
         # outer root carries archives plus presentation files, with VMPlacement.txt
-        # (CSV text) as the single sanctioned loose data file. A consumer that discovers
-        # ingestible files by extension at this level must not find anything else,
-        # or the same data gets ingested twice.
+        # (CSV text) as the single sanctioned loose data file. Anything that picks up data
+        # files by extension at this level must find nothing else,
+        # or the same data is read twice.
 
         It 'carries no loose Inventory_* or Metrics_* JSON at the root' {
             @($script:RootEntries | Where-Object { $_ -like 'Inventory_*.json' -or $_ -like 'Metrics_*.json' }).Count |

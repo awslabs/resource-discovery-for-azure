@@ -320,8 +320,8 @@ Two logs help you see what failed and where.
   the resume state, so `-Resume` and `-ResumeFailedOnly` both collect it again.
   The log never carries the re-run command the console prints: that line holds a
   local path and the tenant id, and this log ships with the bundle.
-- It is a plain `.log`, not `.json`, on purpose, so the ingestion pipeline treats
-  it as an attachment and not as report data.
+- It is a plain `.log`, not `.json`, on purpose, so it is never mistaken for
+  report data.
 
 If a subscription is not listed under any failure heading, that phase finished
 cleanly for it.

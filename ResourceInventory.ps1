@@ -1471,12 +1471,11 @@ function ExecuteInventoryProcessing()
                         }
                     }
                     # The Get-UsageAggregates payload names the per-resource licensing/instance JSON
-                    # blob "InstanceData". a downstream cost-analysis tool reads that same blob
-                    # from a Consumption CSV column named "AdditionalInfo" (VM Windows/AHB + SQL vCore
-                    # detection bind to AdditionalInfo, not InstanceData), so a column literally named
-                    # InstanceData arrives empty downstream and that detection silently degrades. Map
-                    # the source property to a column named AdditionalInfo here at the point of ingest,
-                    # so every downstream read (below) and the emitted CSV header both use AdditionalInfo.
+                    # blob "InstanceData". The Consumption CSV column for that same blob is named
+                    # "AdditionalInfo" (VM Windows/AHB + SQL vCore
+                    # detection read AdditionalInfo, not InstanceData). Map
+                    # the source property to a column named AdditionalInfo here, as the rows are read,
+                    # so every later read (below) and the emitted CSV header both use AdditionalInfo.
                     $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
@@ -2077,9 +2076,8 @@ function ExecuteInventoryProcessing()
                 {
                     if ($null -eq $Row) { continue }
 
-                    # FOUNDRY FOLD CAPTURE (P1). a downstream cost-analysis tool reads ONLY
-                    # Consumption_*.csv and has NO reader for this Marketplace_*.csv, so Claude/
-                    # Anthropic usage collected here is invisible downstream unless it is ALSO
+                    # FOUNDRY FOLD CAPTURE (P1). Claude/Anthropic usage collected here lands in
+                    # this Marketplace_*.csv only, unless it is ALSO
                     # folded into the Consumption CSV as a "Foundry Models" row. Capture the RAW
                     # (pre-obfuscation) Claude rows now, keyed by the pinned subscription, so the
                     # fold step (GetFoundryFoldConsumption, invoked after this phase) can shape and
@@ -2199,8 +2197,8 @@ function ExecuteInventoryProcessing()
     function GetFoundryFoldConsumption()
     {
         # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
-        # a downstream cost-analysis tool - which reads ONLY Consumption_*.csv and has NO reader for
-        # Marketplace_*.csv - actually sees it. Runs AFTER GetMarketplaceConsumption (it consumes the
+        # it appears there too, not only in
+        # Marketplace_*.csv. Runs AFTER GetMarketplaceConsumption (it consumes the
         # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
         # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
         # off), so the fold follows the Marketplace phase's skip coherence exactly.
@@ -2227,7 +2225,7 @@ function ExecuteInventoryProcessing()
             return
         }
 
-        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows so a downstream cost tool can attribute them." -f $ClaudeRows.Count) -Severity 'Info'
+        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows." -f $ClaudeRows.Count) -Severity 'Info'
 
         # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
         # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
@@ -2253,7 +2251,7 @@ function ExecuteInventoryProcessing()
             $null = $FoldExport.Add($Folded)
         }
 
-        # ---- Append the folded rows onto the SAME Consumption CSV a downstream consumer reads ----
+        # ---- Append the folded rows onto the SAME Consumption CSV the first-party phase writes ----
         # Export-Csv -Append with the identical column set the first-party path emits, so a folded
         # row is schema-identical to a native consumption row (it just carries MeterCategory=
         # 'Foundry Models' + the fold markers inside AdditionalInfo). If the first-party phase wrote
@@ -2277,20 +2275,20 @@ function ExecuteInventoryProcessing()
         $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         # ADDITIVE Azure AI Foundry model billing-plane coverage collector.
         #
-        # WHY THIS EXISTS. A downstream downstream pricing pipeline ingests ONLY the Azure
-        # Retail Prices API. Microsoft splits Foundry models across TWO independent billing
-        # planes: "sold directly by Azure" (billed on Azure meters -> appears in Retail
-        # Prices -> priced fine) and "from partners/community" (billed through Azure
+        # WHY THIS EXISTS. Microsoft splits Foundry models across TWO independent billing
+        # planes: "sold directly by Azure" (billed on Azure meters -> appears in the Retail
+        # Prices API) and "from partners/community" (billed through Azure
         # Marketplace - for Claude via Claude Consumption Units / CCU - NOT in Retail
-        # Prices). A Marketplace-only model was therefore SILENTLY DROPPED: no Azure cost,
-        # no AWS mapping, and (the real bug) NO WARNING. The split is PER MODEL, not per
+        # Prices). A Marketplace-only model therefore came out with NO cost signal at all:
+        # no Azure meter, no AWS mapping, and (the real bug) NO WARNING. The split is PER
+        # MODEL, not per
         # vendor, so a vendor can look "covered" while one SKU vanishes. This phase probes
         # BOTH planes per deployed model and emits an explicit coverage flag so a
-        # Marketplace-only or entirely-uncovered model is NEVER silently dropped again.
+        # Marketplace-only or entirely-uncovered model is NEVER left unreported.
         #
-        # COLLECTION AND HANDOFF ONLY. This does NOT price anything and does NOT map to AWS
+        # COLLECTION ONLY. This does NOT price anything and does NOT map to AWS
         # - it collects the Azure-side signal (what is deployed, which plane covers each,
-        # and whatever usage was collectable) and hands it to a downstream cost tool pricing team.
+        # and whatever usage was collectable) and writes it to FoundryModelCoverage_*.csv.
         #
         # RELATIONSHIP TO THE MARKETPLACE COLLECTOR. GetMarketplaceConsumption (above)
         # answers "what Marketplace/CCU dollars were billed"; this phase answers "what
@@ -2793,8 +2791,8 @@ resources
             $script:PhaseTimings['Marketplace consumption collection (billing)'] = $MarketplacePhaseTimer.Elapsed
 
             # P1 FOUNDRY FOLD. Folds the Claude/Anthropic Marketplace rows the phase above captured
-            # into the SAME first-party Consumption_*.csv a downstream consumer reads, as 'Foundry Models' rows,
-            # so Claude usage is no longer dropped downstream. Runs under the SAME gate as the
+            # into the SAME first-party Consumption_*.csv, as 'Foundry Models' rows,
+            # so Claude usage appears there as well. Runs under the SAME gate as the
             # Marketplace phase (only when neither -SkipConsumption nor -SkipMarketplace is set), so
             # the fold follows the identical skip coherence. It appends to the Consumption CSV
             # written by GetResourceConsumption above.
@@ -3209,7 +3207,7 @@ if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 }
 
 # Marketplace CSV parallels the Consumption CSV: an empty-but-present file (header only)
-# is written when the phase was skipped or produced no rows, so a downstream consumer sees
+# is written when the phase was skipped or produced no rows, so the bundle shows
 # a deliberate, schema-shaped "0 Marketplace rows" rather than a missing file. This mirrors
 # the confirmed-zero diagnostic the collector logs.
 $MarketplaceCreated = Test-Path -LiteralPath $Global:MarketplaceFileCsv
@@ -3232,8 +3230,8 @@ if ($SkipConsumption.IsPresent -or $SkipMarketplace.IsPresent -or !$MarketplaceC
 }
 
 # FoundryModelCoverage CSV parallels the Consumption/Marketplace CSVs: an empty-but-present
-# file (header only) is written when the phase was skipped or produced no rows, so a
-# downstream consumer sees a deliberate, schema-shaped "0 coverage rows" rather than a
+# file (header only) is written when the phase was skipped or produced no rows, so the
+# bundle shows a deliberate, schema-shaped "0 coverage rows" rather than a
 # missing file. This mirrors the confirmed-zero diagnostic the collector logs.
 $FoundryCoverageCreated = Test-Path -LiteralPath $Global:FoundryCoverageFileCsv
 $FoundryCoverageEmpty = $false

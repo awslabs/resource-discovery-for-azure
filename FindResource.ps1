@@ -10,9 +10,8 @@
     it" from report output that has ALREADY been generated. Makes no Azure calls
     and writes nothing back into the scanned tree.
 
-    Why this exists: a resource type can be collected into Inventory_*.json
-    before server ingestion handles it, and in that case the report bundle is the
-    only copy of the data. Searching for it inside the HTML report is not an
+    Why this exists: Inventory_*.json inside a report bundle can be the only
+    copy of a given resource type's data. Searching for it inside the HTML report is not an
     option, because each per-subscription report covers exactly ONE subscription -
     there is no single report spanning an estate to search. This walks the
     bundles instead.

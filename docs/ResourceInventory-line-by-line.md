@@ -831,7 +831,7 @@ With only second precision, two workers computed the *same* `$CurrentDateTime`, 
 Milliseconds made a collision unlikely; the process discriminator makes it impossible, because two processes cannot share a PID.
 
 The reason it is hex only and fixed length is compatibility.
-Every downstream consumer globs for these files with patterns like `*<timestamp>*`, so as long as the segment stays a single unbroken alphanumeric run, nothing downstream needs to change.
+Everything that reads these files globs for them with patterns like `*<timestamp>*`, so as long as the segment stays a single unbroken alphanumeric run, nothing else needs to change.
 
 ### Resolving the output path
 
@@ -2884,7 +2884,7 @@ Between subscriptions, clearing it is the fix.
 
 | Line | Code | What it does |
 |---|---|---|
-| 1769 | `$UsageData.UsageAggregations.Properties \| Select-Object ...` | Digs down two levels into the response and projects ten fields. The raw Azure field is `InstanceData`; it is aliased here to the emitted column name `AdditionalInfo` (a calculated `Select-Object` property `@{Name='AdditionalInfo';Expression={$_.InstanceData}}`) so it binds to the server field of the same name. It is a **JSON string inside a JSON response**, which is why it has to be parsed separately. |
+| 1769 | `$UsageData.UsageAggregations.Properties \| Select-Object ...` | Digs down two levels into the response and projects ten fields. The raw Azure field is `InstanceData`; it is aliased here to the emitted column name `AdditionalInfo` (a calculated `Select-Object` property `@{Name='AdditionalInfo';Expression={$_.InstanceData}}`) so the emitted column carries that name. It is a **JSON string inside a JSON response**, which is why it has to be parsed separately. |
 | 1774 | `[System.Collections.ArrayList]::new()` | An `ArrayList` rather than `@()` because this loop appends thousands of items per page, and `+=` on a PowerShell array copies the whole array every time, which is quadratic. `ArrayList.Add` is constant time. |
 | 1776 | `for ($Item = 0; ...)` | An index based `for` rather than `foreach`, because the loop **mutates** `$UsageDataExport[$Item]` in place. |
 | 1786-1790 | the null `InstanceData` guard | A real bug fix. Some meters, marketplace purchases and certain reservations and tenant level charges, have no `InstanceData` at all. `.tolower()` on null throws, and because this loop sits inside the per subscription `try`, that single record would abort the **entire** subscription's consumption. Such a record has no resource URI to attribute anyway, so skipping just that one record is exactly right. |
@@ -2916,8 +2916,8 @@ This is the most sophisticated obfuscation in the whole tool, and it exists to f
 
 **The regression:** the original behaviour replaced the whole resource URI with one flat opaque token.
 That was safe but useless.
-The downstream dashboard categorises billing rows by **parsing the ARM path**: it reads the resource provider and type to identify AKS, VMSS, Container Instances, Container Registry, Kusto and so on, and it looks for the `mc_` resource group marker to spot AKS managed resources.
-A flat token destroyed every one of those signals, and AKS and VMSS rows became invisible on the dashboard.
+Billing rows are categorised by **parsing the ARM path**: the resource provider and type identify AKS, VMSS, Container Instances, Container Registry, Kusto and so on, and the `mc_` resource group marker marks AKS managed resources.
+A flat token destroyed every one of those signals, and AKS and VMSS rows could no longer be told apart.
 
 **The fix:** mask only the identifying segments and keep the path skeleton intact.
 
@@ -3153,8 +3153,8 @@ The bottom of `ExecuteInventoryProcessing`, where the nested functions get calle
 
 ```powershell
     # [long comment: VM placement CSV for capacity planning. Deliberately a SEPARATE file
-    #  rather than new fields on the VM collector, so Inventory_*.json and the server
-    #  ingestion contract it feeds are untouched.
+    #  rather than new fields on the VM collector, so the Inventory_*.json field
+    #  names are untouched.
     #
     #  Runs after ProcessResourceResult so $Global:SmaResources is fully populated, and
     #  needs no Azure calls - it joins collector output already in memory.
@@ -3210,7 +3210,7 @@ The bottom of `ExecuteInventoryProcessing`, where the nested functions get calle
 Four design decisions here, each worth noting because each is a reasonable pattern to copy.
 
 **A separate file, not new collector fields.**
-Adding fields to the VM collector's output object would change `Inventory_*.json`, which is a schema the server ingestion pipeline binds to on fixed field names.
+Adding fields to the VM collector's output object would change `Inventory_*.json`, whose field names are fixed.
 Producing a separate CSV leaves that contract untouched.
 
 **Filename differs by mode, and the location differs too.**
@@ -3786,7 +3786,7 @@ Only a standalone run gets told its zip is the thing to send.
 ## 6.6 Structural completeness fallbacks (lines 2611-2661)
 
 Three guards that make the output bundle structurally identical regardless of which phases ran or how much data existed.
-All three exist because downstream consumers, dashboard ingestion and the Pester tests, reject a bundle with a missing or unparseable member.
+All three exist because the Pester tests, and anything else that reads a bundle, reject one with a missing or unparseable member.
 
 ### Metrics JSON (lines 2611-2632)
 
@@ -3799,8 +3799,8 @@ else
 {
     # [long comment: subscriptions with zero metric-eligible resources never enter the
     #  batched-write loop in Extension/Metrics.ps1, so no Metrics_*.json is produced.
-    #  Downstream consumers that expect EVERY per-sub bundle to contain a Metrics JSON
-    #  reject the bundle when it is missing. Emit an empty-but-valid one. Use a wildcard
+    #  A per-sub bundle is expected to carry a Metrics JSON, and is rejected when
+    #  that member is missing. Emit an empty-but-valid one. Use a wildcard
     #  because the batched writer suffixes filenames with "_<rangeIdx>.json".]
     $MetricsPattern = ('Metrics_{0}_{1}*.json' -f $Global:ReportName, $CurrentDateTime)
     $MetricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)

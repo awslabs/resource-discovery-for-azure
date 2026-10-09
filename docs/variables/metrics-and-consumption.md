@@ -101,8 +101,8 @@ The switch is also honored at three later points so the run stays consistent:
   0-second metrics phase.
 - At finalization, a **valid but empty** metrics JSON is still written when
   metrics were skipped: `@{ Metrics = @() } | ConvertTo-Json | Out-File`
-  (~line 1710). This matters — the output bundle always contains a well-formed
-  `Metrics_*.json` so downstream ingestion does not choke on a missing file; it
+  (~line 1710). This matters - the output bundle always contains a well-formed
+  `Metrics_*.json`, so a reader never meets a missing file; it
   just sees zero metric records.
 
 In `Run-AllSubscriptions.ps1` the switch is a **passthrough** to the inner
@@ -159,8 +159,8 @@ In `ResourceInventory.ps1`:
   consumption is skipped (or the CSV was never created, or is empty), RDA writes
   a **header-only** consumption CSV with the full 15-column header row
   (guarded by `if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or
-  $ConsumptionEmpty)`, ~lines 1739–1743). Downstream tooling therefore always
-  finds a schema-valid CSV, just with no data rows.
+  $ConsumptionEmpty)`, ~lines 1739–1743). The bundle therefore always
+  holds a schema-valid CSV, just with no data rows.
 
 In `Run-AllSubscriptions.ps1` the switch does two things:
 
@@ -225,7 +225,7 @@ api-version, columns, obfuscation, confirmed-zero behaviour) are documented in
   **only** the Marketplace collector while leaving first-party consumption on.
 - As with the other phases, finalization guarantees a well-formed output: when
   the Marketplace phase is skipped (or produced no rows), RDA writes a
-  **header-only** `Marketplace_*.csv` so downstream tooling always finds a
+  **header-only** `Marketplace_*.csv` so the bundle always holds a
   schema-valid file.
 
 In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
@@ -285,7 +285,7 @@ successfully probed and both came back negative; any probe gap yields
   are not a zero), or `NotApplicable` on a row that is not a deployment.
 - As with the other phases, finalization guarantees a well-formed output: when
   the phase is skipped (or produced no rows) RDA writes a **header-only**
-  `FoundryModelCoverage_*.csv` so downstream tooling always finds a schema-valid
+  `FoundryModelCoverage_*.csv` so the bundle always holds a schema-valid
   file.
 
 In `Run-AllSubscriptions.ps1` the switch is forwarded to the inner script exactly
@@ -300,7 +300,7 @@ read per subscription. Use `-SkipFoundryCoverage` when you want first-party (and
 Marketplace) consumption but not the per-model coverage reconciliation — for
 example when the tenant deploys no Azure AI Foundry models. Leave it **on** (the
 default) for any run where a Marketplace-only or uncovered Foundry model could
-otherwise be silently dropped from downstream pricing.
+otherwise go unreported.
 
 ---
 

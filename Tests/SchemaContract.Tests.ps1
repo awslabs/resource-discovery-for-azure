@@ -57,7 +57,7 @@ BeforeAll {
 
         # Every inventory resource ID across ALL sections (the id space the other
         # datasets must join back into), plus per-section id lists for the
-        # server-bound sections.
+        # pinned sections.
         $script:AllInvIds = @()
         $script:InvBySection = @{}
         if ($null -ne $script:Inventory)
@@ -89,7 +89,7 @@ AfterAll {
 # =============================================================================
 Describe "Inventory schema contract" {
 
-    It "Every server-bound inventory section carries the identity field names on every row" {
+    It "Every pinned inventory section carries the identity field names on every row" {
         if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
         $IdentityFields = @($script:Contract.identityFields)
         $Sections = $script:Contract.serverBoundInventorySections.PSObject.Properties.Name
@@ -110,13 +110,13 @@ Describe "Inventory schema contract" {
                 }
             }
         }
-        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no server-bound inventory section was populated in this fixture"; return }
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no pinned inventory section was populated in this fixture"; return }
         # De-duplicate so one bad section reports once, not once per row.
         $Violations = @($Violations | Sort-Object -Unique)
-        $Violations.Count | Should -Be 0 -Because ("server ingestion binds these identity field NAMES; a rename/removal is silently dropped and breaks the join. Missing: {0}" -f ($Violations -join '; '))
+        $Violations.Count | Should -Be 0 -Because ("these identity field NAMES are what the datasets join on; a rename or removal breaks the join. Missing: {0}" -f ($Violations -join '; '))
     }
 
-    It "Every server-bound inventory row has a non-empty join key (ID)" {
+    It "Every pinned inventory row has a non-empty join key (ID)" {
         if (-not $script:Ready) { Set-ItResult -Skipped -Because $script:SkipReason; return }
         $Sections = $script:Contract.serverBoundInventorySections.PSObject.Properties.Name
         $Checked = 0
@@ -130,8 +130,8 @@ Describe "Inventory schema contract" {
                 if ([string]::IsNullOrEmpty($Row.ID)) { $Empty++ }
             }
         }
-        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no server-bound inventory section was populated in this fixture"; return }
-        $Empty | Should -Be 0 -Because "the inventory join key (ID) must be populated on every server-bound row or the resource cannot be correlated to its metrics/consumption"
+        if ($Checked -eq 0) { Set-ItResult -Skipped -Because "no pinned inventory section was populated in this fixture"; return }
+        $Empty | Should -Be 0 -Because "the inventory join key (ID) must be populated on every pinned row or the resource cannot be correlated to its metrics/consumption"
     }
 }
 
@@ -151,7 +151,7 @@ Describe "Metrics schema contract" {
             }
         }
         $Violations = @($Violations | Sort-Object -Unique)
-        $Violations.Count | Should -Be 0 -Because ("the server binds these AzureMetricRecord fields; a missing name is dropped on ingest. Missing: {0}" -f ($Violations -join '; '))
+        $Violations.Count | Should -Be 0 -Because ("these AzureMetricRecord field names are fixed; a missing name breaks the join. Missing: {0}" -f ($Violations -join '; '))
     }
 
     It "Every metric row has a non-empty join key (ID)" {
@@ -159,7 +159,7 @@ Describe "Metrics schema contract" {
         if ($script:MetricRows.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows (metrics phase absent or skipped in this fixture)"; return }
         $JoinKey = $script:Contract.metrics.joinKey
         $Empty = @($script:MetricRows | Where-Object { [string]::IsNullOrEmpty($_.$JoinKey) }).Count
-        $Empty | Should -Be 0 -Because "a metric row with no ID cannot be attached to its resource (the server groups metrics by {ID, Metric})"
+        $Empty | Should -Be 0 -Because "a metric row with no ID cannot be attached to its resource (metrics are keyed by {ID, Metric})"
     }
 }
 
@@ -184,7 +184,7 @@ Describe "Consumption schema contract" {
         }
         $Required = @($script:Contract.consumption.requiredColumns)
         $Missing = @($Required | Where-Object { $_ -notin $Columns })
-        $Missing.Count | Should -Be 0 -Because ("the consumption CSV column contract is fixed for server ingestion. Missing: {0}" -f ($Missing -join ', '))
+        $Missing.Count | Should -Be 0 -Because ("the consumption CSV column contract is fixed. Missing: {0}" -f ($Missing -join ', '))
     }
 }
 

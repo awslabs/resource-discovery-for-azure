@@ -5,9 +5,8 @@
     Purpose: answer "which subscriptions in this scan contain resource type X,
     and how big is it" from ALREADY-PRODUCED report output. No Azure calls.
 
-    Why this exists: a resource type can be collected into Inventory_*.json but
-    not yet handled by server ingestion, so the only copy of that data is the
-    report bundle itself. Each per-subscription HTML report covers ONE
+    Why this exists: Inventory_*.json inside a report bundle can be the only
+    copy of a given resource type's data. Each per-subscription HTML report covers ONE
     subscription, so there is no single report to search across an estate. This
     walks every bundle instead and returns the matching rows.
 

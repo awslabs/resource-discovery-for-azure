@@ -248,8 +248,8 @@ Kubernetes `completionMode: Indexed` Job's `JOB_COMPLETION_INDEX`.
 
 Each shard produces its **own** `AllSubscriptions_ResourcesReport_*.zip` covering
 only its slice — uploaded as `shard-<i>of<N>-…` when `uploadContainerUri` is set,
-and published as the per-shard pipeline artifact `rda-reports-shard<n>`. Ingest the
-N zips separately — no merge needed — or rebuild one aggregate `MainSummary.html`
+and published as the per-shard pipeline artifact `rda-reports-shard<n>`. Upload the
+N zips separately - no merge needed - or rebuild one aggregate `MainSummary.html`
 per [`../../../docs/horizontal-sharding.md`](../../../docs/horizontal-sharding.md)
 ("Collecting the results").
 

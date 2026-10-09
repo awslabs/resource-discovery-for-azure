@@ -1,12 +1,12 @@
 {
   "_comment": [
-    "The fields a downstream cost tool binds on, taken from its C# ingestion models and the",
-    "consumption CSV header written by ResourceInventory.ps1.",
+    "The field names that must stay stable, taken from the consumption CSV header",
+    "written by ResourceInventory.ps1 and from the inventory and metrics writers.",
     "",
     "Deliberately narrow: it pins only the identity and join-key fields that keep",
     "inventory, metrics, and consumption linkable. Descriptive fields (SKU, tier,",
-    "state) are not pinned - many are not server-bound yet and are free to change.",
-    "If a key here drifts, a downstream cost tool silently drops the value and the files stop",
+    "state) are not pinned - they are free to change.",
+    "If a key here drifts, the value no longer carries its name and the files stop",
     "joining, which is what the gate exists to prevent.",
     "",
     "Data only, no logic. Tests/SchemaContract.Tests.ps1 reads identityFields, the",

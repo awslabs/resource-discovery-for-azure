@@ -377,12 +377,12 @@ zips**.
 
 Each shard zip is a complete, self-contained report artifact — identical in
 shape to what an ordinary single-machine run produces, just covering fewer
-subscriptions. So a downstream cost-analysis tool accepts each one exactly like any normal
-run's output: uploading the 10 shard zips is simply 10 normal ingestions.
+subscriptions. So each one is exactly like any normal
+run's output: uploading the 10 shard zips is simply 10 normal uploads.
 
 Uploading them separately is usually the better choice:
 
-- It spreads the ingestion load across 10 smaller uploads instead of one large
+- It spreads the work across 10 smaller uploads instead of one large
   merged archive.
 - Because the shards are disjoint by construction, the 10 uploads together cover
   the whole tenant exactly once, with no duplicates and no gaps — no local merge
@@ -672,7 +672,7 @@ best-effort: if it fails, the run still succeeds and the zip remains on the
 node's local disk with a loud warning.
 
 Because the shard slices are disjoint, the uploaded zips together cover the
-whole tenant exactly once. Ingest them separately, or merge locally into one
+whole tenant exactly once. Upload them separately, or merge locally into one
 `MainSummary.html` as in "Collecting the results" above.
 
 ### Surviving pod eviction: blob-backed resume state

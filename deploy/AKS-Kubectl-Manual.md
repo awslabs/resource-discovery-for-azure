@@ -153,7 +153,7 @@ az storage blob download-batch --account-name <account> --source <container> \
   --destination ./collected --auth-mode login --pattern "*.zip"
 ```
 
-- **One zip per non-empty shard**; shards are disjoint, so together they cover the tenant once — **ingest each separately, no merge needed**.
+- **One zip per non-empty shard**; shards are disjoint, so together they cover the tenant once - **upload each separately, no merge needed**.
 - Each zip → inner `ResourcesReport_*.zip` → `Inventory_*.json`, `Metrics_*.json`, `Consumption_*.csv` (+ HTML).
 - Optional single rolled-up view: `Build-MainSummaryFromZip.ps1` (see `docs/horizontal-sharding.md`).
 

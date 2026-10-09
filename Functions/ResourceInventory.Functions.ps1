@@ -230,8 +230,8 @@ function Global:Get-RdaClaudeModelIdentity
     # Derives a recognizable Claude MODEL identity string from a Marketplace row's
     # product-identity fields (OfferName/PlanName, then PublisherName as a last resort).
     #
-    # DOWNSTREAM FORMAT. a downstream cost-analysis tool resolves the model by alias-matching a recognizable
-    # Claude token (e.g. "Claude Sonnet 4.5", "Claude Opus 4.5", "Claude Haiku 4.5") out of
+    # MODEL IDENTITY FORMAT. The model is named by a recognizable
+    # Claude token (e.g. "Claude Sonnet 4.5", "Claude Opus 4.5", "Claude Haiku 4.5") in
     # MeterName/ProductName. This returns the best such string we can read from the row so the
     # folded row's MeterName carries it. When the row names a specific family (sonnet/opus/haiku)
     # and/or a version, that specific identity is returned; otherwise a bare "Claude" is returned
@@ -276,18 +276,18 @@ function Global:ConvertTo-RdaFoldedFoundryRow
 {
     # TIER 1 FOLD (CCU / cost, always available). Maps ONE Claude/Anthropic Marketplace row
     # (PSMarketplace shape, as returned by Get-AzConsumptionMarketplace) to a row shaped like
-    # the FIRST-PARTY Consumption CSV, so a downstream cost-analysis tool - which reads ONLY
-    # Consumption_*.csv and has NO reader for Marketplace_*.csv - actually sees Claude usage.
+    # the FIRST-PARTY Consumption CSV, so Claude usage lands in Consumption_*.csv and not
+    # only in Marketplace_*.csv.
     #
-    # WHY. a downstream cost tool admits a consumption row ONLY when its
-    # MeterCategory == "Foundry Models" (exact string). Claude has no first-party Azure retail
-    # meter, so Claude usage arrives only on the Marketplace endpoint and is silently dropped
-    # downstream. Folding it into the Consumption CSV with MeterCategory="Foundry Models" and
-    # the Claude model identity in MeterName is what makes a downstream cost tool attribute the Azure cost.
+    # WHY. A Foundry cost row carries a MeterCategory of exactly "Foundry Models".
+    # Claude has no first-party Azure retail meter, so Claude usage arrives only on the
+    # Marketplace endpoint. Folding it into the Consumption CSV with
+    # MeterCategory="Foundry Models" and the Claude model identity in MeterName is what puts
+    # that Azure cost on a Foundry cost row.
     #
     # NON-TOKEN (CCU / cost) MARKING. This Tier 1 row carries the Marketplace PretaxCost as an
-    # Azure cost, NOT a token count. a downstream cost tool must attribute that Azure cost but must NOT try
-    # to compute an AWS Bedrock token price from it. So the row is marked non-token: Unit is a
+    # Azure cost, NOT a token count. The row says so plainly, so the cost cannot be read as a
+    # token quantity: Unit is a
     # cost/quantity unit (never a token unit) and additionalInfo.IsTokenMeter=$false.
     #
     # OUTPUT SHAPE. Returns an object carrying EXACTLY the first-party Consumption CSV columns
@@ -296,17 +296,17 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     # ReservationId, ReservationOrderId) so the collector can Select-Object + Export-Csv -Append
     # it straight onto the existing Consumption_*.csv with no schema change.
     #   - MeterCategory = "Foundry Models" (exact, expected consumption-row format).
-    #   - MeterName     = the Claude model identity (downstream consumer resolves the model from it).
+    #   - MeterName     = the Claude model identity (the readable model name on this row).
     #   - Quantity      = the Marketplace ConsumedQuantity (usage quantity, mirrors first-party).
     #   - Unit          = the Marketplace UnitOfMeasure, or a neutral cost unit; NEVER a token unit.
     #   - AdditionalInfo = a JSON blob shaped like the first-party path's
     #                      {"Microsoft.Resources":{resourceUri,location,additionalInfo:{...}}},
-    #                      carrying PretaxCost/Currency (the Azure cost a downstream consumer attributes),
+    #                      carrying PretaxCost/Currency (the Azure cost of this Claude usage),
     #                      the readable product identity, and the fold markers. Cost lives here
     #                      because the Consumption CSV has no dedicated cost column - the
     #                      first-party path likewise carries per-resource detail inside this blob.
     #
-    # SYNTHESIZED, STABLE, OBFUSCATION-CONSISTENT ResourceId + MeterId. a downstream consumer requires a
+    # SYNTHESIZED, STABLE, OBFUSCATION-CONSISTENT ResourceId + MeterId. Every row carries a
     # NON-EMPTY ResourceId and MeterId. A Marketplace row's InstanceId/MeterId may be empty, so
     # when absent we SYNTHESIZE them deterministically from the row's stable identity fields (a
     # SHA256 over publisher/offer/plan/instance) so the same offer maps to the same ids across
@@ -348,11 +348,11 @@ function Global:ConvertTo-RdaFoldedFoundryRow
     # are stable for a given offer identity across runs.
     $SynthGuid = ("{0}-{1}-{2}-{3}-{4}" -f $HashHex.Substring(0, 8), $HashHex.Substring(8, 4), $HashHex.Substring(12, 4), $HashHex.Substring(16, 4), $HashHex.Substring(20, 12))
 
-    # MeterId: prefer the row's own, else the synthetic (downstream consumer requires non-empty).
+    # MeterId: prefer the row's own, else the synthetic (this column is never left empty).
     $MeterId = if (-not [string]::IsNullOrEmpty($Row.MeterId)) { $Row.MeterId } else { ("foundryfold-{0}" -f $SynthGuid) }
 
-    # ResourceId: prefer the row's InstanceId, else a synthetic SaaS-shaped ARM URI so a downstream cost tool
-    # sees a well-formed non-empty resource id. Kept as an ARM path so obfuscation preserves its
+    # ResourceId: prefer the row's InstanceId, else a synthetic SaaS-shaped ARM URI so the row
+    # carries a well-formed non-empty resource id. Kept as an ARM path so obfuscation preserves its
     # structure exactly like a real one.
     $RawResourceId = if (-not [string]::IsNullOrEmpty($Row.InstanceId))
     {
@@ -383,8 +383,8 @@ function Global:ConvertTo-RdaFoldedFoundryRow
 
     # --- AdditionalInfo JSON blob (mirror the first-party {"Microsoft.Resources":{...}} shape) ---
     # Cost lives here because the Consumption CSV carries no dedicated cost column; the first-party
-    # path likewise stows per-resource licensing detail inside this same blob. The fold markers let
-    # a downstream consumer (and a human reading the CSV) tell a folded Claude cost row from a native one.
+    # path likewise stows per-resource licensing detail inside this same blob. The fold markers show
+    # at a glance that this is a folded Claude cost row and not a native one.
     $AdditionalInfoObject = [PSCustomObject]@{
         'Microsoft.Resources' = [PSCustomObject]@{
             resourceUri    = $OutResourceId
@@ -395,7 +395,7 @@ function Global:ConvertTo-RdaFoldedFoundryRow
                 FoldTier       = 1
                 IsTokenMeter   = $false
                 ModelIdentity  = $ModelIdentity
-                # The Azure cost a downstream consumer attributes for this Claude usage.
+                # The Azure cost of this Claude usage.
                 PretaxCost     = $Row.PretaxCost
                 Currency       = $Row.Currency
                 # The Marketplace usage quantity + its original unit, preserved for fidelity (the
@@ -416,14 +416,14 @@ function Global:ConvertTo-RdaFoldedFoundryRow
         MeterId            = $MeterId
         MeterName          = $ModelIdentity
         MeterRegion        = $ResourceLocation
-        # Carry the readable model identity as the sub-category too, a second place a downstream consumer can
-        # read the model from, mirroring how the product identity is preserved on Marketplace rows.
+        # Carry the readable model identity as the sub-category too, a second place the model name
+        # appears, mirroring how the product identity is preserved on Marketplace rows.
         MeterSubCategory   = $ModelIdentity
         # Usage quantity, mirroring the first-party path (NOT a token count - this is the CCU/cost row).
         Quantity           = $Row.ConsumedQuantity
-        # A FIXED non-token unit. a downstream consumer decides token-vs-cost partly from the Unit
-        # (Quantity x TokensPerAzureUnit(Unit)); a token-shaped Marketplace unit like "1M Tokens"
-        # on this cost row could make a downstream cost tool misprice the CCU/usage Quantity as tokens. So this
+        # A FIXED non-token unit. The Unit column is what tells a cost row from a token row, so a
+        # token-shaped Marketplace unit like "1M Tokens"
+        # on this cost row would make the CCU/usage Quantity look like a token count. So this
         # Tier 1 row ALWAYS carries a neutral unit and marks itself non-token; the real Marketplace
         # unit is preserved in additionalInfo.MarketplaceUnitOfMeasure for fidelity.
         Unit               = 'CCU'
@@ -463,7 +463,7 @@ function Global:Test-RdaRetailPriceMatch
 {
     # Decides whether a single deployed model has a CONFIDENT match among the supplied
     # Azure Retail Prices catalog items (serviceName eq 'Foundry Models'), returning the
-    # matched productName/meterName so a downstream cost tool team can audit the match (the design spec section 4.3).
+    # matched productName/meterName so the match can be audited (the design spec section 4.3).
     #
     # CONSERVATIVE + PER-MODEL (the design spec section 4.2/4.3): the match is decided at the individual
     # catalog-item granularity, never at vendor granularity - a vendor like Cohere/Llama/

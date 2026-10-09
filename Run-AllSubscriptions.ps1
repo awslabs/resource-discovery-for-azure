@@ -1738,7 +1738,7 @@ else
     }
     if ($StreamCount -ge 2)
     {
-        # A summary left by an earlier run that died before reading it would otherwise be ingested as
+        # A summary left by an earlier run that died before reading it would otherwise be read as
         # this run's if a stream then dies before writing its own. Cleared before any stream starts and
         # before the token cache is snapshotted, so stopping here leaves nothing running or on disk.
         $StreamSummaryPaths = @(0..($StreamCount - 1) | ForEach-Object { Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $_) })

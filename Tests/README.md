@@ -169,7 +169,7 @@ The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
 assume obfuscated input. On a **non-obfuscated** zip the raw subscription paths
 and transcript are present *by design*, so those tests are EXPECTED to fail and
 are therefore not run for non-obfuscated scenarios. Only obfuscated zips are ever
-shared with the downstream tool, so this matches real usage.
+shared, so this matches real usage.
 
 ### Live tenant reconciliation (`default` scenario)
 
@@ -200,26 +200,26 @@ reconciliation" tests ran, so a quiet skip cannot pass as a green run.
 ### Schema contract & cross-dataset linkage (`default` + `obfuscate`)
 
 `SchemaContract.Tests.ps1` is a **pure-output, drift-immune** gate (no Azure
-calls) that protects the **server ingestion contract** and - above all - the
+calls) that protects the **emitted field names** and - above all - the
 **cross-dataset linkage** that makes the three datasets usable together. The
 owner's rule: Inventory, Metrics, and Consumption are *useless on their own*
 unless they stay joinable via a common identity key
 (`Inventory.ID` ↔ `Metrics.ID` ↔ `Consumption.ResourceId`). A field
-rename/removal/emptying that breaks that join is silently dropped by the server
-(`System.Text.Json` ignores unmapped members), so a parse-check or report render
+rename/removal/emptying that breaks that join leaves the three files
+unjoinable, and a parse-check or report render
 won't catch it - only asserting the emitted zip against the contract does.
 
 The pinned contract lives in `schema-contract.json` (data, separate from logic)
-so the downstream owner can see/adjust the bound keys. It is deliberately
-**narrow**: it pins only the identity/join-key fields of the server-bound
+so the bound keys can be read and adjusted in one place. It is deliberately
+**narrow**: it pins only the identity/join-key fields of the pinned
 inventory sections (VirtualMachines, VMDisk, Databricks, PostgreSQLflexible,
 MySQLflexible, SQLVM, SQLDB, SQLPOOL, SQLMI), the `AzureMetricRecord` identity
 fields, and the Consumption CSV columns - **not** the long tail of descriptive
-fields (many aren't server-bound yet), which stay free to evolve.
+fields, which stay free to evolve.
 
 It asserts:
 
-- **Tier 1 (schema):** every present server-bound inventory section carries the
+- **Tier 1 (schema):** every present pinned inventory section carries the
   identity field *names* on every row (a per-row rename/removal guard) and a
   non-empty `ID`; metric rows carry their required field names and a non-empty
   `ID`; the consumption header carries every required column;

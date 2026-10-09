@@ -196,7 +196,7 @@ Describe 'ConvertTo-RdaMarketplaceRow: obfuscation routing' {
         $Out.InstanceName     | Should -Not -Be 'contoso-saas-01'
 
         # The InstanceId is an ARM resource id and must stay structurally an ARM id
-        # (segment-by-segment rebuild), so a downstream consumer can still parse it.
+        # (segment-by-segment rebuild), so it stays parseable as an ARM id.
         $Out.InstanceId | Should -Match '^/subscriptions/[^/]+/resourcegroups/[^/]+/providers/Microsoft\.SaaS/resources/[^/]+$'
     }
 

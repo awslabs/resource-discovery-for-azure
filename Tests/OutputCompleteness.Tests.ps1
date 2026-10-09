@@ -61,7 +61,7 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
-        # Report members are .html/.json/.csv. Diagnostics_*.log is always allowed (scrubbed; kept .log so the pipeline won't table-ingest it);
+        # Report members are .html/.json/.csv. Diagnostics_*.log is always allowed (scrubbed; kept .log, not .json, so it is not picked up as a data file);
         # DebugLog_*.log only in a NON-obfuscated bundle (it carries real, unscrubbed identifiers); every other .log and the transcript stay local-only.
         $AllowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles)

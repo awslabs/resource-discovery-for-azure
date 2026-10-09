@@ -12,7 +12,7 @@ Questions in an issue are always welcome, and "is this the right approach?" is a
 
 ## Adding a new data source
 
-Anything new is worth a quick chat first, because the tool's output feeds a downstream ingestion service and a shared report, so a new source usually touches more than the code that fetches it.
+Anything new is worth a quick chat first, because a new field lands in the tool's output files and in a shared report, so a new source usually touches more than the code that fetches it.
 
 Open an issue and we'll look at it together.
 The things we'll want to think through:
@@ -20,7 +20,7 @@ The things we'll want to think through:
 - **Where the data comes from.** Which API, and whether it needs permissions beyond the Reader, Cost Management Reader, and Monitoring Reader set the tool asks for today.
 - **Where it lands.** The existing output files are all keyed on an Azure resource ID, so tenant-level or non-Azure data may need a home of its own rather than a row in the inventory.
 - **How it gets masked.** See [obfuscation](#obfuscation) below. If the data is about people rather than infrastructure, that's worth extra thought.
-- **Who consumes it.** New fields need a heads-up to the folks running the ingestion side so they can bind to them.
+- **Who else sees it.** New fields land in the output files, so the people who use those files need a heads-up.
 - **What it costs to collect.** Extra API calls per resource show up as run time on large tenants.
 
 None of that is a barrier, it's just the checklist so nothing gets discovered late.
@@ -113,10 +113,10 @@ One thing to keep in mind: the same real value needs to keep producing the same 
 
 ## Output fields
 
-Worth flagging separately because it's easy to miss: your collector's output object becomes both the `Inventory_*.json` that the ingestion service reads and the HTML report.
-So adding or renaming a field changes what a downstream consumer sees, even when you only meant to change the report.
+Worth flagging separately because it's easy to miss: your collector's output object becomes both the `Inventory_*.json` and the HTML report.
+So adding or renaming a field changes the JSON as well, even when you only meant to change the report.
 
-Mention it in the issue or PR and we'll sort out the ingestion side in parallel.
+Mention it in the issue or PR and we'll sort the rest out in parallel.
 If you only need something to show up in the report, it can often be derived in the renderer from fields that are already there, which saves the round trip entirely.
 
 ## Checking your work

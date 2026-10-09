@@ -863,7 +863,7 @@ function Get-RdaSubscriptionProfile
     }
     catch
     {
-        # Kept for the local debug log. A lookup without a tenant reports what that lookup found, which can be
+        # Kept for the debug log. A lookup without a tenant reports what that lookup found, which can be
         # a bare "not found" even when the signed-in tenant failed on a token instead; per-tenant token
         # failures come out of that lookup as warnings, which -WarningAction SilentlyContinue hides.
         $TenantLookupError = [string]$_.Exception.Message
@@ -881,13 +881,15 @@ function Get-RdaSubscriptionProfile
             {
                 throw
             }
-            # The first failure's text, and the tenant it was looked up in, go to the local debug log only.
-            # That text can name the tenant, its domain or a local path, and callers copy this message into
-            # the skip entries that ship in Diagnostics_*.log. The message keeps the second lookup's own
-            # words, as before, and says where the first failure went - but only when a debug log is being
-            # written, which the wrapper's consumption probe runs before.
+            # The first failure's text, and the tenant it was looked up in, go to the debug log only (which stays
+            # local in an -Obfuscate run and ships in a default bundle, beside the real identifiers that bundle
+            # already holds). That text can name the tenant, its domain or a local path, and callers copy this
+            # message into the skip entries that ship in Diagnostics_*.log. The message keeps the second
+            # lookup's own words, as before, and says where the first failure went - but only when a debug log
+            # is being written: the wrappers clear its path at the start of a run, and their billing probe runs
+            # before the first inner run opens one.
             Write-Log -Message ('[Profile] The lookup of subscription {0} in the signed-in tenant {1} failed first, with: {2}' -f $SubscriptionId, $Current.Tenant.Id, $TenantLookupError) -Severity 'Info' -NoConsole -ToDebugLog
-            $DebugLogNote = if ([string]::IsNullOrEmpty($Global:DebugLogFile)) { '' } else { '; its error is in the local debug log' }
+            $DebugLogNote = if ([string]::IsNullOrEmpty($Global:DebugLogFile)) { '' } else { '; its error is in the debug log' }
             throw [System.Exception]::new(('{0} (the lookup in the signed-in tenant had also failed{1})' -f $_.Exception.Message, $DebugLogNote), $_.Exception)
         }
     }

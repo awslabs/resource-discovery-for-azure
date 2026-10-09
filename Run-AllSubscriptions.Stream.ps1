@@ -239,6 +239,10 @@ $Global:CollectorFailures = @()
 
 $Global:MemoryReadings = @()
 
+# Reset with the totals, as the wrapper does: the debug log path of the last inner run, so nothing written
+# before this stream's first inner run lands in a log from an earlier run.
+$Global:DebugLogFile = $null
+
 # Under -StreamIsolation Runspace every subscription asks the run's shared admission state before it starts.
 $UseAdmission = [bool]($SharedProcess -and $null -ne $AdmissionState)
 

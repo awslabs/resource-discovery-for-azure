@@ -749,6 +749,8 @@ Describe 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' {
             @{ Name = 'MarketplaceFailedSubs'; IsList = $true; Stale = @([pscustomobject]@{ Name = 'earlier run'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'stale' }) }
             @{ Name = 'CollectorFailures'; IsList = $true; Stale = @([pscustomobject]@{ Id = '12345678-1234-1234-1234-123456789012'; Module = 'VirtualMachines'; Message = 'stale' }) }
             @{ Name = 'MemoryReadings'; IsList = $true; Stale = @([pscustomobject]@{ Id = '12345678-1234-1234-1234-123456789012'; Stamp = '20260101000000'; Phase = 'end'; Resources = 1; HeapMB = 1.0; WorkingSetMB = 1.0; LimitMB = 1.0 }) }
+            # Not a total, but reset with them: a path, checked as a one-item list that must come out empty.
+            @{ Name = 'DebugLogFile'; IsList = $true; Stale = '/earlier-run/DebugLog_earlier.log' }
         )
     }
 

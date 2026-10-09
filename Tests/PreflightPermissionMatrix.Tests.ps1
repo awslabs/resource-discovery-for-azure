@@ -140,11 +140,15 @@ Describe 'The -Preflight probe loop in Run-AllSubscriptions.ps1' {
         # detail says "its error is shown above"; at Verbose only, that line would print with no second half.
         $Printed = [System.Collections.Generic.List[object]]::new()
         $Cost = [pscustomobject]@{ Outcome = 'Unavailable'; Detail = 'could not scope the Az calls to the probe subscription: SubscriptionNotFound (the lookup in the signed-in tenant had also failed; its error is shown above)' }
-        $Rows = @(& $script:PreflightLoop $script:PfSubs $Cost $Printed 4>$null)
+        $VerbosePreference = 'Continue'
+        $Output = @(& $script:PreflightLoop $script:PfSubs $Cost $Printed 4>&1)
+        $Rows = @($Output | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] })
+        $Verbose = @($Output | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] })
         $Rows[0].CostManagement | Should -Be 'Unavailable'
-        $Shown = @($Printed | Where-Object { $_.Text -like '*`[preflight`] consumption Sub One: could not scope*its error is shown above*' })
+        $Shown = @($Printed | Where-Object { $_.Text -like '  WARNING: `[preflight`] consumption Sub One: could not scope*its error is shown above*' })
         $Shown.Count | Should -Be 1
         $Shown[0].Color | Should -Be 'Yellow'
+        @($Verbose | Where-Object { $_.Message -like '*`[preflight`]*' }).Count | Should -Be 0 -Because 'the detail is shown at Warning instead of Verbose, not as well'
     }
 
     It 'keeps the detail of any other outcome at Verbose' {

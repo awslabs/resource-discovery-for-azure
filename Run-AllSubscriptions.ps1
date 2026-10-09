@@ -1126,7 +1126,13 @@ if ($Preflight)
         {
             $CostProbe = Test-ConsumptionAccess -SubscriptionId $PfSub.Id
             $CostState = $CostProbe.Outcome
-            if ($CostProbe.Detail) { Write-Verbose ("[preflight] consumption {0}: {1}" -f $PfSub.Name, $CostProbe.Detail) }
+            if ($CostProbe.Outcome -eq 'Unavailable' -and $CostProbe.Detail)
+            {
+                # At Warning, not Verbose: when both lookups of the subscription failed, the profile helper has
+                # just printed the first lookup's error, and this detail is the second half it points back to.
+                Write-Host ("  WARNING: [preflight] consumption {0}: {1}" -f $PfSub.Name, $CostProbe.Detail) -ForegroundColor Yellow
+            }
+            elseif ($CostProbe.Detail) { Write-Verbose ("[preflight] consumption {0}: {1}" -f $PfSub.Name, $CostProbe.Detail) }
         }
         $MonState = 'Skipped'
         if (-not $SkipMetrics)

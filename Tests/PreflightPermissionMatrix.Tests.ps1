@@ -2,6 +2,7 @@
 # Offline unit tests for the -Preflight permission matrix: Test-MetricsAccess (mocked Az) across all
 # outcome branches, and Format-PreflightMatrix's verdict - a Denied probe or an unverifiable Reader blocks;
 # Skipped, NoResource and Unavailable results for the Cost Management and Monitoring phases do not.
+# The last Describe runs the wrapper's probe loop, lifted from its source, against stub probes.
 
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
@@ -109,5 +110,49 @@ Describe 'Format-PreflightMatrix' {
         $Long = 'x' * 60
         $M = Format-PreflightMatrix -Rows @((& $script:Row $Long 'Ok' 'Ok' 'Ok'))
         ($M.Lines | Where-Object { $_ -match '^\s+x{37}\.\.\.\s' }).Count | Should -Be 1
+    }
+}
+
+Describe 'The -Preflight probe loop in Run-AllSubscriptions.ps1' {
+    # The loop is inline in the wrapper, so it is lifted from the parsed source and run against stub probes.
+    BeforeAll {
+        $ParseErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$ParseErrors)
+        if (@($ParseErrors).Count -gt 0) { throw ('Run-AllSubscriptions.ps1 does not parse: {0}' -f $ParseErrors[0].Message) }
+        $Loop = @($WrapperAst.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $Node.Left.Extent.Text -eq '$MatrixRows' -and $Node.Right.Extent.Text -like 'foreach ($PfSub in $Subscriptions)*' }, $true))
+        if ($Loop.Count -ne 1) { throw ('expected one preflight probe loop, found {0}' -f $Loop.Count) }
+        $script:PreflightLoop = [scriptblock]::Create((@(
+                    'param($Subscriptions, $CostResult, $Printed)'
+                    'function Write-Host { param($Object, $ForegroundColor) $Printed.Add([pscustomobject]@{ Text = [string]$Object; Color = [string]$ForegroundColor }) }'
+                    'function Test-ConsumptionAccess { param([string]$SubscriptionId) $CostResult }'
+                    'function Test-MetricsAccess { param([string]$SubscriptionId) [pscustomobject]@{ Outcome = ''Ok''; Detail = $null } }'
+                    '$SkipConsumption = $false'
+                    '$SkipMetrics = $false'
+                    '$MatrixRows = @()'
+                    $Loop[0].Extent.Text
+                    '$MatrixRows'
+                ) -join [Environment]::NewLine))
+        $script:PfSubs = @([pscustomobject]@{ Name = 'Sub One'; Id = 'sub-1' })
+    }
+
+    It 'shows an Unavailable consumption probe''s detail at Warning, the second half of the profile helper''s line' {
+        # With no debug log open, the profile helper prints the first lookup's error on the console and the
+        # detail says "its error is shown above"; at Verbose only, that line would print with no second half.
+        $Printed = [System.Collections.Generic.List[object]]::new()
+        $Cost = [pscustomobject]@{ Outcome = 'Unavailable'; Detail = 'could not scope the Az calls to the probe subscription: SubscriptionNotFound (the lookup in the signed-in tenant had also failed; its error is shown above)' }
+        $Rows = @(& $script:PreflightLoop $script:PfSubs $Cost $Printed 4>$null)
+        $Rows[0].CostManagement | Should -Be 'Unavailable'
+        $Shown = @($Printed | Where-Object { $_.Text -like '*`[preflight`] consumption Sub One: could not scope*its error is shown above*' })
+        $Shown.Count | Should -Be 1
+        $Shown[0].Color | Should -Be 'Yellow'
+    }
+
+    It 'keeps the detail of any other outcome at Verbose' {
+        $Printed = [System.Collections.Generic.List[object]]::new()
+        $Cost = [pscustomobject]@{ Outcome = 'Denied'; Detail = 'AuthorizationFailed: the client does not have authorization' }
+        $VerbosePreference = 'Continue'
+        $Verbose = @(& $script:PreflightLoop $script:PfSubs $Cost $Printed 4>&1 | Where-Object { $_ -is [System.Management.Automation.VerboseRecord] })
+        @($Printed | Where-Object { $_.Text -like '*`[preflight`]*' }).Count | Should -Be 0 -Because 'a denial already reads Denied in the matrix'
+        @($Verbose | Where-Object { $_.Message -like '`[preflight`] consumption Sub One: AuthorizationFailed*' }).Count | Should -Be 1
     }
 }

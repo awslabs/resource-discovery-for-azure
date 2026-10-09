@@ -3526,7 +3526,7 @@ function Close-RdaMetricWorkerPool { Set-Content -LiteralPath ($WorkerArgs.Probe
             Test-Path -LiteralPath $StreamSummaries[0].SummaryPath | Should -BeFalse -Because 'a stream that did start writes its own summary'
             Test-Path -LiteralPath $StreamSummaries[1].SummaryPath | Should -BeTrue -Because 'the stopped stream leaves a summary the wrapper folds like a worker that failed to start'
         }
-        finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue }
+        finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue; <# -ThrottleLimit is session-wide, so put the default of 5 back for later thread jobs #> Start-ThreadJob -ThrottleLimit 5 -ScriptBlock { } | Wait-Job | Remove-Job -Force }
     }
 
     Context 'a stream that was stopped before it started is folded like a worker that failed to start' {
@@ -3560,7 +3560,7 @@ function Close-RdaMetricWorkerPool { Set-Content -LiteralPath ($WorkerArgs.Probe
             {
                 $null = @(. $script:StartWaitBlock 6>&1)
             }
-            finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue }
+            finally { $Jobs | Remove-Job -Force -ErrorAction SilentlyContinue; <# -ThrottleLimit is session-wide, so put the default of 5 back for later thread jobs #> Start-ThreadJob -ThrottleLimit 5 -ScriptBlock { } | Wait-Job | Remove-Job -Force }
 
             Set-Variable -Name S -Value ([pscustomobject]@{ StreamId = 1 })
             Set-Variable -Name StreamSummary -Value (Get-Content -LiteralPath $StreamSummaries[1].SummaryPath -Raw | ConvertFrom-Json)
@@ -4707,16 +4707,17 @@ if ($Gap -contains [string]$SubscriptionID)
 '@
         function script:Invoke-GapStream
         {
-            param([string]$Root, [string[]]$SubIds, [string[]]$SubNames, [string]$Gap = '')
+            param([string]$Root, [string[]]$SubIds, [string[]]$SubNames, [string]$Gap = '', [switch]$Resume)
             New-Item -ItemType Directory -Path $Root -Force | Out-Null
             $Prior = $env:RDA_TEST_METRIC_GAP
             $env:RDA_TEST_METRIC_GAP = $Gap
             try
             {
+                # -Resume makes the worker read the state an earlier pass in the same root wrote, as a real retry does.
                 $Output = @(& $script:GapWorker -TenantID 'tenant-g' -StreamId '0' -InventoryRoot $Root `
                     -ScriptRoot $script:GapTree -AzContextPath (Join-Path $Root 'snapshot.json') `
                     -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.log') `
-                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess 6>&1)
+                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess -Resume:$Resume 6>&1)
             }
             finally
             {
@@ -4757,17 +4758,21 @@ if ($Gap -contains [string]$SubscriptionID)
         $Root = Join-Path $script:TestRoot 'gap-run-2'
         $First = script:Invoke-GapStream -Root $Root -SubIds @('sub-1', 'sub-2') -SubNames @('Sub One', 'Sub Two') -Gap 'sub-2'
         @($First.State.FailedAttempts | ForEach-Object { [string]$_.Id }) | Should -Be @('sub-2')
-        $Retry = script:Invoke-GapStream -Root (Join-Path $script:TestRoot 'gap-run-2b') -SubIds @('sub-2') -SubNames @('Sub Two')
-        @($Retry.Summary.Completed) | Should -Be @('sub-2')
-        @($Retry.State.FailedAttempts | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'the metrics are in, so nothing is owed'
+        # The retry reads the first pass's state, so the entry it must clear is really there to clear.
+        $Retry = script:Invoke-GapStream -Root $Root -SubIds @('sub-1', 'sub-2') -SubNames @('Sub One', 'Sub Two') -Resume
+        $Retry.Output | Should -Match 'skipping \(already completed\): Sub One' -Because 'the retry started from the first pass''s state'
+        @($Retry.Summary.Completed | Sort-Object) | Should -Be @('sub-1', 'sub-2')
+        @($Retry.State.Completed | Sort-Object) | Should -Be @('sub-1', 'sub-2') -Because 'sub-2 now has its metrics'
+        @($Retry.State.FailedAttempts | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'the success removed the entry the first pass left, so nothing is owed'
     }
 
     It 'counts the attempts when the retry leaves the same gap, because the entry is never removed first' {
         $Root = Join-Path $script:TestRoot 'gap-run-3'
-        $Again = script:Invoke-GapStream -Root $Root -SubIds @('sub-2', 'sub-2') -SubNames @('Sub Two', 'Sub Two') -Gap 'sub-2'
+        $null = script:Invoke-GapStream -Root $Root -SubIds @('sub-2') -SubNames @('Sub Two') -Gap 'sub-2'
+        $Again = script:Invoke-GapStream -Root $Root -SubIds @('sub-2') -SubNames @('Sub Two') -Gap 'sub-2' -Resume
         $Entries = @($Again.State.FailedAttempts | Where-Object { $null -ne $_ })
         $Entries.Count | Should -Be 1
-        [int]$Entries[0].Attempts | Should -Be 2 -Because 'removing the entry before adding it would reset the count to 1'
+        [int]$Entries[0].Attempts | Should -Be 2 -Because 'the second pass read the first pass''s entry, and removing it before adding would reset the count to 1'
         @($Again.State.Completed | Where-Object { $null -ne $_ }).Count | Should -Be 0
     }
 

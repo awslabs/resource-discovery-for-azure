@@ -326,7 +326,7 @@ After each subscription is fully processed (its per-subscription ZIP has been wr
 
 ```
 Found an earlier run for this tenant (started 2026-10-08 09:12):
-  3 subscription(s) done, 1 failed.
+  3 subscription(s) done, 1 in the retry list.
   [R] Resume - skip the 3 done subscription(s) (default)
   [F] Start fresh - collect all again; the earlier state is kept as a backup
 Choice [R/f]:

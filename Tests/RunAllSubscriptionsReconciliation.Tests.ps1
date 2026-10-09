@@ -719,7 +719,7 @@ Describe 'Read-ResumeOrFreshChoice (ask whether to resume an earlier run or star
         $R.Lines | Should -Be @(
             ''
             'Found an earlier run for this tenant (started 2026-10-08 09:12):'
-            '  3 subscription(s) done, 1 failed.'
+            '  3 subscription(s) done, 1 in the retry list.'
             '  [R] Resume - skip the 3 done subscription(s) (default)'
             '  [F] Start fresh - collect all again; the earlier state is kept as a backup'
         )
@@ -732,7 +732,7 @@ Describe 'Read-ResumeOrFreshChoice (ask whether to resume an earlier run or star
         $R.Lines | Should -Be @(
             ''
             'Found an earlier run for this tenant:'
-            '  3 subscription(s) done, 1 failed.'
+            '  3 subscription(s) done, 1 in the retry list.'
             '  2 of the done subscription(s) have no report this run can carry, so resuming would leave them out of the bundle.'
             '  [R] Resume - skip the 3 done subscription(s)'
             '  [F] Start fresh - collect all again; the earlier state is kept as a backup (default)'

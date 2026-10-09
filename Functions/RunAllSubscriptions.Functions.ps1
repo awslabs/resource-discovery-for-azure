@@ -982,7 +982,10 @@ function Read-ResumeOrFreshChoice
     # report a resumed run could carry into its bundle. When it is above 0 the question says so and
     # Enter means start fresh instead, because resuming would leave those reports out.
     # -StartedAt is when the earlier run started: a [datetime] (as ConvertFrom-Json returns it) or a
-    # round-trip string. When it is missing or unreadable the start time is left out.
+    # round-trip string. When it is missing or unreadable the start time is left out. -FailedCount is the
+    # size of the retry list, which holds subscriptions whose metrics are still owed as well as real
+    # failures, so the question calls them that rather than "failed": an operator told "failed" about a
+    # subscription whose report shipped might start fresh and collect everything again.
     param(
         [Parameter(Mandatory = $true)][int]$CompletedCount,
         [int]$FailedCount = 0,
@@ -1020,7 +1023,7 @@ function Read-ResumeOrFreshChoice
 
     Write-Host ""
     Write-Host ("Found an earlier run for this tenant{0}:" -f $StartedText) -ForegroundColor Yellow
-    Write-Host ("  {0} subscription(s) done, {1} failed." -f $CompletedCount, $FailedCount)
+    Write-Host ("  {0} subscription(s) done, {1} in the retry list." -f $CompletedCount, $FailedCount)
     if ($FreshByDefault)
     {
         Write-Host ("  {0} of the done subscription(s) have no report this run can carry, so resuming would leave them out of the bundle." -f $UncarriedCount) -ForegroundColor Yellow

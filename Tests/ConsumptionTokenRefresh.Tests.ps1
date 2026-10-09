@@ -32,7 +32,9 @@
         a billing exception (the same anchoring hazard the denial predicate has).
 
     Fully offline. The classifier is pure; the loop's structure is asserted from
-    source (it is inline in a paging loop, not a separately callable function).
+    source (it is inline in a paging loop, not a separately callable function),
+    and its re-pin block is lifted from the parsed source and run with a helper
+    that throws, so the abandon path is exercised, not only read.
     The Describe on per-subscription scoping also runs Get-RdaSubscriptionProfile
     itself against mocked Az.Accounts reads (Get-AzContext, Get-AzSubscription):
     they make no network call, and those tests skip when Az.Accounts is absent.
@@ -181,8 +183,44 @@ Describe 'A mid-loop reconnect must re-pin the subscription scope before retryin
         $script:InvSrc | Should -Match "\`$PSDefaultParameterValues\['\*:DefaultProfile'\] = Get-RdaSubscriptionProfile -SubscriptionId \`$sub\.id" -Because 'the reconnect can reset the context to the identity default subscription, so the loop must re-pin to the current subscription before retrying'
     }
 
-    It 're-verifies the context actually matched $sub.id after re-pinning' {
-        $script:InvSrc | Should -Match '\(Get-AzContext\)\.Subscription\.Id -eq \$sub\.id' -Because 'Set-AzContext succeeding is not proof the scope is correct; the loop must confirm the context matches the target subscription'
+    It 're-verifies the context actually matched $sub.id after re-pinning, and abandons the subscription when the re-pin fails' {
+        $script:InvSrc | Should -Match '\(Get-AzContext\)\.Subscription\.Id -eq \$sub\.id' -Because 'the loop confirms the pinned scope names the target subscription before it retries the page'
+        # The read-back above sees the profile just pinned for $sub, so on its own it cannot come out false.
+        # The guard that can fire is the helper's throw (a subscription the identity cannot read, or a
+        # reconnect that left no usable context), which lands in $RepinError. The block is lifted from the
+        # parsed source and run inside a page-query catch, as in the loop, with a helper that throws.
+        $ParseErrors = $null
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InvPath, [ref]$null, [ref]$ParseErrors)
+        @($ParseErrors).Count | Should -Be 0
+        $RepinIf = @($InvAst.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.IfStatementAst] -and $Node.Clauses[0].Item1.Extent.Text -eq '$RepinOk' }, $true))
+        $RepinIf.Count | Should -Be 1 -Because 'the re-pin decision is made in one place'
+        $Body = $RepinIf[0].Parent
+        $Statements = @($Body.Statements)
+        $Start = [array]::FindIndex([object[]]$Statements, [Predicate[object]] { param($S) $S.Extent.Text -eq '$RepinOk = $false' })
+        $End = [array]::IndexOf([object[]]$Statements, $RepinIf[0])
+        $Start | Should -BeGreaterThan -1
+        $End | Should -BeGreaterThan $Start
+        $RepinText = (@($Statements[$Start..$End] | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine)
+        $Runner = [scriptblock]::Create((@(
+                    'param($sub, $Logged)'
+                    'function Write-Log { param([string]$Message, [string]$Severity) $Logged.Add([pscustomobject]@{ Message = $Message; Severity = $Severity }) }'
+                    'function Get-RdaSubscriptionProfile { param([string]$SubscriptionId) throw (''subscription {0} is not visible to the signed-in identity'' -f $SubscriptionId) }'
+                    '$PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new()'
+                    'try { throw ''the page query failed: 401 (Unauthorized)'' }'
+                    'catch'
+                    '{'
+                    $RepinText
+                    '}'
+                ) -join [Environment]::NewLine))
+        $Logged = [System.Collections.Generic.List[object]]::new()
+        $Thrown = $null
+        try { & $Runner ([pscustomobject]@{ id = 'sub-1'; Name = 'Sub One' }) $Logged } catch { $Thrown = $_ }
+        $Thrown | Should -Not -BeNullOrEmpty -Because 'retrying the page under a scope that could not be restored would attribute another subscription''s billing rows to this one'
+        $Thrown.Exception.Message | Should -Be 'the page query failed: 401 (Unauthorized)' -Because 'the page error is thrown on, so the subscription takes its failed path'
+        $Errors = @($Logged | Where-Object { $_.Severity -eq 'Error' })
+        $Errors.Count | Should -Be 1
+        $Errors[0].Message | Should -BeLike '*could not be re-pinned to this subscription (subscription sub-1 is not visible to the signed-in identity)*' -Because 'the helper''s own reason, kept in $RepinError, is what the operator reads'
+        @($Logged | Where-Object { $_.Message -like '*retrying the current page*' }).Count | Should -Be 0 -Because 'a failed re-pin never retries'
     }
 
     It 'the re-pin happens INSIDE the auth-expiry refresh branch (after the reconnect helper)' {

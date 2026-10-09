@@ -4972,11 +4972,12 @@ Describe 'Get-RdaInventoryRerunCommand builds one pasteable line' {
             $Table[$Key] = if ($Key -eq 'SkipMetrics' -or $Key -eq 'SkipFoundryTokens') { $true } elseif ($Key -eq 'Service') { @('Compute') } else { 6 }
             Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough $Table | Should -Not -BeNullOrEmpty -Because ('{0} carries no credential' -f $Key)
         }
-        # Every key the wrapper really passes through, read from its source, so the next switch it adds is
-        # checked too: -SkipFoundryTokens once matched 'token' and cost every run with it its re-run lines.
+        # Every key the wrapper really passes through, read from its source, so each switch it has now or
+        # adds later is checked too: a real switch once matched the bare 'token' and cost every run with it
+        # its re-run lines. ConcurrencyLimit is passed on every run, so finding it shows the read works.
         $WrapperText = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
         $RealKeys = @([regex]::Matches($WrapperText, '\$InventoryPassthrough\[''(\w+)''\] =') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-        $RealKeys | Should -Contain 'SkipFoundryTokens' -Because 'the source read must find the keys it is meant to check'
+        $RealKeys | Should -Contain 'ConcurrencyLimit' -Because 'the source read must find the keys it is meant to check'
         foreach ($Key in $RealKeys)
         {
             Get-RdaInventoryRerunCommand -ScriptPath '/tmp/ResourceInventory.ps1' -TenantId $script:RerunTenant -SubscriptionId $script:RerunSub -Passthrough @{ $Key = $true } | Should -Not -BeNullOrEmpty -Because ('the wrapper passes {0}, and refusing it would print no re-run line for any subscription' -f $Key)

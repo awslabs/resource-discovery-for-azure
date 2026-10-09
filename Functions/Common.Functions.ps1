@@ -897,7 +897,13 @@ function Get-RdaSubscriptionProfile
     {
         throw ('subscription {0} is not visible to the signed-in identity' -f $SubscriptionId)
     }
-    $Subscription = @($Subscription)[0]
+    # A subscription reachable through more than one tenant (delegated access as well as guest access) can come
+    # back once per tenant from the lookup without a tenant. The copy in the signed-in tenant is taken when there
+    # is one, so a first lookup that failed only for a moment does not move the profile to another tenant, whose
+    # access rights can differ from those of the tenant the run names.
+    $SubscriptionCopies = @($Subscription | Where-Object { $null -ne $_ })
+    $Subscription = @($SubscriptionCopies | Where-Object { [string]$_.TenantId -eq [string]$Current.Tenant.Id })[0]
+    if ($null -eq $Subscription) { $Subscription = $SubscriptionCopies[0] }
 
     $Scoped = $ContextType::new([System.Management.Automation.LanguagePrimitives]::ConvertTo($Current, $AbstractContextType))
     $Scoped.Subscription = $Subscription

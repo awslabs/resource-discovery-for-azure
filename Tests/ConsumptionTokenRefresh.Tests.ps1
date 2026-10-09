@@ -473,6 +473,35 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         $Current.Tenant.Id | Should -Be $HomeTenantId -Because 'the signed-in context must not be modified'
     }
 
+    It 'takes the signed-in tenant''s copy when the lookup without a tenant returns the subscription once per tenant' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+        # A subscription reachable through two tenants comes back twice from the lookup without a tenant. If the
+        # first lookup failed only for a moment, the profile must keep the tenant the run names.
+        Import-Module Az.Accounts -ErrorAction Stop
+        $HomeTenantId = [guid]::NewGuid().ToString()
+        $OtherTenantId = [guid]::NewGuid().ToString()
+        $SharedId = [guid]::NewGuid().ToString()
+        $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
+        $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
+        $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
+        $Current.Tenant.Id = $HomeTenantId
+        $Current.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $Current.Subscription.Id = [guid]::NewGuid().ToString()
+        $OtherCopy = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $OtherCopy.Id = $SharedId
+        $OtherCopy.TenantId = $OtherTenantId
+        $HomeCopy = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
+        $HomeCopy.Id = $SharedId
+        $HomeCopy.TenantId = $HomeTenantId
+        Mock Get-AzContext { $Current }
+        Mock Get-AzSubscription {
+            if ($TenantId) { throw 'a transient failure of the first lookup' }
+            @($OtherCopy, $HomeCopy)
+        }
+        $Built = Get-RdaSubscriptionProfile -SubscriptionId $SharedId
+        $Built.DefaultContext.Subscription.TenantId | Should -Be $HomeTenantId -Because 'the copy in the signed-in tenant is taken, although it came second'
+        $Built.DefaultContext.Tenant.Id | Should -Be $HomeTenantId -Because 'the profile keeps the tenant the run names'
+    }
+
     It 'keeps the signed-in tenant failure in the debug log, not in the error, when the lookup without a tenant also fails' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
         # The lookup without a tenant reports what that lookup found, which can be a bare "not found" even
         # when the signed-in tenant actually failed on a token: per-tenant token failures come out of that

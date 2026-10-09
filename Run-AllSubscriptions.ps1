@@ -868,10 +868,12 @@ if (-not $Preflight)
             # After the saved state's own records, so the interrupted run's newer report wins.
             $CompletedReports = @(@($CompletedReports) + @($StrandedReports))
         }
-        # A failure an interrupted run recorded outranks an older completion, exactly as the end-of-run
-        # fold treats one, or Merge-FailedAttempts drops the very entry that would repair the
-        # subscription and the next -Resume skips it. An id that same stranded state lists as completed
-        # is exempt: that run finished it after the failure it recorded.
+        # A failure a stranded copy holds outranks a completion the saved state records, whatever its age, or
+        # Merge-FailedAttempts drops the very entry that would repair the subscription and the next -Resume
+        # skips it. Unlike the end-of-run fold, which counts only failures written since this run started,
+        # there is no time check here: a copy kept from an older start can hold a failure older than a later
+        # completion, and that costs one more collection of the subscription, never a skipped one. An id that
+        # same stranded state lists as completed is exempt: that run finished it after the failure it recorded.
         $StrandedFailedIds = @($StrandedFailed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } | Where-Object { $StrandedCompleted -notcontains $_ })
         $CompletedIds = @($CompletedIds | Where-Object { $StrandedFailedIds -notcontains $_ })
         $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds

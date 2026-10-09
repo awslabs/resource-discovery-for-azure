@@ -1512,7 +1512,7 @@ $Warned = @(. ([scriptblock]::Create($Text)) 3>&1 | Where-Object { $_ -is [Syste
             # skips a subscription whose metrics are still owed and whose partial report was withheld.
             & $Reset '{ "Completed": ["sub-file"], "FailedAttempts": [ { "Id": "sub-earlier", "Name": "E", "Reason": "Metrics incomplete: the metric worker pool could not be opened (out of memory).", "LastFailedAt": "2026-01-01T00:00:00Z", "Attempts": 1 } ] }'
             $Revoked = & $Run $Block $false $Dir $true $true
-            $Revoked.Failed | Should -Be @('sub-earlier') -Because 'a failure an interrupted run recorded outranks an older completion, as the end-of-run fold treats one'
+            $Revoked.Failed | Should -Be @('sub-earlier') -Because 'any failure a stranded copy holds outranks the saved completion, whatever its age (this fold has no time check, unlike the end-of-run one)'
             $Revoked.Completed | Should -Be @('sub-file') -Because 'the id it is still owed metrics for is dropped from the completed set'
             $Revoked.FileKept | Should -BeFalse -Because 'the saved state now holds the entry, so the copy can go'
             $Revoked.Warned.Count | Should -Be 0

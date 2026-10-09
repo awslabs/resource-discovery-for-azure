@@ -265,8 +265,10 @@ if ($Task -eq 'Processing')
             {
                 Write-MetricsDiag ("WARNING: could not scope the metrics batch of subscription {0} region {1} to its own tenant ({2}); its {3} metric def(s) are batched with the process context, and a chunk that context cannot read falls back to per-call." -f $SubscriptionId, $Region, $_.Exception.Message, @($Group.Group).Count)
             }
-            # Left out rather than passed as null when there is no profile: an explicit null opts out of
-            # the scoped profile the caller pins in $PSDefaultParameterValues.
+            # Left out rather than passed as null when there is no profile, so the token comes from the process
+            # context. No caller pins *:DefaultProfile around this phase today; if one ever did, an explicit null
+            # would opt out of that pin, while leaving the argument out lets it apply here exactly as it does in
+            # the per-call fallback ($MetricAzContext = Get-AzContext).
             $TokenArgs = @{ ResourceUrl = 'https://metrics.monitor.azure.com'; WarningAction = 'SilentlyContinue' }
             if ($null -ne $SubProfile) { $TokenArgs['DefaultProfile'] = $SubProfile }
 
@@ -308,9 +310,12 @@ if ($Task -eq 'Processing')
                         # connection failure - and the total can slightly overstate what the metric-query
                         # meter bills. Counting only on success under-reported every failed run.
                         $script:MetricsBatchHttpCalls++
-                        # Bounded like a per-call query: with no limit one hung connection held the main thread,
-                        # and with it the whole metrics phase. A timeout throws into the chunk catch below, so it
-                        # costs only this chunk, which falls back to per-call.
+                        # Bounded like a per-call query (120 s): with no limit one hung connection held the main
+                        # thread, and with it the whole metrics phase. -TimeoutSec bounds the connection and the
+                        # wait for the response; it does not bound a body read that stalls after the response
+                        # headers arrived (PowerShell 7.4+ has -OperationTimeoutSeconds for that, 7.0-7.3 has
+                        # nothing), which a getBatch body for at most 50 resources makes unlikely. A timeout throws
+                        # into the chunk catch below, so it costs only this chunk, which falls back to per-call.
                         $Response = Invoke-RestMethod -Method Post -Uri $Uri -Headers @{ Authorization = "Bearer $BearerToken"; 'Content-Type' = 'application/json' } -Body $BodyJson -TimeoutSec 120 -ErrorAction Stop
 
                         foreach ($ResourceResult in @($Response.values))
@@ -865,6 +870,12 @@ if ($Task -eq 'Processing')
                     {
                         'the signed-in identity lacks subscription-level read for the metrics data plane - assign Reader or Monitoring Reader at the subscription scope, and ensure Microsoft.Insights is registered'
                     }
+                    elseif ($BatchErrText -match '(?i)\b401\b|Unauthorized|InvalidAuthenticationToken')
+                    {
+                        # Most often a batch of a subscription that could not be scoped to its own tenant, and so
+                        # got a token for the process tenant: the WARNING just before this one in the log says so.
+                        'the metrics data plane rejected the token - most often it was minted for another tenant than the subscription''s own, because the subscription could not be scoped to its tenant'
+                    }
                     else
                     {
                         'ensure Microsoft.Insights is registered and the region/resources are reachable'
@@ -985,7 +996,11 @@ if ($Task -eq 'Processing')
             # releases the runspaces holding the Az modules - nor reachable by the closer at wrapper
             # exit, and a failed open would hold its memory through both attempts and the wait that is
             # meant to free memory. The reuse guard above already treats a pool in any other state as
-            # unexpected, so this says so rather than passing over it quietly.
+            # unexpected, so this says so rather than passing over it quietly. Any state but Opened is
+            # disposed, which is broader than the wrapper-exit closer (it disposes only a Broken pool and
+            # leaves the rest alone rather than tear one down under a running call). No call can be running
+            # here: a pool reaches the global only once every worker has finished, and the closer clears the
+            # global before it starts closing, so a Closing or Opening pool is never found here.
             if ($ReuseWorkerPool -and $null -ne $Global:MetricCallPool -and $Global:MetricCallPool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
             {
                 Write-MetricsDiag ('Releasing the metric worker pool left from an earlier subscription in state {0}; it can serve no call.' -f $Global:MetricCallPool.RunspacePoolStateInfo.State)

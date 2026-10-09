@@ -4,8 +4,11 @@
 # Throttled/failed, ignoring the server's Retry-After. Get-RdaMetricRetryPlan now gives throttled
 # attempts their own budget and waits at least Retry-After (bounded). Extracted by AST like
 # MetricsErrorBodyCapture.Tests.ps1 does, because the function lives inside the -Parallel block.
-# The last Describe covers the per-attempt timeout: each attempt runs on a shared runspace pool
-# and a timed-out attempt is stopped without waiting for it.
+# The later Describes cover the per-attempt timeout (each attempt runs on a shared runspace pool and a
+# timed-out attempt is stopped without waiting for it), the worker pool's lifecycle and the Az context
+# it is given, the resource provider check, and the getBatch fast path: what it keeps when a group or a
+# chunk fails, its call site, the per-subscription tenant profile and its one-lookup cache, and the
+# line that starts the phase.
 
 BeforeAll {
     $Repo = Split-Path $PSScriptRoot -Parent
@@ -892,8 +895,11 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         function New-RdaMetricObject { param($Def, $MetricResult) [pscustomobject]@{ ID = $Def.Id; Metric = $Def.MetricName } }
         function Get-AzAccessToken
         {
-            param($ResourceUrl, $DefaultProfile, $WarningAction)
-            $script:BatchTokens.Add([string]$DefaultProfile)
+            # Advanced, like the real cmdlet, so a pin in $PSDefaultParameterValues reaches it. It records
+            # '<omitted>' when DefaultProfile was not passed at all, which an explicit null cannot fake.
+            [CmdletBinding()]
+            param($ResourceUrl, $DefaultProfile)
+            $script:BatchTokens.Add($(if ($PSBoundParameters.ContainsKey('DefaultProfile')) { [string]$DefaultProfile } else { '<omitted>' }))
             if ($script:BatchTokenFails) { throw 'the token could not be minted' }
             [pscustomobject]@{ Token = 'token'; ExpiresOn = [DateTimeOffset]::UtcNow.AddMinutes($script:BatchTokenMinutes) }
         }
@@ -967,7 +973,7 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
     It 'bounds every POST with a timeout' {
         $Defs = @(1..60 | ForEach-Object { New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index $_ })
         $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
-        Should -Invoke Invoke-RestMethod -Times 2 -Exactly -ParameterFilter { $TimeoutSec -gt 0 } -Because 'with no limit one hung connection holds the whole metrics phase'
+        Should -Invoke Invoke-RestMethod -Times 2 -Exactly -ParameterFilter { $TimeoutSec -eq 120 } -Because 'with no limit one hung connection holds the whole metrics phase, and the limit is the one a per-call query has'
     }
 
     It 'skips a group with no subscription segment and still batches the rest' {
@@ -1024,9 +1030,18 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
         @($Records | ForEach-Object { $_.ID } | Sort-Object) | Should -Be @($Defs | ForEach-Object { $_.Id } | Sort-Object) -Because 'a subscription the signed-in context can read is read in full'
         @($script:BatchDiag | Where-Object { $_ -like 'WARNING: could not scope the metrics batch of subscription sub-broken region * to its own tenant (*is not visible*); its 1 metric def(s) are batched with the process context*' }).Count | Should -Be 2 -Because 'each group says it is not scoped to its own tenant'
         @($script:BatchDiag | Where-Object { $_ -like '*batch group skipped*' }).Count | Should -Be 0
-        @($script:BatchTokens | Sort-Object) | Should -Be @('', '', 'profile-for-sub-a') -Because 'with no profile the parameter is left out, so the scoped profile the caller pins still applies'
+        @($script:BatchTokens | Sort-Object) | Should -Be @('<omitted>', '<omitted>', 'profile-for-sub-a') -Because 'with no profile the parameter is left out, not passed as null, so the token comes from the process context'
         $script:MetricsBatchLastError | Should -BeNullOrEmpty -Because 'nothing left the batch'
         @($script:BatchProfileLookups) | Should -Be @('sub-a', 'sub-broken') -Because 'a lookup that threw is remembered too, so a subscription with several groups pays it once - and the failing lookup is the expensive one, since its second call enumerates every tenant before throwing'
+    }
+
+    It 'lets a profile a caller pins apply to a subscription whose own profile cannot be built' {
+        # No caller pins one around this phase today. If one did, leaving the argument out lets the pin apply,
+        # as it does in the per-call fallback; an explicit null would have opted out of it.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+        $PSDefaultParameterValues['Get-AzAccessToken:DefaultProfile'] = 'pinned-by-caller'
+        $null = Invoke-RdaMetricsBatch -Defs @((New-BatchDef -Sub 'sub-broken' -Region 'westeurope' -Index 1)) -MetricNamespace 'microsoft.compute/virtualMachines'
+        @($script:BatchTokens) | Should -Be @('pinned-by-caller')
     }
 
     It 'still sends a chunk the process context cannot read to the per-call path' {
@@ -1092,6 +1107,17 @@ Describe 'The metrics batch call site sends only the definitions the batch did n
         $Result = & $script:BatchCallSite $script:CallSiteGroups $script:CallSiteMap @() $null
         $Result.Remaining.Count | Should -Be 3
         @($Result.Diag | Where-Object { $_ -like '*getBatch refused the request: BadRequest*' }).Count | Should -Be 1 -Because 'the skipped group or chunk is the only thing that knows why the records are missing'
+    }
+
+    It 'points a rejected token (401) at the tenant, not at the provider registration' {
+        # A subscription that could not be scoped to its own tenant is batched with a process-tenant token, and
+        # the metrics data plane answers a token for the wrong tenant with 401.
+        $script:MetricsBatchLastError = 'Response status code does not indicate success: 401 (Unauthorized).'
+        $Result = & $script:BatchCallSite $script:CallSiteGroups $script:CallSiteMap @() $null
+        $Line = @($Result.Diag | Where-Object { $_ -like 'WARNING: metrics batch fast-path failed*' })
+        $Line.Count | Should -Be 1
+        $Line[0] | Should -BeLike '*rejected the token*another tenant*'
+        $Line[0] | Should -Not -BeLike '*ensure Microsoft.Insights is registered and the region*' -Because 'that hint points away from the cause'
     }
 
     It 'says nothing about a fallback, and logs the fetch, when every definition was batched' {

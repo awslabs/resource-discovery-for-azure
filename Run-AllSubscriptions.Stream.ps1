@@ -218,6 +218,9 @@ if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = 
 $ResourceCounts = @()
 $Completed = @($CompletedIds)
 $FailedSubs = @()
+# Subscriptions of this slice whose inventory finished but whose metrics were left incomplete: in neither
+# $Completed nor $FailedSubs, so the closing line counts them on their own.
+$MetricsIncompleteCount = 0
 $ArchiveWriteFailures = @()
 $CollectionAbortedSubs = @()
 
@@ -307,7 +310,11 @@ for ($i = 0; $i -lt $PairCount; $i++)
             # metrics phase left a gap: the subscription goes into the retry list and out of this
             # stream's completed set, so both resume modes collect it again. The entry is added without
             # being removed first, so Attempts counts every try. The stream's Failed list is untouched.
+            # The parent learns of this retry ONLY from the state file written below: the summary keeps its
+            # shape and carries no per-subscription retry signal, so if that write fails (Write-StreamState
+            # warns) the subscription ends the run in neither the completed list nor the retry list.
             Write-Stream ("metrics incomplete: {0} stays in the retry list" -f $SubName) 'Yellow'
+            $MetricsIncompleteCount++
             $Completed = @($Completed | Where-Object { $_ -ne $SubId })
             $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $SubId -Name $SubName -Reason $MetricsRetryReason
         }
@@ -406,6 +413,7 @@ catch
     exit 1
 }
 
-Write-Stream ("complete: {0}/{1} succeeded, {2} failed" -f $Completed.Count, $PairCount, $FailedSubs.Count) 'Green'
+$MetricsIncompleteNote = if ($MetricsIncompleteCount -gt 0) { ', {0} with metrics incomplete (in the retry list)' -f $MetricsIncompleteCount } else { '' }
+Write-Stream ("complete: {0}/{1} succeeded, {2} failed{3}" -f $Completed.Count, $PairCount, $FailedSubs.Count, $MetricsIncompleteNote) 'Green'
 exit 0
 

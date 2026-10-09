@@ -4713,10 +4713,10 @@ if ($Gap -contains [string]$SubscriptionID)
             $env:RDA_TEST_METRIC_GAP = $Gap
             try
             {
-                $null = & $script:GapWorker -TenantID 'tenant-g' -StreamId '0' -InventoryRoot $Root `
+                $Output = @(& $script:GapWorker -TenantID 'tenant-g' -StreamId '0' -InventoryRoot $Root `
                     -ScriptRoot $script:GapTree -AzContextPath (Join-Path $Root 'snapshot.json') `
                     -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.log') `
-                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess 6>&1
+                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess 6>&1)
             }
             finally
             {
@@ -4725,6 +4725,7 @@ if ($Gap -contains [string]$SubscriptionID)
             [pscustomobject]@{
                 Summary = (Get-Content -Raw -LiteralPath (Join-Path $Root 'summary.json') | ConvertFrom-Json)
                 State   = (Get-Content -Raw -LiteralPath (Get-StreamStateFilePath -InventoryRoot $Root -Tenant 'tenant-g' -StreamId '0') | ConvertFrom-Json)
+                Output  = ($Output | Out-String)
             }
         }
     }
@@ -4749,6 +4750,7 @@ if ($Gap -contains [string]$SubscriptionID)
         [int]$Entries[0].Attempts | Should -Be 1
         @($Run.State.Completed | Sort-Object) | Should -Be @('sub-1', 'sub-3')
         @($Run.State.Reports | ForEach-Object { [string]$_.Id } | Sort-Object) | Should -Be @('sub-1', 'sub-2', 'sub-3')
+        $Run.Output | Should -Match 'complete: 2/3 succeeded, 0 failed, 1 with metrics incomplete \(in the retry list\)' -Because 'the closing line must account for every subscription of the slice'
     }
 
     It 'a clean retry over that one subscription completes it and clears the entry' {

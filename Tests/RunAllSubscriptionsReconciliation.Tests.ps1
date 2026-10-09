@@ -4714,10 +4714,10 @@ if ($Gap -contains [string]$SubscriptionID)
             try
             {
                 # -Resume makes the worker read the state an earlier pass in the same root wrote, as a real retry does.
-                $Output = @(& $script:GapWorker -TenantID 'tenant-g' -StreamId '0' -InventoryRoot $Root `
+                $Output = & $script:GapWorker -TenantID 'tenant-g' -StreamId '0' -InventoryRoot $Root `
                     -ScriptRoot $script:GapTree -AzContextPath (Join-Path $Root 'snapshot.json') `
                     -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.log') `
-                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess -Resume:$Resume 6>&1)
+                    -SubscriptionIds $SubIds -SubscriptionNames $SubNames -SharedProcess -Resume:$Resume 6>&1
             }
             finally
             {

@@ -1975,14 +1975,18 @@ function Write-RdaShareableDiagnosticsLog
         # Listed apart because the remedies differ: an auth skip needs a token, metrics left incomplete by a
         # worker pool that would not open need memory on the host. An entry with no Cause was written before
         # the field existed, when every entry was an auth skip, so it is still listed as one.
-        # LIMITATION (the same one the consumption list below documents): $Global:MetricsFailedSubs is reset once
-        # per wrapper run or stream (once per stream with -ParallelStreams) and never by a standalone run, not
-        # per subscription, so a later subscription's log repeats the entries of earlier ones, and a standalone
-        # run in a session that ran the script before lists that earlier run's entries too. The [sub ...] tag
-        # does NOT tell them apart: in a default run every subscription id masks to the same '<guid>', and in
-        # an obfuscated run an earlier subscription's id has no token in this run's dictionary, so it masks the
-        # same way. A reader cannot tell this subscription's entry from an earlier one's. This function is not
-        # told which subscription it writes for.
+        # $Global:MetricsFailedSubs is reset once per wrapper run or stream (once per stream with
+        # -ParallelStreams) and never by a standalone run, not per subscription, so it also holds the entries of
+        # earlier subscriptions and earlier runs. The [sub ...] tag cannot tell them apart once masked, so a run
+        # for one subscription keeps only that subscription's entries, its id read the way Write-Log reads it.
+        # An entry whose subscription could not be told ('(unknown)') is kept, because dropping it could hide
+        # this subscription's own gap. A run over every subscription of a tenant has no one id to keep, so it
+        # still lists all the entries, including any an earlier run in the same session left behind.
+        $ThisRunSubscriptionId = [string](Get-Variable -Name 'SubscriptionID' -ValueOnly -ErrorAction SilentlyContinue)
+        if (-not [string]::IsNullOrEmpty($ThisRunSubscriptionId))
+        {
+            $MetricsSkips = @($MetricsSkips | Where-Object { [string]$_.Id -eq $ThisRunSubscriptionId -or [string]$_.Id -eq '(unknown)' })
+        }
         $MetricsAuthSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -ne 'pool' })
         $MetricsPoolSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -eq 'pool' })
         $ConsumpSkips = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })

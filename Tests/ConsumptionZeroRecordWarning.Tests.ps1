@@ -1,7 +1,7 @@
 # Offline tests pinning the "consumption requested but ZERO records collected" warning: a header-only
 # Consumption CSV once shipped unflagged (the console gate excluded the exact 0/0 case). The warning must fire only when all five guards hold: requested, 0 records, 0 consumption failures, >=1 sub ran, and >=1 ran without recording a failure.
 # The Describes 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' and 'Run-AllSubscriptions.Stream.ps1 passes every consumption failure to the wrapper' pin the warning's inputs: the run-wide totals start from zero on every run (a stale record count would disarm the warning) and every stream's consumption failures reach the parent (a dropped row would mis-gate it).
-# The Describes after them pin the two consumption numbers and their labels, the rows-FETCHED gate, the excluded-by-scope note, the sentinel collapse and two source guards; the last one pins the Diagnostics_*.log split between metrics auth skips and metrics left incomplete.
+# The Describes after them pin the two consumption numbers and their labels, the rows-FETCHED gate, the excluded-by-scope note, the sentinel collapse and two source guards; the last one pins the Diagnostics_*.log split between metrics auth skips and metrics left incomplete, and that a run for one subscription lists only that subscription's metrics entries.
 
 BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -1432,5 +1432,17 @@ Describe 'Diagnostics_*.log separates an auth skip from metrics left incomplete'
         $Lines[$PoolAt + 1] | Should -Be '  [sub <guid>] the metric worker pool could not be opened under <guid>' -Because 'the pool list is scrubbed exactly like the auth list'
         $AuthAt = [array]::IndexOf($Lines, 'Metrics auth-skipped subscriptions: 2')
         @($Lines[($AuthAt + 1)..($AuthAt + 2)]) | Should -Be @('  [sub <guid>] no usable token', '  [sub <guid>] no usable token')
+    }
+
+    It 'keeps only the entries of the subscription the run is for, and any it cannot place' {
+        # Under the wrapper the list also holds every earlier subscription's entries, and once masked the
+        # [sub ...] tag cannot tell them apart, so a run for one subscription lists only its own. An entry
+        # with no subscription id is kept, because dropping it could hide this subscription's own gap.
+        $Unplaced = [pscustomobject]@{ Name = '(subscription)'; Id = '(unknown)'; Message = 'the metric worker pool could not be opened'; Cause = 'pool' }
+        Set-Variable -Name 'SubscriptionID' -Value '22222222-2222-2222-2222-222222222222'
+        $Text = & $script:DiagMetricsText @($script:DiagAuth, $script:DiagPool, $script:DiagOld, $Unplaced) 'one-sub'
+        $Text | Should -Match '(?m)^Metrics auth-skipped subscriptions: 0\s*$' -Because 'both auth skips belong to earlier subscriptions'
+        $Text | Should -Match '(?m)^Metrics incomplete subscriptions: 2\s*$' -Because 'this subscription''s own entry and the one with no id are kept'
+        $Text | Should -Not -Match 'no usable token'
     }
 }

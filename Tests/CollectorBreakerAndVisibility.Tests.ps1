@@ -2333,6 +2333,8 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
 
     It 'says neither of those for a pool failure, whose remedy is memory and whose scope is a few subscriptions' {
         $R = & $script:RunPoolEnd @($script:PoolEntry)
+        $R.Printed | Should -Not -BeNullOrEmpty -Because 'the checks below say what is NOT printed, so they would pass on no output at all'
+        $R.Printed | Should -Match 'FAILED \(metrics incomplete\)' -Because 'the pool banner was printed'
         $R.Printed | Should -Not -Match 'credential' -Because 'the pool remedy is memory on the host'
         $R.Printed | Should -Not -Match '-SkipMetrics' -Because 'skipping metrics is not the remedy for a host short of memory'
     }

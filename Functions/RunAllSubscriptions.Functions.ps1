@@ -1949,8 +1949,10 @@ function Get-RdaInventoryRerunCommand
         $Value = $Table[$Key]
         # By name as well as by type: no passthrough carries a credential today, and the wrapper has no
         # -Appid or -Secret of its own, but whoever adds one next will not necessarily make it a
-        # SecureString, and a plain string would otherwise be printed verbatim.
-        if ($Key -match '(?i)secret|password|credential|token|key|appid') { return $null }
+        # SecureString, and a plain string would otherwise be printed verbatim. 'token' and 'key' count only
+        # as a whole name or a credential-shaped ending: as bare substrings they also caught the real switch
+        # -SkipFoundryTokens, and every run with it printed no re-run line at all.
+        if ($Key -match '(?i)secret|password|credential|appid|^token$|(access|refresh|bearer|auth|id|sas)token$|key$') { return $null }
         if ($Value -is [System.Security.SecureString] -or $Value -is [System.Management.Automation.PSCredential]) { return $null }
         if ($Value -is [bool] -or $Value -is [System.Management.Automation.SwitchParameter])
         {

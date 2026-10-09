@@ -671,10 +671,12 @@ function Enter-StreamAdmission
                     $LastRead = $Now
                     $LastFull = $State['LastFullCollection']
                     $FullRan = $false
-                    # The reading, and the full collection it may run, can take seconds, and every stream that is
-                    # releasing needs this lock to do so. Nothing else is admitted while the lock is let go, because
-                    # only the head of the queue may be admitted and only its own thread removes its token. The
-                    # finally block takes the lock back on every path, including a stop.
+                    # The reading is done with the lock let go, so neither its own work nor a slow custom reader
+                    # holds up a stream that is releasing. A blocking full collection pauses every thread while
+                    # it runs, lock or no lock, so the gain is the rest of the reading, not the collection itself.
+                    # Nothing else is admitted while the lock is let go, because only the head of the queue may
+                    # be admitted and only its own thread removes its token. The finally block takes the lock
+                    # back on every path, including a stop.
                     [System.Threading.Monitor]::Exit($Lock)
                     try
                     {

@@ -3681,7 +3681,7 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         $Logs.Count | Should -Be 0 -Because 'only a wait is logged'
     }
 
-    It 'reads free memory without holding the admission lock, so a full collection does not stall the streams that are releasing' {
+    It 'reads free memory without holding the admission lock, so a slow reading does not stall the streams that are releasing' {
         $State = New-StreamAdmissionState -FloorGB 2 -PollSeconds 0.05 -MaxWaitSeconds 30
         [void]$State.Holders.Add('other')
         $LockHeld = [System.Collections.Generic.List[bool]]::new()
@@ -3690,7 +3690,7 @@ Describe 'Run-AllSubscriptions.ps1: under -StreamIsolation Runspace a stream sta
         $Admission = Enter-StreamAdmission -State $State -Holder 'sub-a' -Subscription 'Sub A (sub-a)' -FreeMemoryReader $Reader -Log { param([string]$Message, [string]$Color) }
         $Admission.Reason | Should -Be 'memory'
         $LockHeld.Count | Should -BeGreaterThan 0
-        @($LockHeld | Where-Object { $_ }).Count | Should -Be 0 -Because 'the reader runs an aggressive full collection, which can take seconds while every other stream waits for this lock'
+        @($LockHeld | Where-Object { $_ }).Count | Should -Be 0 -Because 'a reading can be slow (a custom reader, or the work around a collection), and every other stream that is releasing waits for this lock'
     }
 
     It 'looks again at once when a subscription finishes while the lock is let go for the reading, instead of sleeping a slice first' {

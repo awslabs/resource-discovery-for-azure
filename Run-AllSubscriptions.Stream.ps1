@@ -292,14 +292,16 @@ for ($i = 0; $i -lt $PairCount; $i++)
         {
             Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $SubName) 'Yellow'
         }
-        else
-        {
-            Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
-        }
 
         $MetricsRetryReason = Get-RdaMetricsRetryReason -Entries $Global:MetricsFailedSubs -Before $MetricsHealthBefore
         if ($null -eq $MetricsRetryReason)
         {
+            # Printed only here, as the wrapper prints its 'Completed subscription' line: a subscription whose
+            # metrics were left incomplete is not done, and the other branch says so instead.
+            if ($ResCount -gt 0)
+            {
+                Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
+            }
             if (-not ($Completed -contains $SubId))
             {
                 $Completed += $SubId

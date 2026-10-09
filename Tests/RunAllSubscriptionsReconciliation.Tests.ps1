@@ -3654,6 +3654,44 @@ $Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
             @(Get-ChildItem -LiteralPath $Root -Filter 'snapshot.json.imported-*' -Force).Count | Should -Be 1
             $Summary.Status | Should -Be 'ok'
         }
+
+        It 'says done for a subscription only when its metrics are complete, as the wrapper says completed' {
+            # The wrapper prints 'Completed subscription' only in its success branch. A subscription the metrics
+            # phase left incomplete goes into the retry list, so the stream must not call it done either.
+            $GapTree = Join-Path $TestDrive 'tree-metrics-gap'
+            New-Item -ItemType Directory -Path $GapTree -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $GapTree 'ResourceInventory.ps1') -Value @'
+param($TenantID, $SubscriptionID, [switch]$RunAllSubs, $ConcurrencyLimit)
+$Global:ResourceCount = 3
+$Global:ZipOutputFile = 'report-' + $SubscriptionID + '.zip'
+if ($SubscriptionID -eq 'sub-2')
+{
+    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = 'Sub Two'; Id = 'sub-2'; Message = 'Metrics: the metric worker pool could not be opened (out of memory).'; Cause = 'pool' }
+}
+'@
+            $Root = Join-Path $TestDrive 'metrics-gap'
+            New-Item -ItemType Directory -Path $Root -Force | Out-Null
+            $WorkerArgs = @{
+                TenantID           = 'tenant-x'
+                StreamId           = '0'
+                InventoryRoot      = $Root
+                ScriptRoot         = $GapTree
+                AzContextPath      = (Join-Path $Root 'snapshot.json')
+                StreamSummaryPath  = (Join-Path $Root 'summary.json')
+                StreamFailuresPath = (Join-Path $Root 'failures.log')
+                SubscriptionIds    = @('sub-1', 'sub-2')
+                SubscriptionNames  = @('Sub One', 'Sub Two')
+                SharedProcess      = $true
+            }
+            $SavedMetricsFailedSubs = $Global:MetricsFailedSubs
+            try { $Printed = (& $script:WorkerPath @WorkerArgs 6>&1 | Out-String) }
+            finally { $Global:MetricsFailedSubs = $SavedMetricsFailedSubs }
+            $Printed | Should -Match 'done: Sub One - 3 resources' -Because 'a subscription with complete metrics is done'
+            $Printed | Should -Not -Match 'done: Sub Two' -Because 'a subscription whose metrics were left incomplete is not done'
+            $Printed | Should -Match 'metrics incomplete: Sub Two stays in the retry list'
+            $Summary = Get-Content -Raw -LiteralPath (Join-Path $Root 'summary.json') | ConvertFrom-Json
+            @($Summary.Completed) | Should -Be @('sub-1')
+        }
     }
 }
 

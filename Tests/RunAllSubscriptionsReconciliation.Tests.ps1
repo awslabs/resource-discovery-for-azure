@@ -4959,7 +4959,7 @@ Describe 'Get-RdaInventoryRerunCommand builds one pasteable line' {
     }
 
     It 'refuses by parameter name as well as by type, so a plain-string secret is not printed' {
-        foreach ($Key in @('Secret', 'secret', 'Password', 'Credential', 'Token', 'KEY', 'Appid', 'ClientSecret', 'AccessToken'))
+        foreach ($Key in @('Secret', 'secret', 'Password', 'Credential', 'Token', 'Tokens', 'KEY', 'Appid', 'ClientSecret', 'AccessToken', 'AccessKeys', 'StorageKeys', 'SasTokens'))
         {
             $Table = @{ ConcurrencyLimit = 6 }
             $Table[$Key] = 'a-plain-string-value'

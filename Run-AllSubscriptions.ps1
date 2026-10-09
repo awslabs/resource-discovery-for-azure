@@ -1128,8 +1128,9 @@ if ($Preflight)
             $CostState = $CostProbe.Outcome
             if ($CostProbe.Outcome -eq 'Unavailable' -and $CostProbe.Detail)
             {
-                # At Warning, not Verbose: when both lookups of the subscription failed, the profile helper has
-                # just printed the first lookup's error, and this detail is the second half it points back to.
+                # At Warning, not Verbose, for every Unavailable detail. When both lookups of the subscription failed,
+                # the profile helper has just printed the first lookup's error and this detail is the second half it
+                # points back to; any other Unavailable detail is the only reason shown, as in the real run's billing check.
                 Write-Host ("  WARNING: [preflight] consumption {0}: {1}" -f $PfSub.Name, $CostProbe.Detail) -ForegroundColor Yellow
             }
             elseif ($CostProbe.Detail) { Write-Verbose ("[preflight] consumption {0}: {1}" -f $PfSub.Name, $CostProbe.Detail) }

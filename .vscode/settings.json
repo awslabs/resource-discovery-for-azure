@@ -47,7 +47,7 @@
     "powershell.codeFormatting.whitespaceInsideBrace": true,          // CheckInnerBrace = $true
     "powershell.codeFormatting.whitespaceBeforeOpenParen": true,      // CheckOpenParen  = $true
     "powershell.codeFormatting.whitespaceAroundOperator": true,       // CheckOperator   = $true
-    "powershell.codeFormatting.whitespaceAroundPipe": true,           // CheckPipe       = $true
+    "powershell.codeFormatting.addWhitespaceAroundPipe": true,        // CheckPipe       = $true
     "powershell.codeFormatting.trimWhitespaceAroundPipe": false,      // CheckPipeForRedundantWhitespace = $false
     "powershell.codeFormatting.whitespaceAfterSeparator": true,       // CheckSeparator  = $true
     "powershell.codeFormatting.whitespaceBetweenParameters": false,   // CheckParameter  = $false

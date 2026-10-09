@@ -1976,10 +1976,13 @@ function Write-RdaShareableDiagnosticsLog
         # worker pool that would not open need memory on the host. An entry with no Cause was written before
         # the field existed, when every entry was an auth skip, so it is still listed as one.
         # LIMITATION (the same one the consumption list below documents): $Global:MetricsFailedSubs is reset once
-        # per run (once per stream with -ParallelStreams), not per subscription, so a later subscription's
-        # log repeats the entries of earlier ones. Each entry is tagged with its own masked subscription id,
-        # so the log never says the wrong subscription is incomplete. This function is not told which
-        # subscription it writes for, so it cannot filter the list without a new parameter.
+        # per wrapper run or stream (once per stream with -ParallelStreams) and never by a standalone run, not
+        # per subscription, so a later subscription's log repeats the entries of earlier ones, and a standalone
+        # run in a session that ran the script before lists that earlier run's entries too. The [sub ...] tag
+        # does NOT tell them apart: in a default run every subscription id masks to the same '<guid>', and in
+        # an obfuscated run an earlier subscription's id has no token in this run's dictionary, so it masks the
+        # same way. A reader cannot tell this subscription's entry from an earlier one's. This function is not
+        # told which subscription it writes for.
         $MetricsAuthSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -ne 'pool' })
         $MetricsPoolSkips = @($MetricsSkips | Where-Object { [string]$_.Cause -eq 'pool' })
         $ConsumpSkips = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })

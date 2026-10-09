@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AppInsights = $Resources | Where-Object { $_.TYPE -eq 'microsoft.insights/components' }
+    $AppInsights = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.insights/components') { $Row } }
 
     if ($AppInsights)
     {

@@ -1852,9 +1852,28 @@ function Invoke-AzGraphQuerySafe
 
     if ($Lowercase -and $Rows.Count -gt 0)
     {
-        $Json = ($Rows | ConvertTo-Json -Depth 100).ToLowerInvariant()
-        $Json = [regex]::Replace($Json, '(?<=[{,]\s*)""(?=\s*:)', ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
-        $Rows = @($Json | ConvertFrom-Json)
+        # One row at a time: a whole 1,000-row page as one JSON text is copied three times, and that dead text held a large share of the memory peak.
+        # A row that cannot be converted is kept as returned (as the whole page was before), never dropped, and the count is logged.
+        $KeptAsReturned = 0
+        $Lowered = foreach ($Row in $Rows)
+        {
+            try
+            {
+                $Json = (ConvertTo-Json -InputObject $Row -Depth 100 -ErrorAction Stop).ToLowerInvariant()
+                $Json = [regex]::Replace($Json, '(?<=[{,]\s*)""(?=\s*:)', ('"' + $Script:RdaEmptyPropertyNameSentinel + '"'))
+                ConvertFrom-Json -InputObject $Json -NoEnumerate -ErrorAction Stop
+            }
+            catch
+            {
+                $KeptAsReturned++
+                $Row
+            }
+        }
+        $Rows = @($Lowered)
+        if ($KeptAsReturned -gt 0)
+        {
+            Write-Log -Message ("{0} Resource Graph row(s) could not be lowercased and were kept as returned." -f $KeptAsReturned) -Severity 'Warning'
+        }
     }
 
     return [pscustomobject]@{ data = $Rows }

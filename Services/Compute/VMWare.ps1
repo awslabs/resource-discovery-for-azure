@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $VMWare = $Resources | Where-Object { $_.TYPE -eq 'microsoft.avs/privateclouds' }
+    $VMWare = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.avs/privateclouds') { $Row } }
 
     if ($VMWare)
     {

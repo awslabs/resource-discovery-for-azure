@@ -2,9 +2,9 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $VM = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
-    $AVD = $Resources | Where-Object { $_.TYPE -eq 'microsoft.desktopvirtualization/hostpools' }
-    $Hosts = $Resources | Where-Object { $_.TYPE -eq 'microsoft.desktopvirtualization/hostpools/sessionhosts' }
+    $VM = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/virtualmachines') { $Row } }
+    $AVD = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.desktopvirtualization/hostpools') { $Row } }
+    $Hosts = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.desktopvirtualization/hostpools/sessionhosts') { $Row } }
 
     if ($AVD)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $CONTAINER = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerinstance/containergroups' }
+    $CONTAINER = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerinstance/containergroups') { $Row } }
 
     if ($CONTAINER)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $MySQLFlexible = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.DBforMySQL/flexibleServers' }
+    $MySQLFlexible = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'Microsoft.DBforMySQL/flexibleServers') { $Row } }
 
     if ($MySQLFlexible)
     {

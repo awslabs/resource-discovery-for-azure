@@ -2,9 +2,9 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $VirtualWAN = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/virtualwans' }
-    $VirtualHub = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/virtualhubs' }
-    $VPNSite = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/vpnsites' }
+    $VirtualWAN = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/virtualwans') { $Row } }
+    $VirtualHub = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/virtualhubs') { $Row } }
+    $VPNSite = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/vpnsites') { $Row } }
 
     if ($VirtualWAN)
     {

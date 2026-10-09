@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Snapshots = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.Compute/snapshots' }
+    $Snapshots = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'Microsoft.Compute/snapshots') { $Row } }
 
     if ($Snapshots)
     {

@@ -94,6 +94,40 @@ Describe 'Invoke-AzGraphQuerySafe retry behavior' {
         }
     }
 
+    Context '-Lowercase works one row at a time' {
+
+        BeforeAll {
+            Mock -CommandName Search-AzGraph -MockWith {
+                script:New-FakeGraphResponse -Rows @(
+                    [pscustomobject]@{ Name = 'RowOne'; Tags = [ordered]@{ '' = 'Empty'; Env = 'PROD' } },
+                    [pscustomobject]@{ Name = 'RowTwo' },
+                    [pscustomobject]@{ Name = 'RowThree' })
+            }
+        }
+
+        It 'returns every row, in the order it came, each lowercased' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources' -Lowercase
+            @($Result.data).Count | Should -Be 3
+            @($Result.data | ForEach-Object { $_.name }) -join ',' | Should -BeExactly 'rowone,rowtwo,rowthree'
+        }
+
+        It 'renames an empty property name to the sentinel and lowercases the values' {
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources' -Lowercase
+            $Tags = @($Result.data)[0].tags
+            $Tags.PSObject.Properties.Name -join ',' | Should -BeExactly ($script:RdaEmptyPropertyNameSentinel + ',env')
+            $Tags.env | Should -BeExactly 'prod'
+        }
+
+        It 'keeps a row as returned, and warns once, when that row cannot be converted' {
+            Mock -CommandName Write-Log -MockWith { }
+            Mock -CommandName ConvertTo-Json -MockWith { throw 'cannot convert this row' } -ParameterFilter { $InputObject.Name -ceq 'RowTwo' }
+            $Result = Invoke-AzGraphQuerySafe -Query 'resources' -Lowercase
+            @($Result.data).Count | Should -Be 3
+            @($Result.data | ForEach-Object { $_.name }) -join ',' | Should -BeExactly 'rowone,RowTwo,rowthree'
+            Should -Invoke -CommandName Write-Log -Exactly -Times 1 -ParameterFilter { $Message -match '1 Resource Graph row\(s\) could not be lowercased' }
+        }
+    }
+
     Context 'Transient failure (ServiceUnavailable) retries then fails loud' {
 
         BeforeAll {

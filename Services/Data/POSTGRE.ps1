@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $POSTGRE = $Resources | Where-Object { $_.TYPE -eq 'microsoft.dbforpostgresql/servers' }
+    $POSTGRE = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.dbforpostgresql/servers') { $Row } }
 
     if ($POSTGRE)
     {

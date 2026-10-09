@@ -2,8 +2,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $VirtualMachines = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
-    $Disk = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' }
+    $VirtualMachines = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/virtualmachines') { $Row } }
+    $Disk = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/disks') { $Row } }
 
     $Vmsizemap = @{}
 

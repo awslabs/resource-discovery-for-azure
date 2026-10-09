@@ -7,7 +7,7 @@ param(
 
 if ($Task -eq 'Processing')
 {
-    $Vault = $Resources | Where-Object { $_.TYPE -eq 'microsoft.keyvault/vaults' }
+    $Vault = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.keyvault/vaults') { $Row } }
 
     if ($Vault)
     {

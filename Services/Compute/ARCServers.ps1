@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Arcservers = $Resources | Where-Object { $_.TYPE -eq 'microsoft.hybridcompute/machines' }
+    $Arcservers = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.hybridcompute/machines') { $Row } }
 
     if ($Arcservers)
     {

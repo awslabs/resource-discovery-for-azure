@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $REGISTRIES = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerregistry/registries' }
+    $REGISTRIES = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerregistry/registries') { $Row } }
 
     if ($REGISTRIES)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $CloudServices = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/cloudservices' }
+    $CloudServices = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/cloudservices') { $Row } }
 
     if ($CloudServices)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $PublicDNS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/dnszones' }
+    $PublicDNS = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/dnszones') { $Row } }
 
     if ($PublicDNS)
     {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $AzureML = $Resources | Where-Object { $_.TYPE -eq 'microsoft.machinelearningservices/workspaces' }
+    $AzureML = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.machinelearningservices/workspaces') { $Row } }
 
     if ($AzureML)
     {

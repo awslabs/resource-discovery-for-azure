@@ -1888,6 +1888,38 @@ Describe 'A stream worker records each finished report, so its parent can ship i
         'x' | Set-Content -LiteralPath (Get-StreamStateFilePath -InventoryRoot $script:DeadDir -Tenant 't' -StreamId '2') -Encoding utf8
         @(Get-StreamResumeStateFiles -InventoryRoot $script:DeadDir -Tenant 't').Count | Should -Be 1 -Because 'the startup merge finds what the worker wrote'
     }
+    It 'the wrapper''s two in-process loops make the same metrics-retry decision as the worker' {
+        # The sequential loop (the default path) and the one-subscription fallback of the parallel path run in
+        # this process with their own copy of the decision, so each copy is pinned here as the worker's is above.
+        $WrapperErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$WrapperErrors)
+        @($WrapperErrors).Count | Should -Be 0
+        $ReasonIfs = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$null -eq $MetricsRetryReason' }, $true))
+        $ReasonIfs.Count | Should -Be 2 -Because 'the sequential loop and the one-subscription fallback, and nothing else'
+        foreach ($ReasonIf in $ReasonIfs)
+        {
+            $Line = $ReasonIf.Extent.StartLineNumber
+            $Try = $ReasonIf.Parent.Parent
+            ($Try -is [System.Management.Automation.Language.TryStatementAst]) | Should -BeTrue -Because "no other condition may skip the decision at line $Line after a success"
+            $Try.Body.Extent.Text | Should -Match 'ResourceInventory\.ps1' -Because 'the decision follows the inventory call in the same try'
+            $Then = $ReasonIf.Clauses[0].Item2
+            $Else = $ReasonIf.ElseClause
+            $Else | Should -Not -BeNullOrEmpty
+            $Then.Extent.Text | Should -Match '\$CompletedReports \+= ' -Because 'a complete subscription records its report'
+            @($Then.Statements | Where-Object { $_.Extent.Text -match '^\$FailedAttempts = Remove-FailedAttempt' }).Count | Should -Be 1 -Because "a success at line $Line clears the retry entry directly, even for an id already recorded as completed"
+            $Then.Extent.Text | Should -Not -Match 'Add-FailedAttempt'
+            $ElseText = $Else.Extent.Text
+            $ElseText | Should -Not -Match 'Remove-FailedAttempt' -Because 'removing the entry first would reset the attempt count'
+            $ElseText | Should -Not -Match '\$CompletedReports \+=' -Because 'a subscription still owed its metrics records no report in the state'
+            $Drop = $ElseText.IndexOf('$CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })')
+            $Add = $ElseText.IndexOf('$FailedAttempts = Add-FailedAttempt')
+            $Save = $ElseText.IndexOf('Save-CompletedSubscriptionIds')
+            $Drop | Should -BeGreaterThan -1 -Because 'an older completion must not survive a run that still owes the metrics'
+            $Add | Should -BeGreaterThan -1 -Because 'the gap goes into the retry list'
+            $Save | Should -BeGreaterThan $Drop -Because 'the completion is dropped before the state is saved'
+            $Save | Should -BeGreaterThan $Add -Because 'the entry is added before the state is saved'
+        }
+    }
 }
 
 Describe 'The inner script marks an aborted report folder' {

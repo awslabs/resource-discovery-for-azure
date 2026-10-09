@@ -1669,8 +1669,10 @@ else
                     if (-not ($CompletedIds -contains $Sub.Id))
                     {
                         $CompletedIds += $Sub.Id
-                        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
                     }
+                    # Cleared even when the id was already recorded as completed, as in the sequential loop: a
+                    # state that lists an id both ways would otherwise keep its retry entry after this success.
+                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
                     # Saved even when the id was already recorded: this run's report replaces the earlier one.
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports @StateSaveArgs
                 }

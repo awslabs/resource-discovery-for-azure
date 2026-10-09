@@ -2166,6 +2166,13 @@ Describe 'A metric worker pool that could not open is reported as metrics incomp
         $R.ExitCode | Should -Be 3
     }
 
+    It 'lists two auth-skipped subscriptions that share a name on a line each, as its count does' {
+        $Twin = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = 'aaaa-9'; Message = $script:AuthEntry.Message; Cause = 'auth' }
+        $R = & $script:RunPoolEnd @($script:AuthEntry, $Twin)
+        $R.Printed | Should -Match 'Metrics Auth Failures:\s+2 subscription\(s\)'
+        @($R.Printed -split "`n" | Where-Object { $_ -like '  - Contoso-Auth (*' }) | Should -Be @('  - Contoso-Auth (aaaa-1)', '  - Contoso-Auth (aaaa-9)') -Because 'a list that folds them by name reads one subscription short of the count above it'
+    }
+
     It 'says which reports are missing instead of claiming every report was produced' {
         $script:PoolBannerText | Should -Not -BeNullOrEmpty
         $R = & $script:RunPoolEnd @($script:PoolEntry) @('Other-Sub (dddd-4)')

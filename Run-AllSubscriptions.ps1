@@ -3070,7 +3070,7 @@ if ($MetricsFailures.Count -gt 0)
 {
     Write-Host ""
     Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $MetricsFailures.Count) -ForegroundColor Yellow
-    foreach ($m in ($MetricsFailures | Sort-Object Name -Unique))
+    foreach ($m in ($MetricsFailures | Sort-Object Name, Id -Unique))
     {
         Write-Host ("  - {0} ({1})" -f $m.Name, $m.Id) -ForegroundColor Yellow
     }

@@ -970,7 +970,7 @@ if ($ResumeFailedOnly)
 {
     if ($FailedAttempts.Count -eq 0)
     {
-        Write-Host "ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry." -ForegroundColor Green
+        Write-Host "ResumeFailedOnly: the retry list in the resume state is empty. Nothing to retry." -ForegroundColor Green
         Write-Host ("If you expected failures here, verify {0} has a non-empty FailedAttempts array." -f $ResumeStateFile) -ForegroundColor DarkGray
         Exit-Wrapper -Code 0
     }
@@ -3150,7 +3150,7 @@ if ($FailedSubscriptions.Count -gt 0)
     Write-Host ("Subscriptions Failed:    {0} ({1})" -f $FailedSubscriptions.Count, ($FailedSubscriptions -join ', ')) -ForegroundColor Red
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
     Write-Host "Re-run with -Resume to retry failed and any unprocessed subscriptions." -ForegroundColor Yellow
-    Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the failed subscriptions." -ForegroundColor Yellow
+    Write-Host "Or re-run with -ResumeFailedOnly to retry ONLY the subscriptions in the retry list." -ForegroundColor Yellow
     if ($DiagFile -and (Test-Path -LiteralPath $DiagFile))
     {
         Write-Host ("Failure Diagnostics:     {0}" -f $DiagFile) -ForegroundColor Red

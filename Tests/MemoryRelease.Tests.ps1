@@ -1086,14 +1086,15 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
                         '$RetrySnapshots = [System.Collections.Generic.List[string]]::new()'
                         '$RetryCompact = [System.Collections.Generic.List[bool]]::new()'
                         '$RetryPoolHeldAtWait = [System.Collections.Generic.List[object]]::new()'
+                        '$RetryGlobalAtWait = [System.Collections.Generic.List[object]]::new()'
                         '$RetryFactoryCalls = [System.Collections.Generic.List[object]]::new()'
                         'function Write-MetricsDiag { param($Message) $RetryDiag.Add([string]$Message) }'
                         'function Write-Log { param($Message, $Severity, [switch]$NoConsole, [switch]$ToDebugLog) $RetryLog.Add([pscustomobject]@{ Message = [string]$Message; Severity = [string]$Severity }) }'
-                        'function Write-RdaMemorySnapshot { param($Phase, [switch]$Compact, [switch]$Record) $RetrySnapshots.Add([string]$Phase); $RetryCompact.Add([bool]$Compact); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
-                        'function Start-Sleep { param([int]$Seconds, [int]$Milliseconds) $RetrySleeps.Add($Seconds); $RetryPoolHeldAtWait.Add($MetricCallPool) }'
+                        'function Write-RdaMemorySnapshot { param($Phase, [switch]$Compact, [switch]$Record) $RetrySnapshots.Add([string]$Phase); $RetryCompact.Add([bool]$Compact); $RetryPoolHeldAtWait.Add($MetricCallPool); $RetryGlobalAtWait.Add($Global:MetricCallPool) }'
+                        'function Start-Sleep { param([int]$Seconds, [int]$Milliseconds) $RetrySleeps.Add($Seconds); $RetryPoolHeldAtWait.Add($MetricCallPool); $RetryGlobalAtWait.Add($Global:MetricCallPool) }'
                         'function New-RdaStandInPool { if ($PoolQueue.Count -eq 0) { throw ''the pool block asked for more pools than this test queued'' }; $Next = $PoolQueue.Dequeue(); $RetryFactoryCalls.Add($Next); $Next }'
                         $BlockText.Replace($FactoryText, '(New-RdaStandInPool)')
-                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; PoolFailed = $MetricPerCallPoolFailed; Diag = @($RetryDiag); Log = @($RetryLog); Sleeps = @($RetrySleeps); Snapshots = @($RetrySnapshots); Compact = @($RetryCompact); HeldAtWait = @($RetryPoolHeldAtWait); Factory = @($RetryFactoryCalls) }'
+                        '[pscustomobject]@{ Pool = $MetricCallPool; Count = $MetricCount; PoolFailed = $MetricPerCallPoolFailed; Diag = @($RetryDiag); Log = @($RetryLog); Sleeps = @($RetrySleeps); Snapshots = @($RetrySnapshots); Compact = @($RetryCompact); HeldAtWait = @($RetryPoolHeldAtWait); GlobalAtWait = @($RetryGlobalAtWait); Factory = @($RetryFactoryCalls) }'
                     ) -join [Environment]::NewLine))
             # A stand-in rather than a real pool: a real one made to fail its open keeps this process
             # from exiting. An empty OpenError means that attempt succeeds.
@@ -1255,6 +1256,8 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             $Stale.DisposeCount | Should -Be 1 -Because 'only Dispose removes the cleanup timer that keeps it, and its runspaces hold the Az modules, for the life of the process'
             $Global:MetricCallPool | Should -BeNullOrEmpty -Because 'a pool that cannot serve a call must not be handed to the next subscription'
             $Result.PoolFailed | Should -BeTrue
+            $Result.GlobalAtWait.Count | Should -Be 2 -Because 'the snapshot and the wait each record what the global still held'
+            @($Result.GlobalAtWait | Where-Object { $null -ne $_ }).Count | Should -Be 0 -Because 'the stranded pool is released before the first open, so it holds no memory through the wait that is meant to free it'
             @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 1 -Because 'a pool found broken between subscriptions is unexpected and says so in the debug log'
 
             # The state test cannot be reached behaviourally with an OPENED pool - the reuse guard takes that
@@ -1296,7 +1299,7 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 1
         }
 
-        It 'leaves an open pool in the global alone when it gives up, and never disposes one it did not build' {
+        It 'releases nothing when the global is empty, and a standalone run never disposes a pool in the global' {
             # Give-up with nothing stale: the global was already empty, so there is nothing to release and
             # nothing to say about it.
             $Queue = [System.Collections.Queue]::new()
@@ -1306,15 +1309,15 @@ Describe 'Extension/Metrics.ps1 shares one worker pool across the subscriptions 
             @($Result.Diag | Where-Object { $_ -like '*pool left from an earlier subscription*' }).Count | Should -Be 0
 
             # And a standalone run never touches the global, whatever it holds.
-            $Open = [pscustomobject]@{ DisposeCount = 0; RunspacePoolStateInfo = [pscustomobject]@{ State = [System.Management.Automation.Runspaces.RunspacePoolState]::Broken } }
-            Add-Member -InputObject $Open -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
-            $Global:MetricCallPool = $Open
+            $NotOurs = [pscustomobject]@{ DisposeCount = 0; RunspacePoolStateInfo = [pscustomobject]@{ State = [System.Management.Automation.Runspaces.RunspacePoolState]::Broken } }
+            Add-Member -InputObject $NotOurs -MemberType ScriptMethod -Name Dispose -Value { $this.DisposeCount++ }
+            $Global:MetricCallPool = $NotOurs
             $Solo = [System.Collections.Queue]::new()
             $Solo.Enqueue((& $script:NewQueuedPool 'first open failed'))
             $Solo.Enqueue((& $script:NewQueuedPool 'second open failed too'))
             $null = & $script:PoolRetry $Solo $false 7 $script:RetryDefs $script:RetrySubLookup
-            $Open.DisposeCount | Should -Be 0 -Because 'without -ReuseWorkerPool the global is another caller business'
-            [object]::ReferenceEquals($Global:MetricCallPool, $Open) | Should -BeTrue
+            $NotOurs.DisposeCount | Should -Be 0 -Because 'without -ReuseWorkerPool the global is another caller business'
+            [object]::ReferenceEquals($Global:MetricCallPool, $NotOurs) | Should -BeTrue
         }
 
         It 'keeps the retry wording free of auth and of a phase that cannot be re-run on its own' {

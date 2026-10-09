@@ -209,6 +209,12 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
         $RootCsvs = @($script:MergedRootEntries | Where-Object { $_ -like '*.csv' })
         $RootCsvs.Count | Should -Be 0 -Because ("the merged placement file is VMPlacement.txt, so nothing at the merged root is a .csv (found: {0})" -f ($RootCsvs -join ', '))
     }
+
+    It 'keeps VMPlacement.txt the only loose member besides the inner archives' {
+        $Loose = @($script:MergedRootEntries | Where-Object { $_ -notlike '*.zip' })
+        $Loose.Count | Should -Be 1 -Because ("only the merged placement file sits loose at the merged root (found: {0})" -f ($Loose -join ', '))
+        $Loose[0] | Should -Be 'VMPlacement.txt'
+    }
 }
 
 Describe 'The documented sequence and this test cannot drift apart' {
@@ -227,6 +233,7 @@ Describe 'The documented sequence and this test cannot drift apart' {
     }
 
     It 'documents the placement concatenation' {
+        $script:DocSrc | Should -Match "Join-Path \`$shardDir 'VMPlacement\.txt'" -Because 'a drifted per-shard read name skips every shard and the merged bundle loses the placement file'
         $script:DocSrc | Should -Match 'Import-Csv -LiteralPath \$part'
         $script:DocSrc | Should -Match "Export-Csv -LiteralPath \(Join-Path \`$staging 'VMPlacement\.txt'\)"
     }

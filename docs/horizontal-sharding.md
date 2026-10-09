@@ -460,9 +460,9 @@ Compress-Archive -LiteralPath $members.FullName -DestinationPath $merged -Force
 
 Note that `Build-MainSummaryFromZip.ps1` reads only `Inventory_*.json` and the
 report HTML, so it neither consumes nor rewrites `VMPlacement.txt`. Step 4 is what
-puts the merged placement file in the bundle; if you run `Build-MainSummaryFromZip.ps1` with
-`-PackageZip`, its output archive will **not** carry the placement file, so keep the
-step-4 zip as the deliverable.
+puts the merged placement file in the bundle; if you run
+`Build-MainSummaryFromZip.ps1` with `-PackageZip`, its output archive will **not**
+carry the placement file, so keep the step-4 zip as the deliverable.
 
 The per-shard `MainSummary.html` and `RunSummary.log` copies stay in their shard
 subfolders under `$staging`. That is deliberate - each describes only its own

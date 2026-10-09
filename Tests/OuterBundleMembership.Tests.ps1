@@ -130,6 +130,11 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
             $RootCsvs = @($script:RootEntries | Where-Object { $_ -like '*.csv' })
             $RootCsvs.Count | Should -Be 0 -Because ("the VM placement file is bundled as VMPlacement.txt, so nothing at the outer root is a .csv (found: {0})" -f ($RootCsvs -join ', '))
         }
+
+        It 'carries no loose .txt at the root other than VMPlacement.txt' {
+            $RootTxts = @($script:RootEntries | Where-Object { $_ -like '*.txt' -and $_ -ne 'VMPlacement.txt' })
+            $RootTxts.Count | Should -Be 0 -Because ("VMPlacement.txt is the one sanctioned loose data file at the outer root (found: {0})" -f ($RootTxts -join ', '))
+        }
     }
 
     Context 'Tenant-wide VM placement CSV' {

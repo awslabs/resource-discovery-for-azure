@@ -119,7 +119,7 @@ Describe 'VM placement CSV' {
             $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1') `
                 -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1') -Dictionary $null
 
-            # This list IS the VMPlacement.csv column contract (Export-Csv takes the
+            # This list IS the VM placement CSV column contract (Export-Csv takes the
             # header from it); ParentScaleSet/AksCluster exist to stop double-counting.
             $Expected = @(
                 'ResourceKind', 'Subscription', 'ResourceGroup', 'Name', 'Location', 'Zone',

@@ -557,21 +557,23 @@ match that specific tenant instead of the generic baseline.
 | **Declared on** | `ResourceInventory.ps1` (line ~20), `Run-AllSubscriptions.ps1` (line ~15) |
 | **Default** | off (opt-in) |
 
-**What it does.** Opts into a tenant-wide capacity-planning CSV
-(`VMPlacement_<timestamp>.csv` on disk, bundled as `VMPlacement.txt`) describing
-the availability-zone, SKU, vCPU/RAM and disk
-profile of every VM and scale set. When set, the inner script runs
+**What it does.** Opts into a tenant-wide capacity-planning CSV describing the
+availability-zone, SKU, vCPU/RAM and disk profile of every VM and scale set
+(under the wrapper: `VMPlacement_<timestamp>.csv` on disk, bundled as
+`VMPlacement.txt`). When set, the inner script runs
 `Extension/VMPlacement.ps1` after inventory (`ResourceInventory.ps1`
 line ~1385–1404); under the wrapper it writes a per-subscription
 `VMPlacementPart_*.csv`, and the wrapper concatenates the parts into one
 tenant-wide `VMPlacement_<timestamp>.csv` and folds a copy into the bundle root as
 `VMPlacement.txt`. That copy is CSV text in a `.txt` file, so the bundle root holds
-no loose `.csv`; open it in Excel with File > Open. Without the switch, no
-`VMPlacement*` file is produced, aggregated, or bundled.
+no loose `.csv`. To open it in Excel, use Data > From Text/CSV, which detects the
+comma; File > Open starts the import wizard instead, where you choose Delimited and
+then Comma. Without the switch, no `VMPlacement*` file is produced, aggregated, or
+bundled.
 
-**Why it exists — and why it is opt-in.** It is for sizing target infrastructure
-per availability zone during a migration. It makes **no extra Azure calls** — it
-joins data already collected — but it is a **separate** output with its own
+**Why it exists - and why it is opt-in.** It is for sizing target infrastructure
+per availability zone during a migration. It makes **no extra Azure calls** - it
+joins data already collected - but it is a **separate** output with its own
 schema, so it is off by default to keep the standard report shape stable for
 consumers that do not need it. Turn it on only when AZ-level VM capacity is
 actually wanted. (Note for sharded runs: because every shard's bundle carries

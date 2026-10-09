@@ -1,6 +1,7 @@
 # Offline tests pinning the "consumption requested but ZERO records collected" warning: a header-only
 # Consumption CSV once shipped unflagged (the console gate excluded the exact 0/0 case). The warning must fire only when all five guards hold: requested, 0 records, 0 consumption failures, >=1 sub ran, and >=1 ran without recording a failure.
-# The last two Describes pin the warning's inputs: the run-wide totals start from zero on every run (a stale record count would disarm the warning) and every stream's consumption failures reach the parent (a dropped row would mis-gate it).
+# The Describes 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' and 'Run-AllSubscriptions.Stream.ps1 passes every consumption failure to the wrapper' pin the warning's inputs: the run-wide totals start from zero on every run (a stale record count would disarm the warning) and every stream's consumption failures reach the parent (a dropped row would mis-gate it).
+# The Describes after them pin the two consumption numbers and their labels, the rows-FETCHED gate, the excluded-by-scope note, the sentinel collapse and two source guards; the last one pins the Diagnostics_*.log split between metrics auth skips and metrics left incomplete.
 
 BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -725,6 +726,30 @@ Describe 'The two surfaces agree' {
         $Summary | Should -Not -Match 'midnight UTC'
         $Diag | Should -Not -Match 'midnight UTC'
     }
+
+    It 'Splits metrics auth skips from metrics left incomplete the same way on both surfaces' {
+        # Both builders read the Cause the same way: 'pool' is metrics left incomplete, anything else (no Cause
+        # at all included) an auth skip. A surface that read it differently would make one bundle give two
+        # reasons for the same missing metrics.
+        $Entries = @(
+            [pscustomobject]@{ Name = 'A'; Id = '11111111-1111-1111-1111-111111111111'; Message = 'no usable token'; Cause = 'auth' }
+            [pscustomobject]@{ Name = 'B'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'the metric worker pool could not be opened'; Cause = 'pool' }
+            [pscustomobject]@{ Name = 'C'; Id = '33333333-3333-3333-3333-333333333333'; Message = 'no usable token' }
+        )
+        $Summary = (Get-RunSummaryLogContent -InvocationParameters @{} -Version '0.0.0-test' -Processed 3 -ConsumptionRecordCount 1 -ConsumptionFailedSubs @() -ConsumptionRequested $true -MetricsRequested $true -MetricsApiCallCount 0 -MetricsFailedSubs $Entries) -join [Environment]::NewLine
+        $Prior = Get-Variable -Name 'MetricsFailedSubs' -Scope Global -ErrorAction SilentlyContinue
+        $Global:MetricsFailedSubs = $Entries
+        try { $Diag = script:GetDiagText -RecordCount 1 -Requested $true -RunTag 'a8' }
+        finally
+        {
+            Remove-Variable -Name 'MetricsFailedSubs' -Scope Global -ErrorAction SilentlyContinue
+            if ($Prior) { Set-Variable -Name 'MetricsFailedSubs' -Scope Global -Value $Prior.Value }
+        }
+        $Summary | Should -Match '(?m)^\s*Metrics auth-skipped subs\s*:\s*2\s*$'
+        $Summary | Should -Match '(?m)^\s*Metrics incomplete subs\s*:\s*1\s*$'
+        $Diag | Should -Match '(?m)^Metrics auth-skipped subscriptions: 2\s*$'
+        $Diag | Should -Match '(?m)^Metrics incomplete subscriptions: 1\s*$'
+    }
 }
 
 Describe 'Run-AllSubscriptions.ps1 starts every run from zero run-wide totals' {
@@ -1353,7 +1378,8 @@ Describe 'Diagnostics_*.log separates an auth skip from metrics left incomplete'
     # Protect-DiagnosticText scrubbing of the id and the message.
     BeforeAll {
         $script:DiagAuth = [pscustomobject]@{ Name = 'Contoso-Auth'; Id = '11111111-1111-1111-1111-111111111111'; Message = 'no usable token'; Cause = 'auth' }
-        $script:DiagPool = [pscustomobject]@{ Name = 'Fabrikam-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'the metric worker pool could not be opened'; Cause = 'pool' }
+        # A GUID in the pool message, so the test proves the message is scrubbed as well as the id.
+        $script:DiagPool = [pscustomobject]@{ Name = 'Fabrikam-Pool'; Id = '22222222-2222-2222-2222-222222222222'; Message = 'the metric worker pool could not be opened under 44444444-4444-4444-4444-444444444444'; Cause = 'pool' }
         $script:DiagOld = [pscustomobject]@{ Name = 'Northwind-Old'; Id = '33333333-3333-3333-3333-333333333333'; Message = 'no usable token' }
         $script:DiagMetricsText = {
             param($Entries, [string]$Tag, [switch]$Obfuscated)
@@ -1374,33 +1400,36 @@ Describe 'Diagnostics_*.log separates an auth skip from metrics left incomplete'
 
     It 'counts a pool failure under its own heading and not as an auth skip' {
         $Text = & $script:DiagMetricsText @($script:DiagPool) 'cause-pool'
-        $Text | Should -Match 'Metrics auth-skipped subscriptions: 0'
-        $Text | Should -Match 'Metrics incomplete subscriptions: 1'
+        $Text | Should -Match '(?m)^Metrics auth-skipped subscriptions: 0\s*$'
+        $Text | Should -Match '(?m)^Metrics incomplete subscriptions: 1\s*$'
         $Text | Should -Match 'the metric worker pool could not be opened'
     }
 
     It 'keeps the auth heading for an auth skip and for an entry with no Cause' {
         $Auth = & $script:DiagMetricsText @($script:DiagAuth) 'cause-auth'
-        $Auth | Should -Match 'Metrics auth-skipped subscriptions: 1'
-        $Auth | Should -Match 'Metrics incomplete subscriptions: 0'
+        $Auth | Should -Match '(?m)^Metrics auth-skipped subscriptions: 1\s*$'
+        $Auth | Should -Match '(?m)^Metrics incomplete subscriptions: 0\s*$'
         $Old = & $script:DiagMetricsText @($script:DiagOld) 'cause-none'
-        $Old | Should -Match 'Metrics auth-skipped subscriptions: 1' -Because 'an entry written before the field existed was always an auth skip'
-        $Old | Should -Match 'Metrics incomplete subscriptions: 0'
+        $Old | Should -Match '(?m)^Metrics auth-skipped subscriptions: 1\s*$' -Because 'an entry written before the field existed was always an auth skip'
+        $Old | Should -Match '(?m)^Metrics incomplete subscriptions: 0\s*$'
     }
 
-    It 'splits a mixed run and scrubs the id on both lists' {
+    It 'splits a mixed run and scrubs the id and the message on both lists' {
         # This log is human-readable troubleshooting text, so Protect-DiagnosticText masks identifiers and
-        # secrets and keeps the message. Both lists must go through it, so neither leaks a subscription id.
+        # secrets and keeps the message. Both lists must go through it, so neither leaks a subscription id,
+        # an identifier inside a message, or a subscription name.
         $Text = & $script:DiagMetricsText @($script:DiagAuth, $script:DiagPool, $script:DiagOld) 'cause-mixed' -Obfuscated
-        $Text | Should -Match 'Metrics auth-skipped subscriptions: 2'
-        $Text | Should -Match 'Metrics incomplete subscriptions: 1'
+        $Text | Should -Match '(?m)^Metrics auth-skipped subscriptions: 2\s*$'
+        $Text | Should -Match '(?m)^Metrics incomplete subscriptions: 1\s*$'
         $Text | Should -Not -Match '11111111-1111-1111-1111-111111111111'
         $Text | Should -Not -Match '22222222-2222-2222-2222-222222222222'
         $Text | Should -Not -Match '33333333-3333-3333-3333-333333333333'
+        $Text | Should -Not -Match '44444444-4444-4444-4444-444444444444' -Because 'the message is scrubbed, not only the id'
+        foreach ($Name in 'Contoso-Auth', 'Fabrikam-Pool', 'Northwind-Old') { $Text | Should -Not -Match $Name -Because 'the subscription name is not written to this log' }
         $Lines = @($Text -split "`r?`n")
         $PoolAt = [array]::IndexOf($Lines, 'Metrics incomplete subscriptions: 1')
         $PoolAt | Should -BeGreaterThan -1
-        $Lines[$PoolAt + 1] | Should -Be '  [sub <guid>] the metric worker pool could not be opened' -Because 'the pool list is scrubbed exactly like the auth list'
+        $Lines[$PoolAt + 1] | Should -Be '  [sub <guid>] the metric worker pool could not be opened under <guid>' -Because 'the pool list is scrubbed exactly like the auth list'
         $AuthAt = [array]::IndexOf($Lines, 'Metrics auth-skipped subscriptions: 2')
         @($Lines[($AuthAt + 1)..($AuthAt + 2)]) | Should -Be @('  [sub <guid>] no usable token', '  [sub <guid>] no usable token')
     }

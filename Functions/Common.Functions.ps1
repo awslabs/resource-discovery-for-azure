@@ -843,8 +843,8 @@ function Get-RdaSubscriptionProfile
 
     # -DefaultProfile $null on both reads: the callers pin a scoped profile in $PSDefaultParameterValues, and after
     # a reconnect replaced the process context that pin still points at the profile built BEFORE it. Both cmdlets
-    # honour the pin, so without the opt-out this helper would copy the pre-reconnect context, and the caller's
-    # check that the context matches the subscription would be true by construction.
+    # honour the pin, so without the opt-out this helper would copy the pre-reconnect context and look the
+    # subscription up through it.
     $Current = Get-AzContext -DefaultProfile $null -ErrorAction Stop
     if ($null -eq $Current -or $null -eq $Current.Account)
     {

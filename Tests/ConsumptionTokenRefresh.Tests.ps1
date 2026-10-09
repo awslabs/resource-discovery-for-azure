@@ -33,6 +33,9 @@
 
     Fully offline. The classifier is pure; the loop's structure is asserted from
     source (it is inline in a paging loop, not a separately callable function).
+    The Describe on per-subscription scoping also runs Get-RdaSubscriptionProfile
+    itself against mocked Az.Accounts reads (Get-AzContext, Get-AzSubscription):
+    they make no network call, and those tests skip when Az.Accounts is absent.
 #>
 
 BeforeAll {
@@ -418,8 +421,7 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
     It 'copies the current process context, not an older scoped profile that is still pinned (the re-pin after a reconnect)' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
         # A reconnect replaces the process context, but the pin in $PSDefaultParameterValues still points at the
         # profile built BEFORE it. Get-AzContext and Get-AzSubscription honour that pin, so a helper that does not
-        # opt out reads the pin back: it copies the pre-reconnect context, and the caller's check that the
-        # context matches the subscription is then true by construction.
+        # opt out of it on both reads copies the pre-reconnect context or looks the subscription up through it.
         Import-Module Az.Accounts -ErrorAction Stop
         $ContainerType = 'Microsoft.Azure.Commands.Common.Authentication.Abstractions.Core.IAzureContextContainer' -as [type]
         $NewContext = {
@@ -437,10 +439,13 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         $Target = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new(); $Target.Id = [guid]::NewGuid().ToString()
         $StalePin = [System.Management.Automation.LanguagePrimitives]::ConvertTo($Stale, $ContainerType)
         Mock Get-AzContext { if ($null -ne $DefaultProfile) { $Stale } else { $Fresh } }
-        Mock Get-AzSubscription { $Target }
+        Mock Get-AzSubscription { if ($null -ne $DefaultProfile) { throw 'looked up through the stale pin' } $Target }
+        # A copy of the session dictionary, as the phases make one, so the pin set here leaves with this test and
+        # any pin the session itself holds is untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         $PSDefaultParameterValues['*:DefaultProfile'] = $StalePin
-        try { $Built = Get-RdaSubscriptionProfile -SubscriptionId $Target.Id }
-        finally { $PSDefaultParameterValues.Remove('*:DefaultProfile') }
+        $Built = Get-RdaSubscriptionProfile -SubscriptionId $Target.Id
+        Should -Invoke Get-AzSubscription -Times 0 -Exactly -ParameterFilter { $null -ne $DefaultProfile } -Because 'neither lookup may go through the stale pin, not even one whose failure the other would cover'
         $Built.DefaultContext.Account.Id | Should -Be 'fresh-account' -Because 'the helper must build from the context the process holds now, not from a pin that predates the reconnect'
         $Built.DefaultContext.Subscription.Id | Should -Be $Target.Id
     }

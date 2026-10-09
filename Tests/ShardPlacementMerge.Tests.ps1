@@ -5,7 +5,7 @@
     Guards the multi-shard merge sequence documented in docs/horizontal-sharding.md
     against silently losing the tenant-wide VM placement CSV.
 
-    WHY THIS EXISTS. VMPlacement.csv is a capacity-planning input: it carries the
+    WHY THIS EXISTS. VMPlacement.txt (CSV text) is a capacity-planning input: it carries the
     availability-zone of every VM and scale set so a planner can size how many nodes
     are needed per AZ. Every shard's outer zip carries it at the root under the SAME
     FIXED NAME, alongside MainSummary.html and RunSummary.log.
@@ -43,8 +43,8 @@ BeforeAll {
         $Work = Join-Path $script:Root ('work_' + $ShardName)
         New-Item -ItemType Directory -Path $Work -Force | Out-Null
 
-        # Root member 1: the shard's placement CSV, at the FIXED name every shard uses.
-        $Csv = Join-Path $Work 'VMPlacement.csv'
+        # Root member 1: the shard's placement file, at the FIXED name every shard uses.
+        $Csv = Join-Path $Work 'VMPlacement.txt'
         (@($script:Header) + $PlacementRows) | Set-Content -LiteralPath $Csv -Encoding utf8
 
         # Root member 2: a fixed-name presentation file, to show the collision is not
@@ -111,7 +111,7 @@ Describe 'The naive shared-destination extract loses shard placement data' {
     }
 
     It 'overwrites all but one shard copy when every shard extracts to the same folder' {
-        $Rows = @(Import-Csv -LiteralPath (Join-Path $script:NaiveStaging 'VMPlacement.csv'))
+        $Rows = @(Import-Csv -LiteralPath (Join-Path $script:NaiveStaging 'VMPlacement.txt'))
         $Subs = @($Rows | ForEach-Object { $_.Subscription } | Select-Object -Unique)
 
         # 3 rows across 2 subscriptions exist in total; a clobbered merge sees only one
@@ -125,7 +125,7 @@ Describe 'The naive shared-destination extract loses shard placement data' {
         Compress-Archive -Path (Join-Path $script:NaiveStaging '*.zip') -DestinationPath $Merged -Force
 
         $RootEntries = script:Get-ZipRootEntry -ZipPath $Merged
-        @($RootEntries | Where-Object { $_ -like '*.csv' }).Count |
+        @($RootEntries | Where-Object { $_ -like 'VMPlacement*' -or $_ -like '*.csv' }).Count |
             Should -Be 0 -Because 'the naive merge produced a tenant bundle with NO placement member at all'
     }
 }
@@ -145,7 +145,7 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
         {
             $ShardDir = Join-Path $script:Staging $Shard.BaseName
             Expand-Archive -LiteralPath $Shard.FullName -DestinationPath $ShardDir -Force
-            $Csv = Join-Path $ShardDir 'VMPlacement.csv'
+            $Csv = Join-Path $ShardDir 'VMPlacement.txt'
             if (Test-Path -LiteralPath $Csv) { $PlacementParts += $Csv }
         }
 
@@ -158,12 +158,12 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
         foreach ($Part in $PlacementParts) { $script:MergedRows += @(Import-Csv -LiteralPath $Part) }
         if ($script:MergedRows.Count -gt 0)
         {
-            $script:MergedRows | Export-Csv -LiteralPath (Join-Path $script:Staging 'VMPlacement.csv') -Encoding utf8 -NoTypeInformation
+            $script:MergedRows | Export-Csv -LiteralPath (Join-Path $script:Staging 'VMPlacement.txt') -Encoding utf8 -NoTypeInformation
         }
 
-        # 4. Re-zip inner zips PLUS the merged CSV.
+        # 4. Re-zip inner zips PLUS the merged placement file.
         $script:Merged = Join-Path $script:Root 'tenant-merged.zip'
-        $Members = @(Get-ChildItem -LiteralPath $script:Staging -File | Where-Object { $_.Extension -in @('.zip', '.csv') })
+        $Members = @(Get-ChildItem -LiteralPath $script:Staging -File | Where-Object { $_.Extension -in @('.zip', '.txt') })
         Compress-Archive -LiteralPath $Members.FullName -DestinationPath $script:Merged -Force
 
         $script:MergedRootEntries = script:Get-ZipRootEntry -ZipPath $script:Merged
@@ -179,7 +179,7 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
     }
 
     It 'writes the header exactly once, so no shard header becomes a data row' {
-        $Lines = @(Get-Content -LiteralPath (Join-Path $script:Staging 'VMPlacement.csv'))
+        $Lines = @(Get-Content -LiteralPath (Join-Path $script:Staging 'VMPlacement.txt'))
         @($Lines | Where-Object { $_ -match '(^|,)"?ResourceKind"?,' }).Count |
             Should -Be 1 -Because 'a text append would repeat the header once per shard and corrupt the row count'
         @($script:MergedRows | Where-Object { $_.ResourceKind -eq 'ResourceKind' }).Count | Should -Be 0
@@ -195,8 +195,8 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
         $Zones | Should -Be @('1', '2', '3') -Because 'per-AZ planning needs every shard zone represented'
     }
 
-    It 'lands VMPlacement.csv at the merged bundle root under the fixed name' {
-        $script:MergedRootEntries | Should -Contain 'VMPlacement.csv' -Because 'the merged bundle must match the shape a single non-sharded run produces'
+    It 'lands VMPlacement.txt at the merged bundle root under the fixed name' {
+        $script:MergedRootEntries | Should -Contain 'VMPlacement.txt' -Because 'the merged bundle must match the shape a single non-sharded run produces'
         @($script:MergedRootEntries | Where-Object { $_ -match '^VMPlacement_\d' }).Count | Should -Be 0
     }
 
@@ -204,12 +204,10 @@ Describe 'The documented merge sequence preserves the tenant-wide placement view
         @($script:MergedRootEntries | Where-Object { $_ -like 'ResourcesReport_*.zip' }).Count | Should -Be 2
     }
 
-    It 'keeps VMPlacement.csv the only loose CSV at the merged root' {
-        # Same ingestion-contract rule the single-run bundle obeys.
-        foreach ($Csv in @($script:MergedRootEntries | Where-Object { $_ -like '*.csv' }))
-        {
-            $Csv | Should -Be 'VMPlacement.csv'
-        }
+    It 'carries no loose .csv at the merged root' {
+        # Same rule the single-run bundle obeys.
+        $RootCsvs = @($script:MergedRootEntries | Where-Object { $_ -like '*.csv' })
+        $RootCsvs.Count | Should -Be 0 -Because ("the merged placement file is VMPlacement.txt, so nothing at the merged root is a .csv (found: {0})" -f ($RootCsvs -join ', '))
     }
 }
 
@@ -230,12 +228,12 @@ Describe 'The documented sequence and this test cannot drift apart' {
 
     It 'documents the placement concatenation' {
         $script:DocSrc | Should -Match 'Import-Csv -LiteralPath \$part'
-        $script:DocSrc | Should -Match "Export-Csv -LiteralPath \(Join-Path \`$staging 'VMPlacement\.csv'\)"
+        $script:DocSrc | Should -Match "Export-Csv -LiteralPath \(Join-Path \`$staging 'VMPlacement\.txt'\)"
     }
 
-    It 'includes the CSV in the re-zip, not just the inner zips' {
+    It 'includes the placement file in the re-zip, not just the inner zips' {
         # The original defect: Compress-Archive over '*.zip' only.
-        $script:DocSrc | Should -Match "Extension -in @\('\.zip', '\.csv'\)" -Because 'the merged bundle must include the placement CSV'
+        $script:DocSrc | Should -Match "Extension -in @\('\.zip', '\.txt'\)" -Because 'the merged bundle must include the placement file'
     }
 
     It 'explains WHY the per-shard folder is needed, so it is not simplified away' {

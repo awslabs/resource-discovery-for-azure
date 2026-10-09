@@ -3307,7 +3307,8 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 
         if (-not [string]::IsNullOrEmpty($VmPlacementFile) -and (Test-Path -LiteralPath $VmPlacementFile))
         {
-            Copy-Item -LiteralPath $VmPlacementFile -Destination (Join-Path $BundleStage 'VMPlacement.csv') -Force
+            # Same CSV text under a .txt name, so the bundle root holds no loose .csv.
+            Copy-Item -LiteralPath $VmPlacementFile -Destination (Join-Path $BundleStage 'VMPlacement.txt') -Force
         }
 
         $StageItems = @(Get-ChildItem -LiteralPath $BundleStage -Force -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
@@ -3346,7 +3347,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     $SubZipCount = @($BundleMembers | Where-Object { $_ -notmatch '[\\/]' -and $_ -like 'ResourcesReport_*.zip' }).Count
     $HtmlFolderCount = @($BundleMembers | Where-Object { $_ -like 'HTML*/*' } | ForEach-Object { ($_ -split '[\\/]')[0] } | Select-Object -Unique).Count
     $HasMainSummary = @($BundleMembers | Where-Object { $_ -ieq 'MainSummary.html' }).Count -gt 0
-    $HasPlacementCsv = @($BundleMembers | Where-Object { $_ -ieq 'VMPlacement.csv' }).Count -gt 0
+    $HasPlacementCsv = @($BundleMembers | Where-Object { $_ -ieq 'VMPlacement.txt' }).Count -gt 0
     $HasRunSummary = @($BundleMembers | Where-Object { $_ -ieq 'RunSummary.log' }).Count -gt 0
 
     Write-Host ""
@@ -3361,7 +3362,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     Write-Host ("    - {0} per-subscription data archive(s) ({1})" -f $SubZipCount, $SubZipScope) -ForegroundColor Green
     if ($HasMainSummary) { Write-Host "    - MainSummary.html (tenant-wide summary)" -ForegroundColor Green }
     if ($HtmlFolderCount -gt 0) { Write-Host ("    - {0} per-subscription HTML report folder(s)" -f $HtmlFolderCount) -ForegroundColor Green }
-    if ($HasPlacementCsv) { Write-Host "    - VMPlacement.csv (tenant-wide VM placement)" -ForegroundColor Green }
+    if ($HasPlacementCsv) { Write-Host "    - VMPlacement.txt (tenant-wide VM placement, CSV text)" -ForegroundColor Green }
     if ($HasRunSummary) { Write-Host "    - RunSummary.log (run health, needed to triage the bundle)" -ForegroundColor Green }
 
     $MissingMembers = @($StagedLeafNames | Where-Object { $Leaf = $_; @($BundleMembers | Where-Object { $_ -ieq $Leaf -or $_ -like ($Leaf + '/*') }).Count -eq 0 })

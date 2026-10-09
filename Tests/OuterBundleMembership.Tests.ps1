@@ -111,8 +111,8 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
     Context 'Ingestion contract at the outer root' {
 
         # The per-subscription ingestible members live INSIDE the inner zips. The
-        # outer root carries archives plus presentation files, with VMPlacement.csv
-        # as the single sanctioned loose data file. A consumer that discovers
+        # outer root carries archives plus presentation files, with VMPlacement.txt
+        # (CSV text) as the single sanctioned loose data file. A consumer that discovers
         # ingestible files by extension at this level must not find anything else,
         # or the same data gets ingested twice.
 
@@ -126,12 +126,9 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
                 Should -Be 0 -Because 'consumption data belongs inside the per-subscription zips'
         }
 
-        It 'has VMPlacement.csv as the only loose CSV at the root' {
+        It 'carries no loose .csv at the root' {
             $RootCsvs = @($script:RootEntries | Where-Object { $_ -like '*.csv' })
-            foreach ($Csv in $RootCsvs)
-            {
-                $Csv | Should -Be 'VMPlacement.csv' -Because 'it is the one sanctioned loose data file at the outer root'
-            }
+            $RootCsvs.Count | Should -Be 0 -Because ("the VM placement file is bundled as VMPlacement.txt, so nothing at the outer root is a .csv (found: {0})" -f ($RootCsvs -join ', '))
         }
     }
 
@@ -142,23 +139,23 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
         # presence is not asserted - only that WHEN present it sits at the root under
         # the fixed name, and that it carries no un-obfuscated identifier.
 
-        It 'when present, sits at the bundle root under the fixed name VMPlacement.csv' {
-            $Csvs = @($script:EntryNames | Where-Object { $_ -like 'VMPlacement*.csv' })
-            if ($Csvs.Count -eq 0)
+        It 'when present, sits at the bundle root under the fixed name VMPlacement.txt' {
+            $Placements = @($script:EntryNames | Where-Object { $_ -like 'VMPlacement*' })
+            if ($Placements.Count -eq 0)
             {
                 Set-ItResult -Skipped -Because 'this bundle carries no VM placement CSV (a tenant with no VMs is a legitimate outcome)'
                 return
             }
-            $script:RootEntries | Should -Contain 'VMPlacement.csv' -Because 'a consumer binds to a fixed member name rather than globbing a timestamp'
+            $script:RootEntries | Should -Contain 'VMPlacement.txt' -Because 'a consumer binds to a fixed member name rather than globbing a timestamp'
             # The on-disk copy keeps its timestamp; the bundled copy must not.
             @($script:EntryNames | Where-Object { $_ -match '^VMPlacement_\d' }).Count |
                 Should -Be 0 -Because 'the timestamped form belongs on local disk, not in the bundle'
         }
 
         It 'when present in an obfuscated bundle, exposes no raw ARM path in its identifier columns' {
-            if ($script:RootEntries -notcontains 'VMPlacement.csv')
+            if ($script:RootEntries -notcontains 'VMPlacement.txt')
             {
-                Set-ItResult -Skipped -Because 'no VMPlacement.csv in this bundle'
+                Set-ItResult -Skipped -Because 'no VMPlacement.txt in this bundle'
                 return
             }
 
@@ -166,7 +163,7 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
             $Archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $script:BundlePath).Path)
             try
             {
-                $Entry = $Archive.Entries | Where-Object { $_.FullName -eq 'VMPlacement.csv' } | Select-Object -First 1
+                $Entry = $Archive.Entries | Where-Object { $_.FullName -eq 'VMPlacement.txt' } | Select-Object -First 1
                 $Reader = New-Object System.IO.StreamReader($Entry.Open())
                 try { $Content = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
 
@@ -216,7 +213,7 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
 
     Context 'The -CapacityPlan opt-in gate' {
 
-        # VMPlacement.csv is OPT-IN via -CapacityPlan (mirrors the -IncludeStorageMetrics/
+        # VMPlacement.txt is OPT-IN via -CapacityPlan (mirrors the -IncludeStorageMetrics/
         # -SkipDiskMetrics volume controls). These two assertions are the with/without
         # pair, each env-gated so they are inert unless the harness declares which kind
         # of run produced $env:TEST_ALLSUB_BUNDLE - same TEST_EXPECT_* style as
@@ -224,17 +221,17 @@ Describe 'Outer bundle membership' -Skip:(-not $script:HaveBundle) {
         # assertions above already prove placement, when it appears, is well-formed;
         # these prove the SWITCH is what decides whether it appears at all.
 
-        It 'omits VMPlacement.csv entirely when -CapacityPlan was NOT passed' {
+        It 'omits VMPlacement.txt entirely when -CapacityPlan was NOT passed' {
             if ($env:TEST_EXPECT_NO_CAPACITY_PLAN -ne '1') { Set-ItResult -Skipped -Because 'TEST_EXPECT_NO_CAPACITY_PLAN not set'; return }
-            @($script:EntryNames | Where-Object { $_ -like 'VMPlacement*.csv' }).Count |
+            @($script:EntryNames | Where-Object { $_ -like 'VMPlacement*' }).Count |
                 Should -Be 0 -Because 'without -CapacityPlan no VM placement CSV is produced, aggregated, or folded into the bundle'
         }
 
-        It 'includes VMPlacement.csv at the root when -CapacityPlan was passed and the tenant has VMs' {
+        It 'includes VMPlacement.txt at the root when -CapacityPlan was passed and the tenant has VMs' {
             if ($env:TEST_EXPECT_CAPACITY_PLAN -ne '1') { Set-ItResult -Skipped -Because 'TEST_EXPECT_CAPACITY_PLAN not set'; return }
             # A -CapacityPlan run over a tenant with no VMs legitimately produces none,
             # so the with-VMs precondition is asserted via the harness flag, not inferred.
-            $script:RootEntries | Should -Contain 'VMPlacement.csv' -Because '-CapacityPlan over a tenant with VMs must fold the tenant-wide CSV into the bundle root'
+            $script:RootEntries | Should -Contain 'VMPlacement.txt' -Because '-CapacityPlan over a tenant with VMs must fold the tenant-wide CSV into the bundle root'
         }
     }
 }

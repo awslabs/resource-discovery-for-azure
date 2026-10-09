@@ -3161,7 +3161,7 @@ The bottom of `ExecuteInventoryProcessing`, where the nested functions get calle
     #
     #  Placement mirrors $Global:ErrorLogFile rather than the report files: under the
     #  wrapper this is a per-subscription PART that Run-AllSubscriptions.ps1 concatenates
-    #  into one tenant-wide VMPlacement.csv, so it goes in the PARENT InventoryRoot
+    #  into one tenant-wide VMPlacement_<stamp>.csv, so it goes in the PARENT InventoryRoot
     #  (tagged with the SubscriptionID so parallel streams cannot collide) and NOT into
     #  the report folder, where it would be swept into the per-subscription zip.
     #
@@ -3215,7 +3215,7 @@ Producing a separate CSV leaves that contract untouched.
 
 **Filename differs by mode, and the location differs too.**
 Under the wrapper this is a *part* file, `VMPlacementPart_*`, written to the **parent** `InventoryRoot` and tagged with the subscription ID.
-`Run-AllSubscriptions.ps1` later concatenates every part into one tenant wide `VMPlacement.csv`.
+`Run-AllSubscriptions.ps1` later concatenates every part into one tenant wide `VMPlacement_<stamp>.csv` and bundles a copy as `VMPlacement.txt` (the same CSV text).
 Writing it into the report folder instead would let the zip sweep pick it up and silently add a member to every per subscription bundle.
 A standalone run has nothing to aggregate, so it just writes `VMPlacement_*` next to its own report.
 

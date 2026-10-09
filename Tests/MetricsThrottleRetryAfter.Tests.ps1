@@ -6,9 +6,9 @@
 # MetricsErrorBodyCapture.Tests.ps1 does, because the function lives inside the -Parallel block.
 # The later Describes cover the per-attempt timeout (each attempt runs on a shared runspace pool and a
 # timed-out attempt is stopped without waiting for it), the worker pool's lifecycle and the Az context
-# it is given, the resource provider check, and the getBatch fast path: what it keeps when a group or a
-# chunk fails, its call site, the per-subscription tenant profile and its one-lookup cache, and the
-# line that starts the phase.
+# it is given, the resource provider check, the getBatch fast path (what it keeps when a group or a
+# chunk fails, and its call site), the per-subscription tenant profile on both paths and its one-lookup
+# cache, and the line that starts the phase.
 
 BeforeAll {
     $Repo = Split-Path $PSScriptRoot -Parent
@@ -971,9 +971,14 @@ Describe 'Invoke-RdaMetricsBatch keeps what it fetched when a group or a chunk f
     }
 
     It 'bounds every POST with a timeout' {
+        # The expected limit is read from the per-call assignment, so the batch bound and the per-call one
+        # cannot drift apart while this test still passes.
+        $PerCallLimit = @($script:Ast.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $Node.Left.Extent.Text -eq '$MetricTimeoutSeconds' }, $true))
+        $PerCallLimit.Count | Should -Be 1 -Because 'the per-call limit is set in one place'
+        $Expected = [int]$PerCallLimit[0].Right.Extent.Text
         $Defs = @(1..60 | ForEach-Object { New-BatchDef -Sub 'sub-a' -Region 'westeurope' -Index $_ })
         $null = Invoke-RdaMetricsBatch -Defs $Defs -MetricNamespace 'microsoft.compute/virtualMachines'
-        Should -Invoke Invoke-RestMethod -Times 2 -Exactly -ParameterFilter { $TimeoutSec -eq 120 } -Because 'with no limit one hung connection holds the whole metrics phase, and the limit is the one a per-call query has'
+        Should -Invoke Invoke-RestMethod -Times 2 -Exactly -ParameterFilter { $TimeoutSec -eq $Expected } -Because 'with no limit one hung connection holds the whole metrics phase, and the limit is the one a per-call query has'
     }
 
     It 'skips a group with no subscription segment and still batches the rest' {
@@ -1117,6 +1122,7 @@ Describe 'The metrics batch call site sends only the definitions the batch did n
         $Line = @($Result.Diag | Where-Object { $_ -like 'WARNING: metrics batch fast-path failed*' })
         $Line.Count | Should -Be 1
         $Line[0] | Should -BeLike '*rejected the token*another tenant*'
+        $Line[0] | Should -BeLike '*if the log shows a could-not-scope WARNING for this subscription*' -Because 'the hint is shown on any 401, so it says when the tenant is the cause'
         $Line[0] | Should -Not -BeLike '*ensure Microsoft.Insights is registered and the region*' -Because 'that hint points away from the cause'
     }
 

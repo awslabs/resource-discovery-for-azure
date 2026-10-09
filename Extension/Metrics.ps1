@@ -873,8 +873,9 @@ if ($Task -eq 'Processing')
                     elseif ($BatchErrText -match '(?i)\b401\b|Unauthorized|InvalidAuthenticationToken')
                     {
                         # Most often a batch of a subscription that could not be scoped to its own tenant, and so
-                        # got a token for the process tenant: the WARNING just before this one in the log says so.
-                        'the metrics data plane rejected the token - most often it was minted for another tenant than the subscription''s own, because the subscription could not be scoped to its tenant'
+                        # got a token for the process tenant: a could-not-scope WARNING earlier in the log for that
+                        # subscription says so, when that is the cause.
+                        'the metrics data plane rejected the token - if the log shows a could-not-scope WARNING for this subscription, it was minted for another tenant than the subscription''s own, because the subscription could not be scoped to its tenant'
                     }
                     else
                     {
@@ -999,8 +1000,9 @@ if ($Task -eq 'Processing')
             # unexpected, so this says so rather than passing over it quietly. Any state but Opened is
             # disposed, which is broader than the wrapper-exit closer (it disposes only a Broken pool and
             # leaves the rest alone rather than tear one down under a running call). No call can be running
-            # here: a pool reaches the global only once every worker has finished, and the closer clears the
-            # global before it starts closing, so a Closing or Opening pool is never found here.
+            # here: a pool stays in the global past its own phase only when every worker has finished (it is
+            # stored at open, and the phase end clears it otherwise, before any close starts), and the closer
+            # clears the global before it starts closing, so a Closing or Opening pool is never found here.
             if ($ReuseWorkerPool -and $null -ne $Global:MetricCallPool -and $Global:MetricCallPool.RunspacePoolStateInfo.State -ne [System.Management.Automation.Runspaces.RunspacePoolState]::Opened)
             {
                 Write-MetricsDiag ('Releasing the metric worker pool left from an earlier subscription in state {0}; it can serve no call.' -f $Global:MetricCallPool.RunspacePoolStateInfo.State)

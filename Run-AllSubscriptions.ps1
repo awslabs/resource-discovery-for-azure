@@ -1436,11 +1436,12 @@ if ($ParallelStreams -le 1)
                     Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
                 }
 
-                Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
-
                 $MetricsRetryReason = Get-RdaMetricsRetryReason -Entries $Global:MetricsFailedSubs -Before $MetricsHealthBefore
                 if ($null -eq $MetricsRetryReason)
                 {
+                    # Printed only here: a subscription whose metrics were left incomplete is not completed,
+                    # and the other branch says so instead.
+                    Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
                     # This run's report replaces any earlier one recorded for the subscription, so the state is
                     # saved even when the id was already recorded as completed.
                     $CompletedReports += $SubResourceCounts[-1]

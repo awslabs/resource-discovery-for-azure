@@ -302,9 +302,10 @@ $Global:CollectorFailures = @()
 $Global:MemoryReadings = @()
 
 # Not a total, but left behind the same way: the debug log path of the last inner run. A subscription
-# lookup this wrapper makes before its first inner run (the billing probe) writes its first error there
-# and says so, so a second run in the same session would put that text in the previous run's log and
-# point the operator at a log of this run that does not hold it.
+# lookup this wrapper makes before its first inner run (the billing probe) writes its first error to the
+# debug log when a path is set and shows it on the console as a warning when none is. Left set, a second
+# run in the same session would put that text in the previous run's log and point the operator at a log
+# of this run that does not hold it.
 $Global:DebugLogFile = $null
 
 $RootResult = Get-RdaInventoryRoot -NoInherit

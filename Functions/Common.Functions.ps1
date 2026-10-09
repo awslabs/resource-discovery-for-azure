@@ -881,16 +881,26 @@ function Get-RdaSubscriptionProfile
             {
                 throw
             }
-            # The first failure's text, and the tenant it was looked up in, go to the debug log only (which stays
-            # local in an -Obfuscate run and ships in a default bundle, beside the real identifiers that bundle
-            # already holds). That text can name the tenant, its domain or a local path, and callers copy this
-            # message into the skip entries that ship in Diagnostics_*.log. The message keeps the second
-            # lookup's own words, as before, and says where the first failure went - but only when a debug log
-            # is being written: the wrappers clear its path at the start of a run, and their billing probe runs
-            # before the first inner run opens one.
-            Write-Log -Message ('[Profile] The lookup of subscription {0} in the signed-in tenant {1} failed first, with: {2}' -f $SubscriptionId, $Current.Tenant.Id, $TenantLookupError) -Severity 'Info' -NoConsole -ToDebugLog
-            $DebugLogNote = if ([string]::IsNullOrEmpty($Global:DebugLogFile)) { '' } else { '; its error is in the debug log' }
-            throw [System.Exception]::new(('{0} (the lookup in the signed-in tenant had also failed{1})' -f $_.Exception.Message, $DebugLogNote), $_.Exception)
+            # The first failure's text, and the tenant it was looked up in, stay out of the thrown message: that
+            # text can name the tenant, its domain or a local path, and callers copy this message into the skip
+            # entries that ship in Diagnostics_*.log. It goes to the debug log (which stays local in an
+            # -Obfuscate run and ships in a default bundle, beside the real identifiers that bundle already
+            # holds). When no debug log is being written it is shown once on the console as a warning instead,
+            # so it is not lost: the wrappers clear the debug log path at the start of a run, and their billing
+            # probe runs before the first inner run opens one. The message keeps the second lookup's own words,
+            # as before, and says where the first failure went.
+            $FirstLookupLine = '[Profile] The lookup of subscription {0} in the signed-in tenant {1} failed first, with: {2}' -f $SubscriptionId, $Current.Tenant.Id, $TenantLookupError
+            if ([string]::IsNullOrEmpty($Global:DebugLogFile))
+            {
+                Write-Log -Message $FirstLookupLine -Severity 'Warning'
+                $FirstLookupNote = '; its error is shown above'
+            }
+            else
+            {
+                Write-Log -Message $FirstLookupLine -Severity 'Info' -NoConsole -ToDebugLog
+                $FirstLookupNote = '; its error is in the debug log'
+            }
+            throw [System.Exception]::new(('{0} (the lookup in the signed-in tenant had also failed{1})' -f $_.Exception.Message, $FirstLookupNote), $_.Exception)
         }
     }
     if ($null -eq $Subscription)

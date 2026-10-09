@@ -547,13 +547,16 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
         $Thrown.Exception.InnerException.Message | Should -Be 'SubscriptionNotFound: the subscription was not found'
     }
 
-    It 'does not point at a debug log when none is being written' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
+    It 'shows the signed-in tenant failure once as a warning when no debug log is being written' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {
         # The wrapper's consumption probe looks its subscription up before any inner run has opened a debug log.
+        # With nowhere to keep it, the first failure (often the one that names the real cause) is shown on the
+        # console instead of being dropped, and still stays out of the message that reaches Diagnostics_*.log.
         Import-Module Az.Accounts -ErrorAction Stop
+        $HomeTenantId = [guid]::NewGuid().ToString()
         $Current = [Microsoft.Azure.Commands.Profile.Models.Core.PSAzureContext]::new()
         $Current.Account = [Microsoft.Azure.Commands.Profile.Models.PSAzureRmAccount]::new()
         $Current.Tenant = [Microsoft.Azure.Commands.Profile.Models.PSAzureTenant]::new()
-        $Current.Tenant.Id = [guid]::NewGuid().ToString()
+        $Current.Tenant.Id = $HomeTenantId
         $Current.Subscription = [Microsoft.Azure.Commands.Profile.Models.PSAzureSubscription]::new()
         $Current.Subscription.Id = [guid]::NewGuid().ToString()
         Mock Get-AzContext { $Current }
@@ -561,12 +564,20 @@ Describe 'Phases scope their Az calls per subscription without Set-AzContext' {
             if ($TenantId) { throw 'AADSTS50076: the refresh token for the signed-in tenant has expired' }
             throw 'SubscriptionNotFound: the subscription was not found'
         }
-        $SavedDebugLog = $Global:DebugLogFile
+        $ErrorLog = Join-Path $TestDrive 'error-no-debug-log.log'
+        $SavedLogs = @($Global:DebugLogFile, $Global:ErrorLogFile)
         $Global:DebugLogFile = $null
+        $Global:ErrorLogFile = $ErrorLog
         $Thrown = $null
-        try { $null = Get-RdaSubscriptionProfile -SubscriptionId ([guid]::NewGuid().ToString()) } catch { $Thrown = $_ }
-        finally { $Global:DebugLogFile = $SavedDebugLog }
-        $Thrown.Exception.Message | Should -Be 'SubscriptionNotFound: the subscription was not found (the lookup in the signed-in tenant had also failed)' -Because 'a pointer to a log that does not exist sends the operator looking for nothing'
+        try { $Shown = @(& { try { $null = Get-RdaSubscriptionProfile -SubscriptionId ([guid]::NewGuid().ToString()) } catch { Set-Variable -Name Thrown -Value $_ -Scope 1 } } 6>&1) }
+        finally { $Global:DebugLogFile = $SavedLogs[0]; $Global:ErrorLogFile = $SavedLogs[1] }
+        $Thrown.Exception.Message | Should -Be 'SubscriptionNotFound: the subscription was not found (the lookup in the signed-in tenant had also failed; its error is shown above)' -Because 'the message points at where the first failure went, and a pointer to a log that does not exist sends the operator looking for nothing'
+        $Thrown.Exception.Message | Should -Not -BeLike '*AADSTS50076*' -Because 'this message reaches Diagnostics_*.log'
+        $FirstLookup = @($Shown | Where-Object { [string]$_.MessageData -like '*AADSTS50076: the refresh token for the signed-in tenant has expired*' })
+        $FirstLookup.Count | Should -Be 1 -Because 'the first failure is what names the real cause, and it is shown once'
+        [string]$FirstLookup[0].MessageData | Should -BeLike ('*tenant {0}*' -f $HomeTenantId) -Because 'the operator needs to know which tenant that first lookup used'
+        $FirstLookup[0].MessageData.ForegroundColor | Should -Be 'Yellow' -Because 'it is written at Warning'
+        Test-Path -LiteralPath $ErrorLog | Should -BeFalse -Because 'the detail does not belong in the error log'
     }
 
     It 'passes the second lookup''s error on untouched when the signed-in tenant simply did not have the subscription' -Skip:($null -eq (Get-Module -ListAvailable -Name Az.Accounts)) {

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $CloudServices = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/cloudservices' }
+    $CloudServices = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/cloudservices') { $Row } }
 
     if ($CloudServices)
     {
@@ -13,7 +13,7 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            $Roles = $Data.roleProfile
+            $Roles = $Data.roleProfile.roles
 
             $Obj = @{
                 'ID'                   = $1.id;
@@ -23,7 +23,6 @@ if ($Task -eq 'Processing')
                 'Location'             = $1.location;
             }
 
-            $Obj | Add-Member -MemberType NoteProperty -Name Roles -Value NotSet
             $Obj.Roles = [System.Collections.Generic.List[object]]::new()
 
             foreach ($roleProfile in $Roles)
@@ -44,3 +43,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

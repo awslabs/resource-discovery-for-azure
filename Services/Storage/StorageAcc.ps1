@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Storageacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.storage/storageaccounts' }
+    $Storageacc = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.storage/storageaccounts') { $Row } }
 
     if ($Storageacc)
     {
@@ -12,9 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = $Data.creationTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.creationTime) { [datetime]($Data.creationTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($Data.isHnsEnabled) { $HnsEnabled = $true } else { $HnsEnabled = $false }
 

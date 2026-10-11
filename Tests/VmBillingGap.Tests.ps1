@@ -1,23 +1,5 @@
-# VM billing-coverage banner tests
-# Run with: Invoke-Pester ./Tests/VmBillingGap.Tests.ps1 -Output Detailed
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# The inventory (ARM/Resource Graph) lists every VM that EXISTS; the consumption
-# CSV lists VMs that produced a compute-usage record in the billing window. A
-# running VM with no compute-usage record is an anomaly that usually means
-# consumption data was incomplete for that VM's subscription. Summary.ps1
-# cross-checks the count of running VMs against the count of distinct
-# 'Virtual Machines'-meter resources in the consumption CSV and, when the
-# running count materially exceeds the billed count, renders a coverage banner
-# at the top of the report.
-#
-# This test is SELF-CONTAINED: it builds a tiny Inventory JSON and a tiny
-# Consumption CSV in a temp dir, invokes the REAL Extension/Summary.ps1, and
-# asserts the banner is present / absent / scoped correctly. No live Azure, no
-# output zip. The comparison is count-level by design (the inventory and
-# consumption files obfuscate resource ids through different dictionaries, so a
-# per-VM join is impossible in an obfuscated report).
+# VM billing-coverage banner tests: Summary.ps1 flags running VMs that lack a compute-usage record.
+# Count-level by design - inventory and consumption obfuscate ids through different dictionaries, so no per-VM join.
 
 BeforeAll {
     $script:SummaryScript = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Extension', 'Summary.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
@@ -128,6 +110,30 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Match '60%'
     }
 
+    # Fractional pct (33.3) with the thread pinned to a comma-decimal culture: fails if Summary.ps1
+    # stops formatting GapPct with InvariantCulture. Pin is required - a dot-decimal host would pass either way.
+    It 'renders a fractional gap percentage with a dot decimal separator' {
+        $Inv = New-TestInventory -RunningVms 3 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_frac.csv'
+        New-TestConsumptionCsv -Path $Csv -BilledVms 2
+
+        $PriorCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [cultureinfo]::new('de-DE')
+            # gap 1 of 3 running = 33.3%
+            $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        }
+        finally
+        {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $PriorCulture
+        }
+
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match '33\.3%'
+        $Html | Should -Not -Match '33,3'
+    }
+
     It 'does NOT render the banner when billed matches running' {
         $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 3
         $Csv = Join-Path $script:WorkDir 'con_match.csv'
@@ -165,6 +171,24 @@ Describe 'VM billing-coverage banner' {
         $Html | Should -Not -Match 'VM billing-coverage check'
     }
 
+    # Data-bearing CSV with zero 'Virtual Machines'-meter rows is a real zero (billed==0 vs running>0 -> ~100% gap, banner shown),
+    # distinct from the header-only 'coverage unknown' case (no banner); guards against conflating the two.
+    It 'renders the banner (~100%) for a data-bearing CSV with zero VM-meter rows' {
+        $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_novm.csv'
+        # BilledVms 0 -> no 'Virtual Machines'-meter rows, but the helper still
+        # writes the Storage/Bandwidth noise rows, so the CSV is data-bearing.
+        New-TestConsumptionCsv -Path $Csv -BilledVms 0
+
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'VM billing-coverage check'
+        # 10 running, 0 billed -> gap 10 -> 100%
+        $Html | Should -Match '10 running VMs'
+        $Html | Should -Match 'only 0 VMs'
+        $Html | Should -Match '100%'
+    }
+
     It 'respects the VmBillingGapThreshold (suppresses small gaps)' {
         $Inv = New-TestInventory -RunningVms 10 -DeallocatedVms 0
         $Csv = Join-Path $script:WorkDir 'con_thresh.csv'
@@ -173,5 +197,45 @@ Describe 'VM billing-coverage banner' {
         $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv -Threshold 5
         $Html | Should -Not -Match '<div class="coverage-banner">'
         $Html | Should -Not -Match 'VM billing-coverage check'
+    }
+
+    # The billed-VM count ignores letter case, so a VM whose ResourceId repeats in another case is one VM.
+    # Counting by exact case here would give 6 billed VMs against 5 running, and no banner at all.
+    # A 'Virtual Machines' row with no ResourceId is a billing line that cannot be joined to any VM,
+    # so it must not count as a billed VM. Import-Csv yields '' for the empty cell, never $null.
+    It 'does not count a VM-meter row whose ResourceId is blank' {
+        $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_blank.csv'
+        $Rows = @()
+        for ($i = 0; $i -lt 3; $i++) { $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) } }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = '' }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = '   ' }
+        $Rows | Select-Object MeterCategory, ResourceId | Export-Csv -Path $Csv -Encoding utf8 -NoTypeInformation
+
+        # 5 running, 3 distinct billed -> gap 2 of 5 = 40%; the two blank rows must not make it 5 billed
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'only 3 VMs'
+        $Html | Should -Match '2 running VMs \(40%\)'
+    }
+
+    It 'counts a VM once when its ResourceId repeats in a different letter case' {
+        $Inv = New-TestInventory -RunningVms 5 -DeallocatedVms 0
+        $Csv = Join-Path $script:WorkDir 'con_case.csv'
+        $Rows = @()
+        for ($i = 0; $i -lt 3; $i++)
+        {
+            $Rid = ('prod_{0}' -f [guid]::NewGuid())
+            $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $Rid }
+            $Rows += [pscustomobject]@{ MeterCategory = 'Virtual Machines'; ResourceId = $Rid.ToUpperInvariant() }
+        }
+        $Rows += [pscustomobject]@{ MeterCategory = 'Storage'; ResourceId = ('prod_{0}' -f [guid]::NewGuid()) }
+        $Rows | Select-Object MeterCategory, ResourceId | Export-Csv -Path $Csv -Encoding utf8 -NoTypeInformation
+
+        # 5 running, 3 distinct billed -> gap 2 of 5 = 40%
+        $Html = Invoke-Summary -Inventory $Inv -ConsumptionFile $Csv
+        $Html | Should -Match '<div class="coverage-banner">'
+        $Html | Should -Match 'only 3 VMs'
+        $Html | Should -Match '2 running VMs \(40%\)'
     }
 }

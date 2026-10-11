@@ -2,9 +2,9 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $VM = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
-    $AVD = $Resources | Where-Object { $_.TYPE -eq 'microsoft.desktopvirtualization/hostpools' }
-    $Hosts = $Resources | Where-Object { $_.TYPE -eq 'microsoft.desktopvirtualization/hostpools/sessionhosts' }
+    $VM = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/virtualmachines') { $Row } }
+    $AVD = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.desktopvirtualization/hostpools') { $Row } }
+    $Hosts = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.desktopvirtualization/hostpools/sessionhosts') { $Row } }
 
     if ($AVD)
     {
@@ -30,26 +30,14 @@ if ($Task -eq 'Processing')
             {
                 $Vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId }
 
-                # Resolve HostId and Hostname
                 $HostIdValue = $null
                 $HostnameValue = $null
                 if (![string]::IsNullOrEmpty($Vmsessionhosts.Id))
                 {
                     if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
                     {
-                        # Obfuscation ON: never emit the real VM id or name. Use the
-                        # dictionary value when the backing VM was indexed, else the
-                        # lossy 'obfuscated' fallback used elsewhere in the codebase.
                         $HostIdValue = if ($ResourceIdDictionary.ContainsKey($Vmsessionhosts.Id)) { $ResourceIdDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
-                        # Deterministic hostname: derive from VM ID hash so same input = same output
-                        $HnPrefix = $HostIdValue.Split('_')[0]
-                        $Sha = [System.Security.Cryptography.SHA256]::Create()
-                        try
-                        {
-                            $HnHash = [System.BitConverter]::ToString($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Vmsessionhosts.Id + '_hostname'))).Replace('-', '').Substring(0, 32).ToLower()
-                        }
-                        finally { $Sha.Dispose() }
-                        $HostnameValue = $HnPrefix + '_' + $HnHash.Substring(0, 8) + '-' + $HnHash.Substring(8, 4) + '-' + $HnHash.Substring(12, 4) + '-' + $HnHash.Substring(16, 4) + '-' + $HnHash.Substring(20, 12)
+                        $HostnameValue = if ($null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($Vmsessionhosts.Id)) { $Global:ResourceNameDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
                     }
                     else
                     {
@@ -87,3 +75,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

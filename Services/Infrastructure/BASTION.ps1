@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $BASTION = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/bastionhosts' }
+    $BASTION = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/bastionhosts') { $Row } }
 
     if ($BASTION)
     {

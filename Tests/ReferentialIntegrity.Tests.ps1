@@ -48,6 +48,12 @@ BeforeAll {
     # prod_/nonprod_ + optional type hint + GUID. Used to prove that a
     # cross-reference / cached metric value is a real token, never a raw id.
     $script:TokenPattern = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+    # Obfuscation signal for mode-gated assertions: in an obfuscated run every
+    # inventory ID is a prod_/nonprod_ token, so a single match proves the run
+    # was obfuscated. Lets the consumption raw-path guard below stay quiet on a
+    # default (non-obfuscated) run where raw ARM ids are expected.
+    $script:IsObfuscated = @($script:AllIds | Where-Object { $_ -match $script:TokenPattern }).Count -gt 0
 }
 
 AfterAll {
@@ -115,91 +121,94 @@ Describe "SQL VM to VM Cross-Reference" {
 }
 
 Describe "Obfuscated ID Uniqueness" {
-    It "Every obfuscated ID should be unique across all resources" {
-        $IdCounts = $script:AllIds | Group-Object | Where-Object { $_.Count -gt 1 }
-        $IdCounts | Should -BeNullOrEmpty -Because "No two resources should share the same obfuscated ID"
+    It "Every obfuscated ID names exactly one resource across all resources" {
+        # Some collectors emit several rows for one resource, all carrying its ID: AvSet.ps1 one row per
+        # member VM, AKS.ps1 one row per agent pool. Repeated IDs are therefore legitimate. A collision is
+        # one token shared by two different resources, which shows up as one ID under two different
+        # (inventory key, Name) pairs.
+        $Owners = @{}
+        $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
+            $Key = $_.Name
+            @($_.Value) | ForEach-Object {
+                if ($null -ne $_ -and $null -ne $_.ID)
+                {
+                    if (-not $Owners.ContainsKey($_.ID)) { $Owners[$_.ID] = [System.Collections.Generic.HashSet[string]]::new() }
+                    [void]$Owners[$_.ID].Add(('{0}|{1}' -f $Key, $_.Name))
+                }
+            }
+        }
+        $Collisions = @($Owners.Keys | Where-Object { $Owners[$_].Count -gt 1 } | ForEach-Object { '{0} -> {1}' -f $_, (@($Owners[$_]) -join ', ') })
+        $Collisions | Should -BeNullOrEmpty -Because "No two resources should share the same obfuscated ID"
     }
 }
 
 Describe "Consumption to Inventory Cross-Reference" {
-    It "Consumption ResourceIds that exist in inventory should use the same obfuscated value" {
+    It "Consumption ResourceIds are obfuscated (never a raw ARM path)" {
         if ($script:ConsumptionCsv.Count -eq 0) { Set-ItResult -Skipped -Because "empty consumption csv"; return }
-        $InventoryIds = $script:AllIds
+        # Raw ARM paths are expected in a default (non-obfuscated) run, so this
+        # only asserts in obfuscated mode. Skip honestly rather than pass vacuously.
+        if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "consumption ResourceIds are only obfuscated in an obfuscated run"; return }
+        $Seen = 0
         foreach ($row in $script:ConsumptionCsv)
         {
-            if (![string]::IsNullOrEmpty($row.ResourceId) -and $row.ResourceId -in $InventoryIds)
-            {
-                # If it's in both, the ID should be identical (same dictionary mapping)
-                $row.ResourceId | Should -BeIn $InventoryIds -Because "Consumption ResourceId should match inventory ID"
-            }
+            if ([string]::IsNullOrEmpty($row.ResourceId)) { continue }
+            $Seen++
+            # Assert the id is NOT a raw ARM path, not merely that it is a member of
+            # the inventory set: a leaked raw path is absent from that set, so a membership-only check would silently miss it.
+            $row.ResourceId | Should -Not -Match '/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}' -Because "obfuscated consumption ResourceId must not be a raw Azure resource path"
         }
+        if ($Seen -eq 0) { Set-ItResult -Skipped -Because "no consumption row carried a ResourceId in this fixture" }
     }
 }
 
 Describe "ResourceGroup Consistency" {
-    It "Resources with the same obfuscated ResourceGroup should be grouped together" {
-        $RgGroups = @{}
+    It "Every ResourceGroup value is a prod_/nonprod_ pseudonym in an obfuscated run" {
+        if (-not $script:IsObfuscated) { Set-ItResult -Skipped -Because "ResourceGroup values are only pseudonyms in an obfuscated run"; return }
+        $RgKeys = [System.Collections.Generic.HashSet[string]]::new()
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
             @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.ResourceGroup)
-                {
-                    if (-not $RgGroups.ContainsKey($_.ResourceGroup)) { $RgGroups[$_.ResourceGroup] = @() }
-                    $RgGroups[$_.ResourceGroup] += $_.ID
-                }
+                if ($null -ne $_ -and -not [string]::IsNullOrEmpty($_.ResourceGroup)) { [void]$RgKeys.Add($_.ResourceGroup) }
             }
         }
-        # Each RG should have at least one resource
-        foreach ($rg in $RgGroups.Keys)
+        # A raw value would mean the RG dictionary failed to map it.
+        foreach ($rg in $RgKeys)
         {
-            $RgGroups[$rg].Count | Should -BeGreaterThan 0 -Because "ResourceGroup '$rg' should have at least one resource"
+            $rg | Should -Match '^(prod|nonprod)_' -Because "obfuscated ResourceGroup keys must be deterministic pseudonyms, not raw names"
         }
     }
 }
 
+# Determinism: the inventory and the metrics are obfuscated separately, so the same resource must carry
+# the same Subscription and ResourceGroup token in both. A mapping that minted a fresh token per row
+# fails here. Rows whose ID is not in the inventory are left to the P8 absent-ID check below.
 Describe "Subscription Determinism" {
-    It "Resources sharing the same obfuscated Subscription should all have the same value" {
-        # Collect all subscription values
-        $SubValues = @{}
+    It "A resource carries the same Subscription value in the inventory and in its metric rows" {
+        $Inv = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.Subscription)
-                {
-                    $SubValues[$_.Subscription] = $true
-                }
-            }
+            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.ID -and $null -ne $_.Subscription -and -not $Inv.ContainsKey($_.ID)) { $Inv[$_.ID] = $_.Subscription } }
         }
-        # There should be fewer unique subscription values than total resources
-        # (deterministic = same real sub maps to same obfuscated sub)
-        $SubValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "Subscription values should be reused across resources in the same subscription"
+        $Pairs = @($script:MetricRows | Where-Object { -not [string]::IsNullOrEmpty($_.ID) -and $Inv.ContainsKey($_.ID) -and $null -ne $_.Subscription })
+        if ($Pairs.Count -eq 0) { Set-ItResult -Skipped -Because "no metric row names an inventory resource in this fixture"; return }
+        $Mismatch = @($Pairs | Where-Object { $_.Subscription -ne $Inv[$_.ID] } | ForEach-Object { '{0}: inventory {1}, metrics {2}' -f $_.ID, $Inv[$_.ID], $_.Subscription } | Sort-Object -Unique)
+        $Mismatch | Should -BeNullOrEmpty -Because "the same real subscription must map to the same value everywhere in a run"
     }
 }
 
 Describe "ResourceGroup Determinism" {
-    It "Fewer unique ResourceGroup values than total resources (deterministic mapping)" {
-        $RgValues = @{}
+    It "A resource carries the same ResourceGroup value in the inventory and in its metric rows" {
+        $Inv = @{}
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
-            @($_.Value) | ForEach-Object {
-                if ($null -ne $_ -and $null -ne $_.ResourceGroup)
-                {
-                    $RgValues[$_.ResourceGroup] = $true
-                }
-            }
+            @($_.Value) | ForEach-Object { if ($null -ne $_ -and $null -ne $_.ID -and $null -ne $_.ResourceGroup -and -not $Inv.ContainsKey($_.ID)) { $Inv[$_.ID] = $_.ResourceGroup } }
         }
-        $RgValues.Keys.Count | Should -BeLessOrEqual $script:AllIds.Count -Because "ResourceGroup values should be reused across resources in the same RG"
+        $Pairs = @($script:MetricRows | Where-Object { -not [string]::IsNullOrEmpty($_.ID) -and $Inv.ContainsKey($_.ID) -and $null -ne $_.ResourceGroup })
+        if ($Pairs.Count -eq 0) { Set-ItResult -Skipped -Because "no metric row names an inventory resource in this fixture"; return }
+        $Mismatch = @($Pairs | Where-Object { $_.ResourceGroup -ne $Inv[$_.ID] } | ForEach-Object { '{0}: inventory {1}, metrics {2}' -f $_.ID, $Inv[$_.ID], $_.ResourceGroup } | Sort-Object -Unique)
+        $Mismatch | Should -BeNullOrEmpty -Because "the same real resource group must map to the same value everywhere in a run"
     }
 }
 
-# ============================================================================
-# Task 6 (spec: obfuscation-and-reveal) — additive P8 coverage.
-# Purely additive. Closes gaps for cross-reference pairs not already asserted
-# above (SQLDB server/pool, SQLMIDB managed instance, AvSet VMs, VMSS related
-# cluster), the out-of-scope 'obfuscated' sentinel (Req 2.3), and the metric
-# per-resource cached token (Req 2.4). Where the live fixture lacks a given
-# pair the block skips gracefully rather than fabricating resources.
-#   Validates: Requirements 2.2, 2.3, 2.4 | Property: P8
-# The disk->VM (VM Disk to VM) and SQLVM->parent VM (SQL VM to VM) pairs are
-# already covered by the blocks above and are intentionally NOT duplicated here.
-# ============================================================================
+# Task 6 (spec: obfuscation-and-reveal) additive P8 coverage for cross-reference pairs not asserted above (Req 2.2/2.3/2.4, Property P8).
+# disk->VM and SQLVM->parent VM are covered by the blocks above and intentionally NOT duplicated here.
 
 Describe "SQLDB to SQL Server Cross-Reference (P8)" {
     It "Every SQLDB DatabaseServer carries the same token its parent SQL Server uses (or the 'obfuscated' sentinel)" {
@@ -276,17 +285,8 @@ Describe "VMSS Related-Cluster Cross-Reference (P8)" {
     It "Every VMSS related-cluster value carries the same token its AKS cluster uses, the out-of-scope sentinel, or a well-formed token for a Service-Fabric-backed scale set" {
         $VmssItems = @($script:Inventory.VMSS) | Where-Object { $null -ne $_ }
         if ($VmssItems.Count -eq 0) { Set-ItResult -Skipped -Because "no VMSS resources in this fixture"; return }
-        # A scale set exposes its related cluster via the 'AKS' field. The
-        # collector (Services/Containers/VMSS.ps1) resolves an AKS cluster
-        # first; if none owns the node pool's resource group it falls back to
-        # a Service Fabric cluster match instead. Either way it resolves the
-        # cluster's real ID through $ResourceIdDictionary and emits the SAME
-        # token the cluster's own row uses for its identity (Req 2.2), or the
-        # 'obfuscated' sentinel when the target is out of scope (Req 2.3).
-        # There is no dedicated Service Fabric collector/inventory bucket, so
-        # a Service-Fabric-backed match can't be looked up against a known-ID
-        # allowlist the way AKS can - instead we accept any well-formed
-        # prod_/nonprod_ token, which the AKS-cluster case already satisfies.
+        # A scale set's 'AKS' field holds its related-cluster token, resolved to an
+        # AKS cluster first, else a Service Fabric fallback; there is no SF inventory bucket, so an SF-backed match is accepted as any well-formed prod_/nonprod_ token, not an id lookup.
         $ClusterIds = @(@($script:Inventory.AKS) | Where-Object { $null -ne $_ } | ForEach-Object { $_.ID })
         $Checked = 0
         foreach ($ss in $VmssItems)
@@ -357,6 +357,28 @@ Describe "Metric Per-Resource Cached Token (P8)" {
         {
             $id | Should -Match $script:TokenPattern -Because "a metric resource absent from the main dictionary should still receive a cached prod_/nonprod_ token, not a raw id"
             $id | Should -Not -Be 'obfuscated' -Because "the metric fallback assigns a correlatable cached token, not the lossy sentinel"
+        }
+    }
+
+    It "Metric resource IDs resolve to inventory resource IDs (the metrics-to-inventory join holds under obfuscation)" {
+        if ($script:MetricRows.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows in this fixture"; return }
+        $InvIdSet = @($script:AllIds)
+        if ($InvIdSet.Count -eq 0) { Set-ItResult -Skipped -Because "no inventory IDs in this fixture"; return }
+
+        $MetricIds = @($script:MetricRows | Where-Object { ![string]::IsNullOrEmpty($_.ID) } | Select-Object -ExpandProperty ID -Unique)
+        if ($MetricIds.Count -eq 0) { Set-ItResult -Skipped -Because "no metric rows carried an ID in this fixture"; return }
+
+        # A metric row's token comes from the same $ResourceIdDictionary the inventory row used, so an also-inventoried resource MUST carry the identical token (the metrics-to-inventory join).
+        # Two guards below catch a regression without false-failing on the legitimate fallback (a deleted/transient metric-eligible resource never inventoried): zero overlap is catastrophic; the matched set must be the majority.
+        $Matched = @($MetricIds | Where-Object { $_ -in $InvIdSet })
+        $Absent = @($MetricIds | Where-Object { $_ -notin $InvIdSet })
+
+        $Matched.Count | Should -BeGreaterThan 0 -Because "at least one metric resource must carry the same obfuscated ID as its inventory row; zero overlap means metrics minted fresh tokens and the metrics-to-inventory join is broken"
+        # Guard 2 (matched >= absent) is only signal once the metric-ID sample is large enough, so gate it behind a minimum floor and skip below it; the catastrophic zero-overlap guard above still runs on every fixture.
+        $RatioSampleFloor = 5
+        if ($MetricIds.Count -ge $RatioSampleFloor)
+        {
+            $Matched.Count | Should -BeGreaterOrEqual $Absent.Count -Because ("metric IDs should predominantly resolve to inventory IDs (matched={0}, absent={1}); absent exceeding matched indicates a whole metric path is obfuscating IDs inconsistently with the inventory" -f $Matched.Count, $Absent.Count)
         }
     }
 }

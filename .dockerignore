@@ -1,0 +1,24 @@
+# Build-context excludes for `az acr build ... .` (context = repo root).
+# az acr build uploads the whole context and does NOT honour .gitignore, so this
+# file is what keeps local-only / dev / non-shippable content OUT of the image.
+# Everything the tool needs at runtime (the *.ps1 entry points, Services/,
+# Extension/, Functions/, Version.json, deploy/entrypoint.ps1) is NOT listed here
+# and is therefore included.
+
+# Git + CI metadata
+.git
+.gitignore
+.github
+
+# Local-only working folders (never part of the product)
+.kiro
+.exploration
+.sisyphus
+.scriptanalyzer
+.DS_Store
+
+# Dev-only assets not needed at runtime
+Tests
+docs
+*.md
+PSScriptAnalyzerSettings.psd1

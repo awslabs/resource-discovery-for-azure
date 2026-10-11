@@ -2,8 +2,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $SQLSERVERMI = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/managedInstances' }
-    $SQLSERVERMIDB = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/managedinstances/databases' }
+    $SQLSERVERMI = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.sql/managedInstances') { $Row } }
+    $SQLSERVERMIDB = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.sql/managedinstances/databases') { $Row } }
 
     if ($SQLSERVERMI)
     {
@@ -28,7 +28,7 @@ if ($Task -eq 'Processing')
                 'InstancePoolName'              = if (![string]::IsNullOrEmpty($Data.instancePoolId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.instancePoolId)) { $ResourceIdDictionary[$Data.instancePoolId] } else { 'obfuscated' } } else { $Data.instancePoolId };
                 'vCores'                        = $Data.vCores;
                 'StorageGB'                     = $Data.storageSizeInGB;
-                'StorageAccountType'            = $Data.storageAccountType;
+                'StorageAccountType'            = if ($null -ne $Data.currentBackupStorageRedundancy) { $Data.currentBackupStorageRedundancy } else { $Data.storageAccountType };
                 'LicenseType'                   = $Data.licenseType;
                 'State'                         = $Data.state;
                 'ManagedInstanceCreateMode'     = $Data.managedInstanceCreateMode;

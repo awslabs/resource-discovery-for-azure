@@ -2,8 +2,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Runbook = $Resources | Where-Object { $_.TYPE -eq 'microsoft.automation/automationaccounts/runbooks' }
-    $Autacc = $Resources | Where-Object { $_.TYPE -eq 'microsoft.automation/automationaccounts' }
+    $Runbook = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.automation/automationaccounts/runbooks') { $Row } }
+    $Autacc = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.automation/automationaccounts') { $Row } }
 
     if ($Autacc)
     {
@@ -12,18 +12,17 @@ if ($Task -eq 'Processing')
         foreach ($0 in $Autacc)
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $0.subscriptionId }
-            $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name }
+            $Rbs = $Runbook | Where-Object { $_.id.split('/')[8] -eq $0.name -and $_.id.split('/')[4] -eq $0.RESOURCEGROUP }
 
             $Data0 = $0.properties
-            $Timecreated = $Data0.creationTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data0.creationTime) { ([datetime]$Data0.creationTime).ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($null -ne $Rbs)
             {
                 foreach ($1 in $Rbs)
                 {
                     $Data = $1.PROPERTIES
+                    $LastModified = try { if ($null -ne $Data.lastModifiedTime) { ([datetime]$Data.lastModifiedTime).ToString('MM/dd/yyyy HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) } else { 'Unknown' } } catch { 'Unknown' }
 
                     $Obj = @{
                         'ID'                            = $1.id;
@@ -35,7 +34,7 @@ if ($Task -eq 'Processing')
                         'AutomationAccountCreatedTime'  = $Timecreated;
                         'Location'                      = $0.LOCATION;
                         'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
-                        'LastModifiedTime'              = ([datetime]$Data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
+                        'LastModifiedTime'              = $LastModified;
                         'RunbookState'                  = $Data.state;
                         'RunbookType'                   = $Data.runbookType;
                         'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };
@@ -69,3 +68,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

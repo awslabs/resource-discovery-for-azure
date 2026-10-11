@@ -2,10 +2,10 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Vmss = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachinescalesets' }
-    $AutoScale = $Resources | Where-Object { $_.TYPE -eq "microsoft.insights/autoscalesettings" -and $_.Properties.enabled -eq 'true' }
-    $AKS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerservice/managedclusters' }
-    $SFC = $Resources | Where-Object { $_.TYPE -eq 'microsoft.servicefabric/clusters' }
+    $Vmss = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/virtualmachinescalesets') { $Row } }
+    $AutoScale = foreach ($Row in $Resources) { if ($Row.TYPE -eq "microsoft.insights/autoscalesettings" -and $Row.Properties.enabled -eq 'true') { $Row } }
+    $AKS = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerservice/managedclusters') { $Row } }
+    $SFC = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.servicefabric/clusters') { $Row } }
 
     $Vmsizemap = @{}
 
@@ -13,8 +13,19 @@ if ($Task -eq 'Processing')
     {
         $SavedDebugPref = $DebugPreference
         $DebugPreference = 'SilentlyContinue'
-        $Skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
-        $DebugPreference = $SavedDebugPref
+        try
+        {
+            $Skus = Get-AzComputeResourceSku -Location $location -ErrorAction Stop | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        }
+        catch
+        {
+            Write-Verbose ("VMSS: SKU lookup skipped for '{0}': {1}. vCPUs/RAM fall back to '0' for scale sets in that region." -f $location, $_.Exception.Message)
+            $Skus = $null
+        }
+        finally
+        {
+            $DebugPreference = $SavedDebugPref
+        }
 
         foreach ($vmsize in $Skus)
         {
@@ -47,15 +58,16 @@ if ($Task -eq 'Processing')
             if ([string]::IsNullOrEmpty($RelatedAKSId)) { $RelatedId = ($SFC | Where-Object { $_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint }).id }else { $RelatedId = $RelatedAKSId }
             $Related = if ([string]::IsNullOrEmpty($RelatedId)) { $RelatedId } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($RelatedId)) { $ResourceIdDictionary[$RelatedId] } else { 'obfuscated' } } else { $RelatedId.split('/')[8] }
 
-            $Timecreated = $Data.timeCreated
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
-            $Cpus = $Vmsizemap[$1.sku.name].CPU;
-            $Ram = $Vmsizemap[$1.sku.name].RAM;
+            $SkuName = $1.sku.name
+            $Cpus = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].CPU } else { $null }
+            $Ram = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].RAM } else { $null }
 
             $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
             $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
+
+            $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
             $Obj = @{
                 'ID'                            = $1.id;
@@ -78,6 +90,7 @@ if ($Task -eq 'Processing')
                 'StorageAccountType'            = $Data.virtualMachineProfile.storageProfile.osDisk.managedDisk.storageAccountType;
                 'AcceleratedNetworkingEnabled'  = $Data.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.properties.enableAcceleratedNetworking;
                 'CreatedTime'                   = $Timecreated;
+                'Tags'                          = $Tags;
             }
 
             $Tmp += $Obj
@@ -86,3 +99,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $IOTHubs = $Resources | Where-Object { $_.TYPE -eq 'microsoft.devices/iothubs' }
+    $IOTHubs = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.devices/iothubs') { $Row } }
 
     if ($IOTHubs)
     {
@@ -13,17 +13,20 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            foreach ($loc in $Data.locations)
+            $Locations = @($Data.locations)
+            if ($Locations.Count -eq 0) { $Locations = @($null) }
+
+            foreach ($loc in $Locations)
             {
                 $Obj = @{
                     'ID'                                = $1.id;
                     'Subscription'                      = $Sub1.Name;
                     'ResourceGroup'                     = $1.RESOURCEGROUP;
                     'Name'                              = $1.NAME;
-                    'SKU'                               = $Data.sku.name;
-                    'SKUTier'                           = $Data.sku.tier;
-                    'Location'                          = $loc.location;
-                    'Role'                              = $loc.role;
+                    'SKU'                               = $1.sku.name;
+                    'SKUTier'                           = $1.sku.tier;
+                    'Location'                          = if ($null -eq $loc) { $null } else { $loc.location };
+                    'Role'                              = if ($null -eq $loc) { $null } else { $loc.role };
                     'State'                             = $Data.state;
                     'EventRetentionTimeInDays'          = [string]$Data.eventHubEndpoints.events.retentionTimeInDays;
                     'EventPartitionCount'               = [string]$Data.eventHubEndpoints.events.partitionCount;
@@ -39,3 +42,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

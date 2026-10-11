@@ -1,21 +1,5 @@
-# New-RdaAllSubHtmlSummary unit tests
-# =============================================================================
-# Offline, self-contained tests for the aggregate all-subscriptions HTML summary
-# (New-RdaAllSubHtmlSummary in Functions/AllSubHtmlSummary.Functions.ps1). They
-# build a synthetic set of per-subscription report folders (each a
-# ResourcesReport<id>/ with a loose Inventory_*.json and a stub .html) in a temp
-# dir, invoke the builder against them, and assert on the produced HTML: run
-# totals equal the sum of fixtures, one row per subscription, self-containment
-# (no external CDN refs), obfuscation posture detection, health banners,
-# -Detailed charts, -SinceTime scoping, and fail-soft behaviour on an unreadable
-# inventory.
-#
-# No live Azure and no real GUIDs: obfuscated fixtures mint prod_/nonprod_
-# tokens at runtime with [guid]::NewGuid(). The only literal GUID in this file
-# is the Azure documentation placeholder (12345678-1234-1234-1234-123456789012),
-# used by the obfuscation-redaction tests to prove a passed-in tenant id is
-# suppressed under -Obfuscated.
-# =============================================================================
+# Offline unit tests for New-RdaAllSubHtmlSummary (Functions/AllSubHtmlSummary.Functions.ps1): build synthetic per-subscription report folders and assert on the produced aggregate HTML.
+# No live Azure and no real GUIDs - obfuscated fixtures mint prod_/nonprod_ tokens at runtime; the one literal GUID is the Azure documentation placeholder.
 
 BeforeAll {
     # Dot-source the function library under test so New-RdaAllSubHtmlSummary (and
@@ -27,12 +11,8 @@ BeforeAll {
     $script:TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('AllSubHtmlSummaryTest_' + [guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $script:TmpRoot -Force | Out-Null
 
-    # Build one synthetic per-subscription report folder.
-    #   -Services : hashtable of serviceName -> record count
-    #   -SubName  : the Subscription value stamped on every record
-    #   -Obfuscated : use prod_ GUID tokens for record Name + Subscription
-    #   -NoHtml   : omit the sibling .html (to exercise the "no report" link)
-    #   -BadInventory : write non-JSON so the fail-soft path is exercised
+    # Build one synthetic per-subscription report folder; switches select obfuscated
+    # tokens (-Obfuscated), a missing sibling .html (-NoHtml), or non-JSON to exercise the fail-soft path (-BadInventory).
     function New-SubFolder
     {
         param(
@@ -97,6 +77,30 @@ AfterAll {
 
 Describe 'New-RdaAllSubHtmlSummary aggregate report' {
 
+    It 'shows the discovered total beside the report total only when every row has a discovery count' {
+        $Run = New-Run
+        $DirA = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1 } -SubName 'Sub A'
+        $DirB = New-SubFolder -Root $Run -Services @{ AppServices = 2 } -SubName 'Sub B'
+        # Discovery found more than the reports hold: types no collector covers.
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Sub A'; Id = 'id-a'; Count = 7; Zip = (Join-Path $DirA 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Sub B'; Id = 'id-b'; Count = 4; Zip = (Join-Path $DirB 'ResourcesReport_b.zip') }
+        )
+        $Out = Join-Path $Run 'main.html'
+        $Printed = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -ProcessedSubscriptions $Processed 6>&1 | ForEach-Object { [string]$_ })
+        $Html = Get-Content -Path $Out -Raw
+        (Get-Card $Html 'Total resources in the reports') | Should -Be '5'
+        (Get-Card $Html 'Discovered by Resource Graph') | Should -Be '11' -Because '7+4 is what the wrapper prints as Resources Discovered'
+        @($Printed | Where-Object { $_ -like '*5 resource(s) in the reports (11 discovered, all types)*' }).Count | Should -Be 1
+
+        # One row without a discovery count: a partial sum would be wrong, so no discovered total.
+        $Out2 = Join-Path $Run 'main2.html'
+        $Printed2 = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out2 -ProcessedSubscriptions @($Processed[0]) 6>&1 | ForEach-Object { [string]$_ })
+        $Html2 = Get-Content -Path $Out2 -Raw
+        $Html2 | Should -Not -Match 'Discovered by Resource Graph'
+        @($Printed2 | Where-Object { $_ -like '*5 resource(s) in the reports, *' }).Count | Should -Be 1
+    }
+
     It 'produces a self-contained HTML whose totals equal the sum of the fixtures' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1 } -SubName 'Sub A' | Out-Null
@@ -109,8 +113,13 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         Test-Path -Path $Out | Should -BeTrue
         (Get-Card $Html 'Total resources') | Should -Be '5' -Because '2+1+2 across the two fixtures'
         (Get-Card $Html 'Subscriptions') | Should -Be '2'
-        # Self-contained: no external CDN/js/css references.
-        ($Html -match '(?i)src="https?://' -or $Html -match '(?i)href="https?://' -or $Html -match '(?i)cdn|googleapis|jsdelivr') | Should -BeFalse
+        # Self-contained: no external CDN/js/css references. Split into separate
+        # assertions so a failure names WHICH kind of external reference leaked
+        # (external script src, external href, or a known CDN host) rather than a
+        # single opaque BeFalse.
+        $Html | Should -Not -Match '(?i)src="https?://' -Because 'no external script/image src'
+        $Html | Should -Not -Match '(?i)href="https?://' -Because 'no external stylesheet/link href'
+        $Html | Should -Not -Match '(?i)cdn|googleapis|jsdelivr' -Because 'no known external CDN host'
         # No <script> at all (pure static HTML).
         ($Html -match '<script') | Should -BeFalse
     }
@@ -268,6 +277,46 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
         Test-Path -Path ($OutDir + '.zip') | Should -BeTrue -Because '-PackageZip zips the reconstructed folder'
     }
 
+    It 'reconstructs self-contained reports and a self-contained -PackageZip bundle (no external CDN/js/css references)' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run
+        $OutDir = Join-Path $Run 'rebuilt_selfcontained'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+
+        # Self-containment is a per-file contract on the shareable artefact: aggregate AND
+        # every re-rendered per-sub report must carry no EXTERNAL reference. Unlike the aggregate-only guard, '<script' is NOT asserted here because a per-sub report legitimately carries an inline <script>.
+        $ReconstructedHtml = @(Get-ChildItem -Path $OutDir -Recurse -Filter '*.html' -File)
+        $ReconstructedHtml.Count | Should -BeGreaterThan 0
+        foreach ($Hf in $ReconstructedHtml)
+        {
+            $Content = Get-Content -Path $Hf.FullName -Raw
+            ($Content -match '(?i)src="https?://' -or $Content -match '(?i)href="https?://' -or $Content -match '(?i)cdn|googleapis|jsdelivr') |
+                Should -BeFalse -Because "reconstructed report '$($Hf.Name)' must be self-contained"
+        }
+
+        # ...and the same holds for every html carried INSIDE the -PackageZip bundle
+        # (the artefact an operator actually shares), read from the archive itself.
+        $Bundle = $OutDir + '.zip'
+        Test-Path -Path $Bundle | Should -BeTrue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Bundle)
+        try
+        {
+            $HtmlEntries = @($Archive.Entries | Where-Object { $_.FullName -like '*.html' })
+            $HtmlEntries.Count | Should -BeGreaterThan 0
+            foreach ($Entry in $HtmlEntries)
+            {
+                $Reader = New-Object System.IO.StreamReader($Entry.Open())
+                try { $EntryText = $Reader.ReadToEnd() }
+                finally { $Reader.Dispose() }
+                ($EntryText -match '(?i)src="https?://' -or $EntryText -match '(?i)href="https?://' -or $EntryText -match '(?i)cdn|googleapis|jsdelivr') |
+                    Should -BeFalse -Because "bundle entry '$($Entry.FullName)' must carry no external reference"
+            }
+        }
+        finally { $Archive.Dispose() }
+    }
+
     It 'throws on an archive that holds no per-subscription reports' {
         $Run = New-Run
         $Junk = Join-Path $Run 'junk.zip'
@@ -309,14 +358,8 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
     }
 
     It 'excludes a leftover *_revealed.zip so no de-obfuscated report leaks into the reconstruction or the -PackageZip bundle' {
-        # Regression for the PII leak vector: the reveal engine names only the OUTER
-        # zip *_revealed.zip and rewrites the inner html/json members IN PLACE (their
-        # names carry no _revealed marker). A member-name-only filter would let those
-        # real-data members through; the guard must exclude at the zip/folder
-        # SELECTION level. Build a consolidated zip that carries one legitimate
-        # obfuscated inner report PLUS a leftover ResourcesReport_<id>_revealed.zip
-        # whose members hold a real (identifiable) marker, then assert the marker
-        # never reaches the reconstruction or the shareable bundle.
+        # Regression for the PII leak vector: the reveal engine names only the OUTER zip
+        # *_revealed.zip and rewrites the inner html/json members IN PLACE (no marker on their names), so the exclusion must act at the zip/folder SELECTION level, not by member name.
         $Run = New-Run
         $Marker = 'REAL-IDENTIFIER-DO-NOT-LEAK'
         $Stage = Join-Path $Run ('revsrc_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
@@ -365,6 +408,31 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
         }
         finally { $Archive.Dispose() }
     }
+
+    It 'packages the reconstructed folder, not a decoy sibling, when the run folder name contains brackets' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run          # fixture built in a plain folder (the helper globs)
+        $Bracketed = Join-Path $Run 'reports [1]'
+        New-Item -ItemType Directory -Path $Bracketed -Force | Out-Null
+        $OutDir = Join-Path $Bracketed 'rebuilt_pkg'
+        # Under -Path, 'reports [1]/rebuilt_pkg/*' also matches 'reports 1/rebuilt_pkg/*'. Plant a decoy there.
+        $DecoyDir = Join-Path (Join-Path $Run 'reports 1') 'rebuilt_pkg'
+        New-Item -ItemType Directory -Path $DecoyDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $DecoyDir 'DECOY.txt') -Value 'decoy'
+
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+
+        $Zip = $OutDir + '.zip'
+        Test-Path -LiteralPath $Zip | Should -BeTrue
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+        try
+        {
+            $Names = @($Archive.Entries | ForEach-Object FullName)
+            $Names | Should -Not -Contain 'DECOY.txt' -Because 'the package must come from the bracketed folder, not the sibling that matches it as a wildcard'
+            ($Names | Where-Object { $_ -like '*.html' }).Count | Should -BeGreaterThan 0
+        }
+        finally { $Archive.Dispose() }
+    }
 }
 
 Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak guard)' {
@@ -380,7 +448,8 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
             -TenantId $RealTenant `
             -FailedSubscriptions @('Contoso-Prod-Sub') `
             -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) `
-            -MetricsFailedSubs @([pscustomobject]@{ Name = 'Northwind-Metrics'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+            -MetricsFailedSubs @([pscustomobject]@{ Name = 'Northwind-Metrics'; Id = '12345678-1234-1234-1234-123456789012' }) `
+            -MarketplaceFailedSubs @([pscustomobject]@{ Name = 'Adventureworks-Marketplace'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
         $Html = Get-Content -Path $Out -Raw
 
         # No real identifiers reach the shareable summary.
@@ -389,10 +458,12 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
         $Html | Should -Not -Match 'Contoso-Prod-Sub'
         $Html | Should -Not -Match 'Fabrikam-Billing'
         $Html | Should -Not -Match 'Northwind-Metrics'
+        $Html | Should -Not -Match 'Adventureworks-Marketplace'
         # But the banners (and their counts) still render so the operator sees the health signal.
         $Html | Should -Match 'failed to process'
         $Html | Should -Match 'consumption \(billing\) issues'
         $Html | Should -Match 'metrics issues'
+        $Html | Should -Match 'Marketplace \(third-party SaaS billing\) issues'
     }
 
     It 'without -Obfuscated a non-obfuscated bundle still lists the affected subscription names' {
@@ -402,10 +473,185 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
 
         New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out `
             -TenantId '12345678-1234-1234-1234-123456789012' `
-            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) `
+            -MarketplaceFailedSubs @([pscustomobject]@{ Name = 'Adventureworks-Marketplace'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
         $Html = Get-Content -Path $Out -Raw
 
         $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
+        $Html | Should -Match '12345678-1234-1234-1234-123456789012' -Because 'an identifiable bundle renders the actual tenant value, not just the label (mirror of the -Obfuscated suppression check)'
         $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
+        $Html | Should -Match 'Adventureworks-Marketplace' -Because 'an identifiable bundle names the affected Marketplace subs too'
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummary per-subscription Health cell' {
+
+    It 'does not call a subscription ok when it produced no report' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 5 } -SubName 'Sub A' -NoHtml | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>Sub A</td><td class="num">5</td><td><span class="tag warn">incomplete</span></td>'
+        $Html | Should -Not -Match '<span class="tag ok">ok</span>' -Because 'a subscription that never produced its report did not finish'
+    }
+
+    It 'tags an unreadable inventory incomplete rather than 0 resources' {
+        $Run = New-Run
+        $Dir = New-SubFolder -Root $Run -BadInventory
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Row = '<td>(unreadable inventory: {0})</td><td class="num">0</td><td><span class="tag warn">incomplete</span></td>' -f (Split-Path -Path $Dir -Leaf)
+        $Html | Should -Match ([regex]::Escape($Row)) -Because 'an unreadable inventory is not a finished 0-resource subscription'
+    }
+
+    It 'still tags a finished subscription that returned 0 resources' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{} -SubName 'Empty Sub' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match ([regex]::Escape('<td>(name unavailable - 0 resources)</td><td class="num">0</td><td><span class="tag warn">0 resources</span></td>'))
+    }
+
+    It 'ranks a missing report over a consumption failure, and a consumption failure over 0 resources' {
+        $Run = New-Run
+        $NoReportDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 4 } -SubName 'No Report Sub' -NoHtml
+        $EmptyDir = New-SubFolder -Root $Run -Services @{} -SubName 'Empty Sub'
+        $Processed = @(
+            [pscustomobject]@{ Name = 'No Report Sub'; Id = 'no-report-subscription'; Count = 4; Zip = (Join-Path $NoReportDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Empty Sub'; Id = 'empty-subscription'; Count = 0; Zip = (Join-Path $EmptyDir 'ResourcesReport_b.zip') }
+        )
+        $ConsumptionFailed = @(
+            [pscustomobject]@{ Name = 'No Report Sub'; Id = 'no-report-subscription' }
+            [pscustomobject]@{ Name = 'Empty Sub'; Id = 'empty-subscription' }
+        )
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -ProcessedSubscriptions $Processed -ConsumptionFailedSubs $ConsumptionFailed | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>No Report Sub</td><td class="num">4</td><td><span class="tag warn">incomplete</span></td>' -Because 'a subscription with no report did not finish at all'
+        $Html | Should -Match ([regex]::Escape('<td>(name unavailable - 0 resources)</td><td class="num">0</td><td><span class="tag warn">consumption incomplete</span></td>')) -Because 'a consumption failure matters more than an empty inventory'
+    }
+
+    It 'marks only the subscription whose consumption failed, matched through its report folder rather than display name' {
+        $Run = New-Run
+        $FailedDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Shared Name'
+        $HealthyDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Shared Name'
+        $FailedId = '12345678-1234-1234-1234-123456789012'
+        # The record counts are swapped against the folders' totals, so a join on anything but the
+        # report folder marks the wrong row.
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Shared Name'; Id = $FailedId; Count = 3; Zip = (Join-Path $FailedDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Shared Name'; Id = 'healthy-subscription'; Count = 2; Zip = (Join-Path $HealthyDir 'ResourcesReport_b.zip') }
+        )
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -ProcessedSubscriptions $Processed `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Shared Name'; Id = $FailedId }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>Shared Name</td><td class="num">2</td><td><span class="tag warn">consumption incomplete</span></td>'
+        $Html | Should -Match '<td>Shared Name</td><td class="num">3</td><td><span class="tag ok">ok</span></td>' -Because 'two subscriptions can share a display name, so a failure is tied to a row by id only'
+    }
+
+    It 'marks a <Phase> failure on its own row, ranked below a consumption failure' -ForEach @(
+        @{ Phase = 'metrics'; Parameter = 'MetricsFailedSubs'; Tag = 'metrics incomplete' }
+        @{ Phase = 'marketplace'; Parameter = 'MarketplaceFailedSubs'; Tag = 'marketplace incomplete' }
+    ) {
+        $Run = New-Run
+        $FailedDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Phase Failed'
+        $BothDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 3 } -SubName 'Both Failed'
+        $HealthyDir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 4 } -SubName 'Healthy'
+        $Processed = @(
+            [pscustomobject]@{ Name = 'Phase Failed'; Id = 'phase-failed-subscription'; Count = 2; Zip = (Join-Path $FailedDir 'ResourcesReport_a.zip') }
+            [pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription'; Count = 3; Zip = (Join-Path $BothDir 'ResourcesReport_b.zip') }
+            [pscustomobject]@{ Name = 'Healthy'; Id = 'healthy-subscription'; Count = 4; Zip = (Join-Path $HealthyDir 'ResourcesReport_c.zip') }
+        )
+        $PhaseFailures = @(
+            [pscustomobject]@{ Name = 'Phase Failed'; Id = 'phase-failed-subscription'; Message = 'stopped' }
+            [pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription'; Message = 'stopped' }
+        )
+        $Out = Join-Path $Run 'main.html'
+        $Splat = @{
+            RunOutputDirectory     = $Run
+            HtmlFile               = $Out
+            ProcessedSubscriptions = $Processed
+            $Parameter             = $PhaseFailures
+            ConsumptionFailedSubs  = @([pscustomobject]@{ Name = 'Both Failed'; Id = 'both-failed-subscription' })
+        }
+
+        New-RdaAllSubHtmlSummary @Splat | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match ('<td>Phase Failed</td><td class="num">2</td><td><span class="tag warn">{0}</span></td>' -f $Tag)
+        $Html | Should -Match '<td>Both Failed</td><td class="num">3</td><td><span class="tag warn">consumption incomplete</span></td>' -Because 'a consumption failure outranks the other phases on one row'
+        $Html | Should -Match '<td>Healthy</td><td class="num">4</td><td><span class="tag ok">ok</span></td>'
+    }
+
+    It 'marks an obfuscated row without printing the real subscription name or id' {
+        $Run = New-Run
+        $Dir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated
+        $FailedId = '12345678-1234-1234-1234-123456789012'
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated `
+            -ProcessedSubscriptions @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = $FailedId; Count = 2; Zip = (Join-Path $Dir 'ResourcesReport_a.zip') }) `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = $FailedId }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<span class="tag warn">consumption incomplete</span>'
+        $Html | Should -Not -Match 'Fabrikam-Billing'
+        $Html | Should -Not -Match ([regex]::Escape($FailedId)) -Because 'the id only joins the row; it is never rendered'
+    }
+
+    It 'does not guess a failure onto a row by name when no per-subscription records are passed' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Fabrikam-Billing' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012' }) | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<td>Fabrikam-Billing</td><td class="num">2</td><td><span class="tag ok">ok</span></td>' -Because 'without the wrapper records there is no safe row-to-subscription join'
+        $Html | Should -Match 'consumption \(billing\) issues' -Because 'the run-level banner still reports it'
+    }
+
+    It 'is handed the per-subscription records by Run-AllSubscriptions.ps1' {
+        # Without them no failure can be joined to its row, and every finished row reads ok again.
+        $ParseErrors = $null
+        $WrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$ParseErrors)
+        $ParseErrors | Should -BeNullOrEmpty
+        $Calls = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'New-RdaAllSubHtmlSummary' }, $true))
+        $Calls.Count | Should -BeGreaterThan 0 -Because 'the wrapper builds MainSummary.html on every run'
+        foreach ($Call in $Calls)
+        {
+            $Elements = @($Call.CommandElements)
+            $At = @(0..($Elements.Count - 1) | Where-Object { $Elements[$_] -is [System.Management.Automation.Language.CommandParameterAst] -and $Elements[$_].ParameterName -eq 'ProcessedSubscriptions' })
+            $At.Count | Should -Be 1 -Because 'each MainSummary build needs the records to join a failure to its row'
+            $Records = $Elements[$At[0] + 1]
+            $Records | Should -BeOfType ([System.Management.Automation.Language.VariableExpressionAst]) -Because 'the wrapper hands over the records it built, not a literal'
+            # Every place the wrapper builds one of those records must give it the two keys the join
+            # filters on; a record without them is dropped silently and its row reads ok.
+            $Builds = @($WrapperAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Operator -eq 'PlusEquals' -and $N.Left.Extent.Text -eq $Records.Extent.Text }, $true))
+            $Builds.Count | Should -BeGreaterThan 0 -Because 'the sequential, single-subscription and parallel paths each build the records'
+            foreach ($Build in $Builds)
+            {
+                $Table = $Build.Right.Find({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] }, $true)
+                $Table | Should -Not -BeNullOrEmpty -Because ('line {0} builds a record without a hashtable' -f $Build.Extent.StartLineNumber)
+                $Keys = @($Table.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text })
+                $Keys | Should -Contain 'Id' -Because ('line {0} must carry the Id the consumption failure is matched on' -f $Build.Extent.StartLineNumber)
+                $Keys | Should -Contain 'Zip' -Because ('line {0} must carry the Zip whose folder joins the row' -f $Build.Extent.StartLineNumber)
+            }
+        }
     }
 }

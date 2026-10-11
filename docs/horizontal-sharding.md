@@ -1,0 +1,725 @@
+# Horizontal sharding — splitting a tenant across many machines
+
+When a tenant has thousands of subscriptions, one machine can take a long time
+to inventory all of them. Horizontal sharding lets you run the same tool on
+several machines at once, with each machine responsible for a slice of the
+subscriptions — no central coordinator, no shared database, and no risk of two
+machines doing the same subscription or of a subscription being missed.
+
+This document explains how it works in plain terms and how to use it. If you
+just want to know how many machines to use, skip to
+[Choosing the shard count](#choosing-the-shard-count--plan); if you need to
+recover an interrupted run or catch a subscription added later, see
+[Resuming, retrying, and adding subscriptions later](#resuming-retrying-and-adding-subscriptions-later).
+
+> **See also:** for the `-ShardCount` / `-ShardIndex` parameters and how they
+> compose with `-ParallelStreams`, see
+> [variables/scaling-sharding-output.md](variables/scaling-sharding-output.md).
+
+## The problem it solves
+
+Say you have 10 machines and a very large tenant. You want each machine to do a
+roughly equal share of the subscriptions (about a tenth each), with two hard
+rules:
+
+- **No subscription is done twice** (that would waste time).
+- **No subscription is skipped** (that would leave gaps in the report).
+
+The catch: you don't want the machines talking to each other or sharing a
+database to divide the work. Each machine should simply *know* which
+subscriptions are its job. That is exactly what hash sharding does.
+
+## The one idea: a repeatable fingerprint
+
+Every Azure subscription has an ID that looks like a GUID
+(`4a1f9c2b-....-............`). A **hash function** (SHA-256) takes that ID and
+turns it into a large, scrambled number. The key property is that it is
+**repeatable**: the same subscription ID always produces the same number — on
+every machine, every time. Feed in the ID, always get the same fingerprint out.
+
+We then take that big number and compute `number mod ShardCount` (the remainder
+after dividing by the number of machines). With 10 machines that always yields a
+result from 0 to 9 — a **bucket number**. So every subscription is permanently
+assigned to one bucket, based purely on its own ID.
+
+That is the whole trick. In the code this is the function
+`Get-ShardKeyForSubscription` in `Functions/RunAllSubscriptions.Functions.ps1`:
+
+```powershell
+Get-ShardKeyForSubscription -SubscriptionId <the GUID> -ShardCount 10
+# -> returns a bucket number 0..9
+```
+
+(If `ShardCount` is 1, it simply returns 0 — the "no sharding" case, which is
+the normal single-machine behaviour.)
+
+### Why SHA-256 and not a simpler hash
+
+The bucket must be identical on every machine and every OS. `[string].GetHashCode()`
+is *randomized per process* in modern .NET, so two machines would disagree.
+SHA-256 of the lowercased ID is stable across processes, operating systems, and
+CPU architectures. The first 4 bytes of the hash are assembled big-endian into a
+number before the `mod`, so an x64 host and an ARM host compute the same bucket
+for the same ID.
+
+## How each machine uses it
+
+Every machine runs the same command, changing only **which bucket is mine**:
+
+```powershell
+# Machine 0
+./Run-AllSubscriptions.ps1 -ShardIndex 0 -ShardCount 10
+# Machine 1
+./Run-AllSubscriptions.ps1 -ShardIndex 1 -ShardCount 10
+# ...
+# Machine 9
+./Run-AllSubscriptions.ps1 -ShardIndex 9 -ShardCount 10
+```
+
+Inside, each machine does three things:
+
+1. Asks Azure for the **full list** of all subscriptions (every machine sees the
+   same list).
+2. For each subscription, computes its bucket number (0–9).
+3. **Keeps only the subscriptions whose bucket matches its own `-ShardIndex`**
+   and ignores the rest.
+
+Steps 2 and 3 are the function `Select-ShardSubscriptions`. Machine 3 keeps only
+subscriptions that hash to bucket 3; machine 7 keeps only bucket 7; and so on.
+
+## A worked example
+
+Four subscriptions, 10 machines:
+
+| Subscription ID | Hash → bucket (mod 10) | Handled by |
+|-----------------|------------------------|------------|
+| `aaaa…`         | 7                      | Machine 7  |
+| `bbbb…`         | 2                      | Machine 2  |
+| `cccc…`         | 7                      | Machine 7  |
+| `dddd…`         | 0                      | Machine 0  |
+
+Machine 7 looks at all four, sees `aaaa` and `cccc` land in bucket 7, and does
+those two. Machine 2 does `bbbb`. Machine 0 does `dddd`. Machines 1, 3, 4, 5, 6,
+8, and 9 look at the same four subscriptions and keep none of them. Every
+subscription is done exactly once, and no machine coordinated with any other.
+
+## Why the two hard rules hold automatically
+
+- **Nothing is done twice:** a subscription has exactly one hash, so it lands in
+  exactly one bucket, so exactly one machine claims it.
+- **Nothing is skipped:** every subscription lands in *some* bucket from 0 to
+  `ShardCount-1`, and there is a machine for every bucket, so all of them are
+  covered.
+- **No coordination is needed:** the bucket depends *only* on the subscription's
+  own ID — not on what other subscriptions exist, and not on what the other
+  machines are doing — so all machines independently reach the same conclusions.
+  They never have to talk to each other.
+
+There is also a useful safety property: if a subscription is created or deleted,
+it only affects its *own* bucket. It never reshuffles where the other
+subscriptions go. That stability is why the split cannot be computed "per
+machine" for the weighted variant — see the limitation below.
+
+## The one limitation: balanced by count, not by size
+
+Buckets are balanced by **number of subscriptions**, not by how big each
+subscription is. Each machine gets roughly the same *count* of subscriptions,
+but if one of them happens to be a very large subscription (say 40,000
+resources), the machine that draws it will take longer than the others. Hash
+sharding spreads the *number* of subscriptions evenly; it cannot see that one
+subscription is a "whale".
+
+For most tenants, with thousands of subscriptions, this evens out well enough in
+practice. If subscription size is very uneven and wall-clock balance matters,
+two other approaches address it:
+
+- **Weighted plan (`-Plan`):** do one cheap pre-pass that counts each
+  subscription's projected **metric-query volume** (via Resource Graph — this is
+  what actually drives wall time; see [Plan.md](Plan.md)), not its raw resource
+  count. Rather than compute a custom subscription→machine assignment (which
+  would have to be shared with every machine and would break the coordination-
+  free property above), `-Plan` keeps the deterministic hash partition and
+  **simulates** it across candidate shard counts, recommending the smallest count
+  whose busiest shard — under that real hash assignment, so heavy subscriptions
+  clumping together is accounted for — fits under the wall-time ceiling. The
+  assignment each machine uses at run time is still the independent hash, so no
+  cross-machine coordination is needed; only the recommended shard *count* comes
+  from the plan.
+- **Dynamic work-queue:** workers claim subscriptions from a shared store (e.g.
+  Azure Table Storage) as they finish, so a machine that draws a whale simply
+  claims fewer subscriptions. This balances by actual wall-clock and recovers
+  from a crashed worker, at the cost of an external dependency and a claim
+  protocol.
+
+## Rate limits: why ~6 streams per machine, and what sharding actually speeds up
+
+Two different Azure limits govern a run, and they behave very differently under
+scale-out. Understanding them is the key to sizing a large-tenant run.
+
+**Azure Resource Graph (ARG) — the discovery limit — is tenant-wide (~15 req/sec
+per tenant).** Every subscription's resource discovery goes through
+`Search-AzGraph`. This is why `-ParallelStreams` is capped at ~6: beyond roughly
+six concurrent streams in one tenant the ARG calls start returning 429s (the tool
+retries them with backoff, so nothing is lost — but you get no further wall-time
+benefit). Crucially, this limit is **per tenant, not per machine**. When you shard
+across N machines, all N shards still draw ARG queries from the *same* ~15 req/sec
+tenant budget during their discovery bursts. So sharding does **not** linearly
+speed up the discovery phase — at high shard counts, discovery is a shared
+ceiling and shards will back off against each other.
+
+**The metrics and consumption limits are per subscription (per principal).**
+Azure Monitor metric queries and consumption/usage reads throttle at the
+*subscription* level, not tenant-wide. Because each shard owns a **disjoint** set
+of subscriptions (deterministic hash — see above), the shards hit *different*
+throttle buckets. So the metrics and consumption phases — which are normally the
+wall-time-dominant part of a run — parallelize **beautifully** across shards:
+N shards ≈ N× the metrics/consumption throughput.
+
+**What this means in practice:**
+
+- Sharding is worth it because it scales the expensive part (metrics/consumption),
+  even though the cheap part (ARG discovery) stays tenant-limited.
+- Adding more, smaller machines past the point where discovery dominates gives
+  diminishing returns — the ARG ceiling caps aggregate discovery regardless of
+  machine count.
+- `-HeadRoom N` (leave N% of concurrency in reserve) lowers the run's peak request
+  rate so it competes less with your production workloads for the shared
+  limits — recommended on a live production tenant.
+- `-UseMetricsBatch` (Azure Monitor `metrics:getBatch`, one REST call per ≤50
+  resources instead of one `Get-AzMetric` per resource-per-metric) sharply cuts
+  the metrics phase's call volume and time. It does **not** change the ARG cap
+  (different subsystem), but by shrinking metrics it lets each stream/shard finish
+  faster and consume far less of the Azure Monitor budget. Batchable services:
+  VMs, managed disks, storage accounts, SQL databases, VM scale sets, Cosmos DB;
+  anything else stays on the per-call path, and any batch failure falls back to
+  per-call (no data lost).
+
+If ARG's ~15 req/sec/tenant genuinely becomes your bottleneck at very high shard
+counts, that is an ARG tenant-quota conversation with Microsoft, not a tuning knob
+in this tool.
+
+## Choosing the shard count (`-Plan`)
+
+You don't have to guess how many machines to use. Run the wrapper once with
+`-Plan` and it sizes the job for you, then exits **without inventorying
+anything**:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -Plan
+```
+
+`-Plan` authenticates, enumerates the tenant's eligible subscriptions, reads this
+machine's CPU and RAM (to pick `-ParallelStreams` / `-ConcurrencyLimit`), and then
+sizes the run from **live metric-query volume** - because the metrics phase is what
+dominates wall time, not the raw resource count. One aggregate Resource Graph query
+per chunk of subscriptions (Resource Graph caps how many a single query may name)
+sums each subscription's projected
+metric-query weight (attached disks x4, VMs x2, SQL databases x8, storage accounts
+x1, scale sets x2, Cosmos x4, and so on), honouring the same metric gating the real
+run uses, and returns the batchable share separately so `-UseMetricsBatch` only
+discounts the types that can genuinely be batched. That weight becomes seconds via
+a fixed per-subscription base overhead plus `per-query cost x weight`, times a
+safety margin. [Plan.md](Plan.md) records the measurements behind the model.
+
+It then **simulates the real hash partition** - the same `hash(id) mod ShardCount`
+every machine computes - across candidate shard counts, and picks the smallest
+count whose *busiest* shard finishes under a ~2-hour wall-clock ceiling. Sizing
+against the real partition means heavy subscriptions clumping onto one shard is
+accounted for rather than assumed away. It never recommends more shards than there
+are subscriptions. One of three verdicts comes out:
+
+- **Single machine** - the whole tenant fits under the ceiling. Prints one
+  ready-to-run command with the tuned `-ParallelStreams` / `-ConcurrencyLimit`.
+- **Shard across N machines** - prints the recommended shard count, the
+  approximate subscriptions-per-machine, the busiest-shard estimate, and the
+  ready-to-paste per-node commands (same command, distinct `-ShardIndex`).
+- **Ceiling unreachable** - no shard count gets under the ceiling. It leads with
+  the warning (never with a recommendation it then contradicts), names the reason,
+  and does not claim the fallback fits:
+  - **One subscription alone exceeds the ceiling.** Sharding splits work *across*
+    subscriptions and cannot speed up *one*, so no shard count fixes this. Cut
+    that subscription's metrics load instead: `-SkipDiskMetrics` (disk queries
+    dominate volume), `-UseMetricsBatch` (cuts per-query cost),
+    `-MetricsIntervalMinutes 60` (shrinks each response),
+    `-MetricsLookbackDays 14` (shortens the window each response covers).
+  - **Even one shard per subscription is not enough** - the maximum useful count,
+    and the hash partition still clumps enough mid-weight subscriptions onto one
+    shard. Same remedy: reduce metrics load.
+
+Every verdict ends with a machine-readable `PLAN_SHARDCOUNT=<n>` line (`n=1` for
+the single-machine case), so an automating wrapper doesn't have to scrape the prose
+- which matters because the printed per-node command list is capped at 10. When the
+count is above 1 that is followed by an explicit "run ALL indices `0..N-1`, one per
+machine" directive, since any index you don't run is silently omitted from the
+combined result.
+
+**Pass the same flags you intend to use for the real run**, because they change the
+estimate: `-SkipMetrics` / `-SkipConsumption`, the metric-scope switches
+`-SkipDiskMetrics` / `-IncludeStorageMetrics`, and
+`-UseMetricsBatch`. Explicit
+`-ParallelStreams` / `-ConcurrencyLimit` are honoured exactly as the real run
+honours them (auto-tuned values fill in only what you don't pass), and the output
+labels each one `explicit` or `auto`.
+
+### Calibrating the estimate
+
+The default per-metric-query costs (~9.5 s for a throttled per-call query, ~0.5 s
+for batched types) are deliberately rough and round up. For a tenant-accurate
+figure, measure it from a prior run - metrics-phase seconds divided by
+metric-query count, both in that run's `Diagnostics_*.log` - and pass it:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID <tenant-id> -Plan -UseMetricsBatch -PlanPerQuerySeconds 0.4
+```
+
+Two fallbacks to watch for in the output:
+
+- With `-SkipMetrics`, or when Resource Graph is unusable (no `Az.ResourceGraph`
+  module, or the weight query failed), `-Plan` falls back to a **coarse flat
+  per-subscription** estimate that ignores metric composition. When the cause is a
+  Resource Graph failure it says so explicitly, because that estimate can under- or
+  over-size a tenant with uneven metric load.
+- Subscriptions that matched no metric-eligible resources are sized at base
+  overhead only, and how many did so is printed. If you expected metrics there, the
+  signed-in identity most likely lacks Resource Graph visibility into those
+  subscriptions.
+
+The output is guidance, not a guarantee: it is a conservative lower bound with a
+built-in safety margin, and throttling adds run-to-run variance that no static
+count model captures. Treat the shard count as a sensible starting point, and keep
+the rate-limit ceiling above in mind - past the point where Resource Graph
+discovery dominates, adding machines gives diminishing returns.
+
+## Parameters reference
+
+| Parameter               | Meaning                                                         | Default |
+|-------------------------|-----------------------------------------------------------------|---------|
+| `-ShardCount`           | Total number of machines (buckets) splitting the tenant         | `1` (no sharding) |
+| `-ShardIndex`           | Which bucket *this* machine handles, from `0` to `ShardCount-1`  | `0`     |
+| `-Plan`                 | Assess only: size the run, print a recommended shard count and the per-node commands, then exit without inventorying anything | off |
+| `-PlanPerQuerySeconds`  | `-Plan` only: wall-time cost of one Azure Monitor metric query, overriding the rough auto-picked default | `0` (auto) |
+
+Notes:
+
+- `ShardCount = 1` (the default) means no sharding — the machine processes every
+  eligible subscription, exactly as before.
+- `ShardIndex` must be in the range `0 .. ShardCount-1`; the wrapper validates
+  this up front and stops with a clear message otherwise.
+- Run **one shard per machine**. Each machine should use its own inventory
+  output folder. The resume-state file is scoped per shard, so `-Resume` on a
+  machine only resumes that machine's own slice.
+
+## Resuming, retrying, and adding subscriptions later
+
+Each shard keeps its own **resume-state file**
+(`.resume-state-<tenant>-shard-<index>of<count>.json`), written after every
+subscription. It records which subscriptions completed successfully
+(`CompletedSubscriptionIds`) and which failed, with the reason and attempt count
+(`FailedAttempts`). Because the filename is shard-scoped, shards never clobber
+each other's progress.
+
+Two switches read that file:
+
+- **`-Resume`** — continue an **interrupted** run (a timeout, a kill, a Cloud
+  Shell session ending). It skips the subscriptions already marked complete and
+  processes the rest — both the ones that failed and the ones never reached. Run
+  the same command that was interrupted, on the same machine (same `-ShardIndex`
+  / `-ShardCount`), with `-Resume` added.
+- **`-ResumeFailedOnly`** — the run **completed**, but a handful of subscriptions
+  failed (a transient throttle or auth blip). This processes **only** the
+  `FailedAttempts` list — a fast, surgical retry that does not re-walk the whole
+  slice. A retried subscription that now succeeds moves to the completed list and
+  drops off the failure list; if there were no failures it prints "Nothing to
+  retry" and exits 0. An entry whose subscription is listed neither at the start
+  nor at the end of a run is removed by that run, unless the tenant-root management
+  group, when it can be read, still holds it, or the end-of-run listing failed; when
+  none of the entries is listed, `-ResumeFailedOnly` stops with a warning first, and
+  a normal or `-Resume` run clears them.
+
+### Adding a subscription after the campaign has finished
+
+Because a subscription's shard is a pure function of its own id
+(`hash(id) mod ShardCount`), a subscription added later already has a
+well-defined owner shard — nothing has to "learn" about it. To pick it up:
+
+1. Keep **`-ShardCount` identical** to the original campaign.
+2. Re-run **every** index `0 .. ShardCount-1` with `-Resume`.
+
+Each shard re-enumerates the whole tenant (so it now sees the new subscription),
+the hash routes that subscription to its one shard, and `-Resume` skips
+everything already done. So the single shard that owns it collects just the new
+subscription, the other shards collect nothing new — cheap, and you never have to
+work out which shard it landed in.
+
+### Keep `-ShardCount` constant for the whole campaign
+
+`-ShardCount` is **not** stored in the resume state — it lives only in the state
+filename. The tool has no memory that you used, say, 10 yesterday. If you change
+the count, **every** subscription's `mod` changes, so the whole partition
+reshuffles: subscriptions already collected under the old count now hash to
+different shards, and `-Resume` reads a differently-named state file and
+re-collects from scratch — producing overlaps and gaps versus your earlier zips.
+Pin `-ShardCount` in the command or script so it can't drift between runs.
+(Adding subscriptions does **not** require changing the count — a growing tenant
+just puts a few more subscriptions in each existing shard. Only change the count
+if you deliberately want a different fan-out, and if you do, re-run the whole
+set.)
+
+## Collecting the results
+
+Each machine runs its own copy of `Run-AllSubscriptions.ps1`, so each one
+produces its **own** consolidated outer zip
+(`AllSubscriptions_ResourcesReport_<timestamp>.zip`) covering **only its slice**
+of subscriptions. After 10 machines you therefore have **10 separate outer
+zips**.
+
+### Recommended: upload the shard zips separately
+
+Each shard zip is a complete, self-contained report artifact — identical in
+shape to what an ordinary single-machine run produces, just covering fewer
+subscriptions. So each one is exactly like any normal
+run's output: uploading the 10 shard zips is simply 10 normal uploads.
+
+Uploading them separately is usually the better choice:
+
+- It spreads the work across 10 smaller uploads instead of one large
+  merged archive.
+- Because the shards are disjoint by construction, the 10 uploads together cover
+  the whole tenant exactly once, with no duplicates and no gaps — no local merge
+  step is required.
+
+### Optional: merge locally into one MainSummary
+
+You only need to merge locally if you want a single combined `MainSummary.html`
+on your own machine (rather than one summary per shard). Note the tooling here:
+
+- `Build-MainSummaryFromZip.ps1` rebuilds the aggregate `MainSummary.html` from
+  **one** already-consolidated outer zip (via `-InputZip`). It does **not**
+  combine multiple outer zips, and there is currently no single built-in command
+  that merges the per-machine shard zips into one.
+
+Merging is straightforward for the **inner per-subscription zips**, because the
+shard slices are disjoint: no two machines produce a zip for the same
+subscription, so those names cannot collide.
+
+The **root members do collide**, and that is the part to get right. Every shard's
+outer zip carries the same three fixed names at its root - `VMPlacement.txt`,
+`MainSummary.html` and `RunSummary.log`. Extracting all shards into one shared
+folder therefore has each shard overwrite the previous one's copies, leaving only
+the last-enumerated shard's. For `VMPlacement.txt` that is silent data loss: the
+tenant-wide AZ capacity view is exactly what a sharded run is for, and a naive
+merge keeps one shard's slice of it while looking like it worked.
+
+So extract each shard into its **own** subfolder, and concatenate the placement
+files explicitly. Each `VMPlacement.txt` is CSV text, so `Import-Csv` reads it as
+it is. Gather the shard zips into a folder and run:
+
+```powershell
+# 1. Extract each shard into its OWN subfolder. Shards share fixed root member
+#    names (VMPlacement.txt / MainSummary.html / RunSummary.log), so a shared
+#    destination would silently overwrite all but the last.
+$staging = New-Item -ItemType Directory -Path ./tenant-merge -Force
+$placementParts = @()
+foreach ($shard in Get-ChildItem ./shard-zips -Filter 'AllSubscriptions_ResourcesReport_*.zip')
+{
+    $shardDir = Join-Path $staging $shard.BaseName
+    Expand-Archive -Path $shard.FullName -DestinationPath $shardDir -Force
+
+    $csv = Join-Path $shardDir 'VMPlacement.txt'
+    if (Test-Path -LiteralPath $csv) { $placementParts += $csv }
+}
+
+# 2. Collect the inner per-subscription zips up into the staging root. Disjoint
+#    slices, so these names are unique across shards.
+Get-ChildItem -Path $staging -Recurse -Filter 'ResourcesReport_*.zip' |
+    ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $staging $_.Name) -Force }
+
+# 3. Concatenate the shards' placement files into ONE tenant-wide file.
+#    Import-Csv/Export-Csv rather than a text append, so the identical header is
+#    written exactly once instead of reappearing as a data row per shard.
+if ($placementParts.Count -gt 0)
+{
+    $rows = @()
+    foreach ($part in $placementParts) { $rows += @(Import-Csv -LiteralPath $part) }
+    if ($rows.Count -gt 0)
+    {
+        $rows | Export-Csv -LiteralPath (Join-Path $staging 'VMPlacement.txt') -Encoding utf8 -NoTypeInformation
+        Write-Host ("Merged {0} shard placement file(s) into {1} row(s)." -f $placementParts.Count, $rows.Count)
+    }
+}
+
+# 4. Re-zip the per-subscription zips PLUS the merged placement file into one
+#    tenant-wide outer zip (the same shape a single non-sharded run produces).
+$merged = './AllSubscriptions_ResourcesReport_tenant.zip'
+$members = @(Get-ChildItem -Path $staging -File | Where-Object { $_.Extension -in @('.zip', '.txt') })
+Compress-Archive -LiteralPath $members.FullName -DestinationPath $merged -Force
+
+# 5. Build the aggregate MainSummary from the merged zip.
+./Build-MainSummaryFromZip.ps1 -InputZip $merged
+```
+
+Note that `Build-MainSummaryFromZip.ps1` reads only `Inventory_*.json` and the
+report HTML, so it neither consumes nor rewrites `VMPlacement.txt`. Step 4 is what
+puts the merged placement file in the bundle; if you run
+`Build-MainSummaryFromZip.ps1` with `-PackageZip`, its output archive will **not**
+carry the placement file, so keep the step-4 zip as the deliverable.
+
+The per-shard `MainSummary.html` and `RunSummary.log` copies stay in their shard
+subfolders under `$staging`. That is deliberate - each describes only its own
+shard's subscriptions, so there is no meaningful way to merge them, and step 5
+regenerates the tenant-wide summary from the data instead.
+
+## Running the shards on AKS (containers / CI-CD)
+
+The sharding above is transport-agnostic: each shard is just
+`Run-AllSubscriptions.ps1` with a distinct `-ShardIndex`, so you can run the
+shards as VMs, as CI/CD jobs, or as pods on AKS. This section shows the AKS
+path, because it is the most common "spin up N cheap workers, run, tear down"
+pattern — and it is the one verified end-to-end for this guide.
+
+> **Just want the step-by-step?** See the copy-paste runbook
+> [`deploy/AKS-WorkloadIdentity-Setup.md`](../deploy/AKS-WorkloadIdentity-Setup.md) — it walks through the
+> readiness checks, cluster + identity setup, running the Job, collecting output,
+> and troubleshooting. The rest of this section is the same material with more of
+> the "why".
+
+### The access trade-off — read this first
+
+Single-machine and multi-node runs need **different levels of access**:
+
+- A **single-machine** run typically uses the operator's own signed-in identity
+  (`Connect-AzAccount` on a laptop / Cloud Shell). It only needs **Reader** on
+  the subscriptions (plus Cost Management Reader / Monitoring Reader if
+  collecting consumption / metrics).
+- A **multi-node** run trades *more setup and more access* for *far less
+  wall-clock time*. The worker pods are non-interactive, so they authenticate as
+  a **workload identity** (a managed identity federated to the cluster), and
+  someone has to **stand up the cluster** and **grant that identity its roles**.
+
+So multi-node is faster, but it needs an identity with broader, pre-granted
+access and the rights to create the infrastructure. Budget for that before you
+start. Run the readiness check first:
+
+```powershell
+./deploy/Test-MultiNodeReadiness.ps1 -Location <region>
+```
+
+It is read-only and prints a PASS/WARN/FAIL table of everything below.
+
+### RBAC the worker identity (UAMI) needs
+
+Grant these to the user-assigned managed identity the pods federate to. **Scope
+Reader at the tenant-root management group — not per subscription.** Subscriptions
+are discovered with `Get-AzSubscription`, which only returns those the identity has
+a role on, so per-subscription grants that miss some subscriptions cause them to be
+**silently omitted** from every shard (at scale, potentially hundreds). A single
+Reader assignment at the **tenant-root management group** (`GroupId` = tenant id)
+inherits to all current and future subscriptions, eliminating that blind spot. The
+in-pod preflight (`deploy/Test-NodeReadiness.ps1`) fails if the identity can reach
+fewer subscriptions than the tenant-root MG contains.
+
+| Role | Why | Scope |
+|------|-----|-------|
+| **Reader** | inventory (Resource Graph / ARM reads) **and** the management-group read the up-front coverage gate needs | **tenant-root management group (required)** — a per-subscription grant hard-fails the coverage gate unless you pass `-AllowPartialAccess` |
+| **Cost Management Reader** | consumption (omit if `-SkipConsumption`) | billing / subscription |
+| **Monitoring Reader** | metrics (omit if `-SkipMetrics`) | subscription |
+| **Storage Blob Data Contributor** | upload each node's output zip | the collection storage account |
+
+The person doing the setup also needs rights to **create AKS/ACR**
+(Contributor or Owner) and to **create role assignments + federated credentials**
+(Owner or User Access Administrator).
+
+### One-time setup (verified commands)
+
+The cluster / registry / identity / federation commands below were run
+end-to-end against a live subscription for this guide. **One exception:** the
+step-6 Reader assignment is shown at **tenant-root management-group** scope
+because that is what the coverage gate requires, but that specific grant was
+**not** exercised in the guide's test environment (it lacked management-group
+administrator rights). What *was* verified live is the gate's behaviour when the
+identity has no management-group read: the run hard-stops (or, with
+`-AllowPartialAccess`, warns and continues). Granting Reader at the MG root
+resolves that hard-stop; do it if you have the rights (Owner / User Access
+Administrator at the MG). Replace the placeholders; the GUID shown is the Azure
+documentation placeholder, not a real value.
+
+```bash
+RG=rda-inventory-rg
+LOC=<region>                     # e.g. eastus
+ACR=<globally-unique-name>       # lowercase alphanumeric
+CLUSTER=rda-aks
+TENANT_ID=12345678-1234-1234-1234-123456789012   # your tenant id (= tenant-root management-group id)
+
+# 0. Providers (no-op if already registered)
+az provider register -n Microsoft.ContainerService
+az provider register -n Microsoft.ContainerRegistry
+
+# 1. Resource group + registry
+az group create -n "$RG" -l "$LOC"
+az acr create -g "$RG" -n "$ACR" --sku Basic
+
+# 2. Build the worker image downstream (no local Docker needed). The
+#    Dockerfile ships at deploy/Dockerfile; build from the REPO ROOT (the
+#    trailing '.') so the product files - INCLUDING Version.json - are in the
+#    build context. .dockerignore keeps local/dev content out of the image.
+az acr build --registry "$ACR" --image rda:latest --file deploy/Dockerfile .
+
+# 3. Cluster. Pick an x64 node size that is AVAILABLE in your region — some
+#    subscriptions only offer Arm64 B-series (Standard_B2s was rejected in
+#    testing); the readiness check flags this. Standard_D2s_v3 is a safe x64
+#    default. Two small nodes are enough for a handful of subscriptions.
+az aks create -g "$RG" -n "$CLUSTER" --node-count 2 --node-vm-size Standard_D2s_v3 \
+  --tier free --generate-ssh-keys
+
+# 4. Let the cluster pull from the registry.
+az aks update -g "$RG" -n "$CLUSTER" --attach-acr "$ACR"
+
+# 5. Enable workload identity (OIDC issuer + the webhook).
+az aks update -g "$RG" -n "$CLUSTER" --enable-oidc-issuer --enable-workload-identity
+ISSUER=$(az aks show -g "$RG" -n "$CLUSTER" --query oidcIssuerProfile.issuerUrl -o tsv)
+
+# 6. Worker identity + its RBAC (Reader shown; add the others from the table).
+#    Scope Reader at the TENANT-ROOT MANAGEMENT GROUP (its id = your tenant id),
+#    NOT per subscription: it inherits Reader to every current and future
+#    subscription AND grants the management-group read the wrapper's coverage gate
+#    needs to CONFIRM full coverage. A per-subscription grant makes the run
+#    hard-fail the coverage gate (or require -AllowPartialAccess). This assignment
+#    requires you to be Owner / User Access Administrator at the MG root.
+az identity create -g "$RG" -n rda-uami
+CLIENT_ID=$(az identity show -g "$RG" -n rda-uami --query clientId -o tsv)
+PRINCIPAL_ID=$(az identity show -g "$RG" -n rda-uami --query principalId -o tsv)
+az role assignment create --assignee-object-id "$PRINCIPAL_ID" \
+  --assignee-principal-type ServicePrincipal --role Reader \
+  --scope /providers/Microsoft.Management/managementGroups/$TENANT_ID
+
+# 7. Federate the identity to the pod's Kubernetes service account.
+#    Subject MUST be system:serviceaccount:<namespace>:<serviceaccount>.
+az identity federated-credential create --name rda-fic --identity-name rda-uami -g "$RG" \
+  --issuer "$ISSUER" --subject system:serviceaccount:rda:rda-sa \
+  --audience api://AzureADTokenExchange
+```
+
+### The Kubernetes manifests
+
+Two manifests ship in the repo at `deploy/k8s/`:
+
+- `deploy/k8s/serviceaccount.yaml` — the ServiceAccount, annotated with the UAMI
+  client id, that the pods federate to.
+- `deploy/k8s/job.yaml` — the indexed Job. Each pod opts in to workload identity
+  with the `azure.workload.identity/use: "true"` label and derives its shard
+  from the indexed-Job completion index (`JOB_COMPLETION_INDEX`).
+
+Edit the two placeholders, then apply:
+
+```bash
+# 1. Set the UAMI client id in the ServiceAccount annotation.
+#    (CLIENT_ID was captured in setup step 6.)
+sed -i "s|<UAMI-client-id>|$CLIENT_ID|" deploy/k8s/serviceaccount.yaml
+# 2. Set your registry in the Job's image reference.
+sed -i "s|<acr>|$ACR|" deploy/k8s/job.yaml
+
+kubectl create namespace rda --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f deploy/k8s/serviceaccount.yaml
+kubectl apply -f deploy/k8s/job.yaml
+```
+
+In `deploy/k8s/job.yaml`, `completions`, `parallelism`, and the `SHARD_COUNT`
+env value MUST all equal the number of shards — change all three together. The
+`HEAD_ROOM`, `SKIP_METRICS`, and `SKIP_CONSUMPTION` env vars are optional knobs,
+commented in the manifest.
+
+The pod entrypoint ships at `deploy/entrypoint.ps1` and is baked in as the
+image `ENTRYPOINT`, so each pod runs it automatically — you don't author it. It
+signs in with **no secret** (the webhook injects the federated token and the
+identity env vars, and the tool exchanges them via the Az module), derives this
+pod's shard from `JOB_COMPLETION_INDEX`, honours the `SHARD_COUNT` / `HEAD_ROOM`
+/ `SKIP_METRICS` / `SKIP_CONSUMPTION` env vars, and runs the wrapper for THIS
+shard only. The no-secret sign-in it performs is:
+
+```powershell
+Connect-AzAccount -ServicePrincipal `
+  -ApplicationId $env:AZURE_CLIENT_ID `
+  -Tenant       $env:AZURE_TENANT_ID `
+  -FederatedToken (Get-Content -Raw $env:AZURE_FEDERATED_TOKEN_FILE).Trim() | Out-Null
+```
+
+### Output: write local, upload once
+
+Each pod writes its report to the node's **local ephemeral disk** first (fast,
+no per-object network round-trips), builds its one consolidated shard zip, and
+then uploads that single artifact to blob storage before it exits. Do **not**
+stream individual JSON files to blob — local-first then one upload is both
+faster and simpler.
+
+You don't hand-roll this: the wrapper has a built-in uploader. Set the
+`UPLOAD_BLOB_URI` env in the Job to a blob container URL and each pod ships its
+finalized zip there automatically. `entrypoint.ps1` forwards it to the wrapper's
+`-UploadToBlobContainerUri`, which uploads over the **same workload-identity
+sign-in the pod already did** — `New-AzStorageContext -UseConnectedAccount`, no
+account key, no SAS, and no second `Connect-AzAccount`. The blob name is made
+unique per shard (`shard-<i>of<n>-...`) so concurrent pods never collide.
+
+```yaml
+        # in deploy/k8s/job.yaml, alongside SHARD_COUNT:
+        - name: UPLOAD_BLOB_URI
+          value: "https://<account>.blob.core.windows.net/reports"
+```
+
+This requires the worker identity to have **Storage Blob Data Contributor** on
+the target storage account (the data-plane role in the RBAC table above —
+control-plane Contributor is not enough for `-UseConnectedAccount`). Upload is
+best-effort: if it fails, the run still succeeds and the zip remains on the
+node's local disk with a loud warning.
+
+Because the shard slices are disjoint, the uploaded zips together cover the
+whole tenant exactly once. Upload them separately, or merge locally into one
+`MainSummary.html` as in "Collecting the results" above.
+
+### Surviving pod eviction: blob-backed resume state
+
+A pod's working directory is ephemeral — an evicted pod, a reclaimed node, or a
+rescheduled Job loses the local resume-state file, exactly when `-Resume` would
+need it (see [Resuming, retrying, and adding subscriptions later](#resuming-retrying-and-adding-subscriptions-later)).
+Set **`STATE_BLOB_URI`** on the Job (forwarded by `entrypoint.ps1` to the
+wrapper's `-StateBlobContainerUri`) to mirror every state write to blob as well:
+
+```yaml
+        # in deploy/k8s/job.yaml, alongside UPLOAD_BLOB_URI:
+        - name: STATE_BLOB_URI
+          value: "https://<account>.blob.core.windows.net/reports"
+```
+
+State lives under a dedicated `_state/` subfolder in the container,
+shard-namespaced so shards never collide, and separate from the report zips.
+Reads on start are **blob-first with a local fallback**, so a fresh pod that
+replaces an evicted one picks up its shard's progress from blob and resumes where
+it left off. It reuses the **same passwordless workload-identity sign-in** the
+pod already did (so the UAMI needs Storage Blob Data Contributor — the same
+data-plane role as the upload). If `STATE_BLOB_URI` is unset, the entrypoint
+reuses the `UPLOAD_BLOB_URI` container for state; leave both unset to keep state
+node-local (the default — behaviour identical to before).
+
+### Alternative deployment: Azure DevOps + KEDA-scaled agents
+
+If your workers are Azure DevOps self-hosted agents rather than a raw Kubernetes
+Job, you don't assign shard indices by hand there either. Queue **one** pipeline
+run with a `shardCount` parameter; the job uses `strategy: parallel: <shardCount>`,
+so Azure DevOps fans it into N parallel jobs and injects `System.JobPositionInPhase`
+(1..N) into each. Every agent derives its own `ShardIndex = JobPositionInPhase - 1`,
+and KEDA's `azure-pipelines` scaler spawns one agent pod per pending job — the ADO
+analogue of an indexed Job's `JOB_COMPLETION_INDEX`. The full setup (Dockerfile,
+`ScaledJob`, pipeline, and RBAC) ships under
+[`deploy/agent-pool/keda/`](../deploy/agent-pool/keda/README.md), with a
+walkthrough in
+[`deploy/AZURE-DEVOPS-PIPELINE.md`](../deploy/AZURE-DEVOPS-PIPELINE.md).
+
+### Cost note
+
+Worker nodes only need to live for the length of the run, so this is a good fit
+for **spot / evictable** node pools — often ~4-5x cheaper than pay-as-you-go for
+short batch runs. Size the nodes to your subscriptions (small nodes are fine for
+sparse subscriptions) and delete the resource group when done:
+
+```bash
+az group delete -n "$RG" --yes --no-wait
+```

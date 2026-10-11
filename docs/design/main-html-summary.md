@@ -2,7 +2,9 @@
 
 Status: IMPLEMENTED. Shipped as the `New-RdaAllSubHtmlSummary` function in
 `Functions/AllSubHtmlSummary.Functions.ps1`, invoked by `Run-AllSubscriptions.ps1`
-behind the `-MainSummary` switch (`-Detailed` for the Tier 2 service charts). The
+on EVERY run (`-Detailed` adds the Tier 2 service charts). The `-MainSummary`
+switch is retained only for backward compatibility and is now a no-op — the
+summary is always produced and folded into the consolidated bundle. The
 shared render helpers (`ConvertTo-HtmlSafe` / `New-DonutChart` / `New-BarChart`)
 were extracted into that same function file and are dot-sourced by BOTH the
 per-subscription report (`Extension/Summary.ps1`) and the aggregate builder, so
@@ -120,11 +122,23 @@ everything" question is answered on the same page:
 | `$FailedSubscriptions` | subs whose run failed | red banner + list |
 | `$SubResourceCounts` Count == 0 | subs that returned 0 resources | amber banner + list (often a Reader-permission gap) |
 | `$Global:ConsumptionFailedSubs` | consumption phase auth issues | amber note (per-sub) |
-| `$Global:MetricsFailedSubs` | metrics phase auth issues | amber note (per-sub) |
+| `$Global:MetricsFailedSubs` | metrics phase auth issues, and metrics left incomplete when the worker pool could not be opened (told apart by the entry's `Cause`) | amber note (per-sub) |
 | `$Global:CollectorFailures` | per-(sub, collector) throws | amber note grouped by sub |
 
 These are the approved health globals (see steering `anti-patterns.md`); the
 main summary only READS them — it introduces no new globals.
+
+As built, the row joins to `$SubResourceCounts` through the report folder named
+by each entry's `Zip`. The "returned 0 resources" banner, the Empty card and the
+`0 resources` tag use that entry's `Count` (what discovery found); the Resources
+column and the Total card count inventory records, like each subscription's own
+report. A row whose subscription had a collector failure is tagged `collector
+failed`; otherwise a row with discovered resources but no records is tagged
+`none of a collected type`. Without
+`$SubResourceCounts` (a rebuild from a zip) the empty count falls back to the
+record count, so there a subscription whose resources are all of types no
+collector covers still counts as empty. The wrapper passes `-IncludeFolders` with
+the report folders its bundle carries, so a partial or stray report is never a row.
 
 ## 6. Obfuscation handling
 

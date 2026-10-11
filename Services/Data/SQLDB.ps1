@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $SQLDB = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/servers/databases' -and $_.name -ne 'master' }
+    $SQLDB = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.sql/servers/databases' -and $Row.name -ne 'master') { $Row } }
 
     if ($SQLDB)
     {
@@ -31,7 +31,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'              = $1.RESOURCEGROUP;
                 'Name'                       = $1.NAME;
                 'Location'                   = $1.LOCATION;
-                'StorageAccountType'         = $Data.storageAccountType;
+                'StorageAccountType'         = if ($null -ne $Data.currentBackupStorageRedundancy) { $Data.currentBackupStorageRedundancy } else { $Data.storageAccountType };
                 'DatabaseServer'             = $DBServer;
                 'SecondaryLocation'          = $Data.defaultSecondaryLocation;
                 'Status'                     = $Data.status;

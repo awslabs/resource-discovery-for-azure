@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $SQLPOOL = $Resources | Where-Object { $_.TYPE -eq 'microsoft.sql/servers/elasticPools' }
+    $SQLPOOL = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.sql/servers/elasticPools') { $Row } }
 
     if ($SQLPOOL)
     {

@@ -1,22 +1,5 @@
-# SQL VM -> parent compute VM cross-reference tests
-# Run with: Invoke-Pester ./Tests/SqlVmParentLink.Tests.ps1 -Output Detailed
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# In an obfuscated report a SQL VM resource
-# (microsoft.sqlvirtualmachine/sqlvirtualmachines) must remain linkable to its
-# underlying compute VM (microsoft.compute/virtualmachines). The SQLVM collector
-# resolves properties.virtualMachineResourceId through $ResourceIdDictionary so
-# the emitted 'ParentVirtualMachine' column carries the SAME obfuscated token the
-# VirtualMachines collector assigned to that VM.
-#
-# This is the test that actually EXERCISES that resolution with data. The live
-# scenario matrix cannot: the test subscription contains zero SQL VMs, so the
-# collector's SQLVM section is empty there and the referential-integrity check
-# passes vacuously. This test invokes the REAL Services/Data/SQLVM.ps1 collector
-# with a synthetic SQL VM record whose virtualMachineResourceId points at a VM
-# that IS in the dictionary, and asserts the parent token resolves correctly. It
-# also covers the three fallback paths. No live Azure.
+# Offline test exercising the real SQLVM collector: asserts ParentVirtualMachine resolves
+# virtualMachineResourceId via $ResourceIdDictionary to the VM's obfuscated token (live matrix has no SQL VMs).
 
 BeforeAll {
     $script:Collector = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Services', 'Data', 'SQLVM.ps1' | Resolve-Path | Select-Object -ExpandProperty Path
@@ -103,6 +86,17 @@ Describe 'SQL VM parent-VM cross-reference (non-obfuscated)' {
     It 'passes the raw parent id through when obfuscation is off (null dictionary)' {
         $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $null
         $Rec.ParentVirtualMachine | Should -BeExactly $script:VmRealId
+    }
+
+    It 'passes the raw parent id through when the dictionary is non-null but EMPTY (Count -eq 0)' {
+        # The collector's guard is "$null -ne $Dict -and $Dict.Count -gt 0", so a
+        # non-null but empty dictionary falls to the raw-passthrough branch just
+        # like $null. Obfuscation-on normally implies a populated dictionary, but
+        # this pins the Count-0 edge so a guard rewrite that dropped the Count
+        # check (and started emitting 'obfuscated' against an empty dict) fails here.
+        $Dict = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Rec = Invoke-SqlVmCollector -Resources @(New-SqlVmRecord -VmResourceId $script:VmRealId) -Dictionary $Dict
+        $Rec.ParentVirtualMachine | Should -BeExactly $script:VmRealId -Because 'an empty dictionary is not an obfuscation pass, so the raw id is carried'
     }
 
     It "emits 'None' when obfuscation is off and there is no parent id" {

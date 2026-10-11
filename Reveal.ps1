@@ -1,3 +1,4 @@
+#!/usr/bin/env pwsh
 #Requires -Version 7.0
 <#
 .SYNOPSIS
@@ -23,7 +24,7 @@
         time-bounded background job so one pathological folder cannot stall the
         batch), and consolidates the revealed per-subscription zips into ONE
         outer zip with the same shape a normal multi-subscription run produces,
-        so the ingestion server consumes it exactly like an -Obfuscate outer zip
+        so it matches an -Obfuscate outer zip exactly
         - just with the chosen dimensions un-masked.
 
     Both modes reveal ONLY the dimensions you select (default: Subscription name
@@ -44,6 +45,11 @@
     SINGLE-REPORT MODE. Path to the ObfuscationDictionary_*.json for -InputZip.
     If omitted, the newest ObfuscationDictionary_*.json in the current directory
     is used.
+
+.PARAMETER SearchDirectory
+    SINGLE-REPORT MODE. Directory searched for the newest
+    ObfuscationDictionary_*.json when -DictionaryPath is not supplied. Defaults
+    to the current directory ('.'). Ignored when -DictionaryPath is given.
 
 .PARAMETER InventoryRoot
     ALL-SUBSCRIPTIONS MODE. Folder that contains the per-subscription output
@@ -126,7 +132,6 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'All')]
 param(
-    # ---- Single-report mode ----
     [Parameter(ParameterSetName = 'Single', Mandatory = $true)]
     [string]   $InputZip,
 
@@ -136,7 +141,6 @@ param(
     [Parameter(ParameterSetName = 'Single')]
     [string]   $SearchDirectory = '.',
 
-    # ---- All-subscriptions mode ----
     [Parameter(ParameterSetName = 'All')]
     [string]   $InventoryRoot,
 
@@ -157,7 +161,6 @@ param(
     [ValidateRange(1, 64)]
     [int]      $ParallelStreams = 1,
 
-    # ---- Common to both modes ----
     [ValidateSet('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')]
     [string[]] $Fields = @('ResourceGroup', 'Subscription'),
 
@@ -168,10 +171,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Shared functions: Invoke-RdaReveal + its helpers live in
-# RevealObfuscation.Functions.ps1; Write-RdaProgress lives in
-# Common.Functions.ps1. Dot-source both so they load into this script's scope.
-# Fail loud if missing rather than a confusing later error.
 $RevealFunctions = Join-Path $PSScriptRoot 'Functions/RevealObfuscation.Functions.ps1'
 $CommonFunctions = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
 foreach ($FunctionFile in @($RevealFunctions, $CommonFunctions))
@@ -183,15 +182,12 @@ foreach ($FunctionFile in @($RevealFunctions, $CommonFunctions))
     . $FunctionFile
 }
 
-# -All is a full reveal: expand to every reversible dimension (overrides
-# -Fields). Done once here so both modes see the expanded list.
 if ($All)
 {
     $Fields = @('ResourceGroup', 'Subscription', 'Tag', 'ResourceName', 'ResourceId', 'FreeText')
 }
 
 # =============================================================================
-# SINGLE-REPORT MODE - delegate straight to the engine.
 # =============================================================================
 if ($PSCmdlet.ParameterSetName -eq 'Single')
 {
@@ -209,10 +205,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Single')
 }
 
 # =============================================================================
-# ALL-SUBSCRIPTIONS MODE
 # =============================================================================
 
-# Resolve the inventory root (same default Run-AllSubscriptions.ps1 uses).
 if ([string]::IsNullOrEmpty($InventoryRoot))
 {
     $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { Join-Path $HOME 'InventoryReports' } else { 'C:\InventoryReports' }
@@ -221,8 +215,6 @@ if (-not (Test-Path -LiteralPath $InventoryRoot -PathType Container))
 {
     throw "Inventory root not found: $InventoryRoot (pass -InventoryRoot to point at the folder holding the per-subscription folders)."
 }
-# Canonicalize to an absolute path so the staging-directory exclusion compare
-# below is airtight even when the caller passes a relative -InventoryRoot.
 $InventoryRoot = (Resolve-Path -LiteralPath $InventoryRoot).Path
 
 $Timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
@@ -230,11 +222,6 @@ if ([string]::IsNullOrEmpty($StagingDirectory))
 {
     if ($Resume)
     {
-        # Resume re-uses a prior run's staging directory: the revealed zips
-        # already in it are the record of which folders completed. Auto-detect
-        # the most recent RevealedStaging_* under the inventory root. If none is
-        # found we cannot resume, so stop and tell the caller to point
-        # -StagingDirectory at the folder holding the already-revealed zips.
         $PriorStaging = Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'RevealedStaging_*' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
@@ -258,14 +245,8 @@ if ([string]::IsNullOrEmpty($OutputZip))
     $OutputZip = Join-Path $InventoryRoot ("AllSubscriptions_Revealed_" + $Timestamp + ".zip")
 }
 New-Item -ItemType Directory -Path $StagingDirectory -Force | Out-Null
-# Canonicalize staging too, so the per-folder exclusion compare below matches
-# the absolute FullName that Get-ChildItem returns.
 $StagingDirectory = (Resolve-Path -LiteralPath $StagingDirectory).Path
 
-# The output zip must not live inside the staging directory, or it would be
-# swept into itself on the final Compress-Archive.
-# NB: Split-Path's -Parent switch is only valid with -Path, not -LiteralPath
-# (the two are in different parameter sets), so -Path is required here.
 $OutputZipParent = Split-Path -Path $OutputZip -Parent
 if (-not [string]::IsNullOrEmpty($OutputZipParent) -and (Test-Path -LiteralPath $OutputZipParent -PathType Container))
 {
@@ -291,26 +272,14 @@ $ResumedCount = 0
 $SkippedItems = @()
 $FailedItems = @()
 
-# Hard cap on how long a single folder's reveal may run. A pathological report
-# (e.g. an unusually large or malformed zip) can make Expand-Archive /
-# Compress-Archive run effectively forever; without a cap one bad folder stalls
-# the entire batch. When a folder exceeds this it is abandoned, recorded as a
-# timeout failure, and the run continues with the next folder. Configurable via
-# -FolderTimeoutMinutes (default 20); Ceiling keeps a fractional-minute value
-# (e.g. 0.5) at a whole >=1s Wait-Job timeout.
 $RevealTimeoutSeconds = [int][math]::Ceiling($FolderTimeoutMinutes * 60)
 
-# Resolve each folder's obfuscated report + dictionary up front, handling the
-# cheap cases synchronously (missing pair -> skip; already-revealed under
-# -Resume -> skip). Everything that needs the reveal engine becomes a queued
-# work item, drained by the bounded pool below.
 $Queue = [System.Collections.Generic.Queue[object]]::new()
 foreach ($Folder in $Folders)
 {
     $Dict = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'ObfuscationDictionary_*.json' -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
 
-    # The obfuscated per-sub report, excluding any *_revealed.zip left by a prior run.
     $Zip = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'ResourcesReport_*.zip' -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -notlike '*_revealed.zip' } |
         Select-Object -First 1
@@ -324,46 +293,28 @@ foreach ($Folder in $Folders)
 
     $PairedCount++
 
-    # Write the revealed copy straight into staging under the ORIGINAL zip name
-    # so the consolidated outer zip matches the structure the ingestion server
-    # expects from a normal multi-subscription run.
     $OutPath = Join-Path $StagingDirectory $Zip.Name
 
     if ($Resume -and (Test-Path -LiteralPath $OutPath))
     {
-        # Already revealed on a prior run: its zip is sitting in staging. Skip so
-        # a resumed run does not redo completed work (and can advance past a
-        # folder that previously stalled the batch).
         $ResumedCount++
         continue
     }
 
     if (Test-Path -LiteralPath $OutPath)
     {
-        # Defensive: per-run stamps are unique so this is not expected, but never
-        # silently overwrite one subscription's output with another's.
         $OutPath = Join-Path $StagingDirectory ($Folder.Name + '_' + $Zip.Name)
     }
 
     $Queue.Enqueue([pscustomobject]@{ Folder = $Folder.Name; Zip = $Zip.FullName; Dict = $Dict.FullName; OutPath = $OutPath })
 }
 
-# Bounded job pool. Keep up to -ParallelStreams reveals in flight, each its own
-# child process (so a pathological Expand/Compress can be stopped instead of
-# wedging the batch) bounded by its OWN per-folder deadline ($RevealTimeoutSeconds).
-# The parent reaps every job serially in this one loop, so the shared counters
-# and record lists are mutated only on the parent thread - no cross-thread races.
-# The folders are independent (each has its own report zip + dictionary and
-# writes its own staged output), so revealing several at once is safe and the
-# obfuscation/reveal determinism is per-folder. -ParallelStreams 1 reproduces
-# the original one-at-a-time behaviour.
 $TotalToReveal = $Queue.Count
 $DoneCount = 0
 $Running = [System.Collections.Generic.List[object]]::new()
 
 while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
 {
-    # Fill free slots from the queue, stamping each job with its own deadline.
     while ($Running.Count -lt $ParallelStreams -and $Queue.Count -gt 0)
     {
         $Item = $Queue.Dequeue()
@@ -378,7 +329,6 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
 
     Start-Sleep -Seconds 2
 
-    # Reap finished (Completed/Failed/Stopped) or timed-out jobs; keep the rest.
     $StillRunning = [System.Collections.Generic.List[object]]::new()
     foreach ($R in $Running)
     {
@@ -386,7 +336,6 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
         {
             try
             {
-                # Re-throw any terminating error the child raised into the catch.
                 Receive-Job -Job $R.Job -ErrorAction Stop | Out-Null
                 if (Test-Path -LiteralPath $R.Item.OutPath)
                 {
@@ -399,8 +348,6 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
             }
             catch
             {
-                # Drop any partial/truncated output so it is neither consolidated
-                # nor treated as done by a later -Resume.
                 Remove-Item -LiteralPath $R.Item.OutPath -Force -ErrorAction SilentlyContinue
                 Remove-Item -LiteralPath (($R.Item.OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
                 $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = $_.Exception.Message }
@@ -410,13 +357,11 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
         }
         elseif ([DateTime]::UtcNow -ge $R.Deadline)
         {
-            # Exceeded this folder's cap. Kill the child so it cannot hold a slot,
-            # clean any partial output, record the timeout, free the slot.
             Stop-Job -Job $R.Job -ErrorAction SilentlyContinue
             Remove-Job -Job $R.Job -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $R.Item.OutPath -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (($R.Item.OutPath -replace '\.zip$', '') + '.partial.zip') -Force -ErrorAction SilentlyContinue
-            $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = ("timed out after {0:0.##} minutes" -f ($RevealTimeoutSeconds / 60)) }
+            $FailedItems += [pscustomobject]@{ Folder = $R.Item.Folder; Reason = ("timed out after {0} minutes" -f ([double]($RevealTimeoutSeconds / 60)).ToString('0.##', [cultureinfo]::InvariantCulture)) }
             $DoneCount++
         }
         else
@@ -426,7 +371,6 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
     }
     $Running = $StillRunning
 
-    # Heartbeat: overall done/total plus the in-flight folders and their elapsed.
     $InFlight = ($Running | ForEach-Object { '{0} [{1}s]' -f $_.Item.Folder, [int]([DateTime]::UtcNow - $_.StartUtc).TotalSeconds }) -join ', '
     Write-RdaProgress -Activity 'Revealing per-subscription reports' `
         -CurrentItem ('{0} of {1} done; {2} running: {3}' -f $DoneCount, $TotalToReveal, $Running.Count, $InFlight) `
@@ -435,33 +379,20 @@ while ($Queue.Count -gt 0 -or $Running.Count -gt 0)
 
 Write-RdaProgress -Activity 'Revealing per-subscription reports' -Completed
 
-# Consolidate the revealed per-sub zips into one outer zip for upload.
-# Exclude *.partial.zip: the single-report engine compresses to a sibling
-# .partial.zip and atomically renames it to the final name on success, so a
-# .partial.zip only ever exists if a reveal was hard-killed mid-compress. Such
-# a truncated file must never be folded into the consolidated outer zip.
 $StagedZips = @(Get-ChildItem -LiteralPath $StagingDirectory -Filter '*.zip' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.partial.zip' })
 $ConsolidationError = $null
 if ($StagedZips.Count -gt 0)
 {
     try
     {
-        # -LiteralPath (not -Path): staged names are taken verbatim. -Path treats
-        # each value as a wildcard, so a report name containing '[' or ']' would
-        # silently fail to match and abort the archive.
-        Compress-Archive -LiteralPath $StagedZips.FullName -DestinationPath $OutputZip -Force
+        Compress-Archive -LiteralPath $StagedZips.FullName -DestinationPath ([WildcardPattern]::Escape($OutputZip)) -Force
     }
     catch
     {
-        # Fail LOUD but do not die here. The revealed per-subscription zips are
-        # already in staging, so the run is recoverable. Record the reason and
-        # fall through to the summary instead of terminating before it prints
-        # (which looked like a silent crash - header shown, no summary).
         $ConsolidationError = $_.Exception.Message
     }
 }
 
-# ---- Summary ---------------------------------------------------------------
 Write-Host ""
 Write-Host "================ Reveal Summary ================" -ForegroundColor Green
 Write-Host ("Per-subscription folders scanned : {0}" -f $Folders.Count) -ForegroundColor Green
@@ -485,7 +416,7 @@ if ($null -eq $ConsolidationError -and $StagedZips.Count -gt 0 -and (Test-Path -
 {
     Write-Host ("Consolidated {0} revealed report(s) into:" -f $StagedZips.Count) -ForegroundColor Green
     Write-Host ("  {0}" -f $OutputZip) -ForegroundColor Green
-    Write-Host "Upload this single zip to the ingestion server." -ForegroundColor Green
+    Write-Host "Upload this single zip." -ForegroundColor Green
 }
 elseif ($null -ne $ConsolidationError)
 {
@@ -499,10 +430,6 @@ else
     Write-Host "No revealed reports were produced - nothing to consolidate. Check the SKIP/FAIL list above." -ForegroundColor Red
 }
 
-# Only tear down staging on a fully CLEAN run (outer zip built, nothing failed
-# or timed out, no consolidation error). If any folder failed/timed out, the
-# staged zips are the only record of what already completed - deleting them
-# would defeat a later -Resume. So keep staging and say why.
 $CleanRun = ($FailedItems.Count -eq 0 -and $null -eq $ConsolidationError)
 if ($RemoveStaging -and $CleanRun -and (Test-Path -LiteralPath $OutputZip))
 {
@@ -518,7 +445,14 @@ if ($RemoveStaging -and $CleanRun -and (Test-Path -LiteralPath $OutputZip))
 }
 elseif ($RemoveStaging -and -not $CleanRun)
 {
-    Write-Host ("-RemoveStaging skipped: {0} folder(s) failed or timed out. Staging kept so you can recover them with -Resume:" -f $FailedItems.Count) -ForegroundColor Yellow
+    if ($FailedItems.Count -gt 0)
+    {
+        Write-Host ("-RemoveStaging skipped: {0} folder(s) failed or timed out. Staging kept so you can recover them with -Resume:" -f $FailedItems.Count) -ForegroundColor Yellow
+    }
+    if ($null -ne $ConsolidationError)
+    {
+        Write-Host "-RemoveStaging skipped: the outer zip could not be built (see above). Staging kept so you can re-run, or zip the revealed reports by hand:" -ForegroundColor Yellow
+    }
     Write-Host ("  {0}" -f $StagingDirectory) -ForegroundColor Yellow
 }
 else
@@ -526,8 +460,6 @@ else
     Write-Host ("Individual revealed zips kept in: {0}" -f $StagingDirectory) -ForegroundColor DarkGray
 }
 
-# Non-zero exit if nothing was produced, or if any subscription failed to reveal,
-# so an automated/large run surfaces problems instead of looking clean.
 if ($StagedZips.Count -eq 0)
 {
     exit 1
@@ -541,3 +473,4 @@ if ($FailedItems.Count -gt 0)
     exit 4
 }
 exit 0
+

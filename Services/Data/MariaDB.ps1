@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $MariaDB = $Resources | Where-Object { $_.TYPE -eq 'microsoft.dbformariadb/servers' }
+    $MariaDB = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.dbformariadb/servers') { $Row } }
 
     if ($MariaDB)
     {

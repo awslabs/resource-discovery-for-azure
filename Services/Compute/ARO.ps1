@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $ARO = $Resources | Where-Object { $_.TYPE -eq 'microsoft.redhatopenshift/openshiftclusters' }
+    $ARO = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.redhatopenshift/openshiftclusters') { $Row } }
 
     if ($ARO)
     {
@@ -24,7 +24,8 @@ if ($Task -eq 'Processing')
                 'MasterSKU'            = $Data.masterProfile.vmSize;
                 'WorkerSKU'            = $Data.workerProfiles.vmSize | Select-Object -Unique;
                 'WorkerDiskSize'       = $Data.workerProfiles.diskSizeGB | Select-Object -Unique;
-                'TotalWorkerNodes'     = $Data.workerProfiles.count;
+                'TotalWorkerNodes'     = [int](($Data.workerProfiles | Measure-Object -Property count -Sum).Sum);
+                'WorkerProfileCount'   = [int]@($Data.workerProfiles).Count;
             }
 
             $Tmp += $Obj

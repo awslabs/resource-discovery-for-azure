@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $REGISTRIES = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerregistry/registries' }
+    $REGISTRIES = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerregistry/registries') { $Row } }
 
     if ($REGISTRIES)
     {
@@ -12,7 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = [datetime]($Data.creationDate) | Get-Date -Format "yyyy-MM-dd HH:mm"
+            $Timecreated = try { if ($null -ne $Data.creationDate) { [datetime]($Data.creationDate) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                        = $1.id;

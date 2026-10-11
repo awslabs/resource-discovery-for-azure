@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AKS = $Resources | Where-Object { $_.TYPE -eq 'microsoft.containerservice/managedclusters' }
+    $AKS = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.containerservice/managedclusters') { $Row } }
 
     if ($AKS)
     {
@@ -15,16 +15,6 @@ if ($Task -eq 'Processing')
 
             foreach ($2 in $Data.agentPoolProfiles)
             {
-                # Recomputed on every node-pool iteration (not hoisted above this
-                # loop): the cluster's tags are the SAME real values across all of
-                # its node pools, but the obfuscation pass mutates $tag.Value on
-                # the object instance it's given. Sharing one $tags array/element
-                # instance across multiple $obj rows would let a value that was
-                # already tokenized on row 1 be re-read (and re-keyed) as a "real"
-                # value on row 2, corrupting $Global:TagValueDictionary. A fresh
-                # Select-Object projection per row gives each row its own object
-                # instances so the same real tag value still yields the same
-                # token (determinism, P1), without aliasing across rows.
                 $Tags = if (![string]::IsNullOrEmpty($1.tags.psobject.properties)) { $1.tags.psobject.properties | Select-Object Name, Value } else { $null }
 
                 $Obj = @{
@@ -44,9 +34,13 @@ if ($Task -eq 'Processing')
                     'NodeSize'                  = $2.vmSize;
                     'OSDiskSize'                = $2.osDiskSizeGB;
                     'Nodes'                     = $2.count;
-                    'Autoscale'                 = if ($null -ne $2.enableAutoScaling) { 'true' } else { 'false' }
-                    'AutoscaleMax'              = if ($null -ne $2.maxCount) { $2.maxCount } else { '0' }
-                    'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' }
+                    # Compare against the string 'true' rather than a bare truth test: enableAutoScaling
+                    # can arrive as a real bool, as $null, or as the stringified 'false' depending on the
+                    # source path, and a bare test would treat the non-empty string 'false' as $true. Do
+                    # not align this with the $null -ne tests below.
+                    'Autoscale'                 = if ($2.enableAutoScaling -eq 'true') { 'true' } else { 'false' };
+                    'AutoscaleMax'              = if ($null -ne $2.maxCount) { $2.maxCount } else { '0' };
+                    'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' };
                     'MaxPodsPerNode'            = $2.maxPods;
                     'OrchestratorVersion'       = $2.orchestratorVersion;
                     'Tags'                      = $Tags;
@@ -59,3 +53,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

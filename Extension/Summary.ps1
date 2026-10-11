@@ -1,79 +1,40 @@
-# Summary.ps1
-#
-# Generates the self-contained HTML report for a Resource Discovery for Azure
-# (RDA) run. Reads the aggregated Inventory_*.json produced by the Processing
-# phase and writes a single .html file with NO external dependencies (no CDN,
-# no JS libraries, no images, no Excel/EPPlus). The output renders in any
-# browser and is suitable for emailing, sharing, or opening in Cloud Shell.
-#
-# This replaces the previous Excel (ImportExcel/EPPlus) report. The data
-# pipeline is unchanged: collectors still run in the Processing phase to build
-# the Inventory JSON; this script only renders that JSON as HTML.
-#
-# Invoked from ResourceInventory.ps1 (ProcessSummary) via `& $SummaryPath ...`.
-#
-# Inputs (Inventory JSON schema):
-#   The JSON file is a single object whose top-level keys are service-type
-#   names (VirtualMachines, AppServices, StorageAcc, ...) and whose values
-#   are arrays of records. Each record has a heterogeneous set of fields,
-#   typically including: Name, Subscription, Location, ResourceGroup, ID,
-#   plus service-specific fields. The report iterates these dynamically so a
-#   new service type added in Services/* surfaces automatically.
-#
-# Outputs:
-#   A single self-contained .html file. ~50 KB framework + ~1 KB per record.
 param(
-    # Path to the aggregated Inventory_*.json file (input).
     $JsonFile,
 
-    # Path to write the .html report to (output).
     $HtmlFile,
 
-    # Report title shown in <h1>. Defaults to a recognisable label.
     $Title = 'Azure Resource Inventory',
 
-    # Subscription friendly name for the header. If empty, the first
-    # resource record's Subscription field is used.
     $SubscriptionName,
 
-    # Tenant ID (display only).
     $TenantId,
 
-    # RDA version string (display only). If empty, falls back to the
-    # Version key inside the Inventory JSON.
     $Version,
 
-    # Extraction / reporting run durations (TimeSpan) for the header. Optional;
-    # omitted on standalone invocations.
     $ExtractionRunTime,
     $ReportingRunTime,
 
-    # Ordered hashtable of { phase label -> [TimeSpan] } giving a clear per-phase
-    # timing breakdown (metrics / collectors / consumption) for the header, so it
-    # is obvious which phase dominates a long run. Optional; when omitted only the
-    # coarse extraction/total timers are shown.
     $PhaseTimings,
 
-    # Environment label (e.g. 'Azure CloudShell', 'PowerShell Unix'). Display only.
     $PlatOS,
 
-    # Path to the Consumption_*.csv produced by the consumption phase (input,
-    # optional). When supplied and non-empty, the report cross-checks the count
-    # of running VMs in the inventory against the count of VMs that produced a
-    # compute-usage record. A large shortfall indicates consumption data was
-    # incomplete for some subscriptions. Omitted on standalone runs and when
-    # -SkipConsumption was used; the check is silently skipped in that case.
     $ConsumptionFile,
 
-    # Minimum running-VM-vs-billed shortfall (count) required before the VM
-    # billing-coverage banner is shown. Default 0 means any shortfall is
-    # surfaced; raise it to suppress small billing-lag noise.
+    # Resource types whose collector THREW. A type that failed serialises as an empty array, exactly
+    # like a type the subscription genuinely does not have, and the section is then dropped from this
+    # report - so without this the page cannot tell "collection failed" from "you own none of these".
+    $CollectorFailures = @(),
+
+    # Collection stopped early because the circuit breaker tripped: every type after the abort was
+    # never attempted, so this report is a partial view of the subscription, not a complete one.
+    [switch]$CollectorsAborted,
+
     [int]$VmBillingGapThreshold = 0
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -Path $JsonFile -PathType Leaf))
+if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -LiteralPath $JsonFile -PathType Leaf))
 {
     throw "Summary.ps1: Inventory JSON not found at '$JsonFile'."
 }
@@ -82,35 +43,18 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
     throw "Summary.ps1: -HtmlFile output path is required."
 }
 
-# Shared HTML-summary render helpers (ConvertTo-HtmlSafe / New-DonutChart /
-# New-BarChart) live in Functions/AllSubHtmlSummary.Functions.ps1 - the single
-# source of truth also used by the aggregate all-subscriptions summary. They are
-# NOT in Common.Functions.ps1 on purpose: only the HTML-rendering paths need
-# them, so they are dot-sourced only here (and by the wrapper's -MainSummary
-# branch) rather than loaded into every entry point. This script sits in
-# Extension/, so resolve the sibling Functions/ folder from the repo root.
 $RenderFunctionsFile = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
-if (-not (Test-Path -Path $RenderFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $RenderFunctionsFile -PathType Leaf))
 {
     throw "Summary.ps1: shared render helpers not found at '$RenderFunctionsFile'."
 }
 . $RenderFunctionsFile
 
-# Self-measure the HTML render (JSON read + all fragment building). Summary CANNOT
-# measure the collection phases - they already ran and are passed in via
-# -PhaseTimings - but it CAN time its own render, so the report shows its own
-# generation cost too. Stopped just before the header is assembled; the final
-# here-string interpolation + file write after that is trivially fast.
 $RenderStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-# Read input JSON. Top-level keys are service-type names; values are arrays of
-# resource records. No schema validation - a new field simply appears as a new
-# column in that service's table.
-$RawJson = Get-Content -Path $JsonFile -Raw -Encoding utf8
+$RawJson = Get-Content -LiteralPath $JsonFile -Raw -Encoding utf8
 $Inventory = $RawJson | ConvertFrom-Json
 
-# Compute summary stats. Every array-valued key becomes a (service, count)
-# pair. Empty services and the "Version" metadata key are filtered out.
 $ServiceSummary = @()
 foreach ($prop in $Inventory.PSObject.Properties)
 {
@@ -124,15 +68,11 @@ foreach ($prop in $Inventory.PSObject.Properties)
         Count   = $Count
     }
 }
-$ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
-$TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
+$ServiceSummary = @($ServiceSummary | Sort-Object -Property Count -Descending)
+$TotalResources = [int](($ServiceSummary | Measure-Object -Property Count -Sum).Sum)
 
-# Detect obfuscation so the header can carry a privacy-posture banner. Sample
-# resource Names and Subscription values across the first few populated
-# services; if most match the obfuscation signature treat the report as
-# obfuscated, else identifiable (the safe default for an unclear posture).
 $ObfuscationStatus = 'identifiable'
-$ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+$ObfPattern = '^(prod_|nonprod_)(databricks_|aks_|vmss_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 $Samples = New-Object System.Collections.Generic.List[string]
 foreach ($svc in $ServiceSummary | Select-Object -First 5)
 {
@@ -153,16 +93,8 @@ if ($Samples.Count -gt 0)
     }
 }
 
-# VM billing-coverage check. The inventory (ARM/Resource Graph) lists every VM
-# that EXISTS; the consumption CSV lists VMs that produced a compute-usage
-# record in the billing window. A running VM with no compute-usage record is an
-# anomaly - it usually means consumption data was incomplete for that VM's
-# subscription (auth / billing-scope gap), not that the VM is idle. We compare
-# COUNTS only (not identities): the inventory and consumption files obfuscate
-# resource ids through different dictionaries, so a per-VM join is impossible in
-# an obfuscated report. Counts of distinct tokens are preserved either way.
 $VmBilling = $null
-if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $ConsumptionFile -PathType Leaf))
+if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -LiteralPath $ConsumptionFile -PathType Leaf))
 {
     $RunningVmCount = 0
     $VmRecords = $Inventory.VirtualMachines
@@ -171,23 +103,28 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $C
         $RunningVmCount = @($VmRecords | Where-Object { $_.PowerState -match 'running' }).Count
     }
 
-    # Count distinct VM-meter resources in the consumption CSV. A header-only or
-    # empty CSV (zero-billing subscription, or -SkipConsumption safety net) has
-    # no data rows at all; in that case consumption coverage is unknown, so the
-    # check is skipped rather than reporting a false 100% gap. A CSV that DOES
-    # have rows but none in the 'Virtual Machines' meter is a legitimate zero -
-    # the gap then reflects a real coverage shortfall.
     $BilledVmCount = 0
     $HasConsumptionData = $false
     try
     {
-        $Consumption = @(Import-Csv -Path $ConsumptionFile -ErrorAction Stop)
-        $HasConsumptionData = ($Consumption.Count -gt 0)
-        $BilledVmCount = (@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
+        # Read the CSV one row at a time and keep only the distinct VM ResourceIds: a large
+        # subscription's billing file takes several times its size on disk once loaded as objects.
+        # The set ignores case, as Sort-Object -Unique does.
+        $ConsumptionRowCount = 0
+        $BilledVmIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop | ForEach-Object {
+            $ConsumptionRowCount++
+            # Import-Csv yields '' for an empty cell, never $null, so test for text rather than presence.
+            if ($_.MeterCategory -eq 'Virtual Machines' -and -not [string]::IsNullOrWhiteSpace([string]$_.ResourceId))
+            {
+                [void]$BilledVmIds.Add([string]$_.ResourceId)
+            }
+        }
+        $HasConsumptionData = ($ConsumptionRowCount -gt 0)
+        $BilledVmCount = $BilledVmIds.Count
     }
     catch
     {
-        # Unreadable CSV: leave the check disabled so no banner is rendered.
         $HasConsumptionData = $false
     }
 
@@ -207,56 +144,56 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $C
     }
 }
 
-# Resolve a sensible subscription label for the header.
 if ([string]::IsNullOrWhiteSpace($SubscriptionName))
 {
+    # Every subscription present in the records, not the first one found. This script's documented
+    # default - no -SubscriptionID - runs an UNSCOPED Resource Graph query and consolidates every
+    # readable subscription into one report, and the caller never passes -SubscriptionName, so this
+    # branch always decides the header. Naming a single subscription there was both wrong and
+    # unstable: it was whichever subscription happened to own the first record of whichever service
+    # happened to be largest, so adding one resource elsewhere could relabel the whole report.
+    $SubNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($svc in $ServiceSummary)
     {
-        $Records = $Inventory.($svc.Service)
-        if ($Records -and @($Records).Count -gt 0)
+        foreach ($Rec in @($Inventory.($svc.Service)))
         {
-            $First = @($Records)[0]
-            if ($First.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace($First.Subscription))
+            if ($null -eq $Rec) { continue }
+            if ($Rec.PSObject.Properties.Name -contains 'Subscription' -and -not [string]::IsNullOrWhiteSpace([string]$Rec.Subscription))
             {
-                $SubscriptionName = [string]$First.Subscription
-                break
+                [void]$SubNames.Add([string]$Rec.Subscription)
             }
         }
     }
-    if ([string]::IsNullOrWhiteSpace($SubscriptionName)) { $SubscriptionName = '(unknown)' }
+    if ($SubNames.Count -eq 1)
+    {
+        $SubscriptionName = @($SubNames)[0]
+    }
+    elseif ($SubNames.Count -gt 1)
+    {
+        # A count, not a list: the list can be long, and under -Obfuscate the names are tokens that
+        # tell the reader nothing. The per-resource Subscription column still carries which is which.
+        $SubscriptionName = '{0} subscriptions (consolidated)' -f $SubNames.Count
+    }
+    else
+    {
+        $SubscriptionName = '(unknown)'
+    }
 }
 
-# Resolve version: explicit -Version wins, else the JSON's Version key.
 if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Version)
 {
     $Version = [string]$Inventory.Version
 }
 
 # === HTML + chart helpers ====================================================
-#
-# ConvertTo-HtmlSafe / New-DonutChart / New-BarChart now live in
-# Functions/AllSubHtmlSummary.Functions.ps1 (dot-sourced near the top of this
-# script) so the per-subscription report and the aggregate all-subscriptions
-# summary share ONE copy instead of duplicating them. Behaviour is unchanged;
-# see that file for the definitions.
 
 # === Per-service table builder ================================================
-#
-# Each service section is an HTML <details> element (so it's collapsible
-# without any JS) wrapping a search input + a sortable <table>.
-#
-# Column selection: the union of all field names across the records, ordered
-# by frequency. This avoids the trap of letting a single record with many
-# fields blow out the column list.
 
 function New-ServiceTable
 {
     param(
         [Parameter(Mandatory)] [string]$ServiceName,
         [Parameter(Mandatory)] $Records,
-        # When the report is obfuscated, certain columns carry only opaque
-        # pseudonym GUIDs (the resource ID and the scale-set reference) and add
-        # no analytical value, so they are dropped to reduce horizontal width.
         [string]$ObfuscationStatus = 'identifiable'
     )
 
@@ -267,17 +204,12 @@ function New-ServiceTable
         return ''
     }
 
-    # Discover columns from the records themselves. Frequency ordering puts
-    # the most consistently-populated columns first.
     $ColCounts = @{}
     foreach ($r in $Records)
     {
         if ($null -eq $r) { continue }
         if ($r -is [string] -or $r -is [int] -or $r -is [bool])
         {
-            # Defensive: collectors should emit objects, not scalars. If a
-            # scalar slips in, surface it under a fixed column name so the
-            # table still renders.
             if (-not $ColCounts.ContainsKey('Value')) { $ColCounts['Value'] = 0 }
             $ColCounts['Value'] += 1
             continue
@@ -289,9 +221,6 @@ function New-ServiceTable
         }
     }
 
-    # Promote a stable preferred-column order for fields that almost every
-    # service has, so the most useful columns lead. Anything not in this list
-    # falls back to frequency order.
     $PreferredOrder = @('Name', 'Subscription', 'ResourceGroup', 'Location', 'SKU', 'Tier', 'State', 'Status', 'Kind', 'AppType', 'OSType', 'OS', 'OSName', 'OSVersion', 'Size')
     $Columns = @()
     foreach ($p in $PreferredOrder)
@@ -302,17 +231,9 @@ function New-ServiceTable
             $ColCounts.Remove($p)
         }
     }
-    # Append remaining columns ordered by descending frequency, but skip
-    # nested-object fields (they don't render usefully in a table cell).
-    # Tie-break on the column name (ascending) so the order is fully
-    # deterministic: without a secondary key, equal-frequency columns fall back
-    # to the enumeration order of an unordered hashtable, which varies run to
-    # run and made columns (e.g. OSName) drift in and out of the 12-column cap.
     $Remaining = $ColCounts.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Key'; Descending = $false } | ForEach-Object { $_.Key }
     $Columns += $Remaining
 
-    # Drop columns that always contain a complex object - they render as
-    # "@{...}" which is noise. Detect by sampling the first non-null value.
     $ColumnsClean = @()
     foreach ($col in $Columns)
     {
@@ -327,34 +248,21 @@ function New-ServiceTable
         if ($null -eq $Sample) { $ColumnsClean += $col; continue }
         if ($Sample -is [psobject] -and -not ($Sample -is [string]) -and -not ($Sample -is [int]) -and -not ($Sample -is [bool]) -and -not ($Sample -is [double]) -and -not ($Sample -is [long]) -and -not ($Sample -is [array]))
         {
-            # Skip nested objects but keep arrays - we render arrays joined.
             continue
         }
         $ColumnsClean += $col
     }
     $Columns = $ColumnsClean
 
-    # When the report is obfuscated, drop columns that carry only opaque
-    # pseudonym GUIDs and add no analytical value (the full resource ID and the
-    # scale-set reference). Identity columns (Name/Subscription/ResourceGroup)
-    # are kept because they still let rows be correlated.
     if ($ObfuscationStatus -eq 'obfuscated')
     {
         $ObfuscatedNoiseColumns = @('ID', 'Set')
         $Columns = $Columns | Where-Object { $ObfuscatedNoiseColumns -notcontains $_ }
     }
 
-    # A 12-column cap used to be applied here to avoid horizontal scrolling on
-    # narrow screens, but it silently DROPPED genuinely useful collected columns
-    # (e.g. ImageSku = the OS image edition, OSType). Now that every table has a
-    # synced top+bottom horizontal scrollbar (see .table-scroll-top /
-    # setupTopScroll in the CSS/JS), the width is fully navigable, so ALL
-    # collected columns are shown rather than hidden behind a cap.
-
-    # Render header
     $Sb = New-Object System.Text.StringBuilder
     $SafeServiceName = ConvertTo-HtmlSafe $ServiceName
-    $SectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLower()
+    $SectionId = ($ServiceName -replace '[^a-zA-Z0-9]', '-').ToLowerInvariant()
     [void]$Sb.AppendFormat('<details class="service-section" id="svc-{0}">', $SectionId)
     [void]$Sb.AppendFormat('<summary><span class="svc-name">{0}</span><span class="svc-count">{1}</span></summary>', $SafeServiceName, $Count)
     [void]$Sb.Append('<div class="svc-body">')
@@ -381,14 +289,9 @@ function New-ServiceTable
             }
             elseif ($Val -is [array])
             {
-                # Render arrays joined. Truncate ID arrays for readability.
                 $Joined = ($Val | ForEach-Object {
                         if ($null -eq $_) { return '' }
                         if ($_ -is [string]) { return [string]$_ }
-                        # Tag-style objects ({ Name; Value }) - e.g. the Tags column -
-                        # render as key=value instead of an opaque placeholder. Any
-                        # other object falls back to its default string form (e.g.
-                        # "@{...}") rather than "(obj)".
                         if ($_ -is [psobject])
                         {
                             $ElemProps = @($_.PSObject.Properties.Name)
@@ -423,16 +326,12 @@ function New-ServiceTable
 
 # === Page assembly ============================================================
 
-# Build the chart row data. Top 10 services by count for the bar chart;
-# all services for the donut.
 $TopN = $ServiceSummary | Select-Object -First 10
 $DonutData = $ServiceSummary | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
 $BarData = $TopN           | ForEach-Object { @{ Label = $_.Service; Value = $_.Count } }
 $DonutSvg = if ($DonutData) { New-DonutChart -Data $DonutData } else { '<div class="empty">No data</div>' }
 $BarSvg = if ($BarData) { New-BarChart   -Data $BarData }   else { '<div class="empty">No data</div>' }
 
-# Build per-service tables in summary-order (highest count first) so the
-# scroll order matches the bar chart.
 $ServiceSectionsHtml = New-Object System.Text.StringBuilder
 foreach ($svc in $ServiceSummary)
 {
@@ -440,29 +339,24 @@ foreach ($svc in $ServiceSummary)
     [void]$ServiceSectionsHtml.Append((New-ServiceTable -ServiceName $svc.Service -Records $Records -ObfuscationStatus $ObfuscationStatus))
 }
 
-$Generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
+$Generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz', [cultureinfo]::InvariantCulture)
 $TitleSafe = ConvertTo-HtmlSafe $Title
 $SubSafe = ConvertTo-HtmlSafe $SubscriptionName
 $TenantSafe = if ([string]::IsNullOrWhiteSpace($TenantId)) { '' } else { (ConvertTo-HtmlSafe $TenantId) }
 $VersionSafe = if (-not [string]::IsNullOrWhiteSpace([string]$Version)) { ConvertTo-HtmlSafe ([string]$Version) } else { '' }
 
-# Optional run-stats carried over from the old Excel Overview sheet so no
-# information is lost in the HTML migration. Each is rendered only when
-# supplied by the caller.
 $ExtractTimeText = ''
 if ($ExtractionRunTime -is [TimeSpan])
 {
-    $ExtractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##')) }
+    $ExtractTimeText = if ($ExtractionRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f $ExtractionRunTime.Seconds) } else { ('{0} Minutes' -f $ExtractionRunTime.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
 }
 $ReportTimeText = ''
 if ($ReportingRunTime -is [TimeSpan])
 {
-    $ReportTimeText = if ($ReportingRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$ReportingRunTime.TotalSeconds) } else { ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##')) }
+    $ReportTimeText = if ($ReportingRunTime.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$ReportingRunTime.TotalSeconds) } else { ('{0} Minutes' -f $ReportingRunTime.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
 }
 $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { (ConvertTo-HtmlSafe ([string]$PlatOS)) }
 
-# CSS - inlined. Print rules expand all <details> and strip non-essential
-# chrome so Cmd+P produces a clean PDF.
 $Css = @'
 :root {
     --bg: #fafbfc;
@@ -520,7 +414,7 @@ header h1 { margin: 0 0 8px 0; font-size: 22px; }
 .bar-fill    { fill: var(--bar-fill); }
 .bar-label   { font-size: 12px; fill: var(--text); }
 .bar-value   { font-size: 12px; fill: var(--muted); }
-.svc-section, .service-section {
+.service-section {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -637,6 +531,8 @@ footer {
     color: #856404;
 }
 .coverage-banner b { font-weight: 600; }
+.coverage-banner.collector-abort { background: #fdecea; border-color: #d13212; color: #7d2019; }
+.incomplete-note { font-weight: 600; color: #7d2019; }
 .coverage-icon { font-size: 16px; }
 @media print {
     body { background: white; font-size: 11px; }
@@ -652,8 +548,6 @@ footer {
 }
 '@
 
-# JS - also inlined. Provides per-table search + click-to-sort. Vanilla,
-# no dependencies. Tables degrade to plain HTML if JS is disabled.
 $Js = @'
 (function () {
     "use strict";
@@ -743,15 +637,11 @@ $Js = @'
 })();
 '@
 
-# Build the full document. Using a here-string so the layout reads top-down.
 $TenantBlock = if ([string]::IsNullOrWhiteSpace($TenantSafe)) { '' } else { "<div><b>Tenant:</b> $TenantSafe</div>" }
 $VersionBlock = if ([string]::IsNullOrWhiteSpace($VersionSafe)) { '' } else { "<div><b>RDA version:</b> $VersionSafe</div>" }
 $ExtractBlock = if ([string]::IsNullOrWhiteSpace($ExtractTimeText)) { '' } else { "<div><b>Setup and resource discovery:</b> $ExtractTimeText</div>" }
 $ReportBlock = if ([string]::IsNullOrWhiteSpace($ReportTimeText)) { '' } else { "<div><b>Total collection (all phases):</b> $ReportTimeText</div>" }
 
-# Clear per-phase timing breakdown (metrics / collectors / consumption) from
-# -PhaseTimings, rendered as individual header lines so it is obvious which phase
-# dominates a long run. Labels are our own fixed text; HTML-escaped defensively.
 $PhaseBlocks = ''
 if ($PhaseTimings)
 {
@@ -760,23 +650,17 @@ if ($PhaseTimings)
         $PhaseSpan = $PhaseTimings[$phaseName]
         if ($PhaseSpan -is [TimeSpan])
         {
-            $PhaseDurText = if ($PhaseSpan.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$PhaseSpan.TotalSeconds) } else { ('{0} Minutes' -f $PhaseSpan.TotalMinutes.ToString('#######.##')) }
+            $PhaseDurText = if ($PhaseSpan.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$PhaseSpan.TotalSeconds) } else { ('{0} Minutes' -f $PhaseSpan.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
             $PhaseBlocks += ("<div><b>{0}:</b> {1}</div>" -f (ConvertTo-HtmlSafe ([string]$phaseName)), $PhaseDurText)
         }
     }
 }
 
-# Stop the render self-timer now: everything expensive (JSON read + all HTML
-# fragment building) is done; only the final here-string assembly + file write
-# remain, which are trivially fast.
 $RenderStopwatch.Stop()
-$RenderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##')) }
+$RenderTimeText = if ($RenderStopwatch.Elapsed.TotalMinutes -lt 1) { ('{0} Seconds' -f [int]$RenderStopwatch.Elapsed.TotalSeconds) } else { ('{0} Minutes' -f $RenderStopwatch.Elapsed.TotalMinutes.ToString('#######.##', [cultureinfo]::InvariantCulture)) }
 $RenderBlock = "<div><b>Report generation (HTML):</b> $RenderTimeText</div>"
 $PlatBlock = if ([string]::IsNullOrWhiteSpace($PlatSafe)) { '' } else { "<div><b>Environment:</b> $PlatSafe</div>" }
 
-# Privacy banner. Obfuscated runs surface a green confirmation; identifiable
-# runs surface an amber warning so anyone opening the report is reminded the
-# content carries real subscription / resource names.
 if ($ObfuscationStatus -eq 'obfuscated')
 {
     $PrivacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names have been replaced with deterministic pseudonyms (prod_/nonprod_ prefixes). Real identifiers are not present. Suitable for sharing.</div></div>'
@@ -786,12 +670,41 @@ else
     $PrivacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
 }
 
-# VM billing-coverage banner. Rendered only when the inventory shows materially
-# more running VMs than the consumption data billed for (see the $VmBilling
-# detection above). Frames the inventory as authoritative and points at
-# consumption-collection completeness, not at the report being inaccurate. In
-# an obfuscated report the per-VM identities cannot be joined (separate
-# dictionaries), so this is a count-level signal; the wording reflects that.
+# A failed collector is INVISIBLE in the tables: its type serialises as an empty array and the
+# section is dropped, which reads identically to a subscription that owns none of that type. Naming
+# the types here is the only thing on this page that distinguishes the two.
+$CollectorBanner = ''
+# Counted UNFILTERED on purpose. Filtering first and keying the guard off the filtered count would
+# make a malformed record delete the whole banner, which is the same silent disappearance this
+# change exists to end.
+$AllFailures = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
+if ($AllFailures.Count -gt 0 -or $CollectorsAborted)
+{
+    $Names = @($AllFailures | ForEach-Object { if ([string]::IsNullOrWhiteSpace([string]$_.Module)) { '(unnamed collector)' } else { [string]$_.Module } } | Sort-Object -Unique)
+    $NameList = (($Names | ForEach-Object { '<code>' + (ConvertTo-HtmlSafe $_) + '</code>' }) -join ', ')
+
+    # An abort with nothing individually recorded must not read "0 resource type(s) ... errored":
+    # lead with the abort in that case instead of contradicting itself.
+    if ($Names.Count -gt 0)
+    {
+        $CollectorLead = ('{0} resource type(s) could not be collected and are MISSING from this report - not empty because there are none, but because the collector errored: {1}.' -f $Names.Count, $NameList)
+    }
+    else
+    {
+        $CollectorLead = 'Collection did not complete, so this report does not cover every resource type.'
+    }
+
+    $AbortNote = if ($CollectorsAborted)
+    {
+        ' Collection was then STOPPED by the circuit breaker, so every resource type after that point was never attempted and is absent from this report entirely. Treat this report as a PARTIAL view of the subscription.'
+    }
+    else { '' }
+
+    # An aborted run is a failure, not a caveat, so it gets the error styling rather than the amber.
+    $CollectorClass = if ($CollectorsAborted) { 'coverage-banner collector-abort' } else { 'coverage-banner' }
+    $CollectorBanner = ('<div class="{0}"><span class="coverage-icon">&#9888;</span><div><b>Incomplete collection:</b> {1}{2} See the Diagnostics log in this bundle for the underlying error, then re-run.</div></div>' -f $CollectorClass, $CollectorLead, $AbortNote)
+}
+
 $CoverageBanner = ''
 if ($null -ne $VmBilling)
 {
@@ -803,7 +716,7 @@ if ($null -ne $VmBilling)
     {
         ''
     }
-    $CoverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct, $IdNote)
+    $CoverageBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>VM billing-coverage check:</b> {0} running VMs were discovered in the inventory, but only {1} VMs have compute-usage records in the consumption window &mdash; {2} running VMs ({3}%) have no compute charge. This usually means consumption data was incomplete for some subscriptions (auth or billing-scope gaps), not that the VMs are idle. Verify consumption collection for the affected subscriptions.{4}</div></div>' -f $VmBilling.Running, $VmBilling.Billed, $VmBilling.Gap, $VmBilling.GapPct.ToString([cultureinfo]::InvariantCulture), $IdNote)
 }
 
 $Html = @"
@@ -833,11 +746,13 @@ $ReportBlock
 $RenderBlock
 $PlatBlock
 <div><b>Total Resources:</b> $TotalResources</div>
-<div><b>Service Types:</b> $($ServiceSummary.Count)</div>
+<div><b>Service Types:</b> $($ServiceSummary.Count)$(if ($CollectorBanner) { ' <span class="incomplete-note">(collection incomplete, see below)</span>' })</div>
 </div>
 </header>
 
 $PrivacyBanner
+
+$CollectorBanner
 
 $CoverageBanner
 
@@ -868,11 +783,11 @@ $Js
 </html>
 "@
 
-Set-Content -Path $HtmlFile -Value $Html -Encoding utf8
+Set-Content -LiteralPath $HtmlFile -Value $Html -Encoding utf8
 Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
-Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
-$FileSize = (Get-Item $HtmlFile).Length
-Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $FileSize, ($FileSize / 1KB)) -ForegroundColor Green
+Write-Host ("  Total resources: {0} across {1} service type(s)" -f $TotalResources.ToString('N0', [cultureinfo]::InvariantCulture), $ServiceSummary.Count) -ForegroundColor Green
+$FileSize = (Get-Item -LiteralPath $HtmlFile).Length
+Write-Host ("  File size: {0} bytes ({1} KB)" -f $FileSize.ToString('N0', [cultureinfo]::InvariantCulture), ($FileSize / 1KB).ToString('N1', [cultureinfo]::InvariantCulture)) -ForegroundColor Green
 if ($ObfuscationStatus -eq 'obfuscated')
 {
     Write-Host "  Privacy posture: obfuscated (safe to share)" -ForegroundColor Green
@@ -881,3 +796,17 @@ else
 {
     Write-Host "  Privacy posture: identifiable (contains real names; treat as confidential)" -ForegroundColor Yellow
 }
+# Last, so the operator's final console line cannot read clean over an incomplete report.
+if ($CollectorBanner)
+{
+    $ConsoleNames = if (@($Names).Count -gt 0) { (@($Names) -join ', ') } else { 'none individually recorded' }
+    if ($CollectorsAborted)
+    {
+        Write-Host ("  Collection ABORTED: this is a PARTIAL report. Types that failed before the abort: {0}" -f $ConsoleNames) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host ("  Collection INCOMPLETE: {0} resource type(s) missing because the collector errored: {1}" -f @($Names).Count, $ConsoleNames) -ForegroundColor Yellow
+    }
+}
+

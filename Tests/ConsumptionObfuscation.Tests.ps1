@@ -1,30 +1,9 @@
-# Consumption Obfuscation null-URI regression tests
-# Run with: Invoke-Pester ./Tests/ConsumptionObfuscation.Tests.ps1 -Output Detailed
-#
-# WHY THIS TEST EXISTS
-# --------------------
-# The obfuscate-mode consumption path in ResourceInventory.ps1
-# (GetResorceConsumption) rebuilds each usage record's resourceUri. Some Azure
-# meter types legitimately have a NULL resourceUri (marketplace purchases,
-# certain reservations, tenant-level charges). The original code fed that value
-# straight into [hashtable].ContainsKey($rawUri); ContainsKey($null) THROWS
-# (ArgumentNullException), and the per-subscription try/catch swallowed it -
-# aborting the rest of that subscription's consumption collection. Net effect:
-# inventory completed but consumption was silently truncated, ONLY under
-# -Obfuscate.
-#
-# This test is SELF-CONTAINED: it replicates the obfuscation guard
-# logic exactly as it appears in ResourceInventory.ps1 and proves a null/empty
-# resourceUri does not throw and yields the 'obfuscated' fallback token, while a
-# normal ARM-shaped uri still obfuscates deterministically. It does NOT need a
-# live Azure run or an output zip. If the guard logic in ResourceInventory.ps1
-# changes, update the helper below to match.
+# Regression: obfuscate-mode consumption rebuild must not throw on a NULL resourceUri.
+# ContainsKey($null) threw and the per-subscription try/catch silently truncated consumption under -Obfuscate.
 
 BeforeAll {
-    # Faithful copy of the consumption resourceUri obfuscation block from
-    # ResourceInventory.ps1 GetResorceConsumption() (obfuscate branch). The test
-    # replicates the logic rather than calling production code, so it stays
-    # self-contained (no live Azure, no output zip).
+    # Simplified model of ResourceInventory.ps1 GetResourceConsumption() obfuscate branch;
+    # deliberately omits the inventory leaf-token cross-dataset link that production adds.
     function Get-ObfuscatedConsumptionUriForTest
     {
         param($RawUri)

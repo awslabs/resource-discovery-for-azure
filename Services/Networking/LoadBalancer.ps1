@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $LoadBalancer = $Resources | Where-Object { $_.TYPE -eq 'microsoft.network/loadbalancers' }
+    $LoadBalancer = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.network/loadbalancers') { $Row } }
 
     if ($LoadBalancer)
     {

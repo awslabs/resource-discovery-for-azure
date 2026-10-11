@@ -1,0 +1,145 @@
+name: Offline Pester
+
+# The suites that need no Azure, on all three operating systems the tool supports.
+# The dangerous bugs in a PowerShell 7 tool are the ones that appear on one OS only -
+# a path separator, a quoting rule at the shell boundary, a temp folder that behaves
+# differently - and those are invisible to a single-platform run.
+#
+# This job deliberately installs ONLY Pester, not the Az modules: a suite that needs
+# Azure must skip itself here rather than pass by accident against a stale context.
+# The live scenario matrix and the wrapper scenarios cover what this cannot, against
+# a real subscription, outside GitHub.
+
+on:
+  push:
+    # Run on every branch so feature work gets immediate feedback.
+    branches: ['**']
+    paths:
+      - '**.ps1'
+      - '**.psm1'
+      - '**.psd1'
+      - 'Tests/**'
+      - '.github/workflows/offline-pester.yml'
+  pull_request:
+    # PRs targeting mainline still gate on the same suites.
+    branches: [main, master]
+    paths:
+      - '**.ps1'
+      - '**.psm1'
+      - '**.psd1'
+      - 'Tests/**'
+      - '.github/workflows/offline-pester.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pester:
+    name: Pester (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One OS failing must not hide the result on the other two: a single-OS
+      # failure is exactly the signal this job exists to produce.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester 5.7.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Pinned: the suite is verified on 5.7.1, and Invoke-Pester otherwise loads
+          # the newest installed version. The Windows runner ships Pester 3.4.0 as a
+          # system module, which is why the publisher check has to be skipped.
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 5.7.1
+          Get-Module Pester | Select-Object Name, Version | Format-Table -AutoSize
+
+      - name: Run the offline suites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.7.1
+
+          # Which suites cannot run here is read from the suites themselves rather than
+          # from a list kept by hand: these throw in their BeforeAll without a
+          # pre-generated report zip, which only a live run produces. The commit gate's
+          # own test job derives the set the same way, so the two cannot drift.
+          $All = @(Get-ChildItem -LiteralPath ./Tests -Filter '*.Tests.ps1' -File | Sort-Object Name)
+          $Excluded = @()
+          $ToRun = @()
+          foreach ($File in $All)
+          {
+              if ((Get-Content -LiteralPath $File.FullName -Raw) -match 'throw\s+"No (test )?zip found')
+              {
+                  $Excluded += $File.Name
+              }
+              else
+              {
+                  $ToRun += $File.FullName
+              }
+          }
+          Write-Host ("Tests: {0} files, {1} need a live report zip and are excluded, {2} to run" -f $All.Count, $Excluded.Count, $ToRun.Count)
+          foreach ($Name in $Excluded) { Write-Host ("  excluded {0}" -f $Name) }
+          if ($ToRun.Count -eq 0) { throw 'No offline suite was selected, so nothing was checked.' }
+
+          $Config = New-PesterConfiguration
+          $Config.Run.Path = $ToRun
+          $Config.Run.PassThru = $true
+          $Config.Output.Verbosity = 'Normal'
+          $Result = Invoke-Pester -Configuration $Config
+
+          # A container whose body throws before any It runs leaves FailedCount at 0,
+          # so a non-empty ErrorRecord counts as a failure too.
+          $Crashed = @($Result.Containers | Where-Object { @($_.ErrorRecord).Count -gt 0 })
+          $Failed = $Result.FailedCount + $Crashed.Count
+
+          Write-Host "::group::Summary"
+          Write-Host ("Passed:  {0}" -f $Result.PassedCount)
+          Write-Host ("Failed:  {0}" -f $Failed)
+          Write-Host ("Skipped: {0}" -f $Result.SkippedCount)
+          Write-Host "::endgroup::"
+
+          foreach ($Test in @($Result.Failed))
+          {
+              $Where = if ($Test.ScriptBlock) { $Test.ScriptBlock.File } else { '' }
+              Write-Host ("::error file={0}::{1}" -f $Where, $Test.ExpandedName)
+          }
+          foreach ($Container in $Crashed)
+          {
+              $Item = if ($Container.Item) { $Container.Item.ToString() } else { 'unknown container' }
+              $Message = ($Container.ErrorRecord | Select-Object -First 1)
+              Write-Host ("::error::{0} failed during discovery: {1}" -f $Item, $Message)
+          }
+
+          $SummaryPath = $env:GITHUB_STEP_SUMMARY
+          if ($SummaryPath)
+          {
+              "# Offline Pester ($env:RUNNER_OS)" | Out-File $SummaryPath -Append
+              "" | Out-File $SummaryPath -Append
+              "| Result | Count |" | Out-File $SummaryPath -Append
+              "|--------|-------|" | Out-File $SummaryPath -Append
+              "| Passed | $($Result.PassedCount) |" | Out-File $SummaryPath -Append
+              "| Failed | $Failed |" | Out-File $SummaryPath -Append
+              "| Skipped | $($Result.SkippedCount) |" | Out-File $SummaryPath -Append
+              "| Files run | $($ToRun.Count) |" | Out-File $SummaryPath -Append
+              "| Files excluded (need a live report zip) | $($Excluded.Count) |" | Out-File $SummaryPath -Append
+          }
+
+          # A run where nothing passed has not proved anything, whatever its failure
+          # count says, so it blocks like a failure.
+          if ($Result.PassedCount -eq 0)
+          {
+              Write-Host "::error::No test passed, so this run checked nothing."
+              exit 1
+          }
+          if ($Failed -gt 0)
+          {
+              Write-Host ("::error::{0} test(s) failed." -f $Failed)
+              exit 1
+          }

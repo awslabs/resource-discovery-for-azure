@@ -1,36 +1,13 @@
-# Protect-DiagnosticText scrub tests
-# =============================================================================
-# Offline, self-contained tests for the scrub that makes the SHAREABLE (in-zip,
-# obfuscated) diagnostics log safe. Protect-DiagnosticText is what stands
-# between a raw collector/phase exception message and the Diagnostics_*.log
-# that ships in the obfuscated bundle, so these assert - directly, without a
-# live run - that every identifier class is masked or tokenized and NONE leaks:
-#   - a dictionary-known subscription GUID / resource name / resource group /
-#     full ARM id  -> its deterministic prod_/nonprod_ token (via the caller's
-#     real-value -> token $ValueMap, applied longest-first)
-#   - an UNKNOWN GUID not in the map (e.g. a tenant GUID)  -> '<guid>'
-#   - email / UPN            -> '<email>'
-#   - IPv4                   -> '<ip>'
-#   - Azure data-plane FQDN  -> '<host>'
-#   - *nix / Windows home dir-> '<user>'
-#   - SAS signature / Bearer -> '<redacted>'
-# and that a prod_/nonprod_ token already in the text is left intact.
-#
-# No customer data: the only literal GUID is the Azure docs placeholder; the
-# "unknown tenant" GUID is generated at runtime; every other value is synthetic.
-# =============================================================================
+# Offline tests for Protect-DiagnosticText, the scrub between a raw exception message and the shareable obfuscated
+# Diagnostics_*.log: every identifier class must be masked/tokenized (map applied longest-first), none leaking; only literal GUID is the Azure docs placeholder.
 
 BeforeAll {
     $FunctionsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/ResourceInventory.Functions.ps1'
     if (-not (Test-Path $FunctionsFile)) { throw "ResourceInventory.Functions.ps1 not found at $FunctionsFile" }
     . $FunctionsFile
 
-    # Known (dictionary-backed) real values and their deterministic tokens,
-    # mirroring the real-value -> token $diagScrubMap the packaging block builds.
-    # All token GUIDs and the secret-shaped fixtures (SAS sig, Bearer JWT) are
-    # GENERATED AT RUNTIME so no literal GUID / auth token lives in this source
-    # file (only the Azure docs placeholder is a literal GUID) - keeps the file
-    # clean for the pre-commit leak scan while still exercising every scrub path.
+    # Dictionary-backed real-value -> token fixtures mirroring the packaging block's $diagScrubMap;
+    # token GUIDs and secret-shaped fixtures are generated at runtime so no literal secret lives in this source (leak scan stays clean).
     $script:SubGuid = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
     $script:RgName = 'rg-sensitive-demo'
     $script:ResName = 'vm-app-demo'
@@ -66,6 +43,13 @@ BeforeAll {
     # rules still fire. Keep the sig/jwt values to assert they are gone afterward.
     $script:SigValue = (& $NewRand 32)
     $script:SasUrl = 'https://example-host/container/blob?sv=2021-08-06&ss=b&' + 'sig=' + $script:SigValue
+    # Non-sig query-param forms from the SAME shared auth alternation
+    # (sig|signature|sas|accesstoken|...). The sig= assertion only catches a
+    # wholesale regex break; these catch the removal of a single alternative
+    # (e.g. signature= or sas=) that would otherwise ship untested. Values are
+    # runtime-random like the sig fixture, so no literal secret lives in source.
+    $script:SignatureValue = (& $NewRand 32)
+    $script:SasValue = (& $NewRand 24)
     $script:JwtValue = 'eyJ' + (& $NewRand 12) + '.' + (& $NewRand 16) + '.' + (& $NewRand 16)
     $script:Bearer = 'Bearer ' + $script:JwtValue
 
@@ -77,6 +61,7 @@ BeforeAll {
         "host $script:Fqdn ($script:Ip);",
         "log $script:HomeNix / $script:HomeWin;",
         "download $script:SasUrl;",
+        "sas params: signature=$script:SignatureValue sas=$script:SasValue;",
         "auth: $script:Bearer"
     ) -join ' '
 
@@ -120,10 +105,12 @@ Describe "Protect-DiagnosticText masks structured identifier classes" {
 
     It "masks IPv4 addresses" {
         $script:Scrubbed | Should -Not -Match '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+        $script:Scrubbed | Should -Match '<ip>' -Because 'the IPv4 must be replaced by the <ip> token, not merely dropped or over-masked'
     }
 
     It "masks Azure data-plane FQDNs" {
         $script:Scrubbed | Should -Not -Match ([regex]::Escape($script:Fqdn))
+        $script:Scrubbed | Should -Match '<host>' -Because 'the FQDN must be replaced by the <host> token, not merely dropped or over-masked'
     }
 
     It "masks Unix home paths and cannot trip the Obfuscation home-path scan" {
@@ -137,6 +124,16 @@ Describe "Protect-DiagnosticText masks structured identifier classes" {
     It "redacts a SAS signature value" {
         $script:Scrubbed | Should -Not -Match ('sig=' + [regex]::Escape($script:SigValue))
         $script:Scrubbed | Should -Match 'sig=<redacted>'
+    }
+
+    It "redacts a 'signature=' query-param value" {
+        $script:Scrubbed | Should -Not -Match ('signature=' + [regex]::Escape($script:SignatureValue))
+        $script:Scrubbed | Should -Match 'signature=<redacted>'
+    }
+
+    It "redacts a 'sas=' query-param value" {
+        $script:Scrubbed | Should -Not -Match ('sas=' + [regex]::Escape($script:SasValue))
+        $script:Scrubbed | Should -Match 'sas=<redacted>'
     }
 
     It "redacts a Bearer token" {
@@ -163,5 +160,48 @@ Describe "Protect-DiagnosticText preserves already-obfuscated tokens and edge ca
         $Out = Protect-DiagnosticText "tenant $script:UnknownGuid mail $script:Email" $null
         $Out | Should -Not -Match ([regex]::Escape($script:UnknownGuid))
         $Out | Should -Not -Match ([regex]::Escape($script:Email))
+    }
+}
+
+Describe "Protect-DiagnosticText redacts connection-string secrets while preserving readable segments" {
+
+    # Widened auth alternation masks connection-string secret values; the value class terminates at ';' or '&'
+    # so the next segment and the readable key NAME survive. Secrets built at runtime so no literal secret lives in source.
+
+    It "redacts an AccountKey value while EndpointSuffix survives readable" {
+        $Secret = [guid]::NewGuid().ToString('N') + '=='
+        $Conn = "AccountName=acct;AccountKey=$Secret;EndpointSuffix=core.windows.net"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'AccountKey=<redacted>'
+        $Out | Should -Match 'EndpointSuffix=core\.windows\.net'
+    }
+
+    It "redacts a SharedAccessKey value while the SharedAccessKeyName key name survives" {
+        $Secret = [guid]::NewGuid().ToString('N') + '='
+        $Conn = "SharedAccessKeyName=RootManage;SharedAccessKey=$Secret"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'SharedAccessKey=<redacted>'
+        $Out | Should -Match 'SharedAccessKeyName=RootManage'
+    }
+
+    It "redacts a Password value while the following Encrypt segment survives readable" {
+        $Secret = [guid]::NewGuid().ToString('N')
+        $Conn = "User ID=u;Password=$Secret;Encrypt=true"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'Password=<redacted>'
+        $Out | Should -Match 'Encrypt=true'
+    }
+
+    It "redacts a client_secret value while client_id and scope survive readable" {
+        $Secret = [guid]::NewGuid().ToString('N')
+        $Conn = "client_id=id&client_secret=$Secret&scope=x"
+        $Out = Protect-DiagnosticText $Conn $null
+        $Out | Should -Not -Match ([regex]::Escape($Secret))
+        $Out | Should -Match 'client_secret=<redacted>'
+        $Out | Should -Match 'client_id=id'
+        $Out | Should -Match 'scope=x'
     }
 }

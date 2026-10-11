@@ -1,0 +1,427 @@
+# Offline unit tests for Extension/VMPlacement.ps1 (capacity CSV): assert numeric
+# columns are number-or-EMPTY (a placeholder word or a fallback 0 corrupts SUM).
+
+BeforeAll {
+    $script:RepoRoot = Split-Path $PSScriptRoot -Parent
+    $script:Extension = Join-Path $script:RepoRoot 'Extension/VMPlacement.ps1'
+    if (-not (Test-Path -LiteralPath $script:Extension))
+    {
+        throw "Cannot find Extension/VMPlacement.ps1 at $script:Extension"
+    }
+
+    $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+    $script:WorkDir = Join-Path $TmpBase ('VMPlacementTest_' + [guid]::NewGuid().ToString().Substring(0, 8))
+    New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
+
+    # Silent Write-Log stand-in so tests exercise the real extension without the
+    # orchestrator; MUST be global: and capture into a GLOBAL or nothing is collected.
+    function global:Write-Log
+    {
+        param([string]$Message, [string]$Severity, [switch]$ToDebugLog, [switch]$NoConsole)
+        $Global:PlacementLogLines += ('[{0}] {1}' -f $Severity, $Message)
+    }
+
+    # Runs the extension against the supplied synthetic state and returns the parsed
+    # CSV rows. Keeping this in one helper means every test exercises the same entry
+    # path the orchestrator uses (a plain call with -CsvFile).
+    function script:Invoke-Placement
+    {
+        param($Vms, $ScaleSets, $GraphRows, $Dictionary)
+
+        $Global:PlacementLogLines = @()
+        $Csv = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8) + '.csv')
+
+        $Payload = @{}
+        if ($null -ne $Vms) { $Payload['VirtualMachines'] = $Vms }
+        if ($null -ne $ScaleSets) { $Payload['VMSS'] = $ScaleSets }
+
+        $Global:SmaResources = [PSCustomObject]$Payload
+        $Global:Resources = @($GraphRows)
+        $Global:ResourceIdDictionary = $Dictionary
+
+        & $script:Extension -CsvFile $Csv
+
+        if (-not (Test-Path -LiteralPath $Csv)) { return $null }
+        return @(Import-Csv -LiteralPath $Csv)
+    }
+
+    # --- fixture builders ----------------------------------------------------
+    function script:New-VmRecord
+    {
+        param($Id, $Name, $Cpu = 2, $Memory = 8, $OsDiskGb = 30)
+        [PSCustomObject]@{
+            ID = $Id; Subscription = 'prod_sub'; ResourceGroup = 'prod_rg'; Name = $Name
+            Location = 'westeurope'; Size = 'Standard_D2s_v5'; CPU = $Cpu; Memory = $Memory
+            PowerState = 'VM running'; AvailabilitySet = ''; OSType = 'Linux'
+            OSName = 'Ubuntu'; OSVersion = '22.04'; OSDisk = 'Premium_LRS'; OSDiskSizeGB = $OsDiskGb
+        }
+    }
+
+    function script:New-VmssRecord
+    {
+        param($Id, $Name, $Instances = 3, $Cpu = 4, $Ram = 16)
+        # Hashtable, matching what Services/Containers/VMSS.ps1 actually emits.
+        @{
+            ID = $Id; Subscription = 'prod_sub'; ResourceGroup = 'prod_rg'; Name = $Name
+            Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = $Instances
+            vCPUs = $Cpu; RAM = $Ram; VMOS = 'Linux'; OSImage = 'ubuntu'
+            ImageVersion = '22_04-lts'; StorageAccountType = 'Premium_LRS'; DiskSizeGB = 64
+        }
+    }
+
+    function script:New-GraphVm
+    {
+        param($Id, $Zones = @('1'), $DataDiskSizes = @())
+        [PSCustomObject]@{
+            TYPE = 'microsoft.compute/virtualmachines'; id = $Id; zones = $Zones
+            PROPERTIES = [PSCustomObject]@{
+                storageProfile = [PSCustomObject]@{
+                    dataDisks = @($DataDiskSizes | ForEach-Object { [PSCustomObject]@{ diskSizeGB = $_ } })
+                }
+            }
+        }
+    }
+
+    function script:New-GraphVmss
+    {
+        param($Id, $Zones = @('1', '2'), $DataDiskSizes = @())
+        # A scale set nests its storage profile one level deeper, under
+        # virtualMachineProfile. That difference is the thing worth testing.
+        [PSCustomObject]@{
+            TYPE = 'microsoft.compute/virtualmachinescalesets'; id = $Id; zones = $Zones
+            PROPERTIES = [PSCustomObject]@{
+                virtualMachineProfile = [PSCustomObject]@{
+                    storageProfile = [PSCustomObject]@{
+                        dataDisks = @($DataDiskSizes | ForEach-Object { [PSCustomObject]@{ diskSizeGB = $_ } })
+                    }
+                }
+            }
+        }
+    }
+}
+
+AfterAll {
+    if ($script:WorkDir -and (Test-Path -LiteralPath $script:WorkDir))
+    {
+        Remove-Item -LiteralPath $script:WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item function:global:Write-Log -ErrorAction SilentlyContinue
+    $Global:SmaResources = $null
+    $Global:Resources = $null
+    $Global:ResourceIdDictionary = $null
+}
+
+Describe 'VM placement CSV' {
+
+    Context 'Schema' {
+
+        It 'emits the documented 22 columns in order' {
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1') `
+                -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1') -Dictionary $null
+
+            # This list IS the VM placement CSV column contract (Export-Csv takes the
+            # header from it); ParentScaleSet/AksCluster exist to stop double-counting.
+            $Expected = @(
+                'ResourceKind', 'Subscription', 'ResourceGroup', 'Name', 'Location', 'Zone',
+                'Size', 'Instances', 'CPU', 'MemoryGB', 'PowerState', 'AvailabilitySet',
+                'OSType', 'OSName', 'OSVersion', 'OSDiskSKU', 'OSDiskSizeGB',
+                'DataDiskCount', 'DataDiskTotalGB',
+                'OrchestrationMode', 'ParentScaleSet', 'AksCluster'
+            )
+            @($Rows[0].PSObject.Properties.Name) | Should -Be $Expected
+        }
+    }
+
+    Context 'Virtual machine rows' {
+
+        It 'records the zone and sums data disk sizes' {
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1') `
+                -ScaleSets $null `
+                -GraphRows @(script:New-GraphVm -Id 'v1' -Zones @('1') -DataDiskSizes @(128, 256)) `
+                -Dictionary $null
+
+            $Rows.Count | Should -Be 1
+            $Rows[0].ResourceKind | Should -Be 'VirtualMachine'
+            $Rows[0].Zone | Should -Be '1'
+            $Rows[0].DataDiskCount | Should -Be '2'
+            $Rows[0].DataDiskTotalGB | Should -Be '384'
+        }
+
+        It 'reports Instances as 1 so SUM(CPU * Instances) works uniformly' {
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1' -Cpu 2) `
+                -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1') -Dictionary $null
+
+            $Rows[0].Instances | Should -Be '1'
+        }
+
+        It 'marks a non-zonal VM Regional rather than leaving Zone blank' {
+            # Blank would read as "not known"; Regional is a definite, different fact.
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1') `
+                -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1' -Zones @()) -Dictionary $null
+
+            $Rows[0].Zone | Should -Be 'Regional'
+        }
+    }
+
+    Context 'Scale set rows' {
+
+        It 'includes scale sets, since they are real capacity in a real zone' {
+            $Rows = script:Invoke-Placement -Vms $null `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1' -Instances 3) `
+                -GraphRows @(script:New-GraphVmss -Id 's1') -Dictionary $null
+
+            $Rows.Count | Should -Be 1
+            $Rows[0].ResourceKind | Should -Be 'VirtualMachineScaleSet'
+            $Rows[0].Instances | Should -Be '3'
+        }
+
+        It 'keeps CPU per-instance so the Instances multiplier is not double counted' {
+            $Rows = script:Invoke-Placement -Vms $null `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1' -Instances 3 -Cpu 4) `
+                -GraphRows @(script:New-GraphVmss -Id 's1') -Dictionary $null
+
+            # 4 per instance, NOT 12. The consumer multiplies.
+            $Rows[0].CPU | Should -Be '4'
+        }
+
+        It 'reads the nested virtualMachineProfile storage profile' {
+            $Rows = script:Invoke-Placement -Vms $null `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1') `
+                -GraphRows @(script:New-GraphVmss -Id 's1' -DataDiskSizes @(512)) -Dictionary $null
+
+            $Rows[0].DataDiskCount | Should -Be '1'
+            $Rows[0].DataDiskTotalGB | Should -Be '512'
+        }
+
+        It 'renders a multi-zone scale set as a sorted, comma-joined list' {
+            $Rows = script:Invoke-Placement -Vms $null `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1') `
+                -GraphRows @(script:New-GraphVmss -Id 's1' -Zones @('2', '1')) -Dictionary $null
+
+            $Rows[0].Zone | Should -Be '1,2'
+        }
+
+        It 'leaves PowerState and AvailabilitySet empty rather than inventing a value' {
+            # A scale set has no single power state and cannot be in an availability set.
+            $Rows = script:Invoke-Placement -Vms $null `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1') `
+                -GraphRows @(script:New-GraphVmss -Id 's1') -Dictionary $null
+
+            $Rows[0].PowerState | Should -BeNullOrEmpty
+            $Rows[0].AvailabilitySet | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Numeric columns are summable (never a placeholder word)' {
+
+        It 'leaves CPU and MemoryGB EMPTY when the SKU lookup failed (0), not 0' {
+            # 0 vCPU is not a real SKU, so 0 means the collector's lookup fell back.
+            # Emitting 0 would understate a capacity total silently.
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1' -Cpu 0 -Memory 0) `
+                -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1') -Dictionary $null
+
+            $Rows[0].CPU | Should -BeNullOrEmpty
+            $Rows[0].MemoryGB | Should -BeNullOrEmpty
+        }
+
+        It 'leaves scale-set CPU and MemoryGB EMPTY for the string 0 fallback too' {
+            # Services/Containers/VMSS.ps1 falls back to the STRING '0', not the int.
+            $Rows = script:Invoke-Placement -Vms $null `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1' -Cpu '0' -Ram '0') `
+                -GraphRows @(script:New-GraphVmss -Id 's1') -Dictionary $null
+
+            $Rows[0].CPU | Should -BeNullOrEmpty
+            $Rows[0].MemoryGB | Should -BeNullOrEmpty
+        }
+
+        It 'leaves disk columns EMPTY on a join miss instead of writing Unknown' {
+            # THE regression guard. A word here makes the column mixed-type and breaks
+            # SUM() in every consumer.
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'orphan' -Name 'prod_vm1') `
+                -ScaleSets $null -GraphRows @() -Dictionary $null
+
+            $Rows[0].DataDiskCount | Should -BeNullOrEmpty
+            $Rows[0].DataDiskTotalGB | Should -BeNullOrEmpty
+        }
+
+        It 'never writes the word Unknown into any numeric column' {
+            $Rows = script:Invoke-Placement `
+                -Vms @(script:New-VmRecord -Id 'orphan' -Name 'prod_vm1' -Cpu 0 -Memory 0) `
+                -ScaleSets @(script:New-VmssRecord -Id 'orphan-ss' -Name 'prod_ss1' -Cpu '0' -Ram '0') `
+                -GraphRows @() -Dictionary $null
+
+            foreach ($Row in $Rows)
+            {
+                foreach ($Col in @('Instances', 'CPU', 'MemoryGB', 'OSDiskSizeGB', 'DataDiskCount', 'DataDiskTotalGB'))
+                {
+                    $Row.$Col | Should -Not -Be 'Unknown' -Because "$Col must stay summable"
+                }
+            }
+        }
+
+        It 'keeps Unknown for Zone, which is categorical rather than numeric' {
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'orphan' -Name 'prod_vm1') `
+                -ScaleSets $null -GraphRows @() -Dictionary $null
+
+            $Rows[0].Zone | Should -Be 'Unknown'
+        }
+
+        It 'keeps a legitimate zero, distinguishing "none" from "unavailable"' {
+            # A VM genuinely with no data disks must report 0, not empty.
+            $Rows = script:Invoke-Placement -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1') `
+                -ScaleSets $null -GraphRows @(script:New-GraphVm -Id 'v1' -DataDiskSizes @()) -Dictionary $null
+
+            $Rows[0].DataDiskCount | Should -Be '0'
+            $Rows[0].DataDiskTotalGB | Should -Be '0'
+        }
+    }
+
+    Context 'Mixed estate and totals' {
+
+        It 'emits both kinds together and the instance total is summable' {
+            $Rows = script:Invoke-Placement `
+                -Vms @(script:New-VmRecord -Id 'v1' -Name 'prod_vm1' -Cpu 2) `
+                -ScaleSets @(script:New-VmssRecord -Id 's1' -Name 'prod_ss1' -Instances 3 -Cpu 4) `
+                -GraphRows @((script:New-GraphVm -Id 'v1'), (script:New-GraphVmss -Id 's1')) -Dictionary $null
+
+            $Rows.Count | Should -Be 2
+
+            # The documented total: SUM(CPU * Instances) = (2*1) + (4*3) = 14.
+            $Total = 0
+            foreach ($Row in $Rows) { $Total += ([int]$Row.CPU * [int]$Row.Instances) }
+            $Total | Should -Be 14
+        }
+    }
+
+    Context 'Obfuscated runs' {
+
+        It 'joins on the obfuscated id so an -Obfuscate run still resolves the zone' {
+            # Collector output is obfuscated before it reaches SmaResources, while the
+            # Graph payload keeps real ids. The map must be keyed by the OUTPUT id or
+            # every Zone silently goes Unknown in exactly the mode that gets shared.
+            $Dict = @{ 'real-id-1' = 'prod_token_1' }
+            $Rows = script:Invoke-Placement `
+                -Vms @(script:New-VmRecord -Id 'prod_token_1' -Name 'prod_vm1') `
+                -ScaleSets $null `
+                -GraphRows @(script:New-GraphVm -Id 'real-id-1' -Zones @('3') -DataDiskSizes @(64)) `
+                -Dictionary $Dict
+
+            $Rows[0].Zone | Should -Be '3'
+            $Rows[0].DataDiskTotalGB | Should -Be '64'
+        }
+    }
+
+    Context 'Empty estate' {
+
+        It 'writes no CSV when there are neither VMs nor scale sets' {
+            $Rows = script:Invoke-Placement -Vms @() -ScaleSets @() -GraphRows @() -Dictionary $null
+            $Rows | Should -BeNullOrEmpty
+        }
+
+        It 'fails loud with an Error when Resource Graph reports VMs or scale sets but the collectors returned no rows' {
+            # Empty collector output has two causes: a benign no-VMs Info skip, versus a
+            # collector that threw while Graph still shows capacity (a fail-loud Error).
+            $Rows = script:Invoke-Placement -Vms @() -ScaleSets @() `
+                -GraphRows @((script:New-GraphVm -Id 'v1'), (script:New-GraphVmss -Id 's1')) -Dictionary $null
+
+            $Rows | Should -BeNullOrEmpty -Because 'no CSV is written on the collector-failure signal, just as on the benign skip'
+            $Errors = @($Global:PlacementLogLines | Where-Object { $_ -match '^\[Error\]' })
+            $Errors.Count | Should -BeGreaterThan 0 -Because 'a collector returning no rows while Resource Graph reports capacity must be reported loudly, not skipped as Info'
+        }
+    }
+}
+
+Describe 'The Flexible-orchestration double-counting guard' {
+
+    # A Flexible scale set's members are already emitted as individual VM rows, so
+    # counting the set's Instances too would double its capacity in SUM(CPU*Instances).
+
+    It 'leaves Instances EMPTY on a Flexible scale set, so it adds nothing to the total' {
+        $Rows = script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/flex'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'flexset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 3; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @([PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/flex'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Flexible'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } })
+
+        $Flex = @($Rows | Where-Object { $_.ResourceKind -eq 'VirtualMachineScaleSet' })
+        $Flex.Count | Should -Be 1 -Because 'the row must stay VISIBLE so a planner still sees the SKU and zone'
+        $Flex[0].Instances | Should -BeNullOrEmpty -Because 'its member VMs are counted separately, so counting instances too would double-count'
+        $Flex[0].OrchestrationMode | Should -Be 'Flexible'
+        $Flex[0].CPU | Should -Be '4' -Because 'CPU stays per-instance and is still reported'
+    }
+
+    It 'KEEPS Instances on a Uniform scale set, whose members are never emitted separately' {
+        $Rows = script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/uni'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'uniset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 3; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @([PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/uni'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Uniform'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } })
+
+        $Uni = @($Rows | Where-Object { $_.ResourceKind -eq 'VirtualMachineScaleSet' })[0]
+        $Uni.Instances | Should -Be '3' -Because 'a Uniform set member is a CHILD ARM type, never matched by the VM filter, so Instances is the only place its capacity appears'
+    }
+
+    It 'names the excluded count in a WARNING rather than leaving it to be inferred' {
+        # The warning the guard's own comment promises. Without it, an operator
+        # reconciling the CSV against the portal sees a shortfall and cannot tell the
+        # guard working correctly apart from a failed SKU lookup.
+        script:Invoke-Placement `
+            -ScaleSets @(
+            [PSCustomObject]@{ ID = '/ss/f1'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'f1'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 2; vCPUs = 4; RAM = 16 }
+            [PSCustomObject]@{ ID = '/ss/f2'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'f2'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 5; vCPUs = 4; RAM = 16 }
+        ) `
+            -GraphRows @(
+            [PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/f1'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Flexible'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } }
+            [PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/f2'; zones = @('2'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Flexible'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } }
+        ) | Out-Null
+
+        $Warned = @($Global:PlacementLogLines | Where-Object { $_ -match '^\[Warning\]' -and $_ -match 'Flexible' })
+        $Warned.Count | Should -BeGreaterThan 0 -Because 'the guard silently removing capacity from the total must be reported'
+        # The COUNT must be right - it was previously incremented on an undeclared
+        # variable, where $null++ yields 1 regardless of how many sets qualified.
+        ($Warned -join ' ') | Should -Match '\b2\b' -Because 'two Flexible sets were present, so the count must read 2 and not 1'
+    }
+
+    It 'says nothing about Flexible when there are none, so the message is not noise' {
+        script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/uni'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'uniset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 3; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @([PSCustomObject]@{ TYPE = 'microsoft.compute/virtualmachinescalesets'; id = '/ss/uni'; zones = @('1'); PROPERTIES = [PSCustomObject]@{ orchestrationMode = 'Uniform'; virtualMachineProfile = [PSCustomObject]@{ storageProfile = [PSCustomObject]@{ dataDisks = @() } } } }) | Out-Null
+
+        @($Global:PlacementLogLines | Where-Object { $_ -match 'Flexible' }).Count | Should -Be 0
+    }
+
+    # NOTE: the '$FlexibleCount initialised, not incremented from undeclared' source-guard
+    # that used to live here was removed as redundant and brittle. Its behaviour - the
+    # Flexible count reading 2 rather than 1 for two Flexible sets, which is exactly the
+    # failure an undeclared counter ($null++ -> always 1) would produce - is already proven
+    # behaviourally by the WARNING-count test above ("names the excluded count in a WARNING",
+    # which asserts the count reads 2). The UnknownOrchestrationCount source-guard is kept
+    # because no behavioural test pins that counter's magnitude.
+
+    It 'leaves Instances EMPTY on an UNMATCHED scale set and names the excluded count in a WARNING' {
+        # A join miss leaves orchestration UNKNOWN (possibly Flexible, whose members are
+        # already VM rows), so Instances is left EMPTY and the excluded count Warned.
+        $Rows = script:Invoke-Placement `
+            -ScaleSets @([PSCustomObject]@{ ID = '/ss/orphan'; Subscription = 'S'; ResourceGroup = 'rg'; Name = 'orphanset'; Location = 'westeurope'; VMSize = 'Standard_D4s_v5'; Instances = 7; vCPUs = 4; RAM = 16 }) `
+            -GraphRows @()
+
+        $Ss = @($Rows | Where-Object { $_.ResourceKind -eq 'VirtualMachineScaleSet' })
+        $Ss.Count | Should -Be 1 -Because 'the row stays VISIBLE for SKU and zone even though its capacity cannot be counted'
+        $Ss[0].Instances | Should -BeNullOrEmpty -Because 'an unmatched set could be Flexible, so counting its instances risks the double-count'
+
+        $Warned = @($Global:PlacementLogLines | Where-Object { $_ -match '^\[Warning\]' -and $_ -match 'orchestration mode is UNKNOWN' })
+        $Warned.Count | Should -BeGreaterThan 0 -Because 'excluding a scale set from SUM(CPU * Instances) silently must never happen'
+        # The COUNT must be right, exactly as for the Flexible warning: an undeclared
+        # counter would read 1 for any number of unmatched sets, so assert it here.
+        ($Warned -join ' ') | Should -Match '\b1\b' -Because 'exactly one scale set was unmatched, so the count must read 1'
+    }
+
+    It 'the UnknownOrchestrationCount counter is initialised, not incremented from undeclared' {
+        # Source guard, mirroring the $FlexibleCount check above. '$null++' silently
+        # becomes 1 with no StrictMode, so an undeclared counter would always report 1
+        # regardless of how many sets missed the join - the count would be wrong AND
+        # unreported.
+        $Src = Get-Content -LiteralPath $script:Extension -Raw
+        $Src | Should -Match '\$UnknownOrchestrationCount = 0' -Because 'an undeclared counter reads as 1 for any number of unmatched sets'
+        $InitIdx = $Src.IndexOf('$UnknownOrchestrationCount = 0')
+        $IncIdx = $Src.IndexOf('$UnknownOrchestrationCount++')
+        $InitIdx | Should -BeGreaterThan -1
+        $IncIdx | Should -BeGreaterThan $InitIdx -Because 'the initialiser must precede the increment'
+    }
+}

@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $DataBricks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.databricks/workspaces' }
+    $DataBricks = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.databricks/workspaces') { $Row } }
 
     if ($DataBricks)
     {
@@ -13,9 +13,7 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $Sku = $1.SKU
-            $Timecreated = $Data.createdDateTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.createdDateTime) { [datetime]($Data.createdDateTime) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                        = $1.id;
@@ -24,13 +22,11 @@ if ($Task -eq 'Processing')
                 'Name'                      = $1.NAME;
                 'Location'                  = $1.LOCATION;
                 'Sku'               = $Sku.name;
-                # ManagedResourceGroupId is theoretically always set on a workspace, but
-                # split('/')[4] still fails if the property is missing or malformed.
-                # Guard cheaply rather than crash the whole subscription.
                 'ManagedResourceGroup'      = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } elseif ([string]::IsNullOrEmpty($Data.managedResourceGroupId)) { $null } else { $Data.managedResourceGroupId.split('/')[4] };
                 'StorageAccount'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.parameters.storageAccountName.value };
                 'StorageAccountSKU'         = $Data.parameters.storageAccountSkuName.value;
                 'CreatedTime'               = $Timecreated;
+                'StorageAccountIdentityType' = $Data.storageAccountIdentity.type;
             }
 
             $Tmp += $Obj
@@ -39,3 +35,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

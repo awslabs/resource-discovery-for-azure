@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Snapshots = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.Compute/snapshots' }
+    $Snapshots = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'Microsoft.Compute/snapshots') { $Row } }
 
     if ($Snapshots)
     {
@@ -12,9 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $snapshot.subscriptionId }
             $Data = $snapshot.PROPERTIES
-            $Timecreated = $Data.timeCreated
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                                    = $snapshot.id;
@@ -29,6 +27,8 @@ if ($Task -eq 'Processing')
                 'Incremental'                           = $Data.incremental;
                 'CreatedTime'                           = $Timecreated;
                 'SourceResourceId'                      = if (![string]::IsNullOrEmpty($Data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.creationData.sourceResourceId)) { $ResourceIdDictionary[$Data.creationData.sourceResourceId] } else { 'obfuscated' } } else { $Data.creationData.sourceResourceId };
+                'EncryptionType'                        = $Data.encryption.type;
+                'DiskEncryptionSet'                     = if (![string]::IsNullOrEmpty($Data.encryption.diskEncryptionSetId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.encryption.diskEncryptionSetId)) { $ResourceIdDictionary[$Data.encryption.diskEncryptionSetId] } else { 'obfuscated' } } else { $Data.encryption.diskEncryptionSetId };
             }
 
             $Tmp += $Obj
@@ -37,3 +37,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

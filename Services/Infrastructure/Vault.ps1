@@ -7,7 +7,7 @@ param(
 
 if ($Task -eq 'Processing')
 {
-    $Vault = $Resources | Where-Object { $_.TYPE -eq 'microsoft.keyvault/vaults' }
+    $Vault = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.keyvault/vaults') { $Row } }
 
     if ($Vault)
     {
@@ -17,7 +17,6 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $Sub | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            # https://learn.microsoft.com/en-us/azure/templates/microsoft.keyvault/vaults?pivots=deployment-language-bicep
             <#
                 Property to specify whether the 'soft delete' functionality is enabled for this key vault.
                 If it's not set to any value(true or false) when creating new key vault, it will be set to true by default.
@@ -32,7 +31,6 @@ if ($Task -eq 'Processing')
             {
                 $Soft = $Data.enableSoftDelete
             }
-            # Purge Protection
             if ([string]::IsNullOrEmpty($Data.enablePurgeProtection))
             {
                 $Purge = $false
@@ -60,3 +58,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

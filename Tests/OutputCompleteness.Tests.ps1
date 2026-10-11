@@ -20,6 +20,19 @@ BeforeAll {
     $script:AllFiles = Get-ChildItem -Path $script:ExtractPath -File
     $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
     $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
+
+    # Determine obfuscation state FROM THE BUNDLE rather than from an env var, so
+    # the rule holds for any zip a human points the suite at. Every run - both
+    # branches - ships a Diagnostics_*.log whose first line states which mode
+    # produced it (Write-RdaShareableDiagnosticsLog). Absent that header the
+    # bundle is treated as OBFUSCATED, i.e. fail closed to the stricter rule.
+    $DiagFile = Get-ChildItem -Path $script:ExtractPath -Filter "Diagnostics_*.log" | Select-Object -First 1
+    $script:IsObfuscatedBundle = $true
+    if ($DiagFile)
+    {
+        $DiagHead = Get-Content -LiteralPath $DiagFile.FullName -TotalCount 5 -ErrorAction SilentlyContinue
+        if (($DiagHead -join ' ') -match 'non-obfuscated') { $script:IsObfuscatedBundle = $false }
+    }
 }
 
 AfterAll {
@@ -48,19 +61,21 @@ Describe "Zip File Contents" {
     }
 
     It "Should not contain any unexpected file types" {
-        # The report members are .html / .json / .csv. The ONLY .log permitted in
-        # the shared bundle is the curated, dictionary-scrubbed Diagnostics_*.log
-        # (a human-readable troubleshooting artifact deliberately kept as .log so
-        # the ingestion pipeline does not table-ingest it). Every OTHER .log
-        # (DebugLog_*, ErrorLog_*, Heartbeat_*) and the transcript .txt are
-        # LOCAL-only and must NEVER ship - so a .log with any other name, or any
-        # other unexpected extension, still fails this assertion.
+        # Report members are .html/.json/.csv. Diagnostics_*.log is always allowed (scrubbed; kept .log, not .json, so it is not picked up as a data file);
+        # DebugLog_*.log only in a NON-obfuscated bundle (it carries real, unscrubbed identifiers); every other .log and the transcript stay local-only.
         $AllowedExtensions = @('.html', '.json', '.csv')
         foreach ($file in $script:AllFiles)
         {
             if ($file.Extension -eq '.log')
             {
-                $file.Name | Should -BeLike 'Diagnostics_*.log' -Because "the only .log allowed in the shared bundle is Diagnostics_*.log; '$($file.Name)' is a local-only log that must not ship"
+                if ($script:IsObfuscatedBundle)
+                {
+                    $file.Name | Should -BeLike 'Diagnostics_*.log' -Because "the only .log allowed in an OBFUSCATED bundle is Diagnostics_*.log; '$($file.Name)' is not dictionary-scrubbed and must not ship"
+                }
+                else
+                {
+                    ($file.Name -like 'Diagnostics_*.log' -or $file.Name -like 'DebugLog_*.log') | Should -BeTrue -Because "a non-obfuscated bundle may ship Diagnostics_*.log and DebugLog_*.log only; '$($file.Name)' is a local-only log that must not ship"
+                }
             }
             else
             {
@@ -69,9 +84,35 @@ Describe "Zip File Contents" {
         }
     }
 
+    It "Should never ship the debug log in an obfuscated bundle" {
+        # Dedicated assertion so the security-relevant half of the rule above
+        # fails with an unmistakable message rather than as a generic
+        # unexpected-file-type failure.
+        if (-not $script:IsObfuscatedBundle)
+        {
+            Set-ItResult -Skipped -Because 'this bundle is not obfuscated; the debug log is permitted here by design'
+            return
+        }
+        $LeakedDebug = $script:AllFiles | Where-Object { $_.Name -like 'DebugLog_*' }
+        $LeakedDebug | Should -BeNullOrEmpty -Because 'the debug log is not dictionary-scrubbed and must never ship in an obfuscated bundle'
+    }
+
     It "Should not contain dictionary or transcript files" {
         $Leaked = $script:AllFiles | Where-Object { $_.Name -like 'ObfuscationDictionary_*' -or $_.Name -like 'Transcript_*' }
         $Leaked | Should -BeNullOrEmpty
+    }
+
+    It "Should carry only this run's inventory and metrics JSON" {
+        # With -OutputDirectory, several runs share one report folder. A JSON file from another run
+        # there must never ride along: an earlier non-obfuscated run's Inventory_*.json in an
+        # obfuscated bundle ships every real name and id it holds. The run stamp is the last '_'
+        # segment of the report's own ResourcesReport_<stamp>.html name.
+        $Html = @($script:AllFiles | Where-Object { $_.Extension -eq '.html' }) | Select-Object -First 1
+        if (-not $Html) { Set-ItResult -Skipped -Because 'no HTML report to take the run stamp from'; return }
+        $Stamp = [regex]::Match($Html.BaseName, '_([^_]+)$').Groups[1].Value
+        $Stamp | Should -Not -BeNullOrEmpty -Because "the report name '$($Html.Name)' must end in a run stamp"
+        $Foreign = @($script:AllFiles | Where-Object { $_.Extension -eq '.json' -and $_.Name -notlike "*_$Stamp*" } | ForEach-Object Name)
+        $Foreign | Should -BeNullOrEmpty -Because "every JSON member must belong to run $Stamp"
     }
 }
 
@@ -81,17 +122,23 @@ Describe "Inventory JSON Structure" {
     }
 
     It "Should have at least one resource type with data" {
-        $Populated = $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' }
+        # $null -ne $_.Value is true even for an empty array (@() is not $null), so
+        # count only properties whose value holds at least one resource - otherwise
+        # this can pass with zero discovered resources while claiming it found some.
+        $Populated = $script:Inventory.PSObject.Properties | Where-Object { $_.Name -ne 'Version' -and @($_.Value).Count -gt 0 }
         $Populated.Count | Should -BeGreaterThan 0 -Because "At least one service should have discovered resources"
     }
 
-    It "Every resource should have ID, Name, and Location fields" {
+    # Asserts ID and Location only, NOT Name: a plain 'Name' column is not universal (ARO.ps1 / NetApp.ps1 emit none,
+    # AutomationAcc.ps1 uses AutomationAccountName/RunbookName), so asserting Name would fail on real output.
+    It "Every resource should have ID and Location fields" {
         $script:Inventory.PSObject.Properties | Where-Object { $null -ne $_.Value -and $_.Name -ne 'Version' } | ForEach-Object {
+            $ResourceType = $_.Name
             @($_.Value) | ForEach-Object {
                 if ($null -ne $_)
                 {
-                    $_.PSObject.Properties.Name | Should -Contain 'ID' -Because "Resource in $($_.Name) should have ID"
-                    $_.PSObject.Properties.Name | Should -Contain 'Location' -Because "Resource should have Location"
+                    $_.PSObject.Properties.Name | Should -Contain 'ID' -Because "Resource in $ResourceType should have ID"
+                    $_.PSObject.Properties.Name | Should -Contain 'Location' -Because "Resource in $ResourceType should have Location"
                 }
             }
         }

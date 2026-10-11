@@ -3,8 +3,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 if ($Task -eq 'Processing')
 {
     $RedisCache = @()
-    $RedisCache += $Resources | Where-Object { $_.TYPE -eq 'microsoft.cache/redis' }
-    $RedisCache += $Resources | Where-Object { $_.TYPE -eq 'microsoft.cache/redisenterprise' }
+    $RedisCache += foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.cache/redis') { $Row } }
+    $RedisCache += foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.cache/redisenterprise') { $Row } }
 
     if ($RedisCache)
     {

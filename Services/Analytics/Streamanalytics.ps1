@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Streamanalytics = $Resources | Where-Object { $_.TYPE -eq 'microsoft.streamanalytics/streamingjobs' }
+    $Streamanalytics = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.streamanalytics/streamingjobs') { $Row } }
 
     if ($Streamanalytics)
     {
@@ -12,16 +12,9 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            # These timestamps are optional on the Azure resource: a Stream Analytics
-            # job that has never produced output (Created/Stopped, never started) returns
-            # null for lastOutputEventTime / outputStartTime, and createdDate can be absent
-            # too. Get-Date on a null value throws "Cannot bind parameter 'Date' ... Cannot
-            # convert null to type System.DateTime", which previously killed the whole
-            # Stream Analytics collector for the subscription. Guard each one and emit $null
-            # when the source value is missing.
-            $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { (get-date $Data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") }
-            $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { (get-date $Data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
-            $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { (get-date $Data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
+            $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { try { (get-date $Data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") } catch { $null } }
+            $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { try { (get-date $Data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { $null } }
+            $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { try { (get-date $Data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { $null } }
 
             $Obj = @{
                 'ID'                               = $1.id;
@@ -50,3 +43,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

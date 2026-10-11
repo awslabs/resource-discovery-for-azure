@@ -1,25 +1,37 @@
+#!/usr/bin/env pwsh
+# Get-UsageAggregates is an alias of Get-AzUsageAggregate from Az.Billing 2.1.0 on, and the cmdlet itself
+# before that, so the alias name is the one spelling that works on every Az.Billing version.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingCmdletAliases', 'Get-UsageAggregates', Justification = 'Only name that exists on Az.Billing before and after 2.1.0')]
+[CmdletBinding()]
 param ($TenantID,
     $Appid,
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', ErrorMessage = 'Invalid SubscriptionID; must be a GUID')]
     [string]$SubscriptionID,
+    [switch]$DeviceLogin,
     [securestring]$Secret,
     [ValidatePattern('^[A-Za-z0-9._()-]{1,90}$', ErrorMessage = 'Invalid resource group name; must match ^[A-Za-z0-9._()-]{1,90}$')]
     [string]$ResourceGroup,
     [string[]]$Service,
-    [string]$ObfuscationDictionary,
-    [switch]$Debug,
     [switch]$SkipMetrics,
+    [switch]$SkipDiskMetrics,
+    [switch]$MetricsDetailed,
+    [switch]$IncludeStorageMetrics,
+    [switch]$UseMetricsBatch,
     [switch]$SkipConsumption,
-    [switch]$DeviceLogin,
+    [switch]$SkipMarketplace,
+    [switch]$SkipFoundryCoverage,
     [switch]$Obfuscate,
+    [string]$ObfuscationDictionary,
     [switch]$RunAllSubs,
+    [switch]$CapacityPlan,
+    [ValidateSet(0, 5, 15, 30, 60)][int]$MetricsIntervalMinutes = 0,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
     $OutputDirectory)
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -28,7 +40,7 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 . $FunctionsFile
 
 $CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -36,16 +48,22 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 }
 . $CommonFunctionsFile
 
-if ($Debug.IsPresent) { $DebugPreference = 'Continue' }
+$DebugMode = ($PSBoundParameters.ContainsKey('Debug') -and [bool]$PSBoundParameters['Debug'])
 
-if ($Debug.IsPresent) { $ErrorActionPreference = "Continue" }Else { $ErrorActionPreference = "silentlycontinue" }
+if (-not $PSBoundParameters.ContainsKey('ErrorAction'))
+{
+    $ErrorActionPreference = if ($DebugMode) { 'Continue' } else { 'SilentlyContinue' }
+}
 
-Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
+Write-Debug ('Debugging Mode: On. ErrorActionPreference is "{0}", every error will be presented.' -f $ErrorActionPreference)
 
 function Variables
 {
     $Global:ResourceContainers = @()
     $Global:Resources = @()
+    $Global:ResourceCount = 0
+    $Global:ErrorLogFile = $null
+    $Global:DebugLogFile = $null
     $Global:Subscriptions = ''
     $Global:ReportName = $ReportName
     $Global:Version = GetLocalVersion
@@ -59,10 +77,10 @@ function Variables
 
     if ($Obfuscate.IsPresent)
     {
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     }
@@ -71,91 +89,7 @@ function Variables
     $Global:TableStyle = "Medium15"
 }
 
-function Resolve-ObfuscationToken
-{
-    param(
-        [string]$RealValue,
-        [string]$LookupKey,
-        $SharedDictionary,
-        [hashtable]$LocalCache,
-        [string]$TokenPrefix
-    )
-
-    if ($null -ne $SharedDictionary -and $SharedDictionary.ContainsKey($LookupKey)) { return $SharedDictionary[$LookupKey] }
-    if ($LocalCache.ContainsKey($RealValue)) { return $LocalCache[$RealValue] }
-
-    $Token = $TokenPrefix + [guid]::NewGuid().ToString()
-    $LocalCache[$RealValue] = $Token
-    return $Token
-}
-
-function Build-ObfuscatedResourceUri
-{
-    param(
-        [string]$RawUri,
-        [string]$Prefix,
-        $SubscriptionDictionary,
-        $ResourceGroupDictionary,
-        $NameDictionary,
-        [hashtable]$SubCache,
-        [hashtable]$RgCache,
-        [hashtable]$NameCache
-    )
-
-    if ([string]::IsNullOrEmpty($RawUri))
-    {
-        return 'obfuscated'
-    }
-
-    if ($RawUri -notmatch '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
-    {
-        if (-not $NameCache.ContainsKey($RawUri))
-        {
-            $NameCache[$RawUri] = $Prefix + [guid]::NewGuid().ToString()
-        }
-        return $NameCache[$RawUri]
-    }
-
-    $RealSub = $Matches[1]
-    $RealRg = $Matches[3]
-    $RealProv = $Matches[5]
-
-    $ObfSub = Resolve-ObfuscationToken -RealValue $RealSub -LookupKey $RawUri -SharedDictionary $SubscriptionDictionary -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
-
-    $RebuiltUri = '/subscriptions/' + $ObfSub
-
-    if (-not [string]::IsNullOrEmpty($RealRg))
-    {
-        $RgTag = if ($RealRg -match '^mc_') { 'mc_' } else { '' }
-        $ObfRg = Resolve-ObfuscationToken -RealValue $RealRg -LookupKey $RawUri -SharedDictionary $ResourceGroupDictionary -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
-        $RebuiltUri += '/resourcegroups/' + $ObfRg
-    }
-
-    if (-not [string]::IsNullOrEmpty($RealProv))
-    {
-        $ProvParts = $RealProv -split '/'
-        $Rebuilt = @()
-        for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
-        {
-            $Part = $ProvParts[$Pi]
-            $IsNameSegment = ($Pi -ge 2 -and ($Pi % 2 -eq 0))
-            if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
-            {
-                $NameSharedDict = if ($Pi -eq $ProvParts.Count - 1) { $NameDictionary } else { $null }
-                $Rebuilt += Resolve-ObfuscationToken -RealValue $Part -LookupKey $RawUri -SharedDictionary $NameSharedDict -LocalCache $NameCache -TokenPrefix $Prefix
-            }
-            else
-            {
-                $Rebuilt += $Part
-            }
-        }
-        $RebuiltUri += '/providers/' + ($Rebuilt -join '/')
-    }
-
-    return $RebuiltUri
-}
-
-Function RunInventorySetup()
+function RunInventorySetup()
 {
     function CheckVersion()
     {
@@ -209,38 +143,9 @@ Function RunInventorySetup()
             return
         }
 
-        Write-Log -Message ('Verifying Azure CLI is installed...') -Severity 'Info'
-
-        $AzCliVersion = az --version
-
-        if ($null -eq $AzCliVersion)
-        {
-            Write-Log -Message ("Azure CLI Not Found. Please install and run the script again.") -Severity 'Error'
-            Read-Host "Press <Enter> to exit"
-            Exit
-        }
-
-        Write-Log -Message ('CLI Version: {0}' -f $AzCliVersion[0]) -Severity 'Success'
-
-        Write-Log -Message ('Verifying Azure CLI Extension...') -Severity 'Info'
-
-        $AzCliExtension = az extension list --output json | ConvertFrom-Json
-        $AzCliExtension = $AzCliExtension | Where-Object { $_.name -eq 'resource-graph' }
-
-        Write-Log -Message ('Current Resource-Graph Extension Version: {0}' -f $AzCliExtension.Version) -Severity 'Success'
-
-        $AzCliExtensionVersion = $AzCliExtension | Where-Object { $_.name -eq 'resource-graph' }
-
-        if (!$AzCliExtensionVersion)
-        {
-            Write-Log -Message ('Azure CLI Extension not found') -Severity 'Warning'
-            Write-Log -Message ('Installing Azure CLI Extension...') -Severity 'Info'
-            az extension add --name resource-graph
-        }
-
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing', 'Az.ResourceGraph')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
@@ -311,34 +216,42 @@ Function RunInventorySetup()
                 {
                     Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
                     Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                    Exit
+                    exit 1
                 }
             }
         }
 
-        $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
-        $Global:CurrentDateTime = ((get-date -Format "yyyyMMddHHmmssfff") + $ProcDiscriminator)
+        # The tail keeps two runs that start in the same millisecond apart. Parallel streams run either as
+        # separate processes (different PIDs) or, under -StreamIsolation Runspace, as runspaces of ONE process,
+        # where only the runspace id differs, so both go in. The first runspace of a process (id 1: a
+        # standalone run, the sequential wrapper and each stream process) keeps the plain PID value; an odd
+        # multiplier keeps every other runspace id distinct within the 4 hex digits.
+        $ProcDiscriminator = ('{0:x4}' -f (($PID -bxor ([long]([runspace]::DefaultRunspace.Id - 1) * 0x9E37)) -band 0xffff))
+        $Global:CurrentDateTime = ((Get-Date).ToString('yyyyMMddHHmmssfff', [cultureinfo]::InvariantCulture) + $ProcDiscriminator)
         $Global:FolderName = $Global:ReportName + $CurrentDateTime
 
-        if ($Global:PlatformOS -eq 'Azure CloudShell' -or $Global:PlatformOS -eq 'PowerShell Unix')
+        $RootForRun = Get-RdaInventoryRoot
+        if (-not $RootForRun.Ok)
         {
-            $DefaultOutputDir = "$HOME/InventoryReports/" + $Global:FolderName + "/"
+            Write-Log -Message $RootForRun.Message -Severity 'Error'
+            exit 1
         }
-        else
+        if ($RootForRun.IsFallback)
         {
-            $DefaultOutputDir = "C:\InventoryReports\" + $Global:FolderName + "\"
+            Write-Log -Message $RootForRun.Message -Severity 'Warning'
         }
+        $DefaultOutputDir = (Join-Path $RootForRun.Path $Global:FolderName) + [IO.Path]::DirectorySeparatorChar
 
         if ($OutputDirectory)
         {
             try
             {
-                $OutputDirectory = (Resolve-Path $OutputDirectory -ErrorAction Stop).Path + [IO.Path]::DirectorySeparatorChar
+                $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory -ErrorAction Stop).Path + [IO.Path]::DirectorySeparatorChar
             }
             catch
             {
                 Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
-                Exit
+                exit 1
             }
         }
 
@@ -346,7 +259,7 @@ Function RunInventorySetup()
 
         if ($platformOS -eq 'Azure CloudShell')
         {
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+            $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
         }
         elseif ($platformOS -eq 'PowerShell Unix' -or $platformOS -eq 'PowerShell Desktop')
         {
@@ -356,49 +269,31 @@ Function RunInventorySetup()
 
     function LoginSession()
     {
+        $ExistingContext = Get-AzContext -ErrorAction SilentlyContinue
+
         if (-not $Global:RdaSessionInitialized)
         {
-            $CloudEnv = az cloud list | ConvertFrom-Json
+            $CurrentCloudEnvName = if ($ExistingContext) { $ExistingContext.Environment.Name } else { 'AzureCloud' }
             Write-Host "Azure Cloud Environment: " -NoNewline
-
-            $CurrentCloudEnvName = $CloudEnv | Where-Object { $_.isActive -eq 'True' }
-            Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+            Write-Host $CurrentCloudEnvName -ForegroundColor Green
         }
 
-        $ExistingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
-        if ($null -ne $ExistingAccount)
+        if ($null -ne $ExistingContext)
         {
             if (-not $Global:RdaSessionInitialized)
             {
-                Write-Log -Message ("Already authenticated as: {0}" -f $ExistingAccount.user.name) -Severity 'Success'
+                Write-Log -Message ("Already authenticated as: {0}" -f $ExistingContext.Account.Id) -Severity 'Success'
             }
 
-            if (!$TenantID -or $ExistingAccount.tenantId -eq $TenantID)
+            if (!$TenantID -or $ExistingContext.Tenant.Id -eq $TenantID)
             {
-                $AzContext = Get-AzContext -ErrorAction SilentlyContinue
-                $NeedsConnect = $null -eq $AzContext -or
-                [string]::IsNullOrEmpty($AzContext.Tenant.Id) -or
-                $AzContext.Tenant.Id -ne $ExistingAccount.tenantId
-                if ($NeedsConnect)
-                {
-                    Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
-                    if ($DeviceLogin.IsPresent)
-                    {
-                        Connect-AzAccount -UseDeviceAuthentication -Tenant $ExistingAccount.tenantId | Out-Null
-                    }
-                    else
-                    {
-                        Connect-AzAccount -Tenant $ExistingAccount.tenantId | Out-Null
-                    }
-                }
-
-                $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
+                $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
+                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID }) }
                 return
             }
             else
             {
-                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $ExistingAccount.tenantId, $TenantID) -Severity 'Warning'
+                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $ExistingContext.Tenant.Id, $TenantID) -Severity 'Warning'
             }
         }
 
@@ -411,9 +306,10 @@ Function RunInventorySetup()
 
             if (!$RunAllSubs.IsPresent)
             {
-                az account clear | Out-Null
+                Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
             }
 
+            $SavedDebugPref = $DebugPreference
             $DebugPreference = "SilentlyContinue"
 
             if (!$RunAllSubs.IsPresent)
@@ -422,18 +318,16 @@ Function RunInventorySetup()
                 if ($DeviceLogin.IsPresent)
                 {
                     Write-Log -Message ('Using device login') -Severity 'Info'
-                    az login --use-device-code
                     Connect-AzAccount -UseDeviceAuthentication | Out-Null
                 }
                 else
                 {
                     Write-Log -Message ('Using browser login') -Severity 'Info'
-                    az login --only-show-errors | Out-Null
                     Connect-AzAccount | Out-Null
                 }
             }
 
-            $DebugPreference = "Continue"
+            $DebugPreference = $SavedDebugPref
 
             $Tenants = (Get-AzSubscription -WarningAction SilentlyContinue).HomeTenantId | Sort-Object -Unique
 
@@ -451,7 +345,7 @@ Function RunInventorySetup()
                 $SequenceID = 1
                 foreach ($TenantID in $Tenants)
                 {
-                    write-host "$SequenceID)  $TenantID"
+                    Write-Host "$SequenceID)  $TenantID"
                     $SequenceID ++
                 }
 
@@ -463,7 +357,7 @@ Function RunInventorySetup()
                 }
                 else
                 {
-                    [int]$SelectTenant = read-host "Select Tenant (Default 1)"
+                    [int]$SelectTenant = Read-Host "Select Tenant (Default 1)"
                     if ($SelectTenant -lt 1) { $SelectTenant = 1 }
                     $TenantID = $Tenants[$SelectTenant - 1]
                 }
@@ -472,12 +366,10 @@ Function RunInventorySetup()
                 {
                     if ($DeviceLogin.IsPresent)
                     {
-                        az login --use-device-code -t $TenantID
                         Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
                     }
                     else
                     {
-                        az login -t $TenantID --only-show-errors | Out-Null
                         Connect-AzAccount -Tenant $TenantID | Out-Null
                     }
                 }
@@ -486,35 +378,30 @@ Function RunInventorySetup()
             Write-Log -Message ("Extracting from Tenant $TenantID") -Severity 'Info'
             Write-Log -Message ("Extracting Subscriptions") -Severity 'Info'
 
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID })
+            $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
+            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID })
         }
         else
         {
 
             if (!$RunAllSubs.IsPresent)
             {
-                az account clear | Out-Null
+                Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
 
                 if (!$Appid)
                 {
                     if ($DeviceLogin.IsPresent)
                     {
-                        az login --use-device-code -t $TenantID
                         Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
                     }
                     else
                     {
-                        az login -t $TenantID --only-show-errors | Out-Null
                         Connect-AzAccount -Tenant $TenantID | Out-Null
                     }
                 }
                 elseif ($Appid -and $Secret -and $tenantid)
                 {
                     Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
-                    $UnsecuredSecret = [System.Net.NetworkCredential]::new('', $Secret).Password
-                    $UnsecuredSecret | az login --service-principal -u $appid --tenant $TenantID --password-stdin --only-show-errors | Out-Null
-                    Remove-Variable -Name unsecuredSecret -ErrorAction SilentlyContinue
                     $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
                     Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
                 }
@@ -523,12 +410,12 @@ Function RunInventorySetup()
                     Write-Log -Message ("You are trying to use Service Principal Authentication Method in a wrong way.") -Severity 'Error'
                     Write-Log -Message ("It's Mandatory to specify Application ID, Secret and Tenant ID in Azure Resource Inventory") -Severity 'Error'
                     Write-Log -Message (".\ResourceInventory.ps1 -appid <SP AppID> -secret <SP Secret> -tenant <TenantID>") -Severity 'Error'
-                    Exit
+                    exit 1
                 }
             }
 
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID })
+            $Global:Subscriptions = @(Get-AzSubscription -WarningAction SilentlyContinue)
+            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.HomeTenantId -eq $TenantID })
         }
     }
 
@@ -543,9 +430,18 @@ Function RunInventorySetup()
 
         Write-Log -Message ("Checking report folder: {0}" -f $DefaultPath) -Severity 'Info'
 
-        if ((Test-Path -Path $DefaultPath -PathType Container) -eq $false)
+        if ((Test-Path -LiteralPath $DefaultPath -PathType Container) -eq $false)
         {
-            New-Item -Type Directory -Force -Path $DefaultPath | Out-Null
+            try
+            {
+                New-Item -Type Directory -Force -Path $DefaultPath -ErrorAction Stop | Out-Null
+            }
+            catch
+            {
+                Write-Log -Message ("Could not create the report folder {0}: {1}" -f $DefaultPath, $_.Exception.Message) -Severity 'Error'
+                Write-Log -Message ("No report can be written for this run. Verify the location is writable, or pass -OutputDirectory with a writable path.") -Severity 'Error'
+                exit 1
+            }
         }
 
         $Global:RdaSessionInitialized = $true
@@ -557,7 +453,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
             Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            Exit
+            exit 1
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup))
@@ -569,11 +465,9 @@ Function RunInventorySetup()
         {
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID + '. And from Resource Group: ' + $ResourceGroup) -Severity 'Success'
 
-            $Subscri = $SubscriptionID
-
             $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
-            $EnvSizeNum = $EnvSize.data.'count_'
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $SubscriptionID
+            $EnvSizeNum = $EnvSize.data.count_
 
             if ($EnvSizeNum -ge 1)
             {
@@ -585,7 +479,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $SubscriptionID -Skip $Limit -First 1000 -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -599,8 +493,8 @@ Function RunInventorySetup()
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
-            $EnvSizeNum = $EnvSize.data.'count_'
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $SubscriptionID
+            $EnvSizeNum = $EnvSize.data.count_
 
             if ($EnvSizeNum -ge 1)
             {
@@ -612,7 +506,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -Subscription $SubscriptionID -Skip $Limit -First 1000 -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -625,7 +519,7 @@ Function RunInventorySetup()
         {
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
             $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery
-            $EnvSizeCount = $EnvSize.Data.'count_'
+            $EnvSizeCount = $EnvSize.data.count_
 
             Write-Log -Message ("Resources Output: {0} Resources Identified" -f $EnvSizeCount) -Severity 'Success'
 
@@ -639,9 +533,9 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -Skip $Limit -First 1000 -Lowercase
 
-                    $Global:Resources += $Resource.Data
+                    $Global:Resources += $Resource.data
                     Start-Sleep 2
                     $Looper++
                     $Limit = $Limit + 1000
@@ -653,9 +547,9 @@ Function RunInventorySetup()
     function ResourceInventoryAvd()
     {
         $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()"
-        $AVDSizeCount = $AVDSize.data.'count_'
+        $AVDSizeCount = $AVDSize.data.count_
 
-        Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
+        Write-Log -Message ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -Severity 'Success'
 
         if ($AVDSizeCount -ge 1)
         {
@@ -667,7 +561,7 @@ Function RunInventorySetup()
             while ($Looper -lt $Loop)
             {
                 $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
+                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -Skip $Limit -First 1000 -Lowercase
 
                 $Global:Resources += $AVD.data
                 Start-Sleep 2
@@ -681,8 +575,29 @@ Function RunInventorySetup()
     CheckCliRequirements
     CheckPowerShell
     GetSubscriptionsData
-    ResourceInventoryLoop
-    ResourceInventoryAvd
+    InitializeLogFiles
+
+    # Taken after sign-in and the subscription list, so the difference to the 'discovery' reading is
+    # the Resource Graph rows alone and not the modules and tokens the setup loaded.
+    Write-RdaMemorySnapshot -Phase 'start' -Compact -Record
+
+    try
+    {
+        ResourceInventoryLoop
+        ResourceInventoryAvd
+    }
+    catch
+    {
+        Write-Log -Message ("FAILED to complete resource discovery: {0}" -f $_.Exception.Message) -Severity 'Error'
+        Write-Log -Message ('  The inventory for this subscription would be INCOMPLETE, so it is reported as failed rather than written to a report. Re-run with -Resume to retry it.') -Severity 'Error'
+        Write-Log -Message ('  If this is a Resource Graph response-size failure on one specific resource type, exclude that type from the discovery query to let the rest of the subscription complete.') -Severity 'Error'
+        exit 1
+    }
+
+    # The wrapper reports this count after the run. It reads the count rather than the array, so
+    # the array can be released once the collectors and the placement CSV have finished with it.
+    $Global:ResourceCount = @($Global:Resources).Count
+    Write-RdaMemorySnapshot -Phase 'discovery' -Compact -Record
 
     if ($Obfuscate.IsPresent)
     {
@@ -691,7 +606,7 @@ Function RunInventorySetup()
 
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
-            $SeedDictionary = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
+            $SeedDictionary = Get-Content -LiteralPath $ObfuscationDictionary -Raw | ConvertFrom-Json
 
             if ($null -ne $SeedDictionary.ResourceIdMap)
             {
@@ -732,6 +647,9 @@ Function RunInventorySetup()
             $IsNonProd = $resourceItem.name -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $resourceItem.name -match '(^|-)([dts])-'
             $Prefix = if ($IsNonProd) { "nonprod_" } else { "prod_" }
 
+            $ObfuscatedID = $Prefix + [guid]::NewGuid().ToString()
+            $ObfuscatedName = $Prefix + [guid]::NewGuid().ToString()
+
             if ($resourceItem.id -match 'databricks')
             {
                 $ObfuscatedName = $Prefix + 'databricks_' + [guid]::NewGuid().ToString()
@@ -743,10 +661,6 @@ Function RunInventorySetup()
             elseif ($resourceItem.id -match 'virtualmachinescalesets')
             {
                 $ObfuscatedName = $Prefix + 'vmss_' + [guid]::NewGuid().ToString()
-            }
-            else
-            {
-                $ObfuscatedName = $Prefix + [guid]::NewGuid().ToString()
             }
 
             $RealSub = ($Global:Subscriptions | Where-Object { $_.id -eq $resourceItem.subscriptionId }).Name
@@ -770,23 +684,10 @@ Function RunInventorySetup()
             if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
             {
                 $ObfuscatedID = $ResourceIdDictionary[$resourceItem.ID]
-                $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
-                $ObfuscatedSubscription = $ResourceSubscriptionDictionary[$resourceItem.ID]
-                $ObfuscatedResourceGroup = $ResourceResourceGroupDictionary[$resourceItem.ID]
-            }
-            else
-            {
-                # Build a structured ARM-shaped obfuscated ID (not a flat GUID token) by
-                # substituting the real subscription/resource-group/name segments with the
-                # SAME tokens stored in the sibling dictionaries below, so a downstream
-                # consumption record that matches this exact resource ID reconstructs an
-                # identically-shaped, identically-tokenized path.
-                $ObfuscatedID = $resourceItem.ID -replace '(?i)/subscriptions/[^/]+', ('/subscriptions/' + $ObfuscatedSubscription)
-                if ($ObfuscatedID -match '(?i)/resourcegroups/[^/]+')
+                if ($ResourceNameDictionary.ContainsKey($resourceItem.ID))
                 {
-                    $ObfuscatedID = $ObfuscatedID -replace '(?i)/resourcegroups/[^/]+', ('/resourcegroups/' + $ObfuscatedResourceGroup)
+                    $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
                 }
-                $ObfuscatedID = $ObfuscatedID -replace '/[^/]+$', ('/' + $ObfuscatedName)
             }
 
             $ResourceIdDictionary[$resourceItem.ID] = $ObfuscatedID
@@ -798,6 +699,34 @@ Function RunInventorySetup()
     }
 }
 
+function InitializeLogFiles()
+{
+    # The two local log paths are set as soon as the report folder exists, so this subscription's
+    # sign-in errors and its 'start' and 'discovery' memory readings land in this subscription's
+    # files. Variables clears both paths first, so under the wrapper nothing is appended to the
+    # previous subscription's logs.
+    if ($RunAllSubs.IsPresent)
+    {
+        $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+        $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+        $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
+    }
+    else
+    {
+        $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+    }
+
+    if ($RunAllSubs.IsPresent)
+    {
+        $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+        $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+        $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
+    }
+    else
+    {
+        $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
+    }
+}
 function ExecuteInventoryProcessing()
 {
     function InitializeInventoryProcessing()
@@ -808,34 +737,20 @@ function ExecuteInventoryProcessing()
         $Global:JsonFile = ($DefaultPath + "Inventory_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:MetricsJsonFile = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
         $Global:ConsumptionFileCsv = ($DefaultPath + "Consumption_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
-
-        if ($RunAllSubs.IsPresent)
-        {
-            $ErrorLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $ErrorLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $Global:ErrorLogFile = (Join-Path $ErrorLogDir ("ErrorLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $ErrorLogSubTag + ".log"))
-        }
-        else
-        {
-            $Global:ErrorLogFile = ($DefaultPath + "ErrorLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
-        }
-
-        if ($RunAllSubs.IsPresent)
-        {
-            $DebugLogDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
-            $DebugLogSubTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
-            $Global:DebugLogFile = (Join-Path $DebugLogDir ("DebugLog_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $DebugLogSubTag + ".log"))
-        }
-        else
-        {
-            $Global:DebugLogFile = ($DefaultPath + "DebugLog_" + $Global:ReportName + "_" + $CurrentDateTime + ".log")
-        }
+        $Global:MarketplaceFileCsv = ($DefaultPath + "Marketplace_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+        $Global:FoundryCoverageFileCsv = ($DefaultPath + "FoundryModelCoverage_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
 
         Write-Log -Message ('Report HTML File: {0}' -f $Global:HtmlFile) -Severity 'Info'
     }
 
     function Test-DataPlaneAuthReady([string]$Phase)
     {
+        # Runs against the process's own context, exactly as before the phases scoped their Az calls:
+        # a reconnect must land in the process profile, not in the per-subscription copy a phase
+        # passes through $PSDefaultParameterValues['*:DefaultProfile']. The caller re-pins afterwards.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+        $PSDefaultParameterValues.Remove('*:DefaultProfile')
+
         $TokenOk = {
             $Ctx = $null
             try { $Ctx = Get-AzContext -ErrorAction Stop } catch { return $false }
@@ -906,6 +821,8 @@ function ExecuteInventoryProcessing()
 
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                 $MetricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                # Cause tells the wrapper which banner and remedy apply: 'auth' is this skip, re-authenticate
+                # and re-run. Extension/Metrics.ps1 writes 'pool' when its worker pool cannot be opened.
                 $AffectedSubs = @(
                     if (![string]::IsNullOrEmpty($SubscriptionID))
                     {
@@ -919,13 +836,13 @@ function ExecuteInventoryProcessing()
                 if ($AffectedSubs.Count -eq 0)
                 {
                     $IdLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg; Cause = 'auth' }
                 }
                 else
                 {
                     foreach ($asub in $AffectedSubs)
                     {
-                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg; Cause = 'auth' }
                     }
                 }
                 return
@@ -935,18 +852,18 @@ function ExecuteInventoryProcessing()
 
             if ($PSScriptRoot -like '*\*')
             {
-                $MetricPath = Get-ChildItem -Path ($PSScriptRoot + '\Extension\Metrics.ps1') -Recurse
+                $MetricPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '\Extension\Metrics.ps1') -Recurse
             }
             else
             {
-                $MetricPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Metrics.ps1') -Recurse
+                $MetricPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '/Extension/Metrics.ps1') -Recurse
             }
 
             $MetricsFilePath = ($DefaultPath + "Metrics_" + $Global:ReportName + "_" + $CurrentDateTime + "_")
 
             $Global:AzMetrics = New-Object PSObject
             $Global:AzMetrics | Add-Member -MemberType NoteProperty -Name Metrics -Value NotSet
-            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays
+            $Global:AzMetrics.Metrics = & $MetricPath -Subscriptions $Subscriptions -Resources $Resources -Task "Processing" -ConcurrencyLimit $ConcurrencyLimit -FilePath $MetricsFilePath -ResourceIdDictionary $(if ($Obfuscate.IsPresent) { $ResourceIdDictionary } else { $null }) -ResourceNameDictionary $(if ($Obfuscate.IsPresent) { $ResourceNameDictionary } else { $null }) -ResourceSubDictionary $(if ($Obfuscate.IsPresent) { $ResourceSubscriptionDictionary } else { $null }) -ResourceGroupDictionary $(if ($Obfuscate.IsPresent) { $ResourceResourceGroupDictionary } else { $null }) -Obfuscate $Obfuscate.IsPresent -MetricsLookbackDays $MetricsLookbackDays -UseMetricsBatch:$UseMetricsBatch -IncludeStorageMetrics:$IncludeStorageMetrics -SkipDiskMetrics:$SkipDiskMetrics -MetricsDetailed:$MetricsDetailed -MetricsIntervalMinutes $MetricsIntervalMinutes -ReuseWorkerPool:$RunAllSubs.IsPresent
         }
     }
 
@@ -954,55 +871,19 @@ function ExecuteInventoryProcessing()
     {
         if (!$SkipMetrics.IsPresent)
         {
-            $([System.GC]::GetTotalMemory($false))
-            $([System.GC]::Collect())
-            $([System.GC]::GetTotalMemory($true))
+            [System.GC]::Collect()
+            try
+            {
+                $MemHeapBeforeMB = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+                $MemHeapAfterMB = [math]::Round([System.GC]::GetTotalMemory($true) / 1MB, 1)
+                $MemWorkingSetMB = [math]::Round([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB, 1)
+                Write-Log -Message ('[Memory] Post-metrics GC: managed heap {0} MB -> {1} MB after collect; process working set {2} MB.' -f $MemHeapBeforeMB.ToString([cultureinfo]::InvariantCulture), $MemHeapAfterMB.ToString([cultureinfo]::InvariantCulture), $MemWorkingSetMB.ToString([cultureinfo]::InvariantCulture)) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+            catch
+            {
+                Write-Log -Message ('[Memory] Post-metrics memory snapshot unavailable: {0}' -f $_.Exception.Message) -Severity 'Info' -NoConsole -ToDebugLog
+            }
         }
-    }
-
-    function GetServiceName($moduleUrl)
-    {
-        if ($moduleUrl -like '*Services/Analytics*')
-        {
-            $DirectoryService = 'Analytics'
-        }
-
-        if ($moduleUrl -like '*Services/Compute*')
-        {
-            $DirectoryService = 'Compute'
-        }
-
-        if ($moduleUrl -like '*Services/Containers*')
-        {
-            $DirectoryService = 'Containers'
-        }
-
-        if ($moduleUrl -like '*Services/Data*')
-        {
-            $DirectoryService = 'Data'
-        }
-
-        if ($moduleUrl -like '*Services/Infrastructure*')
-        {
-            $DirectoryService = 'Infrastructure'
-        }
-
-        if ($moduleUrl -like '*Services/Integration*')
-        {
-            $DirectoryService = 'Integration'
-        }
-
-        if ($moduleUrl -like '*Services/Networking*')
-        {
-            $DirectoryService = 'Networking'
-        }
-
-        if ($moduleUrl -like '*Services/Storage*')
-        {
-            $DirectoryService = 'Storage'
-        }
-
-        return $DirectoryService
     }
 
     function CreateResourceJobs()
@@ -1013,11 +894,11 @@ function ExecuteInventoryProcessing()
 
         if ($PSScriptRoot -like '*\*')
         {
-            $Modules = Get-ChildItem -Path ($PSScriptRoot + '\Services\*.ps1') -Recurse
+            $Modules = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse
         }
         else
         {
-            $Modules = Get-ChildItem -Path ($PSScriptRoot + '/Services/*.ps1') -Recurse
+            $Modules = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse
         }
 
         if ($Service -and @($Service).Count -gt 0)
@@ -1034,6 +915,32 @@ function ExecuteInventoryProcessing()
             $MatchedNames = @($Modules | ForEach-Object { $_.BaseName } | Sort-Object)
             Write-Log -Message ("-Service filter active: collecting {0} of {1} collectors: [{2}]" -f @($Modules).Count, @($AvailableServices).Count, ($MatchedNames -join ', ')) -Severity 'Info'
 
+            $UnscopedPhases = @()
+            $SuggestedSkips = @()
+
+            if (-not $SkipMetrics.IsPresent)
+            {
+                $UnscopedPhases += 'metrics'
+                $SuggestedSkips += '-SkipMetrics'
+            }
+
+            if (-not $SkipConsumption.IsPresent)
+            {
+                $UnscopedPhases += 'consumption'
+                $SuggestedSkips += '-SkipConsumption'
+            }
+
+            $RgTip = ''
+            if ([string]::IsNullOrEmpty($ResourceGroup))
+            {
+                $RgTip = ' For targeted collection of a workload use -ResourceGroup (requires a single -SubscriptionID), which scopes inventory, metrics AND consumption. Consumption is narrowed per usage record because the billing API only serves whole-subscription usage, so meters with no resource id (marketplace purchases, reservations, tenant-level charges) are excluded from a resource-group-scoped run.'
+            }
+
+            if (@($UnscopedPhases).Count -gt 0 -and -not $RunAllSubs.IsPresent)
+            {
+                Write-Log -Message ("-Service scopes the INVENTORY phase only; these phases still run for the WHOLE subscription: {0}. For a clean inventory-only run add {1}.{2} (Ignore this if you are deliberately re-collecting for a later Merge-RecoveryData.)" -f ($UnscopedPhases -join ', '), ($SuggestedSkips -join ' '), $RgTip) -Severity 'Warning'
+            }
+
             $UnmatchedServices = @($Service | Where-Object { $_ -notin $MatchedNames })
             if (@($UnmatchedServices).Count -gt 0)
             {
@@ -1041,7 +948,7 @@ function ExecuteInventoryProcessing()
             }
         }
 
-        $Resource = $Resources | Select-Object -First $Resources.count
+        $Resource = $Resources
 
         $ConsecutiveCollectorFailures = 0
         $CollectorFailureCircuitBreakerThreshold = 5
@@ -1080,13 +987,40 @@ function ExecuteInventoryProcessing()
                     Module  = $ModName
                     Message = $_.Exception.Message
                 }
+                # The global accumulates across every subscription in this process (the wrapper invokes
+                # this script once per subscription), so the report reads this per-invocation copy
+                # instead - otherwise one subscription's report would name another's failures.
+                $script:CollectorFailuresThisRun += [pscustomobject]@{
+                    Module  = $ModName
+                    Message = $_.Exception.Message
+                }
 
                 Write-Log -Message ("Collector FAILED: {0}: {1}" -f $ModName, $_.Exception.Message) -Severity 'Error'
                 Write-Log -Message ("The rest of the inventory will continue, but the '{0}' resource type is MISSING from this report - not empty because there are none, but because the collector errored. Re-run to retry, or investigate the error above if it repeats." -f $ModName) -Severity 'Error'
 
                 if ($ConsecutiveCollectorFailures -ge $CollectorFailureCircuitBreakerThreshold)
                 {
-                    throw ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Total collector failures across the whole run so far (all subscriptions processed to this point): {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
+                    # Recorded and BROKEN out of, not thrown. A bare throw here was observed NOT to stop
+                    # the run and not even to leave this foreach, so the breaker was inert in exactly the
+                    # systemic case it exists for: every remaining collector went on to record @(), the
+                    # "incomplete report that looks like an empty environment" its own message warns of.
+                    # Whether a throw propagates depends on the surrounding $ErrorActionPreference state
+                    # (this script sets SilentlyContinue outside -Debug), and it does propagate in some
+                    # hosts - which is the point: break is deterministic where throw is not, so the
+                    # breaker must not depend on it. Do not "simplify" this back to a throw.
+                    #
+                    # break leaves the loop, so the remaining collectors are never attempted and their
+                    # keys are ABSENT from the inventory rather than present and empty. That is the
+                    # honest shape: absent means not attempted, [] means attempted and none found.
+                    # The failure gate at the end of the script owns reporting this subscription FAILED,
+                    # for the reason given there: halting here directly would skip the obfuscation
+                    # dictionary, which is the de-obfuscation key for whatever this run did write.
+                    $script:CollectorBreakerError = ("Stopping: {0} collectors failed in a row (most recently '{1}': {2}). This pattern indicates a systemic problem (authentication dropped mid-run, network lost, or a broken Az module) rather than an issue with any single resource type. Fix the underlying problem (see the error above) and re-run rather than continuing - limping through the remaining collectors would only produce more identical failures and an incomplete report that looks like an empty environment. Total collector failures across the whole run so far (all subscriptions processed to this point): {3}." -f $ConsecutiveCollectorFailures, $ModName, $_.Exception.Message, ($Global:CollectorFailures.Count))
+                    Write-Log -Message $script:CollectorBreakerError -Severity 'Error'
+                    # No $Result assignment: break skips the write below, so this collector's key is
+                    # absent like the ones after it. Attempted-and-failed is recorded in the failure
+                    # list, the banner and the logs, which is where it belongs.
+                    break
                 }
 
                 $Result = @()
@@ -1193,7 +1127,16 @@ function ExecuteInventoryProcessing()
 
         Write-RdaProgress -Activity 'Service Processing' -Completed
 
-        Write-Log -Message ("Service processing complete: {0} collectors" -f $ModuleTotal) -NoConsole -ToDebugLog
+        if ([string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+        {
+            Write-Log -Message ("Service processing complete: {0} collectors" -f $ModuleTotal) -NoConsole -ToDebugLog
+        }
+        else
+        {
+            # The debug log is the artifact used to explain a thin report, so it must not claim every
+            # collector completed when the loop was abandoned part-way.
+            Write-Log -Message ("Service processing ABORTED after {0} of {1} collectors; the remainder were never attempted." -f $ModuleIndex, $ModuleTotal) -NoConsole -ToDebugLog
+        }
     }
 
     function ProcessResourceResult()
@@ -1203,13 +1146,18 @@ function ExecuteInventoryProcessing()
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
-        $Global:SmaResources | ConvertTo-Json -depth 100 -compress | Out-File $Global:JsonFile
+        $Global:SmaResources | ConvertTo-Json -Depth 100 -Compress | Out-File -LiteralPath $Global:JsonFile
 
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
     }
 
-    function GetResorceConsumption()
+    function GetResourceConsumption()
     {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
         $DebugPreference = "SilentlyContinue"
 
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
@@ -1232,19 +1180,63 @@ function ExecuteInventoryProcessing()
             return
         }
 
+        # One debug-log line for the phase, never one per subscription passed over. The other
+        # subscriptions in this run's list are outside its scope (Disabled ones the wrapper leaves
+        # out, other shards, other tenants in Cloud Shell), and the debug log ships in a
+        # default-mode zip, so they are counted here and never named. The -ResourceGroup notice is
+        # emitted inside the loop, once, for the subscription actually processed.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $TargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $TargetSubLabel = if ($TargetSub) { "'{0}'" -f $TargetSub.Name } else { $SubscriptionID }
+            # Distinct ids: a subscription reachable through two tenants can be listed twice.
+            $PassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
+            if ($PassedOverCount -gt 0)
+            {
+                Write-Log -Message ("Consumption data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $PassedOverCount, $TargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+
+            # A -SubscriptionID missing from the list is never reached by the loop below, so nothing
+            # would be collected for it and nothing would say so.
+            if (-not $TargetSub)
+            {
+                $MissingTargetMessage = ("Consumption SKIPPED: subscription {0} (-SubscriptionID) is not in this run's subscription list, so no consumption data was collected for it. The signed-in identity cannot see it, or -TenantID names a different tenant." -f $SubscriptionID)
+                Write-Log -Message $MissingTargetMessage -Severity 'Error'
+                if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
+                if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+                $Global:ConsumptionFailedSubs += [pscustomobject]@{
+                    Name             = $SubscriptionID
+                    Id               = $SubscriptionID
+                    Message          = $MissingTargetMessage
+                    Complete         = $false
+                    PageAtFailure    = 0
+                    RecordsCollected = 0
+                }
+            }
+        }
+
         foreach ($sub in $Global:Subscriptions)
         {
             if (![string]::IsNullOrEmpty($SubscriptionID))
             {
-                if (![string]::IsNullOrEmpty($ResourceGroup))
-                {
-                    Write-Log -Message ("Cannot filter consumption by resource group." -f $sub.Name) -Severity 'Info'
-                }
-
                 if ($SubscriptionID -ne $sub.Id)
                 {
-                    Write-Log -Message ("Skipping: {0}" -f $sub.Name) -Severity 'Info'
                     continue
+                }
+
+                # Emitted AFTER the skip so it appears once, for the subscription
+                # actually processed, rather than once per subscription in the tenant.
+                # The previous text claimed consumption could NOT be narrowed by
+                # resource group, which is the opposite of what the filter below does.
+                # Measured on a live subscription: an unscoped run wrote 480 rows across
+                # 29 resource groups, and the same run with -ResourceGroup wrote the 180
+                # rows belonging to that one group. Get-UsageAggregates has no
+                # server-side resource-group filter, so the narrowing is applied per
+                # usage record instead - which is why an unattributed meter cannot
+                # satisfy it and is excluded.
+                if (![string]::IsNullOrEmpty($ResourceGroup))
+                {
+                    Write-Log -Message ("Consumption for {0} will be narrowed to resource group '{1}'. The billing API serves whole-subscription usage, so the narrowing is applied per usage record; meters with no resource id (marketplace purchases, reservations, tenant-level charges) cannot be attributed to a resource group and are excluded." -f $sub.Name, $ResourceGroup) -Severity 'Info'
                 }
             }
 
@@ -1252,7 +1244,7 @@ function ExecuteInventoryProcessing()
             $ContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
                 $ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch
@@ -1262,7 +1254,7 @@ function ExecuteInventoryProcessing()
 
             if (-not $ContextOk)
             {
-                $SkipMessage = ("Consumption SKIPPED: could not switch the Azure context to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(if ($ContextSwitchError) { " ($ContextSwitchError)" } else { ' (context did not match the target after Set-AzContext)' }))
+                $SkipMessage = ("Consumption SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's billing data to this one." -f $(if ($ContextSwitchError) { " ($ContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
                 Write-Log -Message ("Consumption: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
 
                 if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
@@ -1279,12 +1271,30 @@ function ExecuteInventoryProcessing()
                 continue
             }
 
+            # Start each billing pull from a compacted heap, so what earlier phases and subscriptions
+            # freed is actually available to it.
+            Write-RdaMemorySnapshot -Phase 'Before the consumption pull' -Compact
+
             Write-Log -Message ("Gathering Consumption for: {0}" -f $sub.Name) -Severity 'Info'
 
             $ConsumptionRecordsThisSub = 0
+            # Rows FETCHED from the billing API, as distinct from rows WRITTEN to the
+            # CSV. They diverge whenever the -ResourceGroup filter or either null
+            # guard excludes a record, so one number cannot serve both meanings: a
+            # reader comparing against Consumption_*.csv needs written, while the
+            # zero-record billing warning needs fetched, because its named causes are
+            # only true when the API itself returned nothing.
+            $ConsumptionRowsFetchedThisSub = 0
+            # Count of records skipped by the -ResourceGroup filter because the
+            # meter carries no resourceUri, so the skip is reported once per
+            # subscription instead of vanishing. Function-scoped local, matching the
+            # other per-subscription counters in this block; NOT a global.
+            $ConsumptionNullUriSkipsThisSub = 0
             $ConsumptionFailedThisSub = $false
             $ConsumptionFailureMessage = $null
             $ConsumptionPageIndex = 0
+
+            $UsageData = $null
 
             try
             {
@@ -1295,13 +1305,39 @@ function ExecuteInventoryProcessing()
                         ReportedStartTime      = $ReportedStartTime
                         ReportedEndTime        = $ReportedEndTime
                         AggregationGranularity = 'Daily'
-                        ShowDetails            = $true
+                        # Canonical parameter name. 'ShowDetails' is a declared alias
+                        # that binds identically, but depending on an alias is a
+                        # needless fragility for a value this load-bearing: it selects
+                        # instance-level detail over server-side aggregation, and the
+                        # whole consumption-to-resource attribution below depends on
+                        # the instance-level InstanceData it returns.
+                        ShowDetail             = $true
                     }
 
-                    $Params.ContinuationToken = $UsageData.ContinuationToken
+                    $Params.ContinuationToken = if ($null -ne $UsageData) { $UsageData.ContinuationToken } else { $null }
+                    # The previous page is written and only its token was still needed, so release its
+                    # response before this page downloads. The loop condition reads the page fetched below.
+                    $UsageData = $null
 
-                    $ConsumptionMaxRetries = 3
+                    $ConsumptionMaxRetries = 30
                     $ConsumptionAttempt = 0
+                    $ConsumptionAuthRefreshedThisPage = $false
+                    # The retry loop can run long: up to $ConsumptionMaxRetries attempts, each
+                    # sleeping a server-directed Retry-After clamped to 300s (~150 min worst case),
+                    # which can outlive the token this page started with. The per-page guard below
+                    # ($ConsumptionAuthRefreshedThisPage) stops a PERMANENT 401 reconnecting on every
+                    # attempt, but on its own it also blocks a legitimate SECOND lapse: once a
+                    # reconnect has succeeded, a token that expires again LATER in the same loop could
+                    # not be refreshed, so the loop would burn its remaining budget against a dead
+                    # token and fail loud. To close that intra-page gap without reopening the reconnect
+                    # storm the guard prevents, a SUCCESSFUL reconnect re-arms the guard (its fresh
+                    # token can lapse again and deserves another refresh); a reconnect that yields no
+                    # usable token leaves the guard closed (a permanent 401 rides out the budget and
+                    # fails loud, unchanged). Total re-arms are capped so an every-attempt expiry that
+                    # keeps "succeeding" then immediately lapsing still terminates.
+                    $ConsumptionAuthRefreshMax = 3
+                    $ConsumptionAuthRefreshCount = 0
+                    $ConsumptionOutOfMemoryRetried = $false
                     while ($true)
                     {
                         try
@@ -1311,27 +1347,173 @@ function ExecuteInventoryProcessing()
                         }
                         catch
                         {
+                            if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                            {
+                                Write-Log -Message ("Consumption page query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                                throw
+                            }
+
+                            if ((Test-RdaPermanentRequestError -ErrorMessage $_.Exception.Message -Exception $_.Exception) -and -not ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message)))
+                            {
+                                # A 400 rejects the REQUEST, and this page is re-sent unchanged on every
+                                # retry (the same window, the same continuation token), so it can never
+                                # succeed. Reproduced live against this API: it answers a malformed window
+                                # with HTTP BadRequest whose message says only "InvalidInput: ...", which
+                                # is why the STATUS and not the text is what decides here. Without this
+                                # the page spent the full 30-attempt budget, about 26 minutes, on it.
+                                #
+                                # Yields to the auth branch below while a refresh is still available, for
+                                # the same reason the Marketplace gate does.
+                                Write-Log -Message ("Consumption page query REJECTED for {0} after {1} attempt(s): {2}. A 400 means the request itself was rejected, and this page is re-sent unchanged on every retry, so it will not be retried. A malformed request window is the usual cause. Pass -SkipConsumption to leave billing out of the run." -f $sub.Name, ($ConsumptionAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                                throw
+                            }
+
+                            if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                            {
+                                # Backing off cannot free memory, and this error carries no Retry-After,
+                                # so the normal budget would only repeat it through ~26 minutes of
+                                # exponential backoff. Drop anything the previous page still holds,
+                                # compact the heap and retry this page once. Nothing has been written for
+                                # this page yet, so the retry cannot duplicate rows. A second out-of-memory
+                                # error ends this subscription's consumption; the outer catch reports it.
+                                if ($ConsumptionOutOfMemoryRetried) { throw }
+                                $ConsumptionOutOfMemoryRetried = $true
+                                Write-Log -Message ("Consumption page query for {0} ran out of memory: {1}. Compacting memory and retrying this page once." -f $sub.Name, $_.Exception.Message.TrimEnd('.')) -Severity 'Warning'
+                                # $Params already holds this page's continuation token, so nothing reads
+                                # the previous page's objects again.
+                                $UsageData = $null
+                                $UsageDataExport = $null
+                                $NewUsageDataExport = $null
+                                [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                                [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+                                [System.GC]::WaitForPendingFinalizers()
+                                [System.GC]::Collect()
+                                continue
+                            }
+
+                            if ((-not $ConsumptionAuthRefreshedThisPage) -and (Test-RdaAuthExpiry -ErrorMessage $_.Exception.Message))
+                            {
+                                $ConsumptionAuthRefreshedThisPage = $true
+                                $ConsumptionAuthRefreshCount++
+                                Write-Log -Message ("Consumption page query for {0} failed with an expired/invalid token: {1}. Attempting Azure re-authentication (refresh {2}/{3} for this page) before retrying this page." -f $sub.Name, $_.Exception.Message, $ConsumptionAuthRefreshCount, $ConsumptionAuthRefreshMax) -Severity 'Warning'
+                                if (Test-DataPlaneAuthReady -Phase 'Consumption')
+                                {
+                                    # Test-DataPlaneAuthReady reconnects with Connect-AzAccount and no
+                                    # -Subscription, so a successful reconnect can leave the context on the
+                                    # identity's DEFAULT subscription rather than $sub. Get-UsageAggregates
+                                    # reads the context's subscription, so retrying now without re-pinning
+                                    # would attribute another subscription's usage rows to $sub. Re-pin and
+                                    # re-verify exactly as the per-sub loop does before its first page; if the
+                                    # scope cannot be restored, abandon this subscription rather than write
+                                    # cross-subscription billing data.
+                                    $RepinOk = $false
+                                    $RepinError = $null
+                                    try
+                                    {
+                                        $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
+                                        $RepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+                                    }
+                                    catch
+                                    {
+                                        $RepinError = $_.Exception.Message
+                                    }
+
+                                    if ($RepinOk)
+                                    {
+                                        Write-Log -Message ("Consumption: Azure context re-established and re-pinned to {0}; retrying the current page." -f $sub.Name) -Severity 'Info'
+                                        # The reconnect produced a usable, correctly-scoped token. That
+                                        # token can itself lapse later in a long retry loop, so re-arm the
+                                        # per-page guard to permit another refresh on a genuine SECOND
+                                        # expiry - bounded by $ConsumptionAuthRefreshMax so this cannot
+                                        # become an unbounded reconnect loop against an every-attempt expiry.
+                                        if ($ConsumptionAuthRefreshCount -lt $ConsumptionAuthRefreshMax)
+                                        {
+                                            $ConsumptionAuthRefreshedThisPage = $false
+                                        }
+                                    }
+                                    else
+                                    {
+                                        Write-Log -Message ("Consumption: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's consumption to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($RepinError) { " ($RepinError)" } else { ' (context did not match the target after scoping)' })) -Severity 'Error'
+                                        throw
+                                    }
+                                }
+                                else
+                                {
+                                    # No usable token after reconnect: a permanent 401 (revoked /
+                                    # interaction-required). Leave the guard CLOSED so we do not reconnect
+                                    # again this page - the remaining retries ride out the budget and fail
+                                    # loud, unchanged from the original behaviour.
+                                    Write-Log -Message ("Consumption: re-authentication for {0} did not yield a usable token; the remaining retries will still be attempted but may not recover." -f $sub.Name) -Severity 'Warning'
+                                }
+                            }
+
                             $ConsumptionAttempt++
                             if ($ConsumptionAttempt -gt $ConsumptionMaxRetries) { throw }
-                            $ConsumptionBackoffSeconds = [int][math]::Pow(2, $ConsumptionAttempt)
-                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}): {3}. Retrying in {4}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $_.Exception.Message, $ConsumptionBackoffSeconds) -Severity 'Warning'
+
+                            $ConsumptionThrottled = $_.Exception.Message -match 'TooManyRequests|\b429\b|throttl|rate limit'
+
+                            $ConsumptionRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_
+                            if ($ConsumptionRetryAfter -gt 0)
+                            {
+                                $ConsumptionThrottled = $true
+                                $ConsumptionBackoffSeconds = [math]::Min($ConsumptionRetryAfter, 300)
+                            }
+                            else
+                            {
+                                $ConsumptionBackoffSeconds = [math]::Min([math]::Pow(2, $ConsumptionAttempt), 60)
+                                if ($ConsumptionThrottled) { $ConsumptionBackoffSeconds = [math]::Min($ConsumptionBackoffSeconds * 2, 120) }
+                            }
+                            $ConsumptionBackoffSeconds = [math]::Round($ConsumptionBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
+
+                            $ConsumptionRetryMarker = if ($ConsumptionRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($ConsumptionThrottled) { ', throttled' } else { '' }
+                            Write-Log -Message ("Consumption page query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $ConsumptionAttempt, $ConsumptionMaxRetries, $ConsumptionRetryMarker, $_.Exception.Message, ([double]$ConsumptionBackoffSeconds).ToString('0.##', [cultureinfo]::InvariantCulture)) -Severity 'Warning'
                             Start-Sleep -Seconds $ConsumptionBackoffSeconds
                         }
                     }
-                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
+                    # The Get-UsageAggregates payload names the per-resource licensing/instance JSON
+                    # blob "InstanceData". The Consumption CSV column for that same blob is named
+                    # "AdditionalInfo" (VM Windows/AHB + SQL vCore
+                    # detection read AdditionalInfo, not InstanceData). Map
+                    # the source property to a column named AdditionalInfo here, as the rows are read,
+                    # so every later read (below) and the emitted CSV header both use AdditionalInfo.
+                    $UsageDataExport = $UsageData.UsageAggregations.Properties | Select-Object @{ Name = 'AdditionalInfo'; Expression = { $_.InstanceData } }, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime
 
                     Write-Log -Message ("Records found: $($UsageDataExport.Count)...") -Severity 'Info'
-                    $ConsumptionRecordsThisSub += $UsageDataExport.Count
+                    $ConsumptionRowsFetchedThisSub += $UsageDataExport.Count
 
                     $NewUsageDataExport = [System.Collections.ArrayList]::new()
 
                     for ($Item = 0; $Item -lt $UsageDataExport.Count; $Item++)
                     {
-                        $InstanceInfo = ($UsageDataExport[$Item].InstanceData.tolower() | ConvertFrom-Json)
+                        $RawInstanceData = $UsageDataExport[$Item].AdditionalInfo
+                        if ([string]::IsNullOrEmpty($RawInstanceData))
+                        {
+                            continue
+                        }
+                        $InstanceInfo = ($RawInstanceData.tolower() | ConvertFrom-Json)
 
                         if (![string]::IsNullOrEmpty($ResourceGroup))
                         {
-                            if (!$InstanceInfo.'Microsoft.Resources'.resourceUri.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
+                            # Same class of null as the InstanceData guard above, one
+                            # statement later: a marketplace purchase, certain reservations
+                            # and tenant-level charges return InstanceData that parses fine
+                            # yet carries NO resourceUri. Calling .toLower() on that null
+                            # throws, and because this loop sits inside the per-subscription
+                            # paging try/catch that throw abandons the REST of this
+                            # subscription's consumption - marking it INCOMPLETE over a
+                            # record that could never have matched the requested resource
+                            # group in the first place. An unattributed record has no
+                            # resource group to compare, so excluding it IS the correct
+                            # filter result rather than lost data. Count it so the skip is
+                            # reported once per subscription instead of vanishing.
+                            $ResourceUriValue = $InstanceInfo.'Microsoft.Resources'.resourceUri
+                            if ([string]::IsNullOrEmpty($ResourceUriValue))
+                            {
+                                $ConsumptionNullUriSkipsThisSub++
+                                continue
+                            }
+
+                            if (!$ResourceUriValue.toLower().Contains("/resourcegroups/" + $ResourceGroup.toLower() + "/"))
                             {
                                 continue;
                             }
@@ -1353,27 +1535,27 @@ function ExecuteInventoryProcessing()
                         $InstanceObject = [PSCustomObject]@{}
 
                         $AdditionalInfoInstance = [PSCustomObject]@{
-                            ResourceUri = $InstanceInfo.'Microsoft.Resources'.resourceUri
-                            Location = $InstanceInfo.'Microsoft.Resources'.location
+                            ResourceUri    = $InstanceInfo.'Microsoft.Resources'.resourceUri
+                            Location       = $InstanceInfo.'Microsoft.Resources'.location
                             additionalInfo = [PSCustomObject]@{
-                                ConsumptionMeter = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter }
-                                ImageType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType }
-                                AHB = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB }
-                                vCores = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores }
-                                VCPUs = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs }
-                                ServiceType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType }
-                                ResourceCategory = ""
-                                Edition = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition }
-                                LicenseType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType }
-                                HostLicenseType = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType }
-                                OS = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS }
-                                IsVM = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM }
-                                NumberOfCores = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores }
+                                ConsumptionMeter          = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ConsumptionMeter }
+                                ImageType                 = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ImageType }
+                                AHB                       = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.AHB }
+                                vCores                    = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.vCores }
+                                VCPUs                     = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.VCPUs }
+                                ServiceType               = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServiceType }
+                                ResourceCategory          = ""
+                                Edition                   = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.Edition }
+                                LicenseType               = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.LicenseType }
+                                HostLicenseType           = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.HostLicenseType }
+                                OS                        = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.OS }
+                                IsVM                      = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsVM }
+                                NumberOfCores             = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfCores }
                                 NumberOfLogicalProcessors = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfLogicalProcessors) { 0 } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.NumberOfLogicalProcessors }
-                                SLO = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO }
-                                ServerSku = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku }
-                                ServerEdition = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition }
-                                IsHAEnabled = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled }
+                                SLO                       = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.SLO }
+                                ServerSku                 = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerSku }
+                                ServerEdition             = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.ServerEdition }
+                                IsHAEnabled               = if ($null -eq $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled) { "" } else { $InstanceInfo.'Microsoft.Resources'.additionalInfo.IsHAEnabled }
                             }
                         }
 
@@ -1381,7 +1563,15 @@ function ExecuteInventoryProcessing()
 
                         if ($Obfuscate.IsPresent)
                         {
+                            # Each token takes its prod_/nonprod_ marker from the real value it labels,
+                            # the way inventory classifies them: the subscription from its NAME (the URI
+                            # only carries the GUID, which never matches), and the resource-group and name
+                            # segments from their own values inside the builder (-PerSegmentPrefix). One
+                            # verdict from the whole URI let a 'test' resource group relabel the subscription
+                            # and every name in the row. $Prefix, still taken from the whole URI, is used only
+                            # for a value that is not ARM-shaped and so has no segments to label.
                             $Prefix = if ($UsageDataExport[$Item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $UsageDataExport[$Item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+                            $SubPrefix = Get-RdaEnvironmentPrefix $(if (-not [string]::IsNullOrEmpty($sub.Name)) { $sub.Name } else { $sub.Id })
 
                             $RawUri = $InstanceObject.'Microsoft.Resources'.resourceUri
 
@@ -1389,20 +1579,16 @@ function ExecuteInventoryProcessing()
                             if (-not $script:ConsumptionRgCache) { $script:ConsumptionRgCache = @{} }
                             if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
 
-
-                            if (![string]::IsNullOrEmpty($RawUri) -and $ResourceIdDictionary.ContainsKey($RawUri))
+                            if ($RawUri -match '^/subscriptions/[^/]+(/resourcegroups/[^/]+)?/providers/(.+)$')
                             {
-                                $ObfuscatedUri = $ResourceIdDictionary[$RawUri]
-                            }
-                            else
-                            {
-                                $ObfuscatedUri = Build-ObfuscatedResourceUri -RawUri $RawUri -Prefix $Prefix -SubscriptionDictionary $ResourceSubscriptionDictionary -ResourceGroupDictionary $ResourceResourceGroupDictionary -NameDictionary $ResourceNameDictionary -SubCache $script:ConsumptionSubCache -RgCache $script:ConsumptionRgCache -NameCache $script:ConsumptionNameCache
-
-                                if (![string]::IsNullOrEmpty($RawUri))
+                                $DiagProvCount = ($Matches[2] -split '/').Count
+                                if (($DiagProvCount -eq 3 -or $DiagProvCount -eq 4) -and -not ($null -ne $Global:ResourceIdDictionary -and $Global:ResourceIdDictionary.ContainsKey($RawUri)))
                                 {
-                                    $ResourceIdDictionary[$RawUri] = $ObfuscatedUri
+                                    Write-Log -Message ("Consumption cross-link miss: top-level resourceUri not found in inventory dictionary (leaf uses a name-cache token; the dictionary is case-insensitive, so this means the resource is genuinely absent - deleted between the graph scan and the billing pull, or outside a -Service-narrowed inventory): {0}" -f $RawUri) -Severity 'Info' -NoConsole -ToDebugLog
                                 }
                             }
+
+                            $ObfuscatedUri = Build-ObfuscatedResourceUri -RawUri $RawUri -Prefix $Prefix -SubPrefix $SubPrefix -PerSegmentPrefix -SubscriptionDictionary $null -ResourceGroupDictionary $null -NameDictionary $Global:ResourceIdDictionary -SubCache $script:ConsumptionSubCache -RgCache $script:ConsumptionRgCache -NameCache $script:ConsumptionNameCache
 
                             $UsageDataExport[$Item].ResourceId = $ObfuscatedUri
                             $InstanceObject.'Microsoft.Resources'.resourceUri = $ObfuscatedUri
@@ -1417,12 +1603,26 @@ function ExecuteInventoryProcessing()
                             }
                         }
 
-                        $UsageDataExport[$Item].InstanceData = $InstanceObject | ConvertTo-Json -Compress
+                        $UsageDataExport[$Item].AdditionalInfo = $InstanceObject | ConvertTo-Json -Compress
 
                         $NewUsageDataExport.Add($UsageDataExport[$Item]) | Out-Null
                     }
 
-                    $NewUsageDataExport | Select-Object InstanceData, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+                    $NewUsageDataExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation -ErrorAction Stop
+
+                    # Counted only after Export-Csv returns. -ErrorAction Stop on the write makes a failed
+                    # write terminating under the run-wide SilentlyContinue, so a page that never reached the
+                    # file is never counted as written.
+                    $ConsumptionRecordsThisSub += $NewUsageDataExport.Count
+
+                    # The page is on disk now, so drop its rows before the next page downloads. $UsageData
+                    # stays: the loop condition and the next request read its continuation token.
+                    $UsageDataExport = $null
+                    $NewUsageDataExport = $null
+                    if (($ConsumptionPageIndex % 10) -eq 0)
+                    {
+                        Write-RdaMemorySnapshot -Phase ('Consumption page {0}' -f $ConsumptionPageIndex)
+                    }
 
                 } while ('ContinuationToken' -in $UsageData.psobject.properties.name -and $UsageData.ContinuationToken)
             }
@@ -1431,11 +1631,49 @@ function ExecuteInventoryProcessing()
                 $ConsumptionFailedThisSub = $true
                 $ConsumptionFailureMessage = ("{0} (stopped at consumption page {1}, after {2} record(s); this subscription's consumption is INCOMPLETE)" -f $_.Exception.Message, $ConsumptionPageIndex, $ConsumptionRecordsThisSub)
                 Write-Log -Message ("Consumption query failed for {0}: {1}" -f $sub.Name, $ConsumptionFailureMessage) -Severity 'Warning'
+                if (Test-RdaOutOfMemory -ErrorMessage $_.Exception.Message)
+                {
+                    if (-not [string]::IsNullOrEmpty($SubscriptionID))
+                    {
+                        # This bundle holds one subscription, so its consumption can be re-collected
+                        # and merged back without touching another subscription's data. An obfuscated
+                        # run is re-run obfuscated and seeded with this report folder's dictionary, so
+                        # the re-collected rows carry no real identifiers and their resource tokens
+                        # still join this run's inventory.
+                        $ConsumptionRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. Re-run it on its own in a fresh PowerShell process, or on a host with more memory (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics -SkipMarketplace{2}), then merge its consumption back in as described in docs/recovery-and-diagnostics.md under: A subscription's consumption pull was interrupted." -f $sub.Name, $sub.Id, $ConsumptionRerunObfuscation) -Severity 'Error'
+                    }
+                    else
+                    {
+                        # Without -SubscriptionID one bundle holds every subscription in scope, and
+                        # merging a single subscription's re-run into it would replace the others'
+                        # consumption.
+                        Write-Log -Message ("Consumption for {0} stopped because this PowerShell process ran out of memory, so its cost data is INCOMPLETE. This report covers every subscription in scope, so re-run the whole report in a fresh PowerShell process, or on a host with more memory." -f $sub.Name) -Severity 'Error'
+                    }
+                }
+            }
+
+            # Report the null-resourceUri skips ONCE for this subscription. Placed
+            # after the paging catch so the count is still reported when a later page
+            # fails for an unrelated reason, and inside the foreach so it is emitted
+            # once per subscription rather than once per row. Info severity: these
+            # records are correctly excluded rather than lost, so this is not a
+            # consumption failure and nothing is added to $Global:ConsumptionFailedSubs.
+            if ($ConsumptionNullUriSkipsThisSub -gt 0)
+            {
+                Write-Log -Message ("Consumption: {0} - {1} record(s) skipped by the -ResourceGroup filter because the meter has no resourceUri (marketplace / reservation / tenant-level charges cannot be attributed to a resource group). This is correct filtering, not lost data." -f $sub.Name, $ConsumptionNullUriSkipsThisSub) -Severity 'Info'
             }
 
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
             $Global:ConsumptionRecordCount += $ConsumptionRecordsThisSub
+            if ($null -eq $script:ConsumptionRecordsThisRun) { $script:ConsumptionRecordsThisRun = 0 }
+            $script:ConsumptionRecordsThisRun += $ConsumptionRecordsThisSub
+            # Fetched total, mirroring the written chain above at both scopes.
+            if ($null -eq $script:ConsumptionRowsFetchedThisRun) { $script:ConsumptionRowsFetchedThisRun = 0 }
+            $script:ConsumptionRowsFetchedThisRun += $ConsumptionRowsFetchedThisSub
+            if ($null -eq $Global:ConsumptionRowsFetchedCount) { $Global:ConsumptionRowsFetchedCount = 0 }
+            $Global:ConsumptionRowsFetchedCount = [int]$Global:ConsumptionRowsFetchedCount + $ConsumptionRowsFetchedThisSub
             if ($ConsumptionFailedThisSub)
             {
                 $Global:ConsumptionFailedSubs += [pscustomobject]@{
@@ -1449,16 +1687,1009 @@ function ExecuteInventoryProcessing()
             }
         }
 
-        $DebugPreference = "Continue"
+    }
+
+    function GetMarketplaceConsumption()
+    {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+        # ADDITIVE Marketplace consumption collector.
+        #
+        # WHY THIS EXISTS. The first-party consumption collector above uses
+        # Get-UsageAggregates (legacy Microsoft.Commerce/UsageAggregates), which
+        # returns ONLY first-party Azure metered usage and carries no PublisherType.
+        # Azure Marketplace / third-party SaaS charges (e.g. an ISV offer sold via
+        # Azure Marketplace, such as a model or SaaS offer surfaced through Azure
+        # AI Foundry) live behind a DIFFERENT endpoint that RDA never called, so
+        # Marketplace usage was invisible regardless of whether any existed. This
+        # closes that endpoint-coverage gap.
+        #
+        # ENDPOINT (verified against Microsoft docs):
+        #   Get-AzConsumptionMarketplace (Az.Billing - already imported by RDA, so NO
+        #   new module dependency). Raw REST equivalent:
+        #     GET .../providers/Microsoft.Consumption/marketplaces?api-version=2023-05-01
+        #     (optionally billing-period-scoped)
+        #   Docs: https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list
+        #   Cmdlet: https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
+        #   Parameters used (-StartDate/-EndDate/-Top) confirmed via
+        #   `Get-Help Get-AzConsumptionMarketplace -Full` on the installed Az.Billing 2.2.0.
+        #
+        # DISCRIMINATOR. On the modern usageDetails / Cost Management dimension the
+        # discriminator is PublisherType ('Azure' = first-party, 'Marketplace' =
+        # third-party). The Marketplace endpoint returns ONLY Marketplace rows (its
+        # PSMarketplace output type has no PublisherType property at all), so NO
+        # client-side filtering is needed - every row it returns is a Marketplace row.
+        #
+        # ROLE. Reuses the SAME Cost Management Reader / Billing Reader requirement the
+        # first-party consumption phase already needs - NO new role. The auth gate,
+        # per-subscription context re-pin, denial short-circuit, auth-expiry refresh
+        # (with re-pin) and Retry-After/backoff below are the SAME pattern the
+        # Get-UsageAggregates loop uses, deliberately reused rather than reinvented.
+        #
+        # OUTPUT. Writes a SEPARATE Marketplace_<ReportName>_<stamp>.csv - the existing
+        # Consumption_* schema and first-party path are untouched. Column set is the
+        # documented PSMarketplace schema (property names verified from the installed
+        # cmdlet's output type).
+
+        $DebugPreference = "SilentlyContinue"
+
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
+
+        # Match the first-party consumption window: previous 31 days through yesterday.
+        $MarketplaceStartDate = (Get-Date).AddDays(-31).Date
+        $MarketplaceEndDate = (Get-Date).AddDays(-1).Date
+
+        if ($null -eq $Global:MarketplaceRecordCount) { $Global:MarketplaceRecordCount = 0 }
+        if ($null -eq $Global:MarketplaceFailedSubs) { $Global:MarketplaceFailedSubs = @() }
+        if ($null -eq $script:MarketplaceRecordsThisRun) { $script:MarketplaceRecordsThisRun = 0 }
+        # Per-INVOCATION failure count. The $Global: counterparts deliberately accumulate so the
+        # multi-subscription wrapper can aggregate them, but the wrapper invokes this script once
+        # per subscription with the CALL OPERATOR (&) in the same process. That is load-bearing
+        # here: `&` gives each invocation a fresh script scope, so $script: is per-invocation while
+        # $Global: carries over from the previous subscription. The confirmed-zero notice below must
+        # describe THIS invocation only, so it reads the $script:-scoped pair instead.
+        if ($null -eq $script:MarketplaceFailedSubsThisRun) { $script:MarketplaceFailedSubsThisRun = 0 }
+
+        if (-not (Test-DataPlaneAuthReady -Phase 'Marketplace'))
+        {
+            Write-Log -Message ('Marketplace: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Marketplace consumption was requested (no -SkipConsumption / -SkipMarketplace) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
+            # Uniform failed-sub shape on EVERY path (mirror $Global:ConsumptionFailedSubs): the
+            # per-sub skip/failure paths below emit Complete/RecordsCollected too, so a downstream
+            # reader (the parallel wrapper aggregation) never hits a missing property on this row.
+            $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                Name             = '(all subscriptions)'
+                Id               = '(auth)'
+                Message          = 'Marketplace phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Complete         = $false
+                RecordsCollected = 0
+            }
+            return
+        }
+
+        # Build guid->token and rgName->token views of the SHARED run-wide obfuscation dictionaries
+        # ONCE, so every Marketplace row masks its SubscriptionGuid/SubscriptionName/ResourceGroup to
+        # the SAME token used elsewhere in the bundle (Inventory_*/Metrics_*/Consumption_*). The shared
+        # dictionaries are keyed by resource ID, so derive:
+        #   - guid  -> subscription token, by parsing /subscriptions/<guid>/ out of each key;
+        #   - rgName -> resource-group token, by parsing /resourcegroups/<rg>/ out of each key.
+        # Both source dictionaries are deterministic (one token per sub / per RG name), so these views
+        # are well-defined. They are $null when not obfuscating; ConvertTo-RdaMarketplaceRow then mints
+        # deterministic local tokens for any sub/RG absent from the shared maps.
+        $script:MarketplaceSubGuidTokenMap = $null
+        $script:MarketplaceRgTokenMap = $null
+        if ($Obfuscate.IsPresent)
+        {
+            $script:MarketplaceSubGuidTokenMap = @{}
+            if ($null -ne $Global:ResourceSubscriptionDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceSubscriptionDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/subscriptions/([^/]+)')
+                    {
+                        $ShGuid = $Matches[1]
+                        if (-not $script:MarketplaceSubGuidTokenMap.ContainsKey($ShGuid))
+                        {
+                            $script:MarketplaceSubGuidTokenMap[$ShGuid] = $Global:ResourceSubscriptionDictionary[$ShKey]
+                        }
+                    }
+                }
+            }
+
+            $script:MarketplaceRgTokenMap = @{}
+            if ($null -ne $Global:ResourceResourceGroupDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceResourceGroupDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/resourcegroups/([^/]+)')
+                    {
+                        $ShRg = $Matches[1]
+                        if (-not $script:MarketplaceRgTokenMap.ContainsKey($ShRg))
+                        {
+                            $script:MarketplaceRgTokenMap[$ShRg] = $Global:ResourceResourceGroupDictionary[$ShKey]
+                        }
+                    }
+                }
+            }
+        }
+
+        # One debug-log line for the phase, never one per subscription passed over (see the
+        # same block in GetResourceConsumption): the others are counted, never named.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $MpTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $MpTargetSubLabel = if ($MpTargetSub) { "'{0}'" -f $MpTargetSub.Name } else { $SubscriptionID }
+            $MpPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
+            if ($MpPassedOverCount -gt 0)
+            {
+                Write-Log -Message ("Marketplace data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $MpPassedOverCount, $MpTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+
+            # Same as GetResourceConsumption: a target missing from the list is never reached below.
+            if (-not $MpTargetSub)
+            {
+                $MpMissingTargetMessage = ("Marketplace SKIPPED: subscription {0} (-SubscriptionID) is not in this run's subscription list, so no Marketplace data was collected for it. The signed-in identity cannot see it, or -TenantID names a different tenant." -f $SubscriptionID)
+                Write-Log -Message $MpMissingTargetMessage -Severity 'Error'
+                if ($null -eq $Global:MarketplaceFailedSubs) { $Global:MarketplaceFailedSubs = @() }
+                $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                    Name             = $SubscriptionID
+                    Id               = $SubscriptionID
+                    Message          = $MpMissingTargetMessage
+                    Complete         = $false
+                    RecordsCollected = 0
+                }
+                # Keeps the confirmed-zero notice below from claiming the endpoint was reached.
+                $script:MarketplaceFailedSubsThisRun++
+            }
+        }
+
+        foreach ($sub in $Global:Subscriptions)
+        {
+            if (![string]::IsNullOrEmpty($SubscriptionID))
+            {
+                if ($SubscriptionID -ne $sub.Id)
+                {
+                    continue
+                }
+            }
+
+            $MpContextOk = $false
+            $MpContextSwitchError = $null
+            try
+            {
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
+                $MpContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+            }
+            catch
+            {
+                $MpContextSwitchError = $_.Exception.Message
+            }
+
+            if (-not $MpContextOk)
+            {
+                $SkipMessage = ("Marketplace SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped to avoid attributing another subscription's Marketplace billing data to this one." -f $(if ($MpContextSwitchError) { " ($MpContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
+                Write-Log -Message ("Marketplace: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
+                $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $SkipMessage
+                    Complete         = $false
+                    RecordsCollected = 0
+                }
+                # Count this toward the per-invocation failure total too. Without it the
+                # confirmed-zero notice below would fire for a run whose only subscription was
+                # skipped here, asserting the endpoint "was reached successfully and returned no
+                # rows" when no query was ever issued.
+                $script:MarketplaceFailedSubsThisRun++
+                continue
+            }
+
+            Write-Log -Message ("Gathering Marketplace consumption for: {0}" -f $sub.Name) -Severity 'Info'
+            Write-RdaMemorySnapshot -Phase ('Before the Marketplace pull for {0}' -f $sub.Name)
+
+            $MarketplaceRecordsThisSub = 0
+            $MarketplaceFailedThisSub = $false
+            $MarketplaceFailureMessage = $null
+            $MarketplaceData = $null
+            # Reset here, not only after the export: every path that throws skips the release
+            # below, which would otherwise leave the previous subscription's converted rows
+            # alive through this subscription's fetch.
+            $MarketplaceExport = $null
+
+            try
+            {
+                $MpMaxRetries = 30
+                $MpAttempt = 0
+                $MpAuthRefreshedThisCall = $false
+                $MpAuthRefreshMax = 3
+                $MpAuthRefreshCount = 0
+                # Per SUBSCRIPTION, like the rest of this block: declared outside the foreach the
+                # whole run would share one retry and every later subscription would abandon its
+                # Marketplace data on its first out-of-memory error without compacting at all.
+                $MarketplaceOutOfMemoryRetried = $false
+                while ($true)
+                {
+                    try
+                    {
+                        # Get-AzConsumptionMarketplace (Az.Billing 2.2.0) returns the FULL result
+                        # set for the window in one call: the cmdlet follows the service nextLink
+                        # internally to exhaustion, and there is NO ContinuationToken parameter to
+                        # page manually (unlike the first-party Get-UsageAggregates loop). Verified
+                        # against the installed cmdlet (Get-Command Get-AzConsumptionMarketplace ->
+                        # Az.Billing 2.2.0) and the docs: -Top is documented as "the maximum number
+                        # of records to return" (default None), i.e. a HARD CAP, not a page size -
+                        # so passing -Top 1000 would SILENTLY TRUNCATE a subscription with >1000
+                        # Marketplace rows. It is therefore OMITTED so all rows are returned.
+                        #   https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace
+                        # It is wrapped in the same retry/auth-refresh envelope as the first-party loop.
+                        $MarketplaceData = @(Get-AzConsumptionMarketplace -StartDate $MarketplaceStartDate -EndDate $MarketplaceEndDate -ErrorAction Stop)
+                        break
+                    }
+                    catch
+                    {
+                        if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                        {
+                            Write-Log -Message ("Marketplace query DENIED for {0} after {1} attempt(s): {2}. This is an authorization failure, not a transient one, so it will not be retried - grant Cost Management Reader (or the billing-scope equivalent) and re-run." -f $sub.Name, ($MpAttempt + 1), $_.Exception.Message) -Severity 'Error'
+                            throw
+                        }
+
+                        # A 4xx that retrying cannot change - for example this endpoint's "Cost Management
+                        # supports only Enterprise Agreement, Web direct and Microsoft Customer Agreement
+                        # offer types" 400 - ends this subscription's Marketplace pull at once. Retrying it
+                        # cost 30 attempts and about 26 minutes per subscription. The service's own reason
+                        # is thrown so the failure line below says why instead of just 'BadRequest'.
+                        $MpPermanentError = Get-RdaPermanentRequestError -ErrorRecord $_
+                        if ($MpPermanentError)
+                        {
+                            # Full unmasked detail (request URI, raw response with the service request ID) to the local debug log only.
+                            Write-Log -Message ('Marketplace request for {0} rejected permanently, not retried: {1}' -f $sub.Name, (Get-RdaRequestErrorDetail -ErrorRecord $_)) -Severity 'Warning' -NoConsole -ToDebugLog
+                            throw ('Marketplace data is not available for this subscription, not retried ({0})' -f $MpPermanentError)
+                        }
+
+                        # Read once into a local: the classifiers below take a string, and the
+                        # out-of-memory branch reports the same text after a collection has run.
+                        $MpErrorText = [string]$_.Exception.Message
+
+                        if ((Test-RdaPermanentRequestError -ErrorMessage $MpErrorText -Exception $_.Exception) -and -not ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText)))
+                        {
+                            # A 400 rejects the request, and this endpoint is sent an identical request on
+                            # every retry, so the transient budget would spend ~25 minutes of escalating
+                            # backoff on a failure already known from the first call. Abandon this
+                            # subscription's Marketplace pull now; the outer catch records it as
+                            # INCOMPLETE so the health report stays honest.
+                            #
+                            # Yields to the auth branch below when the SAME text is also an expired-token
+                            # error. A token-acquisition failure can surface as a 400 carrying both, and a
+                            # refresh is the one thing that recovers it, so abandoning on the 400 alone
+                            # would throw away the only available recovery.
+                            #
+                            # The yield mirrors that branch's OWN guard, so it only defers while a refresh
+                            # is actually available. Yielding unconditionally would leave a combined 400
+                            # once the refresh is spent matching neither branch, which drops it back into
+                            # the 30-attempt budget this gate exists to avoid.
+                            Write-Log -Message ("Marketplace query REJECTED for {0} after {1} attempt(s): {2}. A 400 rejects the request itself and this endpoint is sent an identical request on every retry, so it will not be retried. The usual cause is a subscription whose offer type does not serve the Microsoft.Consumption/marketplaces endpoint; pass -SkipMarketplace to leave it out of the run." -f $sub.Name, ($MpAttempt + 1), $MpErrorText) -Severity 'Error'
+                            throw
+                        }
+
+                        if (Test-RdaOutOfMemory -ErrorMessage $MpErrorText)
+                        {
+                            # Backing off cannot free memory and this error carries no Retry-After, so
+                            # the transient budget would only repeat it through ~25 minutes of
+                            # exponential backoff. Unlike the first-party page loop, which re-requests
+                            # one 1000-row page, this endpoint returns the whole window in a single
+                            # response: the request size is IDENTICAL on the retry, so compaction is the
+                            # only thing that changed and this recovers a fragmented large object heap,
+                            # not an exhausted one. One attempt only; a second ends this subscription's
+                            # Marketplace pull and the outer catch reports it. Nothing has been written
+                            # yet - the export runs only after this loop breaks - so no row can double.
+                            if ($MarketplaceOutOfMemoryRetried) { throw }
+                            $MarketplaceOutOfMemoryRetried = $true
+                            Write-Log -Message ("Marketplace query for {0} ran out of memory: {1}. Compacting memory and retrying this subscription's Marketplace pull once." -f $sub.Name, $MpErrorText.TrimEnd('.')) -Severity 'Warning'
+                            # The fetched response only. $MarketplaceExport cannot hold anything here -
+                            # it is assigned after this loop breaks - and the run-wide Marketplace token
+                            # maps and caches must SURVIVE: dropping one would mint a different token for
+                            # a real value already written under its first token and break determinism.
+                            $MarketplaceData = $null
+                            # Same sequence as the first-party page loop's out-of-memory branch.
+                            # Write-RdaMemorySnapshot -Compact is NOT a substitute: it omits the
+                            # finalizer wait and the follow-up collection, so Az response objects
+                            # awaiting finalization would not be reclaimed.
+                            [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+                            [System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced, $true, $true)
+                            [System.GC]::WaitForPendingFinalizers()
+                            [System.GC]::Collect()
+                            continue
+                        }
+
+                        if ((-not $MpAuthRefreshedThisCall) -and (Test-RdaAuthExpiry -ErrorMessage $MpErrorText))
+                        {
+                            $MpAuthRefreshedThisCall = $true
+                            $MpAuthRefreshCount++
+                            Write-Log -Message ("Marketplace query for {0} failed with an expired/invalid token: {1}. Attempting Azure re-authentication (refresh {2}/{3}) before retrying." -f $sub.Name, $_.Exception.Message, $MpAuthRefreshCount, $MpAuthRefreshMax) -Severity 'Warning'
+                            if (Test-DataPlaneAuthReady -Phase 'Marketplace')
+                            {
+                                # Test-DataPlaneAuthReady reconnects with no -Subscription, so it can
+                                # leave the context on the identity's DEFAULT subscription. Get-AzConsumptionMarketplace
+                                # reads the context's subscription, so re-pin and re-verify before retrying,
+                                # exactly as the first-party consumption loop does - otherwise another
+                                # subscription's Marketplace rows would be attributed to this one.
+                                $MpRepinOk = $false
+                                $MpRepinError = $null
+                                try
+                                {
+                                    $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
+                                    $MpRepinOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+                                }
+                                catch
+                                {
+                                    $MpRepinError = $_.Exception.Message
+                                }
+
+                                if ($MpRepinOk)
+                                {
+                                    Write-Log -Message ("Marketplace: Azure context re-established and re-pinned to {0}; retrying." -f $sub.Name) -Severity 'Info'
+                                    if ($MpAuthRefreshCount -lt $MpAuthRefreshMax)
+                                    {
+                                        $MpAuthRefreshedThisCall = $false
+                                    }
+                                }
+                                else
+                                {
+                                    Write-Log -Message ("Marketplace: re-authentication for {0} succeeded but the context could not be re-pinned to this subscription{1}. Abandoning this subscription's Marketplace data to avoid attributing another subscription's billing data to it." -f $sub.Name, $(if ($MpRepinError) { " ($MpRepinError)" } else { ' (context did not match the target after scoping)' })) -Severity 'Error'
+                                    throw
+                                }
+                            }
+                            else
+                            {
+                                Write-Log -Message ("Marketplace: re-authentication for {0} did not yield a usable token; the remaining retries will still be attempted but may not recover." -f $sub.Name) -Severity 'Warning'
+                            }
+                        }
+
+                        $MpAttempt++
+                        if ($MpAttempt -gt $MpMaxRetries) { throw }
+
+                        $MpThrottled = $_.Exception.Message -match 'TooManyRequests|\b429\b|throttl|rate limit'
+                        $MpRetryAfter = Get-RdaRetryAfterSeconds -ErrorRecord $_
+                        if ($MpRetryAfter -gt 0)
+                        {
+                            $MpThrottled = $true
+                            $MpBackoffSeconds = [math]::Min($MpRetryAfter, 300)
+                        }
+                        else
+                        {
+                            $MpBackoffSeconds = [math]::Min([math]::Pow(2, $MpAttempt), 60)
+                            if ($MpThrottled) { $MpBackoffSeconds = [math]::Min($MpBackoffSeconds * 2, 120) }
+                        }
+                        $MpBackoffSeconds = [math]::Round($MpBackoffSeconds + ((Get-Random -Minimum 0 -Maximum 1000) / 1000.0), 2)
+
+                        $MpRetryMarker = if ($MpRetryAfter -gt 0) { ', throttled, honoring server Retry-After' } elseif ($MpThrottled) { ', throttled' } else { '' }
+                        Write-Log -Message ("Marketplace query failed for {0} (attempt {1}/{2}{3}): {4}. Retrying in {5}s..." -f $sub.Name, $MpAttempt, $MpMaxRetries, $MpRetryMarker, $_.Exception.Message, ([double]$MpBackoffSeconds).ToString('0.##', [cultureinfo]::InvariantCulture)) -Severity 'Warning'
+                        Start-Sleep -Seconds $MpBackoffSeconds
+                    }
+                }
+
+                $MarketplaceExport = [System.Collections.ArrayList]::new()
+                foreach ($Row in $MarketplaceData)
+                {
+                    if ($null -eq $Row) { continue }
+
+                    # FOUNDRY FOLD CAPTURE (P1). Claude/Anthropic usage collected here lands in
+                    # this Marketplace_*.csv only, unless it is ALSO
+                    # folded into the Consumption CSV as a "Foundry Models" row. Capture the RAW
+                    # (pre-obfuscation) Claude rows now, keyed by the pinned subscription, so the
+                    # fold step (GetFoundryFoldConsumption, invoked after this phase) can shape and
+                    # append them with its OWN obfuscation pass - identical in spirit to how the
+                    # Marketplace export below runs its own ConvertTo-RdaMarketplaceRow. Detection
+                    # is the single-owner predicate Test-RdaClaudeMarketplaceRow.
+                    if (Test-RdaClaudeMarketplaceRow -Row $Row)
+                    {
+                        if ($null -eq $script:FoundryFoldClaudeRows) { $script:FoundryFoldClaudeRows = [System.Collections.ArrayList]::new() }
+                        $null = $script:FoundryFoldClaudeRows.Add([pscustomobject]@{ SubId = $sub.Id; SubName = $sub.Name; Row = $Row })
+                    }
+
+                    # Field mapping + obfuscation live in ConvertTo-RdaMarketplaceRow
+                    # (Functions/ResourceInventory.Functions.ps1) so the exact same code path
+                    # is unit-tested. Product identifiers (PublisherName/OfferName/PlanName)
+                    # stay readable; SubscriptionGuid/SubscriptionName/ResourceGroup are masked
+                    # to the SAME tokens used elsewhere in the bundle via the shared run-wide
+                    # dictionaries (passed as the guid/rgName token maps built above and the
+                    # URI-keyed ID dictionary), while InstanceId/InstanceName tokenise through
+                    # the per-run local Marketplace caches. This deliberately DIFFERS from the
+                    # first-party consumption path, which emits no bare subscription-GUID column
+                    # and passes $null shared sub/RG dictionaries.
+                    if ($Obfuscate.IsPresent)
+                    {
+                        if (-not $script:MarketplaceSubCache) { $script:MarketplaceSubCache = @{} }
+                        if (-not $script:MarketplaceRgCache) { $script:MarketplaceRgCache = @{} }
+                        if (-not $script:MarketplaceNameCache) { $script:MarketplaceNameCache = @{} }
+                    }
+
+                    $null = $MarketplaceExport.Add((ConvertTo-RdaMarketplaceRow -Row $Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubGuidTokenMap $script:MarketplaceSubGuidTokenMap -RgTokenMap $script:MarketplaceRgTokenMap -SubCache $script:MarketplaceSubCache -RgCache $script:MarketplaceRgCache -NameCache $script:MarketplaceNameCache))
+                }
+
+                # Converted now, so drop the raw response. Both copies unavoidably coexist FOR the
+                # conversion loop above, so this does not lower the peak; it stops the raw response
+                # being retained past its last reader, through the export and the next subscription.
+                $MarketplaceData = $null
+
+                if ($MarketplaceExport.Count -gt 0)
+                {
+                    $MarketplaceExport | Select-Object PublisherName, OfferName, PlanName, OrderNumber, ConsumedService, ConsumedQuantity, UnitOfMeasure, PretaxCost, Currency, IsEstimated, MeterId, UsageStart, UsageEnd, SubscriptionGuid, SubscriptionName, ResourceGroup, InstanceId, InstanceName | Export-Csv -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8 -Append -NoTypeInformation
+                }
+
+                $MarketplaceRecordsThisSub = $MarketplaceExport.Count
+                Write-Log -Message ("Marketplace records found for {0}: {1}" -f $sub.Name, $MarketplaceRecordsThisSub) -Severity 'Info'
+                # On disk and counted; the health record carries the count, not the rows.
+                $MarketplaceExport = $null
+            }
+            catch
+            {
+                $MarketplaceFailedThisSub = $true
+                $MarketplaceFailureMessage = ("{0} (this subscription's Marketplace data is INCOMPLETE)" -f $_.Exception.Message)
+                Write-Log -Message ("Marketplace query failed for {0}: {1}" -f $sub.Name, $MarketplaceFailureMessage) -Severity 'Warning'
+                $MpOuterErrorText = [string]$_.Exception.Message
+                # Release on this path too. It is the point of greatest memory pressure, and without
+                # this both structures stay referenced through the health append below and on into the
+                # report render and the packaging step.
+                $MarketplaceData = $null
+                $MarketplaceExport = $null
+                if (Test-RdaOutOfMemory -ErrorMessage $MpOuterErrorText)
+                {
+                    # No merge guidance on purpose: Merge-RecoveryData exposes -RecoverConsumption and
+                    # -RecoverMetrics only, so there is no supported way to splice a re-collected
+                    # Marketplace CSV into this bundle. This endpoint also returns the whole window in
+                    # one response, so there is no page to resume from either. A re-run is therefore a
+                    # REPLACEMENT bundle, and because -SkipConsumption implies -SkipMarketplace it has
+                    # to redo the first-party consumption pull as well - say both, or the advice reads
+                    # as though only the Marketplace phase repeats. The command, the subscription id and
+                    # the dictionary path stay in this log line; the health record's Message reaches
+                    # RunSummary.log unscrubbed.
+                    # An obfuscated run MUST be re-run obfuscated and seeded with this run's dictionary,
+                    # otherwise the replacement bundle carries real names.
+                    $MarketplaceRerunObfuscation = if ($Obfuscate.IsPresent) { (' -Obfuscate -ObfuscationDictionary <the ObfuscationDictionary_*.json this run writes to {0}>' -f $DefaultPath) } else { '' }
+                    if (-not [string]::IsNullOrEmpty($SubscriptionID))
+                    {
+                        Write-Log -Message ("Marketplace consumption for {0} stopped because this PowerShell process ran out of memory, so its Marketplace cost data is INCOMPLETE. There is no way to merge Marketplace rows back into this bundle, so re-run this subscription in a fresh PowerShell process, or on a host with more memory, and use the report it produces INSTEAD of this one - the re-run repeats the first-party consumption pull too (for example: pwsh -NoProfile -File ./ResourceInventory.ps1 -TenantID <tenant-id> -SubscriptionID {1} -SkipMetrics{2})." -f $sub.Name, $sub.Id, $MarketplaceRerunObfuscation) -Severity 'Error'
+                    }
+                    else
+                    {
+                        Write-Log -Message ("Marketplace consumption for {0} stopped because this PowerShell process ran out of memory, so its Marketplace cost data is INCOMPLETE. This report covers every subscription in scope and Marketplace rows cannot be merged back in, so re-run the whole report in a fresh PowerShell process, or on a host with more memory, and use that report INSTEAD of this one." -f $sub.Name) -Severity 'Error'
+                    }
+                }
+            }
+
+            $Global:MarketplaceRecordCount += $MarketplaceRecordsThisSub
+            $script:MarketplaceRecordsThisRun += $MarketplaceRecordsThisSub
+            if ($MarketplaceFailedThisSub)
+            {
+                $Global:MarketplaceFailedSubs += [pscustomobject]@{
+                    Name             = $sub.Name
+                    Id               = $sub.Id
+                    Message          = $MarketplaceFailureMessage
+                    Complete         = $false
+                    RecordsCollected = $MarketplaceRecordsThisSub
+                }
+                $script:MarketplaceFailedSubsThisRun++
+            }
+        }
+
+        # HONEST NEGATIVES. An empty Marketplace result is a CONFIRMED ZERO (the endpoint
+        # was reached and returned no rows), NOT a silently-missing section - mirror the
+        # first-party consumption zero-record warning so an empty file reads as "verified
+        # none", not "collector never ran". The Marketplace endpoint returns only
+        # Marketplace-publisher rows, so zero here means no third-party/Marketplace charges
+        # (e.g. no ISV SaaS usage) landed on the in-scope subscriptions in
+        # the window.
+        #
+        # Keyed on the $script:-scoped per-invocation values, NOT the $Global: ones: the
+        # multi-subscription wrapper invokes this script once per subscription in the same
+        # process, so the accumulating $Global: pair would still hold the previous
+        # subscription's rows and suppress this notice for every later zero-row subscription.
+        if ($script:MarketplaceRecordsThisRun -eq 0 -and $script:MarketplaceFailedSubsThisRun -eq 0)
+        {
+            Write-Log -Message ('Marketplace: 0 rows collected for the subscription(s) in scope for this run. This is a CONFIRMED ZERO - the Microsoft.Consumption/marketplaces endpoint was reached successfully and returned no rows, meaning no Azure Marketplace / third-party SaaS charges (e.g. an ISV SaaS offer) were billed to them in the last 31 days. It is NOT a missing/failed section.') -Severity 'Warning'
+        }
+    }
+
+    function GetFoundryFoldConsumption()
+    {
+        # P1 FOUNDRY FOLD. Folds Claude/Anthropic usage into the FIRST-PARTY Consumption_*.csv so
+        # it appears there too, not only in
+        # Marketplace_*.csv. Runs AFTER GetMarketplaceConsumption (it consumes the
+        # raw Claude rows that phase captured in $script:FoundryFoldClaudeRows) and is gated by the
+        # SAME -SkipConsumption / -SkipMarketplace switches (the caller only invokes it when both are
+        # off), so the fold follows the Marketplace phase's skip coherence exactly.
+        #
+        #   Tier 1 (CCU / cost, ALWAYS): one folded "Foundry Models" row per captured Claude
+        #     Marketplace row, carrying the Azure cost, marked non-token. This is the certain part.
+        #
+        # The shaping + obfuscation of each row lives in the unit-tested pure helper
+        # (ConvertTo-RdaFoldedFoundryRow in Functions/ResourceInventory.Functions.ps1); this
+        # function is the collector wiring.
+
+        $DebugPreference = "SilentlyContinue"
+
+        if ($null -eq $Global:FoundryFoldRecordCount) { $Global:FoundryFoldRecordCount = 0 }
+        if ($null -eq $script:FoundryFoldRecordsThisRun) { $script:FoundryFoldRecordsThisRun = 0 }
+
+        # Filtered: nothing captured leaves the list $null, and @($null) counts one row.
+        $ClaudeRows = @($script:FoundryFoldClaudeRows | Where-Object { $null -ne $_ })
+        if ($ClaudeRows.Count -eq 0)
+        {
+            # CONFIRMED ZERO, not a silent skip: the Marketplace phase ran and found no Claude/
+            # Anthropic rows to fold. Mirrors the Marketplace confirmed-zero notice.
+            Write-Log -Message ('Foundry fold: no Claude/Anthropic Marketplace rows were collected for the subscription(s) in scope, so there is nothing to fold into the Consumption CSV. This is a CONFIRMED ZERO (the Marketplace phase ran), NOT a skipped/failed section.') -Severity 'Info'
+            return
+        }
+
+        Write-Log -Message ("Foundry fold: folding {0} Claude/Anthropic Marketplace row(s) into the Consumption CSV as 'Foundry Models' rows." -f $ClaudeRows.Count) -Severity 'Info'
+
+        # Per-run obfuscation caches for the folded rows (parity with the Marketplace/consumption
+        # paths). Product identity (the model) stays readable in MeterName; only ResourceId is masked.
+        if ($Obfuscate.IsPresent)
+        {
+            if (-not $script:FoundryFoldSubCache) { $script:FoundryFoldSubCache = @{} }
+            if (-not $script:FoundryFoldRgCache) { $script:FoundryFoldRgCache = @{} }
+            if (-not $script:FoundryFoldNameCache) { $script:FoundryFoldNameCache = @{} }
+        }
+
+        $FoldExport = [System.Collections.ArrayList]::new()
+
+        # ---- Tier 1: one folded cost row per captured Claude Marketplace row (always) ----
+        foreach ($Captured in $ClaudeRows)
+        {
+            # ConvertTo-RdaFoldedFoundryRow's -Row is Mandatory, so a null captured row would throw
+            # a terminating parameter-binding error ("Cannot bind argument to parameter 'Row'").
+            # Under the run's default SilentlyContinue that terminating error aborts the whole
+            # consumption block, so the phases after the fold never run. Skip a null row so one
+            # bad captured entry cannot stop them.
+            if ($null -eq $Captured.Row) { continue }
+            $Folded = ConvertTo-RdaFoldedFoundryRow -Row $Captured.Row -Obfuscate:$Obfuscate.IsPresent -UriKeyedNameDictionary $Global:ResourceIdDictionary -SubCache $script:FoundryFoldSubCache -RgCache $script:FoundryFoldRgCache -NameCache $script:FoundryFoldNameCache
+            $null = $FoldExport.Add($Folded)
+        }
+
+        # ---- Append the folded rows onto the SAME Consumption CSV the first-party phase writes ----
+        # Export-Csv -Append with the identical column set the first-party path emits, so a folded
+        # row is schema-identical to a native consumption row (it just carries MeterCategory=
+        # 'Foundry Models' + the fold markers inside AdditionalInfo). If the first-party phase wrote
+        # no rows, -Append creates the file with the same header.
+        if ($FoldExport.Count -gt 0)
+        {
+            $FoldExport | Select-Object AdditionalInfo, MeterCategory, MeterId, MeterName, MeterRegion, MeterSubCategory, Quantity, Unit, UsageStartTime, UsageEndTime, ResourceId, ResourceLocation, ConsumptionMeter, ReservationId, ReservationOrderId | Export-Csv -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8 -Append -NoTypeInformation
+        }
+
+        $Global:FoundryFoldRecordCount += $FoldExport.Count
+        $script:FoundryFoldRecordsThisRun += $FoldExport.Count
+        Write-Log -Message ("Foundry fold: appended {0} folded 'Foundry Models' (Tier 1 CCU/cost) row(s) to the Consumption CSV." -f $FoldExport.Count) -Severity 'Info'
+    }
+
+    function GetFoundryModelCoverage()
+    {
+        # Every Az call in this phase is scoped to the subscription being processed through
+        # $PSDefaultParameterValues['*:DefaultProfile'] (Get-RdaSubscriptionProfile), not with
+        # Set-AzContext. This function-local copy keeps that scope out of the caller and the rest of
+        # the run, and the process's current context and the saved default subscription are untouched.
+        $PSDefaultParameterValues = [System.Management.Automation.DefaultParameterDictionary]::new($PSDefaultParameterValues)
+        # ADDITIVE Azure AI Foundry model billing-plane coverage collector.
+        #
+        # WHY THIS EXISTS. Microsoft splits Foundry models across TWO independent billing
+        # planes: "sold directly by Azure" (billed on Azure meters -> appears in the Retail
+        # Prices API) and "from partners/community" (billed through Azure
+        # Marketplace - for Claude via Claude Consumption Units / CCU - NOT in Retail
+        # Prices). A Marketplace-only model therefore came out with NO cost signal at all:
+        # no Azure meter, no AWS mapping, and (the real bug) NO WARNING. The split is PER
+        # MODEL, not per
+        # vendor, so a vendor can look "covered" while one SKU vanishes. This phase probes
+        # BOTH planes per deployed model and emits an explicit coverage flag so a
+        # Marketplace-only or entirely-uncovered model is NEVER left unreported.
+        #
+        # COLLECTION ONLY. This does NOT price anything and does NOT map to AWS
+        # - it collects the Azure-side signal (what is deployed, which plane covers each,
+        # and whatever usage was collectable) and writes it to FoundryModelCoverage_*.csv.
+        #
+        # RELATIONSHIP TO THE MARKETPLACE COLLECTOR. GetMarketplaceConsumption (above)
+        # answers "what Marketplace/CCU dollars were billed"; this phase answers "what
+        # models are deployed and which plane covers each", then JOINS the Marketplace rows
+        # back to deployed models where possible. It performs its OWN per-subscription
+        # Get-AzConsumptionMarketplace probe (scoped to the subscription context inside this
+        # phase's loop), independent of GetMarketplaceConsumption. Both reads are idempotent
+        # billing-plane reads, so the extra call is safe; the two phases are not coupled.
+        #
+        # SOURCE OF TRUTH for "what is deployed" (the design spec section 3.2, verified live): the ARM
+        # per-account deployments list. Resource Graph indexes the deployment resource SHELL
+        # but returns EMPTY name/properties.model, so Graph is used ONLY to enumerate the
+        # CognitiveServices accounts; each account's deployments are then read via ARM.
+        #
+        # GRACEFUL DEGRADATION (the design spec section 10). Every probe fails loud-and-local, never
+        # silently. UNPRICED is emitted ONLY when BOTH planes were successfully probed and
+        # BOTH came back negative; any probe failure yields an Unknown-<reason> status, so a
+        # probe gap never masquerades as a confirmed coverage gap (no-overclaiming).
+
+        $DebugPreference = "SilentlyContinue"
+
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
+
+        if ($null -eq $Global:FoundryCoverageRecordCount) { $Global:FoundryCoverageRecordCount = 0 }
+        if ($null -eq $Global:FoundryCoverageFailedSubs) { $Global:FoundryCoverageFailedSubs = @() }
+        if ($null -eq $Global:FoundryCoverageUnpricedCount) { $Global:FoundryCoverageUnpricedCount = 0 }
+        if ($null -eq $script:FoundryCoverageRecordsThisRun) { $script:FoundryCoverageRecordsThisRun = 0 }
+        # The notices at the end of this phase judge this run only. The $Global: counters are run
+        # totals under the wrapper, which calls this script once per subscription in one process.
+        if ($null -eq $script:FoundryCoverageUnpricedThisRun) { $script:FoundryCoverageUnpricedThisRun = 0 }
+        $FcFailedSubsAtStart = @($Global:FoundryCoverageFailedSubs).Count
+
+        $DeploymentsApiVersion = '2024-10-01'  # single named constant; a future bump is one edit (the design spec section 3.3)
+        $ProbeWindowStart = (Get-Date).AddDays(-31).Date
+        $ProbeWindowEnd = (Get-Date).AddDays(-1).Date
+        $RunTimestampUtc = (Get-Date).ToUniversalTime().ToString('o')
+
+        if (-not (Test-DataPlaneAuthReady -Phase 'FoundryModelCoverage'))
+        {
+            Write-Log -Message ('FoundryModelCoverage: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. The rest of the inventory will continue.') -Severity 'Error'
+            $Global:FoundryCoverageFailedSubs += [pscustomobject]@{
+                Name             = '(all subscriptions)'
+                Id               = '(auth)'
+                Message          = 'FoundryModelCoverage phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Complete         = $false
+                RecordsCollected = 0
+            }
+            return
+        }
+
+        # The token columns (TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens) are kept so
+        # the file layout does not change, but they are not filled: token usage is already in the
+        # billed 'Foundry Models' lines of the Consumption CSV. Say so once, here.
+        Write-Log -Message ('FoundryModelCoverage: the token columns are not filled (TokenProbeStatus NotRun). Token usage is in the billed Foundry Models lines of the Consumption CSV.') -Severity 'Info'
+
+        # Retail Prices catalog is GLOBAL + unauthenticated (the design spec section 4.1): pull the
+        # 'Foundry Models' service catalog ONCE per run and cache it. A network failure
+        # here is not fatal - it makes the Azure-metered axis INDETERMINATE (never UNPRICED).
+        $RetailCatalog = $null
+        $RetailProbed = $false
+        try
+        {
+            $RetailCatalog = @(Get-RdaFoundryRetailCatalog)
+            $RetailProbed = $RetailCatalog.Count -gt 0
+            if ($RetailProbed)
+            {
+                Write-Log -Message ("FoundryModelCoverage: pulled {0} distinct Retail Prices meter(s) for serviceName 'Foundry Models'." -f $RetailCatalog.Count) -Severity 'Info'
+            }
+            else
+            {
+                Write-Log -Message ("FoundryModelCoverage: the Retail Prices catalog for serviceName 'Foundry Models' returned zero items on a successful call. The Azure-metered axis will be marked INDETERMINATE (never UNPRICED) for this run.") -Severity 'Warning'
+            }
+        }
+        catch
+        {
+            Write-Log -Message ("FoundryModelCoverage: Retail Prices catalog could not be read ({0}). The Azure-metered axis will be marked INDETERMINATE (never UNPRICED) for this run." -f $_.Exception.Message) -Severity 'Warning'
+        }
+
+        # Shared obfuscation dictionary views (same derivation as the Marketplace collector).
+        $script:FoundrySubGuidTokenMap = $null
+        $script:FoundryRgTokenMap = $null
+        if ($Obfuscate.IsPresent)
+        {
+            $script:FoundrySubGuidTokenMap = @{}
+            if ($null -ne $Global:ResourceSubscriptionDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceSubscriptionDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/subscriptions/([^/]+)')
+                    {
+                        $ShGuid = $Matches[1]
+                        if (-not $script:FoundrySubGuidTokenMap.ContainsKey($ShGuid)) { $script:FoundrySubGuidTokenMap[$ShGuid] = $Global:ResourceSubscriptionDictionary[$ShKey] }
+                    }
+                }
+            }
+            $script:FoundryRgTokenMap = @{}
+            if ($null -ne $Global:ResourceResourceGroupDictionary)
+            {
+                foreach ($ShKey in $Global:ResourceResourceGroupDictionary.Keys)
+                {
+                    if ($ShKey -match '(?i)/resourcegroups/([^/]+)')
+                    {
+                        $ShRg = $Matches[1]
+                        if (-not $script:FoundryRgTokenMap.ContainsKey($ShRg)) { $script:FoundryRgTokenMap[$ShRg] = $Global:ResourceResourceGroupDictionary[$ShKey] }
+                    }
+                }
+            }
+            if (-not $script:FoundrySubCache) { $script:FoundrySubCache = @{} }
+            if (-not $script:FoundryRgCache) { $script:FoundryRgCache = @{} }
+            if (-not $script:FoundryNameCache) { $script:FoundryNameCache = @{} }
+        }
+
+        # One debug-log line for the phase, never one per subscription passed over (see the
+        # same block in GetResourceConsumption): the others are counted, never named.
+        if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $FcTargetSub = $Global:Subscriptions | Where-Object { $_.Id -eq $SubscriptionID } | Select-Object -First 1
+            $FcTargetSubLabel = if ($FcTargetSub) { "'{0}'" -f $FcTargetSub.Name } else { $SubscriptionID }
+            $FcPassedOverCount = @($Global:Subscriptions | Where-Object { $_.Id -ne $SubscriptionID } | Sort-Object -Property Id -Unique).Count
+            if ($FcPassedOverCount -gt 0)
+            {
+                Write-Log -Message ("Foundry model coverage data not collected for {0} other subscription(s) in this run's subscription list: this run is limited to subscription {1} by -SubscriptionID." -f $FcPassedOverCount, $FcTargetSubLabel) -Severity 'Info' -NoConsole -ToDebugLog
+            }
+        }
+
+        foreach ($sub in $Global:Subscriptions)
+        {
+            if (![string]::IsNullOrEmpty($SubscriptionID))
+            {
+                if ($SubscriptionID -ne $sub.Id)
+                {
+                    continue
+                }
+            }
+
+            $FcContextOk = $false
+            $FcContextSwitchError = $null
+            try
+            {
+                $PSDefaultParameterValues['*:DefaultProfile'] = Get-RdaSubscriptionProfile -SubscriptionId $sub.id
+                $FcContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
+            }
+            catch { $FcContextSwitchError = $_.Exception.Message }
+
+            if (-not $FcContextOk)
+            {
+                $SkipMessage = ("FoundryModelCoverage SKIPPED: could not scope the Azure calls to this subscription{0}. The signed-in identity likely lacks access to it. Skipped rather than reporting zero deployed models." -f $(if ($FcContextSwitchError) { " ($FcContextSwitchError)" } else { ' (context did not match the target after scoping)' }))
+                Write-Log -Message ("FoundryModelCoverage: {0} - {1}" -f $sub.Name, $SkipMessage) -Severity 'Error'
+                $Global:FoundryCoverageFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $SkipMessage; Complete = $false; RecordsCollected = 0 }
+                continue
+            }
+
+            Write-Log -Message ("Assessing Foundry model billing-plane coverage for: {0}" -f $sub.Name) -Severity 'Info'
+
+            $FcRecordsThisSub = 0
+            $FcUnpricedThisSub = 0
+            $FcFailedThisSub = $false
+            $FcFailureMessage = $null
+
+            try
+            {
+                # 1. Enumerate CognitiveServices accounts (Graph preferred; RDA already has
+                #    Search-AzGraph plumbing). Graph is only used to LIST accounts here - never
+                #    to read deployment model detail (the design spec section 3.2).
+                $Accounts = @()
+                try
+                {
+                    $AccountsResult = Invoke-AzGraphQuerySafe -Subscription @($sub.id) -Query @"
+resources
+| where type =~ 'microsoft.cognitiveservices/accounts'
+| project id, name, kind, sku, location, resourceGroup, subscriptionId
+"@
+                    $Accounts = @($AccountsResult.data)
+                }
+                catch
+                {
+                    # ARM accounts-list fallback (the design spec section 3.3, verified HTTP 200).
+                    Write-Log -Message ("FoundryModelCoverage: Resource Graph account enumeration failed for {0} ({1}); falling back to the ARM accounts-list." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    $ArmAcctResp = Invoke-AzRestMethod -Method GET -Path ("/subscriptions/{0}/providers/Microsoft.CognitiveServices/accounts?api-version={1}" -f $sub.id, $DeploymentsApiVersion) -ErrorAction Stop
+                    if ($ArmAcctResp.StatusCode -ge 400) { throw ("ARM accounts-list returned HTTP {0}: {1}" -f $ArmAcctResp.StatusCode, $ArmAcctResp.Content) }
+                    $Accounts = @((($ArmAcctResp.Content | ConvertFrom-Json).value) | ForEach-Object {
+                            [pscustomobject]@{ id = $_.id; name = $_.name; kind = $_.kind; sku = $_.sku; location = $_.location; resourceGroup = ($_.id -replace '(?i)^/subscriptions/[^/]+/resourcegroups/([^/]+)/.*$', '$1'); subscriptionId = $sub.id }
+                        })
+                }
+
+                # Probe the Marketplace plane ONCE for this subscription (the design spec section 5). A
+                # denial makes the Marketplace axis INDETERMINATE for every model in this sub
+                # (never UNPRICED) rather than falsely calling models UNPRICED.
+                $MarketplaceRows = @()
+                $MarketplaceProbed = $true
+                $MarketplaceDeniedReason = $null
+                try
+                {
+                    $MarketplaceRows = @(Get-AzConsumptionMarketplace -StartDate $ProbeWindowStart -EndDate $ProbeWindowEnd -ErrorAction Stop)
+                }
+                catch
+                {
+                    $MarketplaceProbed = $false
+                    if (Test-RdaConsumptionDenial -ErrorMessage $_.Exception.Message)
+                    {
+                        $MarketplaceDeniedReason = 'MarketplaceDenied'
+                        Write-Log -Message ("FoundryModelCoverage: Marketplace plane DENIED for {0}: {1}. Models will be marked Unknown-MarketplaceDenied (NOT UNPRICED). Grant Cost Management Reader and re-run." -f $sub.Name, $_.Exception.Message) -Severity 'Warning'
+                    }
+                    else
+                    {
+                        $MarketplaceDeniedReason = 'MarketplaceProbeFailed'
+                        # A permanent 4xx carries the service's reason (for example the offer-type 400 this
+                        # endpoint returns for subscriptions it does not serve); the SDK text only says 'BadRequest'.
+                        $FcProbeError = Get-RdaPermanentRequestError -ErrorRecord $_
+                        if ($FcProbeError)
+                        {
+                            Write-Log -Message ('FoundryModelCoverage: Marketplace probe for {0} rejected permanently: {1}' -f $sub.Name, (Get-RdaRequestErrorDetail -ErrorRecord $_)) -Severity 'Warning' -NoConsole -ToDebugLog
+                        }
+                        else
+                        {
+                            $FcProbeError = $_.Exception.Message
+                        }
+                        Write-Log -Message ("FoundryModelCoverage: Marketplace plane probe failed for {0}: {1}. Models will be marked Unknown-MarketplaceProbeFailed (NOT UNPRICED)." -f $sub.Name, $FcProbeError.TrimEnd('.')) -Severity 'Warning'
+                    }
+                }
+
+                $ExportRows = [System.Collections.ArrayList]::new()
+                $MatchedMarketplaceRows = [System.Collections.Generic.HashSet[string]]::new()
+
+                foreach ($acct in $Accounts)
+                {
+                    # 2. List deployments per account via ARM (authoritative; the design spec section 3.3).
+                    $Deployments = @()
+                    try
+                    {
+                        $DepResp = Invoke-AzRestMethod -Method GET -Path ($acct.id + '/deployments?api-version=' + $DeploymentsApiVersion) -ErrorAction Stop
+                        if ($DepResp.StatusCode -ge 400) { throw ("ARM deployments-list returned HTTP {0}" -f $DepResp.StatusCode) }
+                        $Deployments = @(($DepResp.Content | ConvertFrom-Json).value)
+                    }
+                    catch
+                    {
+                        Write-Log -Message ("FoundryModelCoverage: could not list deployments for account {0} ({1}); recording an account-level probe failure rather than assuming zero deployments." -f $acct.name, $_.Exception.Message) -Severity 'Warning'
+                        # Do NOT report zero deployed models - emit a probe-failure marker row.
+                        $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record ([pscustomobject]@{
+                                        SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = $acct.resourceGroup; AccountName = $acct.name; AccountId = $acct.id
+                                        AccountKind = "$($acct.kind)"; DeploymentName = '(deployments not enumerated)'; ModelName = ''; ModelFormat = ''; ModelVersion = ''
+                                        DeploymentSku = ''; DeploymentCapacity = ''; Region = "$($acct.location)"; DetectedPlanes = 'None'
+                                        CoverageStatus = 'Unknown-DeploymentsNotEnumerated'; CoverageFlag = ('Coverage INDETERMINATE: the account''s deployments could not be listed ({0}). NOT declared UNPRICED.' -f $_.Exception.Message)
+                                        RetailPriceMatch = '(not probed)'; MarketplacePublisher = ''; MarketplaceOffer = ''; CcuQuantity = ''; CcuUnitOfMeasure = ''; MarketplacePretaxCost = ''; MarketplaceCurrency = ''; CcuAttribution = ''
+                                        TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
+                                        ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                                        TokenProbeStatus = 'NotApplicable'
+                                    }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
+                        continue
+                    }
+
+                    foreach ($d in $Deployments)
+                    {
+                        $Model = [pscustomobject]@{
+                            SubscriptionGuid = $sub.id
+                            SubscriptionName = $sub.Name
+                            ResourceGroup    = $acct.resourceGroup
+                            AccountName      = $acct.name
+                            AccountId        = $acct.id
+                            AccountKind      = "$($acct.kind)"
+                            DeploymentName   = "$($d.name)"
+                            ModelName        = "$($d.properties.model.name)"
+                            ModelFormat      = "$($d.properties.model.format)"
+                            ModelVersion     = "$($d.properties.model.version)"
+                            DeploymentSku    = "$($d.sku.name)"
+                            DeploymentCapacity = "$($d.sku.capacity)"
+                            Region           = "$($acct.location)"
+                        }
+
+                        # 3a. Azure-metered plane: confident per-model Retail Prices match.
+                        $RetailMatch = Test-RdaRetailPriceMatch -Model $Model -CatalogItems $RetailCatalog
+                        $AzureMetered = [bool]$RetailMatch.Matched
+
+                        # 3b. Marketplace plane.
+                        $MpMatch = Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $MarketplaceRows
+                        $MarketplaceCovered = [bool]$MpMatch.Matched
+
+                        $Coverage = Get-RdaFoundryCoverageStatus -AzureMetered $AzureMetered -MarketplaceCovered $MarketplaceCovered -RetailProbed $RetailProbed -MarketplaceProbed $MarketplaceProbed -MarketplaceDeniedReason $MarketplaceDeniedReason
+
+                        $DetectedPlanes = @()
+                        if ($AzureMetered) { $DetectedPlanes += 'AzureMetered' }
+                        if ($MarketplaceCovered) { $DetectedPlanes += 'Marketplace' }
+                        if ($DetectedPlanes.Count -eq 0) { $DetectedPlanes = @('None') }
+
+                        $MpRow = $MpMatch.Row
+                        if ($null -ne $MpRow -and -not [string]::IsNullOrEmpty("$($MpRow.InstanceId)")) { $null = $MatchedMarketplaceRows.Add("$($MpRow.InstanceId)|$($MpRow.MeterId)") }
+
+                        if ($Coverage.CoverageStatus -eq 'UNPRICED') { $FcUnpricedThisSub++ }
+
+                        $Record = [pscustomobject]@{
+                            SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = $acct.resourceGroup; AccountName = $acct.name; AccountId = $acct.id
+                            AccountKind = $Model.AccountKind; DeploymentName = $Model.DeploymentName; ModelName = $Model.ModelName; ModelFormat = $Model.ModelFormat; ModelVersion = $Model.ModelVersion
+                            DeploymentSku = $Model.DeploymentSku; DeploymentCapacity = $Model.DeploymentCapacity; Region = $Model.Region
+                            DetectedPlanes = ($DetectedPlanes -join '+'); CoverageStatus = $Coverage.CoverageStatus; CoverageFlag = $Coverage.CoverageFlag; RetailPriceMatch = $RetailMatch.RetailMatch
+                            MarketplacePublisher = $(if ($MarketplaceCovered) { "$($MpRow.PublisherName)" } else { '' })
+                            MarketplaceOffer = $(if ($MarketplaceCovered) { "$($MpRow.OfferName)" } else { '' })
+                            CcuQuantity = $(if ($MarketplaceCovered) { $MpRow.ConsumedQuantity } else { '' })
+                            CcuUnitOfMeasure = $(if ($MarketplaceCovered) { "$($MpRow.UnitOfMeasure)" } else { '' })
+                            MarketplacePretaxCost = $(if ($MarketplaceCovered) { $MpRow.PretaxCost } else { '' })
+                            MarketplaceCurrency = $(if ($MarketplaceCovered) { "$($MpRow.Currency)" } else { '' })
+                            CcuAttribution = $(if ($MarketplaceCovered) { $MpMatch.CcuAttribution } else { '' })
+                            TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
+                            ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                            TokenProbeStatus = 'NotRun'
+                        }
+
+                        $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
+                    }
+                }
+
+                # 3c. Unattributed Marketplace/CCU rows: a Claude/partner CCU line that could
+                #     NOT be tied to any deployed model (deleted deployment, or a sub the
+                #     identity could not fully enumerate). Emit a synthetic row so the DOLLARS
+                #     are never dropped (the design spec section 9 anti-silent-drop guarantee). Only rows
+                #     whose offer names a KNOWN Foundry model vendor are surfaced. The match
+                #     is on precise, multi-character vendor discriminators (the model-format
+                #     vendors from the design spec section 4.2 plus the 'foundry' service token) - NOT a
+                #     bare 'ai' token, which is far too common a substring and would sweep in
+                #     unrelated Marketplace SaaS charges as false model coverage gaps.
+                foreach ($MpRow in $MarketplaceRows)
+                {
+                    if ($null -eq $MpRow) { continue }
+                    $Key = "$($MpRow.InstanceId)|$($MpRow.MeterId)"
+                    if ($MatchedMarketplaceRows.Contains($Key)) { continue }
+                    $OfferTokens = @(Get-RdaFoundryModelMatchTokens -Value ("$($MpRow.PublisherName) $($MpRow.OfferName) $($MpRow.PlanName)"))
+                    $LooksLikeModelVendor = @($OfferTokens | Where-Object { $_ -in @('anthropic', 'claude', 'cohere', 'mistral', 'ministral', 'codestral', 'llama', 'openai', 'deepseek', 'grok', 'kimi', 'qwen', 'phi', 'tsuzumi', 'foundry') }).Count -gt 0
+                    if (-not $LooksLikeModelVendor) { continue }
+
+                    $null = $ExportRows.Add((ConvertTo-RdaFoundryCoverageRow -Record ([pscustomobject]@{
+                                    SubscriptionGuid = $sub.id; SubscriptionName = $sub.Name; ResourceGroup = "$($MpRow.ResourceGroup)"; AccountName = ''; AccountId = ''
+                                    AccountKind = ''; DeploymentName = '(unattributed Marketplace/CCU charge)'; ModelName = ''; ModelFormat = ''; ModelVersion = ''
+                                    DeploymentSku = ''; DeploymentCapacity = ''; Region = ''; DetectedPlanes = 'Marketplace'
+                                    CoverageStatus = 'MarketplaceOnly'; CoverageFlag = 'Marketplace/CCU charge that could NOT be tied to a deployed model in this subscription; carried so the billed dollars are not dropped.'
+                                    RetailPriceMatch = '(n/a - unattributed Marketplace charge)'
+                                    MarketplacePublisher = "$($MpRow.PublisherName)"; MarketplaceOffer = "$($MpRow.OfferName)"; CcuQuantity = $MpRow.ConsumedQuantity; CcuUnitOfMeasure = "$($MpRow.UnitOfMeasure)"; MarketplacePretaxCost = $MpRow.PretaxCost; MarketplaceCurrency = "$($MpRow.Currency)"; CcuAttribution = 'AggregatedOffer'
+                                    TokenMetricsPresent = $false; InputTokens = ''; OutputTokens = ''; TotalTokens = ''
+                                    ProbeWindowStart = $ProbeWindowStart.ToString('yyyy-MM-dd'); ProbeWindowEnd = $ProbeWindowEnd.ToString('yyyy-MM-dd'); RunTimestampUtc = $RunTimestampUtc
+                                    TokenProbeStatus = 'NotApplicable'
+                                }) -Obfuscate:$Obfuscate.IsPresent -SubGuidTokenMap $script:FoundrySubGuidTokenMap -RgTokenMap $script:FoundryRgTokenMap -SubCache $script:FoundrySubCache -RgCache $script:FoundryRgCache -NameCache $script:FoundryNameCache))
+                }
+
+                if ($ExportRows.Count -gt 0)
+                {
+                    $ExportRows | Select-Object SubscriptionGuid, SubscriptionName, ResourceGroup, AccountName, AccountKind, DeploymentName, ModelName, ModelFormat, ModelVersion, DeploymentSku, DeploymentCapacity, Region, DetectedPlanes, CoverageStatus, CoverageFlag, RetailPriceMatch, MarketplacePublisher, MarketplaceOffer, CcuQuantity, CcuUnitOfMeasure, MarketplacePretaxCost, MarketplaceCurrency, CcuAttribution, TokenMetricsPresent, InputTokens, OutputTokens, TotalTokens, ProbeWindowStart, ProbeWindowEnd, RunTimestampUtc, TokenProbeStatus | Export-Csv -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8 -Append -NoTypeInformation
+                }
+
+                $FcRecordsThisSub = $ExportRows.Count
+                # Counted once its rows are in the CSV, which is where the UNPRICED notice sends the reader.
+                $Global:FoundryCoverageUnpricedCount += $FcUnpricedThisSub
+                $script:FoundryCoverageUnpricedThisRun += $FcUnpricedThisSub
+                Write-Log -Message ("FoundryModelCoverage records for {0}: {1} (deployed-model + coverage-gap rows)." -f $sub.Name, $FcRecordsThisSub) -Severity 'Info'
+            }
+            catch
+            {
+                $FcFailedThisSub = $true
+                $FcFailureMessage = ("{0} (this subscription's Foundry coverage assessment is INCOMPLETE)" -f $_.Exception.Message)
+                Write-Log -Message ("FoundryModelCoverage failed for {0}: {1}" -f $sub.Name, $FcFailureMessage) -Severity 'Warning'
+            }
+
+            $Global:FoundryCoverageRecordCount += $FcRecordsThisSub
+            $script:FoundryCoverageRecordsThisRun += $FcRecordsThisSub
+            if ($FcFailedThisSub)
+            {
+                $Global:FoundryCoverageFailedSubs += [pscustomobject]@{ Name = $sub.Name; Id = $sub.Id; Message = $FcFailureMessage; Complete = $false; RecordsCollected = $FcRecordsThisSub }
+            }
+        }
+
+        # HONEST NEGATIVES (the design spec section 9). Zero deployed Foundry models is a CONFIRMED ZERO
+        # (accounts were enumerated and none held deployments), NOT a silently-missing
+        # section - log it explicitly so an empty file reads as "verified none".
+        $FcFailedSubsThisRun = @($Global:FoundryCoverageFailedSubs | Select-Object -Skip $FcFailedSubsAtStart)
+        if ($script:FoundryCoverageRecordsThisRun -eq 0 -and ($FcFailedSubsThisRun | Where-Object { $_.Id -ne '(auth)' } | Measure-Object).Count -eq 0)
+        {
+            Write-Log -Message ('FoundryModelCoverage: 0 deployed Foundry/CognitiveServices model deployments found across all in-scope subscriptions. This is a CONFIRMED ZERO - accounts were enumerated and none held model deployments. It is NOT a missing/failed section.') -Severity 'Warning'
+        }
+        if ($script:FoundryCoverageUnpricedThisRun -gt 0)
+        {
+            Write-Log -Message ("FoundryModelCoverage: {0} deployed model(s) classified UNPRICED (found in NEITHER billing plane). These are LOUD coverage gaps that should be investigated - see the UNPRICED rows in the coverage CSV." -f $script:FoundryCoverageUnpricedThisRun) -Severity 'Warning'
+        }
     }
 
     InitializeInventoryProcessing
 
+    # Explicitly nil for this invocation. Read unguarded by the failure gate near the end of the
+    # script, which is safe today only because no Set-StrictMode is in effect.
+    $script:HtmlWriteError = $null
+    $script:CollectorBreakerError = $null
+    $script:CollectorFailuresThisRun = @()
+    $script:BillingSkippedForAbort = $false
+
     $script:PhaseTimings = [ordered]@{}
+
+    $MetricsApiCallsBefore = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
 
     $MetricsPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     CreateMetricsJob
     $MetricsPhaseTimer.Stop()
+
+    $MetricsApiCallsAfter = if ($null -ne $Global:MetricsApiCallCount) { [int]$Global:MetricsApiCallCount } else { 0 }
+    $script:MetricsApiCallsThisRun = [Math]::Max(0, $MetricsApiCallsAfter - $MetricsApiCallsBefore)
 
     $CollectorPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     CreateResourceJobs
@@ -1466,6 +2697,64 @@ function ExecuteInventoryProcessing()
 
     ProcessMetricsResult
     ProcessResourceResult
+    Write-RdaMemorySnapshot -Phase 'collectors' -Compact -Record
+
+    # The placement rows join the VirtualMachines and VMSS collector output, and under the wrapper
+    # every part is merged into the tenant-wide CSV it ships, so a part built on partial output would
+    # ship as complete: after an abort the collectors stopped part way, and a failed VM or scale-set
+    # collector leaves its type empty.
+    $PlacementInputFailed = @($script:CollectorFailuresThisRun | Where-Object { $_.Module -in @('VirtualMachines', 'VMSS') } | ForEach-Object { $_.Module })
+    if ($CapacityPlan.IsPresent -and -not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+    {
+        Write-Log -Message ('VM placement CSV SKIPPED: collection was aborted by the circuit breaker, so the collector output it joins is partial. No placement CSV is written for this subscription; the re-run collects it.') -Severity 'Error'
+    }
+    elseif ($CapacityPlan.IsPresent -and $PlacementInputFailed.Count -gt 0)
+    {
+        $FailedNoun = if ($PlacementInputFailed.Count -gt 1) { 'collectors failed' } else { 'collector failed' }
+        Write-Log -Message ('VM placement CSV SKIPPED: the {0} {1}, so the rows it joins are incomplete. No placement CSV is written for this subscription; re-run once the failure above is resolved.' -f ($PlacementInputFailed -join ' and '), $FailedNoun) -Severity 'Error'
+    }
+    elseif ($CapacityPlan.IsPresent)
+    {
+        try
+        {
+            $PlacementScript = Join-Path $PSScriptRoot 'Extension/VMPlacement.ps1'
+            if (Test-Path -LiteralPath $PlacementScript -PathType Leaf)
+            {
+                if ($RunAllSubs.IsPresent)
+                {
+                    $PlacementDir = Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Parent
+                    $PlacementTag = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { $Global:CurrentDateTime }
+                    $PlacementCsv = Join-Path $PlacementDir ("VMPlacementPart_" + $Global:ReportName + "_" + $Global:CurrentDateTime + "_" + $PlacementTag + ".csv")
+                }
+                else
+                {
+                    $PlacementCsv = ($DefaultPath + "VMPlacement_" + $Global:ReportName + "_" + $CurrentDateTime + ".csv")
+                }
+
+                & $PlacementScript -CsvFile $PlacementCsv
+            }
+            else
+            {
+                Write-Log -Message ("VM placement CSV skipped: {0} not found." -f $PlacementScript) -Severity 'Error'
+            }
+        }
+        catch
+        {
+            Write-Log -Message ("VM placement CSV failed: {0}. The rest of the run is unaffected." -f $_.Exception.Message) -Severity 'Error'
+        }
+    }
+
+    # The placement CSV was the last reader of the raw Resource Graph rows and of the collector
+    # output. The Inventory JSON is on disk, billing reads the subscription list and the
+    # obfuscation dictionaries, and the HTML report reads the JSON file, so nothing after this
+    # point needs either structure. Release them here so the billing pull, and the next
+    # subscription under the wrapper, do not carry this subscription's inventory in memory. The
+    # metrics phase writes its own files and its result object has no reader after it returns, so
+    # it goes with them.
+    $Global:Resources = $null
+    $Global:SmaResources = $null
+    $Global:AzMetrics = $null
+    Write-RdaMemorySnapshot -Phase 'released' -Compact -Record
 
     if (!$SkipMetrics.IsPresent)
     {
@@ -1473,12 +2762,68 @@ function ExecuteInventoryProcessing()
     }
     $script:PhaseTimings['Resource detail collection (service collectors)'] = $CollectorPhaseTimer.Elapsed
 
-    if (!$SkipConsumption.IsPresent)
+    if (-not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError) -and -not $SkipConsumption.IsPresent)
+    {
+        # Collection was aborted, so this subscription is reported FAILED and its archive removed
+        # whatever billing returns. A billing pull now would only spend its full retry budget against
+        # the same systemic failure (the usual cause is authentication dropping mid-run) and then have
+        # its output discarded. The re-run collects it.
+        $script:BillingSkippedForAbort = $true
+        $SkippedBilling = if ($SkipMarketplace.IsPresent) { 'Consumption' } else { 'Consumption and Marketplace' }
+        Write-Log -Message ('{0} SKIPPED: collection was aborted by the circuit breaker, so this subscription will be reported FAILED and its archive removed. A billing pull now would spend its full retry budget against the same systemic failure and its output would be discarded. The re-run collects it.' -f $SkippedBilling) -Severity 'Error'
+    }
+    elseif (!$SkipConsumption.IsPresent)
     {
         $ConsumptionPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        GetResorceConsumption
+        GetResourceConsumption
         $ConsumptionPhaseTimer.Stop()
         $script:PhaseTimings['Consumption / cost collection (billing)'] = $ConsumptionPhaseTimer.Elapsed
+
+        # ADDITIVE Marketplace collector. Gated by the SAME -SkipConsumption switch
+        # (it needs the same billing/Cost Management Reader access and Azure context)
+        # and can be skipped independently with -SkipMarketplace. It emits a SEPARATE
+        # Marketplace_* output and never touches the first-party Consumption_* path.
+        if (!$SkipMarketplace.IsPresent)
+        {
+            $MarketplacePhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetMarketplaceConsumption
+            $MarketplacePhaseTimer.Stop()
+            $script:PhaseTimings['Marketplace consumption collection (billing)'] = $MarketplacePhaseTimer.Elapsed
+
+            # P1 FOUNDRY FOLD. Folds the Claude/Anthropic Marketplace rows the phase above captured
+            # into the SAME first-party Consumption_*.csv, as 'Foundry Models' rows,
+            # so Claude usage appears there as well. Runs under the SAME gate as the
+            # Marketplace phase (only when neither -SkipConsumption nor -SkipMarketplace is set), so
+            # the fold follows the identical skip coherence. It appends to the Consumption CSV
+            # written by GetResourceConsumption above.
+            $FoundryFoldPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetFoundryFoldConsumption
+            $FoundryFoldPhaseTimer.Stop()
+            $script:PhaseTimings['Foundry fold (Claude -> Consumption CSV)'] = $FoundryFoldPhaseTimer.Elapsed
+        }
+
+        # ADDITIVE Foundry model billing-plane coverage collector. Gated by the SAME
+        # -SkipConsumption switch: it needs the same billing / Cost Management Reader
+        # access to probe the Marketplace plane per subscription, and it performs its own
+        # per-subscription Get-AzConsumptionMarketplace read (independent of, and idempotent
+        # with, the Marketplace collector's). It is skipped independently with
+        # -SkipFoundryCoverage. It emits a SEPARATE FoundryModelCoverage_* output and never
+        # touches the first-party Consumption_* or Marketplace_* paths.
+        if (!$SkipFoundryCoverage.IsPresent)
+        {
+            $FoundryCoveragePhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            GetFoundryModelCoverage
+            $FoundryCoveragePhaseTimer.Stop()
+            $script:PhaseTimings['Foundry model coverage collection (billing-plane probe)'] = $FoundryCoveragePhaseTimer.Elapsed
+        }
+    }
+    elseif (!$SkipMarketplace.IsPresent)
+    {
+        # -SkipConsumption implies -SkipMarketplace because the Marketplace endpoint needs the
+        # same billing access and Azure context. Say so out loud: the operator asked to skip
+        # first-party consumption, NOT Marketplace, and the only other trace is a header-only
+        # Marketplace CSV, which is indistinguishable from a confirmed zero.
+        Write-Log -Message ('Marketplace: SKIPPED because -SkipConsumption was passed (the Marketplace endpoint needs the same billing access, so -SkipConsumption implies it). This is NOT a confirmed zero - no Marketplace query was issued. Pass -SkipMarketplace on its own to make this explicit, or drop -SkipConsumption to collect Marketplace charges.') -Severity 'Warning'
     }
 }
 
@@ -1491,11 +2836,11 @@ function FinalizeOutputs
 
         if ($PSScriptRoot -like '*\*')
         {
-            $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '\Extension\Summary.ps1') -Recurse
+            $SummaryPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '\Extension\Summary.ps1') -Recurse
         }
         else
         {
-            $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
+            $SummaryPath = Get-ChildItem -LiteralPath ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
         }
 
         $ReportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
@@ -1503,46 +2848,78 @@ function FinalizeOutputs
 
         try
         {
-            $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+            $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv -CollectorFailures $script:CollectorFailuresThisRun -CollectorsAborted:([bool]$script:CollectorBreakerError)
         }
         catch
         {
-            Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
-            Write-Log -Message ("The Inventory/Metrics/Consumption data files were still written to {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
-            throw
+            # Record the REAL cause and carry it to the single failure gate at the end of the
+            # script, which owns the "report this subscription as FAILED + exit 2" contract the
+            # wrapper reads. A bare `throw` here did NOT halt (the global $ErrorActionPreference
+            # is SilentlyContinue outside -Debug), so the run continued into packaging and failed
+            # again on a downstream symptom, reporting that instead of this. Halting here
+            # directly would be worse still: it would skip the obfuscation dictionary, which is
+            # the de-obfuscation key for whatever data files this run DID write.
+            $script:HtmlWriteError = $_.Exception.Message
+            Write-Log -Message ("HTML report generation FAILED: {0}" -f $script:HtmlWriteError) -Severity 'Error'
+
+            # Say only what is true. Do NOT assert the data files were written - when this failed
+            # because the output paths were never initialised, none of them exist.
+            # Metrics is checked by GLOB, not by $Global:MetricsJsonFile. Extension/Metrics.ps1
+            # writes SHARDED Metrics_<ReportName>_<stamp>_*.json files; the unsharded path is only
+            # created by the empty-metrics fallback in the packaging block, which runs AFTER this.
+            # Testing the single path here would report "not written" while real shards sit on disk.
+            # Same folder and name pattern as the packaging block's shard check, so the two agree;
+            # $Global:MetricsJsonFile only confirms the output paths were set up.
+            $MetricsShardFilter = if ([string]::IsNullOrWhiteSpace($Global:MetricsJsonFile) -or [string]::IsNullOrWhiteSpace($Global:DefaultPath)) { $null }
+            else { 'Metrics_{0}_{1}*.json' -f $Global:ReportName, $Global:CurrentDateTime }
+
+            $WrittenOutputs = @(
+                @{ Label = 'Inventory JSON'; Path = $Global:JsonFile }
+                @{ Label = 'Consumption CSV'; Path = $Global:ConsumptionFileCsv }
+                @{ Label = 'Marketplace CSV'; Path = $Global:MarketplaceFileCsv }
+            ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Path) -and (Test-Path -LiteralPath $_.Path -PathType Leaf) }
+
+            if ($MetricsShardFilter -and @(Get-ChildItem -LiteralPath $Global:DefaultPath -Filter $MetricsShardFilter -File -ErrorAction SilentlyContinue).Count -gt 0)
+            {
+                $WrittenOutputs = @($WrittenOutputs) + @{ Label = 'Metrics JSON' }
+            }
+
+            if ($WrittenOutputs.Count -gt 0)
+            {
+                Write-Log -Message ("No HTML report or zip was produced for this run. These data files WERE written to {0}: {1}." -f $Global:DefaultPath, (($WrittenOutputs | ForEach-Object { $_.Label }) -join ', ')) -Severity 'Error'
+            }
+            else
+            {
+                Write-Log -Message ("No HTML report or zip was produced for this run, and NO data files were written either - the run produced no report output at all. Re-run with -Debug to see the underlying error.") -Severity 'Error'
+            }
         }
     }
 
     ProcessSummary
 }
 
+# === Pre-flight checks === Detect common environment problems before transcript/auth/per-subscription work; skipped under -RunAllSubs (the wrapper already ran them at top level), full block on a standalone run.
 if (-not $RunAllSubs.IsPresent)
 {
 
-    $PreFlightInventoryRoot = if ($OutputDirectory)
+    $RootResult = Get-RdaInventoryRoot -Requested $OutputDirectory -NoInherit
+    if (-not $RootResult.Ok)
     {
-        try { (Resolve-Path $OutputDirectory -ErrorAction Stop).Path }
-        catch { $OutputDirectory }
+        Write-Host ("ERROR: {0}" -f $RootResult.Message) -ForegroundColor Red
+        exit 1
     }
-    elseif ($PSVersionTable.Platform -eq 'Unix')
+    $PreFlightInventoryRoot = $RootResult.Path
+    if ($RootResult.IsFallback)
     {
-        "$HOME/InventoryReports"
+        Write-Host ("WARNING: {0}" -f $RootResult.Message) -ForegroundColor Yellow
     }
-    else
-    {
-        "C:\InventoryReports"
-    }
-    if (-not (Test-Path -Path $PreFlightInventoryRoot -PathType Container))
-    {
-        try { New-Item -Path $PreFlightInventoryRoot -ItemType Directory -Force | Out-Null }
-        catch { Write-Verbose ("PreFlightInventoryRoot create failed at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) }
-    }
+    Set-RdaInventoryRootForChildren -Path $PreFlightInventoryRoot
 
     Write-Host "Running pre-flight checks..." -ForegroundColor Cyan
 
     if ($Service -and @($Service).Count -gt 0)
     {
-        $PreFlightAvailableServices = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object)
+        $PreFlightAvailableServices = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Services') -Filter '*.ps1' -Recurse | ForEach-Object { $_.BaseName } | Sort-Object)
         $PreFlightMatchedServices = @($Service | Where-Object { $_ -in $PreFlightAvailableServices })
         if (@($PreFlightMatchedServices).Count -eq 0)
         {
@@ -1560,14 +2937,14 @@ if (-not $RunAllSubs.IsPresent)
             Write-Host "ERROR: -ObfuscationDictionary requires -Obfuscate (there are no obfuscation dictionaries to seed without it)." -ForegroundColor Red
             exit 1
         }
-        if (-not (Test-Path -Path $ObfuscationDictionary -PathType Leaf))
+        if (-not (Test-Path -LiteralPath $ObfuscationDictionary -PathType Leaf))
         {
             Write-Host ("ERROR: -ObfuscationDictionary file not found: {0}" -f $ObfuscationDictionary) -ForegroundColor Red
             exit 1
         }
         try
         {
-            $null = Get-Content -Path $ObfuscationDictionary -Raw | ConvertFrom-Json
+            $null = Get-Content -LiteralPath $ObfuscationDictionary -Raw | ConvertFrom-Json
         }
         catch
         {
@@ -1598,48 +2975,80 @@ if (-not $RunAllSubs.IsPresent)
 
     try
     {
-        $RootItem = Get-Item -Path $PreFlightInventoryRoot -ErrorAction Stop
+        $RootItem = Get-Item -LiteralPath $PreFlightInventoryRoot -ErrorAction Stop
         $Drive = $RootItem.PSDrive
         if ($null -ne $Drive -and $null -ne $Drive.Free)
         {
             $FreeMB = [math]::Round($Drive.Free / 1MB, 0)
-            if ($FreeMB -lt 100)
+
+            # Render the figure ONCE, for all three branches below, so none of
+            # them can drift back into an ambiguous form.
+            #
+            # Do NOT reintroduce a bare "{0:N0} MB" here. N0 uses the HOST
+            # culture's NumberGroupSeparator, and on a culture where that
+            # separator is '.' (en-NL, de-DE, ...) 69969 prints as "69.969 MB",
+            # which an operator reads as 69 MB - so a perfectly healthy 68 GB
+            # free looks like an imminent out-of-disk failure.
+            #
+            # Two properties keep it unambiguous on every host: the MB value is
+            # formatted with NO grouping at all (bare digits cannot be misread
+            # as a decimal), and both values use InvariantCulture so the decimal
+            # point is always '.'. MB alone is also the wrong unit at this
+            # magnitude, so a GB value leads once there is more than 1 GB.
+            #
+            # Keep in sync with Invoke-PreFlightChecks in
+            # Functions/RunAllSubscriptions.Functions.ps1 - both copies must
+            # produce identical text for the same input.
+            $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+            $FreeSpaceDisplay = if ($FreeMB -ge 1024)
             {
-                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB)
-            }
-            elseif ($FreeMB -lt 500)
-            {
-                Write-Host ("WARNING: Free disk space at {0} is {1} MB. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Yellow
+                '{0} GB ({1} MB)' -f ($FreeMB / 1024).ToString('0.0', $InvariantCulture), $FreeMB.ToString('0', $InvariantCulture)
             }
             else
             {
-                Write-Host ("Free disk space: {0:N0} MB at {1}" -f $FreeMB, $PreFlightInventoryRoot) -ForegroundColor Green
+                '{0} MB' -f $FreeMB.ToString('0', $InvariantCulture)
+            }
+
+            if ($FreeMB -lt 100)
+            {
+                Write-Host ("ERROR: Free disk space at {0} is {1}; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeSpaceDisplay) -ForegroundColor Red
+                exit 1
+            }
+            elseif ($FreeMB -lt 500)
+            {
+                Write-Host ("WARNING: Free disk space at {0} is {1}. A large multi-subscription run can exceed this. Consider freeing space before running." -f $PreFlightInventoryRoot, $FreeSpaceDisplay) -ForegroundColor Yellow
+            }
+            else
+            {
+                Write-Host ("Free disk space: {0} at {1}" -f $FreeSpaceDisplay, $PreFlightInventoryRoot) -ForegroundColor Green
             }
         }
     }
     catch
     {
-        if ($_.Exception.Message -match '^Pre-flight:') { throw }
         Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
     }
 
     $ProbePath = Join-Path $PreFlightInventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
     try
     {
-        Set-Content -Path $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
-        $ProbeRead = Get-Content -Path $ProbePath -Raw -ErrorAction Stop
+        Set-Content -LiteralPath $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $ProbeRead = Get-Content -LiteralPath $ProbePath -Raw -ErrorAction Stop
         if ($ProbeRead -notmatch 'preflight write probe')
         {
             throw "Write probe content mismatch (read back '$ProbeRead')"
         }
-        Remove-Item -Path $ProbePath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $ProbePath -Force -ErrorAction Stop
         Write-Host ("Write probe: OK ({0})" -f $PreFlightInventoryRoot) -ForegroundColor Green
     }
     catch
     {
-        try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
+        try { if (Test-Path -LiteralPath $ProbePath) { Remove-Item -LiteralPath $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
-        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+        Write-Host ("ERROR: cannot write to {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Red
+        Write-Host "  This usually means a readonly directory, denied permissions, an antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Yellow
+        Write-Host "  Verify the directory is writable and re-run, or pass -OutputDirectory with a writable path." -ForegroundColor Yellow
+        exit 1
     }
 
     Write-Host "Pre-flight checks passed." -ForegroundColor Green
@@ -1651,7 +3060,7 @@ $Global:Runtime = Measure-Command -Expression {
     RunInventorySetup
 
     $Global:PowerShellTranscriptFile = ($Global:DefaultPath + "Transcript_Log_" + $Global:ReportName + "_" + $Global:CurrentDateTime + ".txt")
-    Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
+    Start-Transcript -LiteralPath $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
 try
@@ -1675,14 +3084,14 @@ if ($Obfuscate.IsPresent)
     $Global:DictionaryFile = ($DefaultPath + "ObfuscationDictionary_" + $Global:ReportName + "_" + $CurrentDateTime + ".json")
 
     $Dictionary = @{
-        GeneratedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        ResourceIdMap = @{}
-        ResourceNameMap = @{}
-        SubscriptionMap = @{}
-        ResourceGroupMap = @{}
+        GeneratedAt         = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)
+        ResourceIdMap       = @{}
+        ResourceNameMap     = @{}
+        SubscriptionMap     = @{}
+        ResourceGroupMap    = @{}
         SubscriptionNameMap = @{}
-        TagMap = @{}
-        FreeTextMap = @{}
+        TagMap              = @{}
+        FreeTextMap         = @{}
     }
 
     foreach ($key in $ResourceIdDictionary.Keys)
@@ -1733,12 +3142,13 @@ if ($Obfuscate.IsPresent)
         }
     }
 
-    $Dictionary | ConvertTo-Json -depth 5 | Out-File $Global:DictionaryFile -Encoding utf8
+    $Dictionary | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $Global:DictionaryFile -Encoding utf8
     Write-Log -Message ("Obfuscation dictionary saved locally: {0}" -f $Global:DictionaryFile) -Severity 'Success'
     Write-Log -Message ("") -Severity 'Info'
     Write-Log -Message ("=== OBFUSCATION NOTICE ===") -Severity 'Warning'
-    Write-Log -Message ("The following files remain LOCAL and should NOT be shared:") -Severity 'Warning'
+    Write-Log -Message ("The following files are NEVER placed in the shared report zip and must NOT be shared with a report consumer:") -Severity 'Warning'
     Write-Log -Message ("  - Dictionary: {0}" -f $Global:DictionaryFile) -Severity 'Warning'
+    Write-Log -Message ("      (the de-obfuscation key. Kept local by default; under the multi-subscription wrapper, if a blob upload target is set it is mirrored to that operator-PRIVATE container - which must stay private.)") -Severity 'Warning'
     Write-Log -Message ("  - Transcript: {0}" -f $Global:PowerShellTranscriptFile) -Severity 'Warning'
     if (![string]::IsNullOrEmpty($Global:ErrorLogFile) -and (Test-Path -LiteralPath $Global:ErrorLogFile))
     {
@@ -1749,33 +3159,41 @@ if ($Obfuscate.IsPresent)
         Write-Log -Message ("  - Debug log:  {0}" -f $Global:DebugLogFile) -Severity 'Warning'
     }
     Write-Log -Message ("") -Severity 'Info'
-    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    if ($RunAllSubs.IsPresent)
+    {
+        Write-Log -Message ("This subscription's ZIP is obfuscated and is one COMPONENT of the run's bundle - it is not the file to send on its own.") -Severity 'Success'
+        Write-Log -Message ("Send the single AllSubscriptions_*.zip named at the end of the run ('SEND THIS ONE FILE'); it already contains this zip.") -Severity 'Success'
+    }
+    else
+    {
+        Write-Log -Message ("The ZIP file is safe to share with AWS or partners. Send that ZIP only - not the folder it sits in.") -Severity 'Success'
+    }
     Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
     Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
 }
 
 if ($SkipMetrics.IsPresent)
 {
-    @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+    @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -LiteralPath $Global:MetricsJsonFile -Encoding utf8
 }
 else
 {
     $MetricsPattern = ('Metrics_{0}_{1}*.json' -f $Global:ReportName, $CurrentDateTime)
-    $MetricsAny = @(Get-ChildItem -Path $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)
+    $MetricsAny = @(Get-ChildItem -LiteralPath $DefaultPath -Filter $MetricsPattern -ErrorAction SilentlyContinue)
     if ($MetricsAny.Count -eq 0)
     {
-        @{ Metrics = @() } | ConvertTo-Json -depth 5 -compress | Out-File $Global:MetricsJsonFile -Encoding utf8
+        @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -LiteralPath $Global:MetricsJsonFile -Encoding utf8
     }
 }
 
-$ConsumptionCreated = Test-Path -Path $Global:ConsumptionFileCsv
+$ConsumptionCreated = Test-Path -LiteralPath $Global:ConsumptionFileCsv
 
 $ConsumptionEmpty = $false
 if ($ConsumptionCreated)
 {
     try
     {
-        $ConsumptionEmpty = ((Get-Item -Path $Global:ConsumptionFileCsv -ErrorAction Stop).Length -eq 0)
+        $ConsumptionEmpty = ((Get-Item -LiteralPath $Global:ConsumptionFileCsv -ErrorAction Stop).Length -eq 0)
     }
     catch
     {
@@ -1785,50 +3203,206 @@ if ($ConsumptionCreated)
 
 if ($SkipConsumption.IsPresent -or !$ConsumptionCreated -or $ConsumptionEmpty)
 {
-    "InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File $Global:ConsumptionFileCsv -Encoding utf8
+    "AdditionalInfo,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId" | Out-File -LiteralPath $Global:ConsumptionFileCsv -Encoding utf8
 }
 
-$JsonWildCard = $DefaultPath + "*.json"
+# Marketplace CSV parallels the Consumption CSV: an empty-but-present file (header only)
+# is written when the phase was skipped or produced no rows, so the bundle shows
+# a deliberate, schema-shaped "0 Marketplace rows" rather than a missing file. This mirrors
+# the confirmed-zero diagnostic the collector logs.
+$MarketplaceCreated = Test-Path -LiteralPath $Global:MarketplaceFileCsv
+$MarketplaceEmpty = $false
+if ($MarketplaceCreated)
+{
+    try
+    {
+        $MarketplaceEmpty = ((Get-Item -LiteralPath $Global:MarketplaceFileCsv -ErrorAction Stop).Length -eq 0)
+    }
+    catch
+    {
+        $MarketplaceEmpty = $true
+    }
+}
+
+if ($SkipConsumption.IsPresent -or $SkipMarketplace.IsPresent -or !$MarketplaceCreated -or $MarketplaceEmpty)
+{
+    "PublisherName,OfferName,PlanName,OrderNumber,ConsumedService,ConsumedQuantity,UnitOfMeasure,PretaxCost,Currency,IsEstimated,MeterId,UsageStart,UsageEnd,SubscriptionGuid,SubscriptionName,ResourceGroup,InstanceId,InstanceName" | Out-File -LiteralPath $Global:MarketplaceFileCsv -Encoding utf8
+}
+
+# FoundryModelCoverage CSV parallels the Consumption/Marketplace CSVs: an empty-but-present
+# file (header only) is written when the phase was skipped or produced no rows, so the
+# bundle shows a deliberate, schema-shaped "0 coverage rows" rather than a
+# missing file. This mirrors the confirmed-zero diagnostic the collector logs.
+$FoundryCoverageCreated = Test-Path -LiteralPath $Global:FoundryCoverageFileCsv
+$FoundryCoverageEmpty = $false
+if ($FoundryCoverageCreated)
+{
+    try
+    {
+        $FoundryCoverageEmpty = ((Get-Item -LiteralPath $Global:FoundryCoverageFileCsv -ErrorAction Stop).Length -eq 0)
+    }
+    catch
+    {
+        $FoundryCoverageEmpty = $true
+    }
+}
+
+if ($SkipConsumption.IsPresent -or $SkipFoundryCoverage.IsPresent -or !$FoundryCoverageCreated -or $FoundryCoverageEmpty)
+{
+    "SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,DeploymentName,ModelName,ModelFormat,ModelVersion,DeploymentSku,DeploymentCapacity,Region,DetectedPlanes,CoverageStatus,CoverageFlag,RetailPriceMatch,MarketplacePublisher,MarketplaceOffer,CcuQuantity,CcuUnitOfMeasure,MarketplacePretaxCost,MarketplaceCurrency,CcuAttribution,TokenMetricsPresent,InputTokens,OutputTokens,TotalTokens,ProbeWindowStart,ProbeWindowEnd,RunTimestampUtc,TokenProbeStatus" | Out-File -LiteralPath $Global:FoundryCoverageFileCsv -Encoding utf8
+}
+
+Write-RdaMemorySnapshot -Phase 'end' -Compact -Record
 
 if ($Obfuscate.IsPresent)
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -Obfuscated:$Obfuscate.IsPresent
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -ConsumptionRowsFetchedCount $(if ($null -ne $script:ConsumptionRowsFetchedThisRun) { [int]$script:ConsumptionRowsFetchedThisRun } else { -1 }) -ConsumptionResourceGroupScoped (-not [string]::IsNullOrEmpty($ResourceGroup)) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent) -Obfuscated:$Obfuscate.IsPresent
 
-    $JsonFiles = Get-ChildItem -Path $DefaultPath -Filter "*.json" | Where-Object { $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -like "*_$($Global:CurrentDateTime)*" -and $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
     $CompressionOutput = @{
-        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv) + $ShareableExtras + $JsonFiles
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv, $Global:FoundryCoverageFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
-        DestinationPath = $Global:ZipOutputFile
+        DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }
     Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 else
 {
-    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings
+    $DiagnosticsFile = Write-RdaShareableDiagnosticsLog -DefaultPath $DefaultPath -ReportName $Global:ReportName -RunDateTime $Global:CurrentDateTime -Version $Global:Version -PhaseTimings $script:PhaseTimings -MemoryReadings $Global:MemoryReadings -ConsumptionRecordCount $(if ($null -ne $script:ConsumptionRecordsThisRun) { [int]$script:ConsumptionRecordsThisRun } else { 0 }) -ConsumptionRequested:((-not $SkipConsumption.IsPresent) -and -not $script:BillingSkippedForAbort) -ConsumptionRowsFetchedCount $(if ($null -ne $script:ConsumptionRowsFetchedThisRun) { [int]$script:ConsumptionRowsFetchedThisRun } else { -1 }) -ConsumptionResourceGroupScoped (-not [string]::IsNullOrEmpty($ResourceGroup)) -MarketplaceRecordCount $(if ($null -ne $script:MarketplaceRecordsThisRun) { [int]$script:MarketplaceRecordsThisRun } else { 0 }) -MarketplaceRequested:((-not $SkipConsumption.IsPresent) -and (-not $SkipMarketplace.IsPresent) -and -not $script:BillingSkippedForAbort) -MetricsApiCallCount $(if ($null -ne $script:MetricsApiCallsThisRun) { [int]$script:MetricsApiCallsThisRun } else { 0 }) -MetricsRequested:(-not $SkipMetrics.IsPresent) -ConsumptionSkippedForAbort:([bool]$script:BillingSkippedForAbort) -MarketplaceSkippedForAbort:([bool]$script:BillingSkippedForAbort -and -not $SkipMarketplace.IsPresent)
     $ShareableExtras = @()
     if (-not [string]::IsNullOrEmpty($DiagnosticsFile) -and (Test-Path -LiteralPath $DiagnosticsFile)) { $ShareableExtras += $DiagnosticsFile }
 
+    if (-not [string]::IsNullOrEmpty($Global:DebugLogFile) -and (Test-Path -LiteralPath $Global:DebugLogFile))
+    {
+        $ShareableExtras += $Global:DebugLogFile
+        Write-Log -Message ('Debug log INCLUDED in zip (non-obfuscated run): {0}' -f (Split-Path -Path $Global:DebugLogFile -Leaf)) -Severity 'Warning'
+        Write-Log -Message ('  It carries real service/resource names and raw exception text. The report in this bundle is already non-obfuscated. Re-run with -Obfuscate to keep the debug log LOCAL.') -Severity 'Warning'
+    }
+
+    $JsonFiles = Get-ChildItem -LiteralPath $DefaultPath -Filter "*.json" | Where-Object { $_.Name -like "*_$($Global:CurrentDateTime)*" -and $_.Name -notlike "ObfuscationDictionary_*" -and $_.Name -notlike "Full_*" -and $_.Name -notlike "Heartbeat_*" -and $_.Name -notlike "DebugLog_*" -and $_.Name -notlike "ErrorLog_*" } | Select-Object -ExpandProperty FullName
+
     $CompressionOutput = @{
-        Path = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $JsonWildCard) + $ShareableExtras
+        LiteralPath      = @($Global:HtmlFile, $Global:ConsumptionFileCsv, $Global:MarketplaceFileCsv, $Global:FoundryCoverageFileCsv) + $ShareableExtras + $JsonFiles
         CompressionLevel = 'Fastest'
-        DestinationPath = $Global:ZipOutputFile
+        DestinationPath  = [WildcardPattern]::Escape($Global:ZipOutputFile)
     }
     Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
+$ZipWriteError = $null
 try
 {
-    Compress-Archive @CompressionOutput
+    Compress-Archive @CompressionOutput -ErrorAction Stop
 }
 catch
 {
-    $_ | Format-List -Force
-    Write-Error ("Error Compressing Output File: {0}." -f $Global:ZipOutputFile)
-    Write-Error ("Please zip the output files manually.")
+    $ZipWriteError = $_.Exception.Message
+}
+
+$ZipVerified = $false
+if ($null -eq $ZipWriteError)
+{
+    $ZipVerified = Test-ReportArchiveUsable -Path $Global:ZipOutputFile
+    if (-not $ZipVerified)
+    {
+        $ZipWriteError = if (Test-Path -LiteralPath $Global:ZipOutputFile -PathType Leaf)
+        {
+            'the archive was created but is 0 bytes'
+        }
+        else
+        {
+            'the archive is absent from disk even though Compress-Archive reported no error'
+        }
+    }
 }
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
+
+# A failed HTML report is a failed run, and it is the CAUSE of an archive failure rather than a
+# peer of it - the compression list always includes $Global:HtmlFile, so a report that was never
+# written necessarily fails the zip too. Name the real cause here, then route into the single
+# failure gate below rather than exiting directly: that gate owns removing an unusable archive so
+# the wrapper cannot consolidate a corrupt member, and duplicating that cleanup here would give
+# it two owners.
+if (-not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError))
+{
+    Write-Log -Message ('ABORTED collection: the collector circuit breaker tripped, so this inventory is INCOMPLETE.') -Severity 'Error'
+    Write-Log -Message ("  Cause: {0}" -f $script:CollectorBreakerError) -Severity 'Error'
+    Write-Log -Message ('  The resource types after the abort were never attempted, so they are ABSENT from the inventory rather than empty.') -Severity 'Error'
+    $BreakerReason = ("collection was aborted by the circuit breaker ({0})" -f $script:CollectorBreakerError)
+    $ZipWriteError = if ([string]::IsNullOrWhiteSpace($ZipWriteError)) { $BreakerReason }
+    else { ("{0}; the archive write also reported: {1}" -f $BreakerReason, $ZipWriteError) }
+    $ZipVerified = $false
+}
+
+if (-not [string]::IsNullOrWhiteSpace($script:HtmlWriteError))
+{
+    Write-Log -Message ('FAILED to produce the HTML report, so this run has no usable report bundle.') -Severity 'Error'
+    Write-Log -Message ("  Cause: {0}" -f $script:HtmlWriteError) -Severity 'Error'
+    # Append rather than replace: usually the compression error is just a derived symptom of the
+    # missing report, but it can be an INDEPENDENT packaging failure (disk full, destination locked,
+    # AV/DLP quarantine) and that text is the only record of it.
+    $HtmlReason = ("the HTML report it must contain was never produced ({0})" -f $script:HtmlWriteError)
+    $ZipWriteError = if ([string]::IsNullOrWhiteSpace($ZipWriteError)) { $HtmlReason }
+    else { ("{0}; the archive write also reported: {1}" -f $HtmlReason, $ZipWriteError) }
+    $ZipVerified = $false
+}
+
+if (-not $ZipVerified)
+{
+    # An aborted collection gets its own wording and exit code. Folding it into the archive-write
+    # failure made the wrapper report "completed collection but could NOT write a report archive"
+    # and advise zipping the folder by hand, both false for a partial inventory.
+    $CollectionAborted = -not [string]::IsNullOrWhiteSpace($script:CollectorBreakerError)
+    if ($CollectionAborted)
+    {
+        Write-Log -Message ("Collection was ABORTED, so this subscription's report archive is not kept: {0}" -f $Global:ZipOutputFile) -Severity 'Error'
+        Write-Log -Message ("  Reason: {0}" -f $ZipWriteError) -Severity 'Error'
+        Write-Log -Message ("  The uncompressed files in {0} are a PARTIAL inventory, kept for inspection only - do not zip and ship them. Fix the failure named above first." -f $DefaultPath) -Severity 'Error'
+        # Leave a marker so the wrapper neither folds this partial HTML into the consolidated bundle nor
+        # lists the folder as a normal row in MainSummary.html. Plain text, no identifiers.
+        try
+        {
+            Set-Content -LiteralPath (Get-RdaCollectionAbortedMarkerPath -Folder $DefaultPath) -Encoding utf8 -ErrorAction Stop -Value @(
+                'Collection for this subscription was ABORTED by the collector circuit breaker.'
+                'The files in this folder are a PARTIAL inventory. Do not zip or ship them.'
+                'Fix the failure recorded in the log, then re-run to collect this subscription.'
+            )
+        }
+        catch
+        {
+            Write-Log -Message ("  WARNING: could not write the aborted-collection marker ({0}); the wrapper may fold this folder's partial HTML into the bundle." -f $_.Exception.Message) -Severity 'Error'
+        }
+    }
+    else
+    {
+        Write-Log -Message ("FAILED to write the report archive: {0}" -f $Global:ZipOutputFile) -Severity 'Error'
+        Write-Log -Message ("  Reason: {0}" -f $ZipWriteError) -Severity 'Error'
+        Write-Log -Message ("  The uncompressed report files are still in {0} - check free disk space first, then an antivirus/DLP quarantine, then write permissions on that folder." -f $DefaultPath) -Severity 'Error'
+    }
+    Write-Log -Message ('  Reporting this subscription as FAILED so the wrapper does not consolidate a bundle that is missing it. Re-run to retry; under Run-AllSubscriptions.ps1, -Resume retries only the failed subscriptions.') -Severity 'Error'
+
+    if (Test-Path -LiteralPath $Global:ZipOutputFile -PathType Leaf)
+    {
+        try
+        {
+            Remove-Item -LiteralPath $Global:ZipOutputFile -Force -ErrorAction Stop
+            Write-Log -Message ('  Removed the unusable archive so it cannot be folded into the consolidated bundle.') -Severity 'Error'
+        }
+        catch
+        {
+            Write-Log -Message ('  WARNING: could not remove the unusable archive at {0} ({1}). Delete it by hand before consolidating, or it will ship as a corrupt member.' -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
+        }
+    }
+
+    # 3 = collection aborted (a partial inventory), 2 = the archive could not be written. The wrapper
+    # reads the two separately so it can say which one happened.
+    if ($CollectionAborted) { exit 3 }
+    exit 2
+}
+
 Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
+

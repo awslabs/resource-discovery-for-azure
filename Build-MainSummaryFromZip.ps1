@@ -1,3 +1,4 @@
+#!/usr/bin/env pwsh
 #Requires -Version 7.0
 <#
 .SYNOPSIS
@@ -60,10 +61,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Shared function library: New-RdaAllSubHtmlSummaryFromZip + New-RdaAllSubHtmlSummary
-# + the render helpers all live here. Dot-source so they load into this scope.
 $SummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
-if (-not (Test-Path -Path $SummaryFunctions -PathType Leaf))
+if (-not (Test-Path -LiteralPath $SummaryFunctions -PathType Leaf))
 {
     throw "Cannot find shared functions at $SummaryFunctions"
 }
@@ -79,7 +78,6 @@ $Params = @{
 }
 if (-not [string]::IsNullOrWhiteSpace($OutputDirectory)) { $Params.OutputDirectory = $OutputDirectory }
 
-# Source the tool version from Version.json if present (display-only header).
 try
 {
     $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
@@ -88,3 +86,4 @@ try
 catch { Write-Verbose ("Could not read Version.json: {0}" -f $_.Exception.Message) }
 
 New-RdaAllSubHtmlSummaryFromZip @Params
+

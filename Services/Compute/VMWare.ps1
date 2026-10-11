@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $VMWare = $Resources | Where-Object { $_.TYPE -eq 'Microsoft.AVS/privateClouds' }
+    $VMWare = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.avs/privateclouds') { $Row } }
 
     if ($VMWare)
     {
@@ -18,7 +18,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'            = $1.RESOURCEGROUP;
                 'Name'                     = $1.NAME;
                 'Location'                 = $1.LOCATION;
-                'SKU'                      = $Data.sku.name;
+                'SKU'                      = $1.sku.name;
                 'AvailabilityStrategy'     = $Data.availability.strategy;
                 'Encryption'               = $Data.encryption.status;
                 'ClusterSize'              = $Data.managementCluster.clusterSize;
@@ -30,3 +30,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

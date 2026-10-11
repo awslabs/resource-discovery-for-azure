@@ -1,34 +1,5 @@
-# Write-RdaProgress Scenario Tests
-#
-# Unit-tests the single, reusable progress reporter (Write-RdaProgress) that
-# every entry-point script routes through: the sequential per-subscription loop
-# (Run-AllSubscriptions.ps1), the reveal per-folder loop and its -Resume variant
-# (Reveal.ps1), the parallel stream per-sub tagged line
-# (Run-AllSubscriptions.Stream.ps1), and the high-frequency non-interactive
-# loops (Service Processing collectors in ResourceInventory.ps1 and the metrics
-# batch loop in Extension/Metrics.ps1, both bar-only).
-#
-# There is ONE function, so the scenarios differ only by the arguments each
-# caller passes. Each It below reproduces one caller's call shape and asserts
-# the observable behavior:
-#
-#   - Write-Progress is mocked so the bar's -Status / -PercentComplete / -Completed
-#     arguments are captured and asserted deterministically (the live bar renders
-#     to the console host and is intentionally NOT asserted here - it is verified
-#     by eye on an interactive console; see Tests/Show-ProgressScenarios.ps1 for
-#     the exact commands to reproduce it).
-#   - The non-interactive fallback line is captured off the Information stream
-#     (Write-Host writes there in PS7) via 6>&1, so we can assert it is emitted
-#     for the interactive-loop callers and SUPPRESSED for the -BarOnly callers.
-#   - The durable heartbeat is asserted by reading the temp log file back.
-#
-# Note: the $Lines = @(Get-RdaProgressLines { ... }) call sites wrap the helper
-# in @() deliberately. PowerShell unwraps a single-element array on assignment,
-# so a lone captured line would otherwise become a scalar string and $Lines[0]
-# would index its first CHARACTER instead of the whole line. @() keeps it an
-# array in every case (0, 1, or many lines).
-#
-# Run with: Invoke-Pester ./Tests/Progress.Tests.ps1 -Output Detailed
+# Scenario unit tests for the single reusable Write-RdaProgress (all entry points route through it; scenarios differ only by caller args).
+# Get-RdaProgressLines captures are wrapped in @() so a lone line stays an array, not a scalar whose $Lines[0] would index a character.
 
 BeforeAll {
     $script:FunctionsPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1'
@@ -161,6 +132,14 @@ Describe 'Write-RdaProgress' {
             }
             (Get-Content $HbFile).Count | Should -Be 3
         }
+
+        It 'never throws when the heartbeat file cannot be written (best-effort)' {
+            # The run-safety contract is that a heartbeat write failure is swallowed so
+            # a long unattended run is never killed by a transient/broken log path.
+            # Point at a path whose parent directory does not exist so Add-Content throws.
+            $Unwritable = Join-Path (Join-Path $script:TestRoot ('no-such-dir_' + [guid]::NewGuid().ToString('N').Substring(0, 8))) 'hb.log'
+            { Write-RdaProgress -Activity 'Processing subscriptions' -CurrentItem 'Sub-Prod-01' -Index 1 -Total 4 -HeartbeatLogFile $Unwritable -BarOnly } | Should -Not -Throw
+        }
     }
 
     Context 'Scenario 6: Completion (clears the bar after a loop)' {
@@ -178,6 +157,15 @@ Describe 'Write-RdaProgress' {
             Write-RdaProgress -Activity 'Metrics collection' -Total 900 -Completed -HeartbeatLogFile $HbFile
             (Get-Content $HbFile -Raw) | Should -Match 'Metrics collection: complete \(900 item\(s\)\)'
         }
+
+        It 'uses the final -Index for the completion count in count-only mode (Total omitted)' {
+            # In count-only mode $Total is 0, so the completion line must fall back to
+            # the final -Index instead of logging 'complete (0 item(s))' regardless of
+            # how many items the loop processed.
+            $HbFile = Join-Path $script:TestRoot ('hb_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.log')
+            Write-RdaProgress -Activity 'Scanning bundles' -Index 42 -Completed -HeartbeatLogFile $HbFile
+            (Get-Content $HbFile -Raw) | Should -Match 'Scanning bundles: complete \(42 item\(s\)\)'
+        }
     }
 
     Context 'Scenario 7: Percent bounds are clamped to 0..100' {
@@ -189,6 +177,14 @@ Describe 'Write-RdaProgress' {
 
         It 'reports 0 percent at the start of a loop (index 0)' {
             Write-RdaProgress -Activity 'X' -CurrentItem 'start' -Index 0 -Total 4
+            Should -Invoke Write-Progress -Times 1 -Exactly -ParameterFilter { $PercentComplete -eq 0 }
+        }
+
+        It 'clamps to 0 when the index is negative (exercises the 0-floor)' {
+            # index 0 reaches 0 by exact arithmetic (0/4*100), so it never exercises the
+            # 'if ($Percent -lt 0) { $Percent = 0 }' lower-bound guard. A negative index
+            # produces a negative raw percent, which the clamp must floor to 0.
+            Write-RdaProgress -Activity 'X' -CurrentItem 'under' -Index -1 -Total 4
             Should -Invoke Write-Progress -Times 1 -Exactly -ParameterFilter { $PercentComplete -eq 0 }
         }
     }

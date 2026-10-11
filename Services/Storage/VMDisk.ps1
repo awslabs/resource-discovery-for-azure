@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Disks = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' }
+    $Disks = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/disks') { $Row } }
 
     if ($Disks)
     {
@@ -12,9 +12,7 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $disk.subscriptionId }
             $Data = $disk.PROPERTIES
-            $Timecreated = $Data.timeCreated
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
             $SKU = $disk.SKU
 
             $Obj = @{
@@ -32,6 +30,8 @@ if ($Task -eq 'Processing')
                 'DiskIOPS'              = $Data.diskIOPSReadWrite;
                 'DiskMBps'              = $Data.diskMBpsReadWrite;
                 'CreatedTime'           = $Timecreated;
+                'EncryptionType'        = $Data.encryption.type;
+                'DiskEncryptionSet'     = if (![string]::IsNullOrEmpty($Data.encryption.diskEncryptionSetId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.encryption.diskEncryptionSetId)) { $ResourceIdDictionary[$Data.encryption.diskEncryptionSetId] } else { 'obfuscated' } } else { $Data.encryption.diskEncryptionSetId };
             }
 
             $Tmp += $Obj
@@ -40,3 +40,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

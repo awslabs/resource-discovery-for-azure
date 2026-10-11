@@ -23,7 +23,9 @@ Per subscription, the collector:
 - Pages through the results using the API's **`ContinuationToken`** until there
   are no more pages.
 - Writes each page to the CSV as it goes (`Export-Csv -Append`), so rows are
-  flushed incrementally rather than held in memory to the end.
+  flushed incrementally rather than held in memory to the end. Only the
+  `ContinuationToken` is carried from one page to the next; each page's rows
+  are released once they are written.
 
 ### Authentication pre-check
 
@@ -37,22 +39,36 @@ consumption phase (the rest of the inventory continues).
 
 ### Transient-failure retry
 
-Each page request is wrapped in a bounded retry (**3 attempts, exponential
-backoff**). A single transient HTTP error — e.g. `Error while copying content to
-a stream`, a timeout, or 429/503 throttling — retries the **same** page (the
-previous page's `ContinuationToken` is preserved), so no rows are duplicated or
-skipped. A permanent error exhausts the retries and is handled by the
-per-subscription failure path (see [Recovering from a consumption
+Each page request is wrapped in a bounded retry (**30 attempts, exponential
+backoff**, or the server's `Retry-After`, capped at five minutes, when it sends one). A single transient
+HTTP error - e.g. `Error while copying content to a stream`, a timeout, or
+429/503 throttling - retries the **same** page (the previous page's
+`ContinuationToken` is preserved), so no rows are duplicated or skipped. An
+authorization denial is not retried, and an error that outlasts the retries is
+handled by the per-subscription failure path (see [Recovering from a consumption
 crash](#recovering-from-a-consumption-crash)).
+
+Running out of memory is not transient, because waiting frees nothing. The first
+out-of-memory error on a page compacts the heap and retries that page once; a
+second one on the same page stops that subscription's consumption with an Error that says how to
+re-run it in a fresh PowerShell process.
+
+Before each subscription's billing pull, RDA runs a compacting garbage
+collection and writes a `[Memory]` line to the local `DebugLog_*.log`: the
+managed heap, the process working set, and the memory available to the runtime.
+It writes another every 10 pages. If a run does run out of memory, these lines
+show how much was already in use when billing began and whether it grew from
+one subscription to the next. The HTML report's VM billing-coverage check reads
+this CSV one row at a time rather than loading it whole.
 
 ## The columns
 
 The CSV has 15 columns. Ten come straight from each usage-aggregation record;
-five are derived from the `InstanceData` JSON on each record.
+five are derived from the `AdditionalInfo` JSON on each record.
 
 | Column | Source | Meaning |
 |--------|--------|---------|
-| `InstanceData` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. |
+| `AdditionalInfo` | usage record (re-serialized) | JSON blob describing the resource the usage belongs to (`Microsoft.Resources.resourceUri`, `location`, `additionalInfo`). Under `-Obfuscate` this is the obfuscated form. **This column was renamed from `InstanceData` to `AdditionalInfo`** (VM Windows/AHB + SQL vCore licensing detail is read from `AdditionalInfo`). The raw Azure `Get-UsageAggregates` payload still names the source field `InstanceData`; RDA maps it onto this `AdditionalInfo` column as the rows are read. |
 | `MeterCategory` | usage record | Top-level meter grouping, e.g. `Virtual Machines`, `Storage`, `Stream Analytics`. |
 | `MeterId` | usage record | Azure's global meter GUID. Same for every customer using that meter — **not** customer-specific. |
 | `MeterName` | usage record | Specific meter, e.g. `Standard Streaming Unit`, `P10 Disks`. |
@@ -62,9 +78,9 @@ five are derived from the `InstanceData` JSON on each record.
 | `Unit` | usage record | Unit for `Quantity`, e.g. `1 Hour`, `10000 GB`. |
 | `UsageStartTime` | usage record | Start of the aggregation interval. |
 | `UsageEndTime` | usage record | End of the aggregation interval. |
-| `ResourceId` | `InstanceData.Microsoft.Resources.resourceUri` | ARM resource URI the usage is attributed to. Under `-Obfuscate`, identifying segments are masked but the ARM path *structure* is preserved (see below). |
-| `ResourceLocation` | `InstanceData.Microsoft.Resources.location` | Location of the resource. |
-| `ConsumptionMeter` | `InstanceData.Microsoft.Resources.additionalInfo.ConsumptionMeter` | Meter identifier from the resource's additional info (may be empty). |
+| `ResourceId` | `AdditionalInfo.Microsoft.Resources.resourceUri` | ARM resource URI the usage is attributed to. Under `-Obfuscate`, identifying segments are masked but the ARM path *structure* is preserved (see below). |
+| `ResourceLocation` | `AdditionalInfo.Microsoft.Resources.location` | Location of the resource. |
+| `ConsumptionMeter` | `AdditionalInfo.Microsoft.Resources.additionalInfo.ConsumptionMeter` | Meter identifier from the resource's additional info (may be empty). |
 | `ReservationId` | `additionalInfo.ReservationId` | Reservation the usage was applied to, if any. Masked to `obfuscated` under `-Obfuscate`. |
 | `ReservationOrderId` | `additionalInfo.ReservationOrderId` | Reservation order, if any. Masked to `obfuscated` under `-Obfuscate`. |
 
@@ -80,7 +96,7 @@ five are derived from the `InstanceData` JSON on each record.
   subscription has its own folder/CSV, so the owning subscription is implicit.
 - **Every `additionalInfo` key as its own column.** Only `ConsumptionMeter`,
   `ReservationId`, and `ReservationOrderId` are broken out. Any other
-  `additionalInfo` keys remain inside the raw `InstanceData` JSON (column 1) —
+  `additionalInfo` keys remain inside the raw `AdditionalInfo` JSON (column 1) —
   not lost, just not columnarised.
 
 ## Obfuscation of consumption data
@@ -97,10 +113,16 @@ the inventory obfuscation dictionary:
   seeing real identifiers.
 - The tokens use per-run caches keyed by the real value, so the same real
   sub/RG/name always maps to the same token **within a run** (deterministic).
-- These caches are **independent of** the inventory `ObfuscationDictionary`.
-  Consumption tokens are therefore internally consistent but do **not** equal the
-  inventory tokens for the same resource — categorisation relies on the path
-  structure, not an ID-to-inventory join.
+- Each token's `prod_`/`nonprod_` marker comes from the value it labels, the
+  same way inventory classifies it: the subscription token from the
+  subscription name, the resource-group token from the resource-group name, and
+  each name token from that name segment. A `test` resource group therefore no
+  longer marks its subscription or its resources `nonprod_`.
+- The subscription and resource-group caches are **independent of** the
+  inventory `ObfuscationDictionary`, so those tokens are internally consistent
+  but do **not** equal the inventory tokens. The leaf resource-name segment is
+  the exception: when the resource was inventoried it reuses the inventory
+  token, so a consumption row joins back to its inventory record.
 - `ReservationId` and `ReservationOrderId` are flattened to `obfuscated`.
 
 ## Per-subscription health and failure-point reporting
@@ -169,3 +191,128 @@ so you can confirm the replacement happened.
 > joins consumption tokens to inventory tokens.
 
 See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
+
+## Marketplace consumption (Azure Marketplace / third-party SaaS)
+
+`Get-UsageAggregates` above returns **first-party Azure** metered usage only — it
+carries no `PublisherType` and never reports Azure Marketplace / third-party SaaS
+charges (for example an ISV offer sold through Azure Marketplace, such as a
+model or SaaS offer surfaced via Azure AI Foundry). Those charges live behind a
+**different** endpoint. To close that coverage gap, RDA runs a second, **additive**
+collector that emits a separate `Marketplace_<ReportName>_<timestamp>.csv`. The
+first-party `Consumption_*` schema and code path are untouched.
+
+The Marketplace phase runs whenever consumption runs (it needs the same billing
+access and Azure context), and can be turned off on its own with `-SkipMarketplace`
+(or implicitly with `-SkipConsumption`).
+
+### Where the data comes from
+
+RDA calls **`Get-AzConsumptionMarketplace`** (also in `Az.Billing`, already
+imported — **no new module dependency**). Its raw REST equivalent is
+`GET .../providers/Microsoft.Consumption/marketplaces?api-version=2023-05-01`
+([docs](https://learn.microsoft.com/en-us/rest/api/consumption/marketplaces/list);
+[cmdlet docs](https://learn.microsoft.com/en-us/powershell/module/az.billing/get-azconsumptionmarketplace)).
+It uses the **same** window as the first-party phase (last 31 days ending at the
+start of yesterday) and reuses the **same** Cost Management Reader / Billing Reader
+requirement — **no new role**. It is wrapped in the same auth pre-check, denial
+short-circuit, mid-run token-refresh + subscription re-pin, and Retry-After/backoff
+envelope as the first-party consumption loop.
+
+**Discriminator.** On the modern usageDetails / Cost Management dimension the
+`PublisherType` value distinguishes `Azure` (first-party) from `Marketplace`
+(third-party). The Marketplace endpoint returns **only** Marketplace rows (its
+`PSMarketplace` output type has no `PublisherType` property at all), so **no
+client-side filtering is needed** — every row it returns is a Marketplace row.
+The "which publisher is this?" question is answered by `PublisherName` / `OfferName`;
+RDA does **not** hardcode any publisher/offer literal — the field is the contract.
+
+### The columns
+
+The CSV columns are the documented `PSMarketplace` fields (verified against the
+installed `Az.Billing` cmdlet's output type):
+
+| Column | Meaning |
+|--------|---------|
+| `PublisherName` | ISV / publisher of the Marketplace offer (readable). |
+| `OfferName` | The Marketplace offer (readable). |
+| `PlanName` | Purchased plan/SKU within the offer (readable). |
+| `OrderNumber` | Marketplace order number. |
+| `ConsumedService` | The service the usage was consumed through. |
+| `ConsumedQuantity` | Amount of usage in `UnitOfMeasure`. |
+| `UnitOfMeasure` | Unit for `ConsumedQuantity`. |
+| `PretaxCost` | Pre-tax charge for the row. |
+| `Currency` | Currency of `PretaxCost`. |
+| `IsEstimated` | Whether the charge is an estimate. |
+| `MeterId` | Azure meter GUID (not customer-specific). |
+| `UsageStart` / `UsageEnd` | Aggregation interval. |
+| `SubscriptionGuid` | Subscription the usage is billed to (masked under `-Obfuscate`). |
+| `SubscriptionName` | Subscription display name (masked under `-Obfuscate`). |
+| `ResourceGroup` | Resource group (masked under `-Obfuscate`). |
+| `InstanceId` | ARM resource id of the consuming resource (masked under `-Obfuscate`, ARM path structure preserved). |
+| `InstanceName` | Resource name (masked under `-Obfuscate`). |
+
+### Obfuscation
+
+`PublisherName` / `OfferName` / `PlanName` are **third-party product identifiers**,
+not customer secrets, so they are left **readable** (the "which ISV / which offer"
+signal must survive). `SubscriptionGuid`, `SubscriptionName`, `ResourceGroup`,
+`InstanceId`, and `InstanceName` flow through RDA's existing consumption obfuscation
+exactly like the first-party fields — deterministic per-run tokens, ARM path
+structure preserved on `InstanceId`. `SubscriptionGuid` and `SubscriptionName`
+resolve to the same shared subscription token, so the Marketplace CSV cross-references
+every other sheet in the bundle for the same subscription.
+
+### Honest negatives (confirmed zero)
+
+The Marketplace endpoint returns only Marketplace rows, so a successful call with
+**zero** rows is a *confirmed absence* of Marketplace/third-party SaaS charges, not
+a silently-missing section. When that happens, RDA logs an explicit
+`0 rows … CONFIRMED ZERO` line, writes a header-only `Marketplace_*.csv`, and (on
+obfuscated runs) records the confirmed-zero note in the shareable diagnostics log —
+mirroring the first-party consumption zero-record warning.
+
+See also: [Recovery and diagnostics features](recovery-and-diagnostics.md).
+
+For the parameters that turn these phases off (`-SkipConsumption`,
+`-SkipMarketplace`) and the other data-collection switches, see
+[variables/metrics-and-consumption.md](variables/metrics-and-consumption.md).
+
+## Foundry fold — Claude/Anthropic usage folded into the Consumption CSV
+
+Claude/Anthropic usage collected by the Marketplace phase above lands only in
+`Marketplace_*.csv`. So RDA also runs an **additive** *Foundry fold* step
+immediately after the Marketplace phase
+(under the **same** `-SkipConsumption` / `-SkipMarketplace` gate) that folds each
+Claude/Anthropic Marketplace row into the **same** `Consumption_*.csv`, tagged as a
+Foundry cost row. The first-party consumption rows and their
+semantics are untouched; folded rows are simply **appended** with the identical
+15-column schema.
+
+A folded row is a normal consumption row with:
+
+- `MeterCategory` = **`Foundry Models`** (the exact string that marks a Foundry cost
+  row - Claude has no first-party Azure retail meter, so RDA sets
+  this explicitly).
+- `MeterName` = the **Claude model identity** parsed from the Marketplace
+  `OfferName`/`PlanName` (e.g. `Claude Sonnet 4.5`), so the row names the
+  model. The model identity stays **readable** under `-Obfuscate` (it is product
+  identity, not a customer secret), exactly like the Marketplace product fields.
+- `ResourceId` + `MeterId` are always **non-empty**: the Marketplace row's own ids are
+  used when present, otherwise a **stable, deterministic** id is synthesized from the
+  offer identity (a SHA-256 over publisher/offer/plan/instance), so the same offer maps
+  to the same id across runs. Under `-Obfuscate` the `ResourceId` is masked through the
+  same ARM-structure-preserving path as every other row.
+- The Azure cost (`PretaxCost` + `Currency`) and the fold markers (`IsFoundryFold`,
+  `FoldTier`, `IsTokenMeter`, `ModelIdentity`) live inside the `AdditionalInfo` JSON,
+  because the Consumption schema has no dedicated cost column (the first-party path
+  likewise stows per-resource detail there).
+
+The fold emits a **Tier 1 (CCU / cost)** row for every captured Claude Marketplace
+row, marked **non-token** (`IsTokenMeter=false`, `Unit=CCU`; the original Marketplace
+unit is preserved in `AdditionalInfo.MarketplaceUnitOfMeasure`). The row carries an
+Azure cost, not a token count.
+
+If the Marketplace phase collected no Claude/Anthropic rows, the fold logs a
+**confirmed zero** (the phase ran; there was simply nothing to fold), not a silent
+skip.

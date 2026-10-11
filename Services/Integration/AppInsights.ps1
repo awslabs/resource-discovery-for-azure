@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $AppInsights = $Resources | Where-Object { $_.TYPE -eq 'microsoft.insights/components' }
+    $AppInsights = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.insights/components') { $Row } }
 
     if ($AppInsights)
     {
@@ -12,10 +12,36 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = $Data.CreationDate
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = 'Unknown'
+            if ($null -ne $Data.CreationDate)
+            {
+                try
+                {
+                    $Timecreated = $Data.CreationDate
+                    $Timecreated = [datetime]$Timecreated
+                    $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+                }
+                catch
+                {
+                    $Timecreated = 'Unknown'
+                }
+            }
             $Sampling = if ([string]::IsNullOrEmpty($Data.SamplingPercentage)) { 'Disabled' }else { $Data.SamplingPercentage }
+
+            $WorkspaceId = [string]$Data.WorkspaceResourceId
+
+            $WorkspaceRef = if ([string]::IsNullOrEmpty($WorkspaceId))
+            {
+                'None'
+            }
+            elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
+            {
+                if ($ResourceIdDictionary.ContainsKey($WorkspaceId)) { $ResourceIdDictionary[$WorkspaceId] } else { 'obfuscated' }
+            }
+            else
+            {
+                $WorkspaceId
+            }
 
             $Obj = @{
                 'ID'                    = $1.id;
@@ -29,6 +55,7 @@ if ($Task -eq 'Processing')
                 'DataSampling'          = [string]$Sampling;
                 'RetentionInDays'       = $Data.RetentionInDays;
                 'IngestionMode'         = $Data.IngestionMode;
+                'WorkspaceResourceId'   = $WorkspaceRef;
                 'CreatedTime'           = $Timecreated;
             }
 
@@ -38,3 +65,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

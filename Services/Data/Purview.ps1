@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Purview = $Resources | Where-Object { $_.TYPE -eq 'microsoft.purview/accounts' }
+    $Purview = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.purview/accounts') { $Row } }
 
     if ($Purview)
     {
@@ -12,9 +12,7 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
 
-            $Timecreated = $Data.createdAt
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.createdAt) { [datetime]($Data.createdAt) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                  = $1.id;
@@ -22,8 +20,8 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'       = $1.RESOURCEGROUP;
                 'Name'                = $1.NAME;
                 'Location'            = $1.LOCATION;
-                'SKU'                 = $Data.sku.name;
-                'Capacity'            = $Data.sku.capacity;
+                'SKU'                 = $1.sku.name;
+                'Capacity'            = $1.sku.capacity;
                 'CreatedBy'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.createdBy } else { $Data.createdBy };
                 'FriendlyName'        = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.friendlyName } else { $Data.friendlyName };
                 'CreatedTime'         = $Timecreated;
@@ -35,3 +33,4 @@ if ($Task -eq 'Processing')
         $Tmp
     }
 }
+

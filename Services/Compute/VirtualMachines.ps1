@@ -2,8 +2,8 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 If ($Task -eq 'Processing')
 {
-    $VirtualMachines = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
-    $Disk = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/disks' }
+    $VirtualMachines = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/virtualmachines') { $Row } }
+    $Disk = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.compute/disks') { $Row } }
 
     $Vmsizemap = @{}
 
@@ -11,8 +11,19 @@ If ($Task -eq 'Processing')
     {
         $SavedDebugPref = $DebugPreference
         $DebugPreference = 'SilentlyContinue'
-        $Skus = Get-AzComputeResourceSku -Location $location | Where-Object { $_.ResourceType -eq 'virtualMachines' }
-        $DebugPreference = $SavedDebugPref
+        try
+        {
+            $Skus = Get-AzComputeResourceSku -Location $location -ErrorAction Stop | Where-Object { $_.ResourceType -eq 'virtualMachines' }
+        }
+        catch
+        {
+            Write-Verbose ("VirtualMachines: SKU lookup skipped for '{0}': {1}. CPU/Memory fall back to '0' for VMs in that region." -f $location, $_.Exception.Message)
+            $Skus = $null
+        }
+        finally
+        {
+            $DebugPreference = $SavedDebugPref
+        }
 
         foreach ($vmsize in $Skus)
         {
@@ -36,7 +47,7 @@ If ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $vm.subscriptionId }
             $Data = $vm.PROPERTIES
-            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Lic = ''
 
@@ -106,3 +117,4 @@ If ($Task -eq 'Processing')
         $Tmp
     }
 }
+

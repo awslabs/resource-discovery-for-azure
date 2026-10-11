@@ -47,25 +47,35 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Import-Module PSScriptAnalyzer
 
-          $Targets = @(
-              './Services',
-              './Extension',
-              './Tests',
-              './ResourceInventory.ps1',
-              './Run-AllSubscriptions.ps1'
-          ) | Where-Object { Test-Path $_ }
-
-          $AllResults = @()
-          foreach ($Target in $Targets)
-          {
-              $AllResults += Invoke-ScriptAnalyzer `
-                  -Path $Target `
+          # The whole repository, so a new or moved script is analyzed without editing this list.
+          $AllResults = @(Invoke-ScriptAnalyzer `
+                  -Path . `
                   -Settings ./PSScriptAnalyzerSettings.psd1 `
                   -Recurse `
-                  -ErrorAction Continue
-          }
+                  -ErrorAction Continue)
 
-          $Errors        = @($AllResults | Where-Object Severity -eq 'Error')
+          # The settings' Severity list does not include ParseError, so the analyzer drops syntax
+          # errors. Every file is parsed here and a parse error blocks like an Error finding.
+          $ParseErrors = @()
+          foreach ($File in (Get-ChildItem -Path . -Recurse -File -Force -Include '*.ps1', '*.psm1', '*.psd1'))
+          {
+              $FileErrors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($File.FullName, [ref]$null, [ref]$FileErrors)
+              foreach ($ParseError in @($FileErrors))
+              {
+                  $ParseErrors += [pscustomobject]@{
+                      ScriptPath = $File.FullName
+                      Line       = $ParseError.Extent.StartLineNumber
+                      Column     = $ParseError.Extent.StartColumnNumber
+                      RuleName   = $ParseError.ErrorId
+                      Message    = $ParseError.Message
+                      Severity   = 'ParseError'
+                  }
+              }
+          }
+          $AllResults += $ParseErrors
+
+          $Errors        = @($AllResults | Where-Object { $_.Severity -in 'Error', 'ParseError' })
           $Warnings      = @($AllResults | Where-Object Severity -eq 'Warning')
           $Informational = @($AllResults | Where-Object Severity -eq 'Information')
 
@@ -81,6 +91,7 @@ jobs:
               $Level = switch ($Finding.Severity)
               {
                   'Error'       { 'error' }
+                  'ParseError'  { 'error' }
                   'Warning'     { 'warning' }
                   default       { 'notice' }
               }
@@ -123,7 +134,7 @@ jobs:
               }
           }
 
-          # Fail the job on Errors only. Warnings are reported but don't block,
+          # Fail the job on Errors and parse errors only. Warnings are reported but don't block,
           # so legacy PascalCase violations surface without breaking every PR.
           # Flip this to `$Errors.Count + $Warnings.Count` once the warning
           # backlog is burned down.

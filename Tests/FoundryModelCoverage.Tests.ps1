@@ -1,0 +1,554 @@
+#Requires -Version 7.0
+<#
+    FoundryModelCoverage.Tests.ps1
+
+    Behavioral tests for the ADDITIVE Azure AI Foundry model billing-plane coverage
+    collector - the pure classification/branch helpers and the row-mapping/obfuscation
+    helper in Functions/ResourceInventory.Functions.ps1:
+      - Get-RdaFoundryModelMatchTokens
+      - Test-RdaRetailPriceMatch        (Azure-metered plane, PER-MODEL not per-vendor)
+      - Test-RdaMarketplaceModelMatch   (Marketplace/CCU plane, offer-level aggregation)
+      - Get-RdaFoundryCoverageStatus    (the core branch/flag decision + UNPRICED invariant)
+      - ConvertTo-RdaFoundryCoverageRow (flat CSV row + obfuscation routing)
+
+    WHY MOCKED. No live Claude / partner Marketplace deployment is available (the only
+    test subscription is MSDN, which cannot purchase Marketplace offers), so these tests
+    mock the two data sources - deployed-model rows shaped like the ARM /deployments
+    value[] entries, and Marketplace rows shaped like PSMarketplace - and assert the
+    REAL classification/branch code path. This mirrors Tests/MarketplaceCollector.Tests.ps1.
+
+    DOC/IMPL VERIFICATION ANCHOR (see the design spec, verified live):
+      - Retail Prices API: serviceName eq 'Foundry Models'; Claude/Anthropic return 0 rows
+        (Marketplace-only), Cohere/Llama/Mistral are PARTIAL - proving per-model matching.
+      - ARM deployments list: GET {accountId}/deployments?api-version=2024-10-01 is the
+        source of truth; d.properties.model.{name,format,version}, d.sku.{name,capacity}.
+      - CCU billing: Claude bills 100% via Azure Marketplace CCU, a single aggregated line.
+
+    Fully offline. No Azure calls.
+#>
+
+BeforeAll {
+    $script:Repo = Split-Path $PSScriptRoot -Parent
+    $script:FunctionsPath = Join-Path $script:Repo 'Functions/ResourceInventory.Functions.ps1'
+    . $script:FunctionsPath
+
+    # A deployed-model record shaped the way GetFoundryModelCoverage builds $Model from an
+    # ARM /deployments value[] entry joined with its account. Property names match what the
+    # classification helpers and ConvertTo-RdaFoundryCoverageRow consume.
+    function script:New-FakeModel
+    {
+        param(
+            [string]$ModelName = 'gpt-4o',
+            [string]$ModelFormat = 'OpenAI',
+            [string]$ModelVersion = '2024-08-06',
+            [string]$DeploymentName = 'gpt4o-prod',
+            [string]$AccountName = 'aiservices-prod',
+            [string]$AccountId = '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.CognitiveServices/accounts/aiservices-prod',
+            [string]$ResourceGroup = 'rg-ai-prod',
+            [string]$SubscriptionGuid = '11111111-1111-1111-1111-111111111111',
+            [string]$SubscriptionName = 'AI Production'
+        )
+        [pscustomobject]@{
+            SubscriptionGuid   = $SubscriptionGuid
+            SubscriptionName   = $SubscriptionName
+            ResourceGroup      = $ResourceGroup
+            AccountName        = $AccountName
+            AccountId          = $AccountId
+            AccountKind        = 'AIServices'
+            DeploymentName     = $DeploymentName
+            ModelName          = $ModelName
+            ModelFormat        = $ModelFormat
+            ModelVersion       = $ModelVersion
+            DeploymentSku      = 'GlobalStandard'
+            DeploymentCapacity = '50'
+            Region             = 'eastus'
+        }
+    }
+
+    # A Retail Prices catalog item shaped like a prices.azure.com Items[] entry.
+    function script:New-FakeRetailItem
+    {
+        param(
+            [string]$ProductName = 'Azure OpenAI GPT4o',
+            [string]$MeterName = 'gpt 4o Input Global 1M Tokens',
+            [string]$SkuName = 'Standard',
+            [string]$ArmSkuName = ''
+        )
+        [pscustomobject]@{
+            serviceName = 'Foundry Models'
+            productName = $ProductName
+            meterName   = $MeterName
+            skuName     = $SkuName
+            armSkuName  = $ArmSkuName
+        }
+    }
+
+    # A Marketplace/CCU row shaped like PSMarketplace (see MarketplaceCollector.Tests.ps1).
+    function script:New-FakeMarketplaceRow
+    {
+        param(
+            [string]$Publisher = 'anthropic',
+            [string]$Offer = 'claude-in-foundry',
+            [string]$Plan = 'pay-as-you-go',
+            [string]$InstanceId = '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/claude-saas-01',
+            [string]$ResourceGroup = 'rg-ai-prod',
+            [double]$Quantity = 8734.0,
+            [string]$Unit = 'CCU',
+            [double]$Cost = 87.34
+        )
+        [pscustomobject]@{
+            PublisherName    = $Publisher
+            OfferName        = $Offer
+            PlanName         = $Plan
+            OrderNumber      = 'ORD-4242'
+            ConsumedService  = 'Microsoft.SaaS'
+            ConsumedQuantity = $Quantity
+            UnitOfMeasure    = $Unit
+            PretaxCost       = $Cost
+            Currency         = 'USD'
+            IsEstimated      = $false
+            MeterId          = 'mtr-ccu-01'
+            InstanceId       = $InstanceId
+            InstanceName     = 'claude-saas-01'
+            ResourceGroup    = $ResourceGroup
+            SubscriptionGuid = '11111111-1111-1111-1111-111111111111'
+            SubscriptionName = 'AI Production'
+        }
+    }
+}
+
+Describe 'Test-RdaRetailPriceMatch: per-model (not per-vendor) Azure-metered detection' {
+
+    It 'confidently matches an OpenAI model to its OpenAI Retail Prices meter' {
+        $Model = script:New-FakeModel -ModelName 'gpt-4o' -ModelFormat 'OpenAI'
+        $Catalog = @(script:New-FakeRetailItem -ProductName 'Azure OpenAI GPT4o' -MeterName 'gpt 4o Input Global 1M Tokens')
+        $Res = Test-RdaRetailPriceMatch -Model $Model -CatalogItems $Catalog
+        $Res.Matched | Should -BeTrue
+        $Res.RetailMatch | Should -Match 'GPT4o'
+    }
+
+    It 'returns NO match for Claude even when the catalog is non-empty (Marketplace-only)' {
+        $Model = script:New-FakeModel -ModelName 'claude-opus-4' -ModelFormat 'Anthropic'
+        $Catalog = @(
+            script:New-FakeRetailItem -ProductName 'Azure OpenAI GPT4o' -MeterName 'gpt 4o 1M Tokens'
+            script:New-FakeRetailItem -ProductName 'Cohere Models' -MeterName 'embed v3 1M Tokens'
+        )
+        $Res = Test-RdaRetailPriceMatch -Model $Model -CatalogItems $Catalog
+        $Res.Matched | Should -BeFalse
+        $Res.RetailMatch | Should -Be '(no confident Retail Prices match)'
+    }
+
+    It 'does NOT mark a Marketplace-only SKU covered just because the vendor is partially present' {
+        # The partly-invisible trap (the design spec section 4.2): a Cohere meter EXISTS for embed v3, but
+        # a DIFFERENT Cohere SKU (a made-up rerank v9) is absent. A vendor-level check would
+        # wrongly call it covered; the per-model matcher must not.
+        $Present = script:New-FakeModel -ModelName 'embed-v3' -ModelFormat 'Cohere' -DeploymentName 'cohere-embed'
+        $Absent = script:New-FakeModel -ModelName 'rerank-v9-ultra' -ModelFormat 'Cohere' -DeploymentName 'cohere-rerank'
+        $Catalog = @(script:New-FakeRetailItem -ProductName 'Cohere Models' -MeterName 'embed v3 Global 1M Tokens')
+
+        (Test-RdaRetailPriceMatch -Model $Present -CatalogItems $Catalog).Matched | Should -BeTrue
+        (Test-RdaRetailPriceMatch -Model $Absent -CatalogItems $Catalog).Matched | Should -BeFalse
+    }
+
+    It 'returns NO match against an empty/absent catalog (does not throw)' {
+        $Model = script:New-FakeModel
+        (Test-RdaRetailPriceMatch -Model $Model -CatalogItems @()).Matched | Should -BeFalse
+        (Test-RdaRetailPriceMatch -Model $Model -CatalogItems $null).Matched | Should -BeFalse
+    }
+}
+
+Describe 'Test-RdaMarketplaceModelMatch: Marketplace/CCU plane detection + attribution' {
+
+    It 'matches a Claude model to an Anthropic/Claude Marketplace offer' {
+        $Model = script:New-FakeModel -ModelName 'claude-opus-4' -ModelFormat 'Anthropic'
+        $Rows = @(script:New-FakeMarketplaceRow -Publisher 'anthropic' -Offer 'claude-in-foundry')
+        $Res = Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $Rows
+        $Res.Matched | Should -BeTrue
+        $Res.Row.PublisherName | Should -Be 'anthropic'
+    }
+
+    It 'ties the CCU line to the deployment (PerModel) when the row references the account resource group' {
+        $Model = script:New-FakeModel -ModelName 'claude-opus-4' -ModelFormat 'Anthropic' -ResourceGroup 'rg-ai-prod'
+        $Rows = @(script:New-FakeMarketplaceRow -Publisher 'anthropic' -Offer 'claude-in-foundry' -ResourceGroup 'rg-ai-prod' -InstanceId '/subscriptions/x/resourceGroups/rg-ai-prod/providers/Microsoft.SaaS/resources/claude-saas-01')
+        $Res = Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $Rows
+        $Res.Matched | Should -BeTrue
+        $Res.CcuAttribution | Should -Be 'PerModel'
+    }
+
+    It 'falls back to AggregatedOffer when the CCU line cannot be tied to the deployment' {
+        $Model = script:New-FakeModel -ModelName 'claude-opus-4' -ModelFormat 'Anthropic' -ResourceGroup 'rg-ai-prod'
+        $Rows = @(script:New-FakeMarketplaceRow -Publisher 'anthropic' -Offer 'claude-in-foundry' -ResourceGroup 'rg-somewhere-else' -InstanceId '/subscriptions/x/resourceGroups/rg-somewhere-else/providers/Microsoft.SaaS/resources/other')
+        $Res = Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $Rows
+        $Res.Matched | Should -BeTrue
+        $Res.CcuAttribution | Should -Be 'AggregatedOffer'
+    }
+
+    It 'does NOT match an OpenAI model to an Anthropic Marketplace offer' {
+        $Model = script:New-FakeModel -ModelName 'gpt-4o' -ModelFormat 'OpenAI'
+        $Rows = @(script:New-FakeMarketplaceRow -Publisher 'anthropic' -Offer 'claude-in-foundry')
+        (Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $Rows).Matched | Should -BeFalse
+    }
+
+    It 'returns NO match against empty/absent Marketplace rows (does not throw)' {
+        $Model = script:New-FakeModel
+        (Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows @()).Matched | Should -BeFalse
+        (Test-RdaMarketplaceModelMatch -Model $Model -MarketplaceRows $null).Matched | Should -BeFalse
+    }
+}
+
+Describe 'Get-RdaFoundryCoverageStatus: the core branch/flag decision + UNPRICED invariant' {
+
+    It 'classifies an Azure-metered model as AzureMetered (server team prices via Retail Prices)' {
+        $C = Get-RdaFoundryCoverageStatus -AzureMetered $true -MarketplaceCovered $false
+        $C.CoverageStatus | Should -Be 'AzureMetered'
+        $C.CoverageFlag | Should -Match 'Retail Prices'
+    }
+
+    It 'classifies a Claude-style model as MarketplaceOnly with the explicit CCU flag' {
+        $C = Get-RdaFoundryCoverageStatus -AzureMetered $false -MarketplaceCovered $true
+        $C.CoverageStatus | Should -Be 'MarketplaceOnly'
+        $C.CoverageFlag | Should -Be 'Marketplace-billed, absent from Retail Prices - priced via CCU path.'
+    }
+
+    It 'classifies a model on BOTH planes as AzureMetered+Marketplace' {
+        (Get-RdaFoundryCoverageStatus -AzureMetered $true -MarketplaceCovered $true).CoverageStatus |
+            Should -Be 'AzureMetered+Marketplace'
+    }
+
+    It 'emits UNPRICED ONLY when BOTH planes were probed and BOTH came back negative' {
+        $C = Get-RdaFoundryCoverageStatus -AzureMetered $false -MarketplaceCovered $false -RetailProbed $true -MarketplaceProbed $true
+        $C.CoverageStatus | Should -Be 'UNPRICED'
+        $C.CoverageFlag | Should -Match 'COVERAGE GAP'
+    }
+
+    It 'does NOT emit UNPRICED when the Marketplace plane was denied (Unknown-MarketplaceDenied)' {
+        $C = Get-RdaFoundryCoverageStatus -AzureMetered $false -MarketplaceCovered $false -RetailProbed $true -MarketplaceProbed $false -MarketplaceDeniedReason 'MarketplaceDenied'
+        $C.CoverageStatus | Should -Be 'Unknown-MarketplaceDenied'
+        $C.CoverageStatus | Should -Not -Be 'UNPRICED'
+    }
+
+    It 'does NOT emit UNPRICED when the Retail Prices catalog could not be read' {
+        $C = Get-RdaFoundryCoverageStatus -AzureMetered $false -MarketplaceCovered $false -RetailProbed $false -MarketplaceProbed $true
+        $C.CoverageStatus | Should -Be 'Unknown-RetailCatalogUnavailable'
+        $C.CoverageStatus | Should -Not -Be 'UNPRICED'
+    }
+}
+
+Describe 'ConvertTo-RdaFoundryCoverageRow: column contract + obfuscation routing' {
+
+    It 'emits exactly the documented column set (no extra, no missing)' {
+        $Record = script:New-FakeModel
+        $Record | Add-Member -NotePropertyName DetectedPlanes -NotePropertyValue 'AzureMetered' -Force
+        $Record | Add-Member -NotePropertyName CoverageStatus -NotePropertyValue 'AzureMetered' -Force
+        $Record | Add-Member -NotePropertyName CoverageFlag -NotePropertyValue 'x' -Force
+        $Record | Add-Member -NotePropertyName RetailPriceMatch -NotePropertyValue 'y' -Force
+        foreach ($p in 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        {
+            $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
+        }
+        $Out = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$false
+        $Expected = @(
+            'SubscriptionGuid', 'SubscriptionName', 'ResourceGroup', 'AccountName', 'AccountKind',
+            'DeploymentName', 'ModelName', 'ModelFormat', 'ModelVersion', 'DeploymentSku',
+            'DeploymentCapacity', 'Region', 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag',
+            'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity',
+            'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution',
+            'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens',
+            'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc', 'TokenProbeStatus'
+        ) | Sort-Object
+        $Actual = @($Out.PSObject.Properties.Name) | Sort-Object
+        ($Actual -join ',') | Should -Be ($Expected -join ',')
+    }
+
+    It 'leaves product/plane identity readable (ModelName/ModelFormat/CoverageStatus/MarketplacePublisher)' {
+        $Record = script:New-FakeModel -ModelName 'claude-opus-4' -ModelFormat 'Anthropic'
+        $Record | Add-Member -NotePropertyName DetectedPlanes -NotePropertyValue 'Marketplace' -Force
+        $Record | Add-Member -NotePropertyName CoverageStatus -NotePropertyValue 'MarketplaceOnly' -Force
+        $Record | Add-Member -NotePropertyName CoverageFlag -NotePropertyValue 'flag' -Force
+        $Record | Add-Member -NotePropertyName RetailPriceMatch -NotePropertyValue 'none' -Force
+        $Record | Add-Member -NotePropertyName MarketplacePublisher -NotePropertyValue 'anthropic' -Force
+        foreach ($p in 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        {
+            $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
+        }
+        $Out = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$true -SubGuidTokenMap @{} -RgTokenMap @{}
+        # Product/plane identity stays readable even under obfuscation.
+        $Out.ModelName | Should -Be 'claude-opus-4'
+        $Out.ModelFormat | Should -Be 'Anthropic'
+        $Out.CoverageStatus | Should -Be 'MarketplaceOnly'
+        $Out.MarketplacePublisher | Should -Be 'anthropic'
+        $Out.AccountKind | Should -Be 'AIServices'
+    }
+
+    It 'masks identifying fields to the SAME shared tokens used elsewhere in the bundle' {
+        $SharedSubToken = 'prod_sub_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $SharedRgToken = 'prod_rg_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        $SubGuidTokenMap = @{ '11111111-1111-1111-1111-111111111111' = $SharedSubToken }
+        $RgTokenMap = @{ 'rg-ai-prod' = $SharedRgToken }
+
+        $Record = script:New-FakeModel
+        foreach ($p in 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag', 'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        {
+            $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
+        }
+
+        $Out = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$true -SubGuidTokenMap $SubGuidTokenMap -RgTokenMap $RgTokenMap
+
+        # Both SubscriptionGuid and SubscriptionName resolve to the SAME shared sub token.
+        $Out.SubscriptionGuid | Should -Be $SharedSubToken
+        $Out.SubscriptionName | Should -Be $SharedSubToken
+        $Out.ResourceGroup | Should -Be $SharedRgToken
+        # Leaf names are masked (not left raw).
+        $Out.AccountName | Should -Not -Be 'aiservices-prod'
+        $Out.DeploymentName | Should -Not -Be 'gpt4o-prod'
+        $Out.AccountName | Should -Match '^(prod|nonprod)_'
+    }
+
+    It 'mints deterministic local tokens when a sub/RG is absent from the shared maps' {
+        $Record = script:New-FakeModel
+        foreach ($p in 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag', 'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity', 'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution', 'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens', 'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc')
+        {
+            $Record | Add-Member -NotePropertyName $p -NotePropertyValue '' -Force
+        }
+        $SubCache = @{}; $RgCache = @{}; $NameCache = @{}
+        $A = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$true -SubGuidTokenMap @{} -RgTokenMap @{} -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+        $B = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$true -SubGuidTokenMap @{} -RgTokenMap @{} -SubCache $SubCache -RgCache $RgCache -NameCache $NameCache
+        # Deterministic within a run: the same real value maps to the same token across rows.
+        $A.SubscriptionGuid | Should -Be $B.SubscriptionGuid
+        $A.AccountName | Should -Be $B.AccountName
+        $A.SubscriptionGuid | Should -Not -Be '11111111-1111-1111-1111-111111111111'
+    }
+}
+
+Describe 'GetFoundryModelCoverage source: the TokenProbeStatus column and no Azure Monitor calls of its own' {
+    BeforeAll {
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $script:CoverageFn = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'GetFoundryModelCoverage' }, $true)
+        if (-not $script:CoverageFn) { throw 'GetFoundryModelCoverage was not found in ResourceInventory.ps1.' }
+
+        # The header-only fallback the finalization writes when the phase produced no rows.
+        $HeaderAst = @($InvAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $N.Value.StartsWith('SubscriptionGuid,SubscriptionName,ResourceGroup,AccountName,AccountKind,') }, $true))
+        if ($HeaderAst.Count -ne 1) { throw ('expected one coverage header literal, found {0}' -f $HeaderAst.Count) }
+        $script:HeaderColumns = @($HeaderAst[0].Value -split ',')
+
+        # The projection the phase writes its rows with.
+        $Projection = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] -and $N.GetCommandName() -eq 'Select-Object' -and $N.Parent.Extent.Text -match 'FoundryCoverageFileCsv' }, $true))
+        if ($Projection.Count -ne 1) { throw ('expected one coverage Select-Object projection, found {0}' -f $Projection.Count) }
+        $script:ProjectionColumns = @($Projection[0].CommandElements[1].Elements | ForEach-Object { $_.Value })
+
+        # The columns up to RunTimestampUtc, in order, as they were before TokenProbeStatus existed.
+        $script:ExistingColumns = @(
+            'SubscriptionGuid', 'SubscriptionName', 'ResourceGroup', 'AccountName', 'AccountKind',
+            'DeploymentName', 'ModelName', 'ModelFormat', 'ModelVersion', 'DeploymentSku',
+            'DeploymentCapacity', 'Region', 'DetectedPlanes', 'CoverageStatus', 'CoverageFlag',
+            'RetailPriceMatch', 'MarketplacePublisher', 'MarketplaceOffer', 'CcuQuantity',
+            'CcuUnitOfMeasure', 'MarketplacePretaxCost', 'MarketplaceCurrency', 'CcuAttribution',
+            'TokenMetricsPresent', 'InputTokens', 'OutputTokens', 'TotalTokens',
+            'ProbeWindowStart', 'ProbeWindowEnd', 'RunTimestampUtc'
+        )
+    }
+
+    It 'appends TokenProbeStatus after the existing columns, in the same order in the row, the projection and the empty-file header' {
+        $Record = script:New-FakeModel
+        $Row = ConvertTo-RdaFoundryCoverageRow -Record $Record -Obfuscate:$false
+        $RowColumns = @($Row.PSObject.Properties.Name)
+        $Expected = @($script:ExistingColumns + 'TokenProbeStatus') -join ','
+
+        ($RowColumns -join ',') | Should -Be $Expected
+        ($script:ProjectionColumns -join ',') | Should -Be $Expected
+        ($script:HeaderColumns -join ',') | Should -Be $Expected
+    }
+
+    It 'sets TokenProbeStatus on every coverage record it builds' {
+        $Records = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.HashtableAst] -and @($N.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text }) -contains 'RunTimestampUtc' }, $true))
+        $Records.Count | Should -Be 3 -Because 'a deployment row, a deployments-not-listed row and an unattributed Marketplace row'
+        foreach ($R in $Records)
+        {
+            @($R.KeyValuePairs | ForEach-Object { $_.Item1.Extent.Text }) | Should -Contain 'TokenProbeStatus'
+        }
+    }
+
+    It 'makes no Azure Monitor calls, and nothing is left that fills the token columns' {
+        $Commands = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        foreach ($Name in 'Get-AzMetric', 'Get-AzMetricDefinition')
+        {
+            $Commands | Should -Not -Contain $Name
+        }
+        Get-Command Get-RdaFoundryCoverageTokenFields -ErrorAction SilentlyContinue | Should -BeNullOrEmpty -Because 'the token step that filled these columns is gone'
+        Get-Command Get-RdaFoundryTokenMetrics -ErrorAction SilentlyContinue | Should -BeNullOrEmpty -Because 'the separate coverage token probe is gone'
+    }
+
+    It 'logs the service reason, not the SDK''s bare BadRequest, when the Marketplace probe fails' {
+        # The probe is one call with no retry. Its non-denial branch must read the service message the
+        # way the Marketplace collector does, or an offer-type 400 is logged as just 'BadRequest'.
+        $Tries = @($script:CoverageFn.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.Body.Extent.Text -match 'Get-AzConsumptionMarketplace' }, $true))
+        $Tries.Count | Should -BeGreaterThan 0 -Because 'the coverage phase probes the Marketplace plane'
+        # The innermost try is the probe's own; the outer ones wrap the whole subscription.
+        $Probe = @($Tries | Sort-Object { $_.Body.Extent.Text.Length } | Select-Object -First 1)
+        @(Select-String -InputObject $Probe[0].Body.Extent.Text -Pattern 'Get-AzConsumptionMarketplace' -AllMatches).Matches.Count | Should -Be 1 -Because 'the probe calls the endpoint once per subscription'
+        $CatchText = $Probe[0].CatchClauses[0].Body.Extent.Text
+        $CatchText | Should -Match 'Get-RdaPermanentRequestError\s+-ErrorRecord\s+\$_'
+        $CatchText | Should -Match 'probe failed for \{0\}: \{1\}.*-f \$sub\.Name, \$FcProbeError' -Because 'the logged reason must be the classified message'
+    }
+}
+
+Describe 'GetFoundryModelCoverage: the real collector body, offline' {
+    BeforeAll {
+        . (Join-Path $script:Repo 'Functions/Common.Functions.ps1')
+
+        # Define the real collector function from its source, not a re-implementation.
+        $InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Repo 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        foreach ($FnName in @('GetFoundryModelCoverage'))
+        {
+            $Fn = $InvAst.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $FnName }, $true)
+            if (-not $Fn) { throw ('{0} was not found in ResourceInventory.ps1.' -f $FnName) }
+            . ([scriptblock]::Create($Fn.Extent.Text))
+        }
+
+        # Stubs so Mock can resolve the commands on a host without the Az modules.
+        # Defined only when absent, never shadowing a real cmdlet.
+        if (-not (Get-Command Get-AzMetric -ErrorAction SilentlyContinue))
+        {
+            function Get-AzMetric
+            {
+                [CmdletBinding()]
+                param([string]$ResourceId, [string[]]$MetricName, [string]$AggregationType, [datetime]$StartTime, [datetime]$EndTime, [string]$MetricFilter, [Nullable[int]]$Top, [Nullable[timespan]]$TimeGrain)
+                throw 'stub - should be mocked'
+            }
+        }
+        if (-not (Get-Command Get-AzConsumptionMarketplace -ErrorAction SilentlyContinue))
+        {
+            function Get-AzConsumptionMarketplace { [CmdletBinding()] param([datetime]$StartDate, [datetime]$EndDate) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue))
+        {
+            function Invoke-AzRestMethod { [CmdletBinding()] param([string]$Method, [string]$Path) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Get-RdaSubscriptionProfile -ErrorAction SilentlyContinue))
+        {
+            function Get-RdaSubscriptionProfile { [CmdletBinding()] param([string]$SubscriptionId) throw 'stub - should be mocked' }
+        }
+        if (-not (Get-Command Get-AzContext -ErrorAction SilentlyContinue))
+        {
+            function Get-AzContext { [CmdletBinding()] param() throw 'stub - should be mocked' }
+        }
+        # A nested function of ResourceInventory.ps1, so it has no definition in this scope.
+        function Test-DataPlaneAuthReady { [CmdletBinding()] param([string]$Phase) throw 'stub - should be mocked' }
+
+        $script:E2ESubId = [guid]::NewGuid().ToString()
+        $script:AcctAId = '/subscriptions/{0}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acct-a' -f $script:E2ESubId
+        $script:AcctBId = '/subscriptions/{0}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acct-b' -f $script:E2ESubId
+
+        function script:New-FakeArmDeployments([string[]]$Names)
+        {
+            $Value = @($Names | ForEach-Object { [pscustomobject]@{ name = $_; sku = [pscustomobject]@{ name = 'GlobalStandard'; capacity = 1 }; properties = [pscustomobject]@{ model = [pscustomobject]@{ name = 'Phi-4'; format = 'Microsoft'; version = '1' } } } })
+            [pscustomobject]@{ StatusCode = 200; Content = ([pscustomobject]@{ value = $Value } | ConvertTo-Json -Depth 6) }
+        }
+
+        Mock Write-Log { }
+        Mock Test-DataPlaneAuthReady { $true }
+        Mock Get-RdaSubscriptionProfile { $null }
+        Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $script:E2ESubId } } }
+        # The phase must make no Azure Monitor calls; this counts any that it does.
+        Mock Get-AzMetric { [pscustomobject]@{ Timeseries = @() } }
+
+        # Resource Graph returns the accounts with the lower-case id form it commonly uses.
+        Mock Get-RdaFoundryRetailCatalog { @() }
+        Mock Get-AzConsumptionMarketplace { @() }
+        Mock Invoke-AzGraphQuerySafe {
+            $Accounts = @(
+                [pscustomobject]@{ id = $script:AcctAId.ToLowerInvariant(); name = 'acct-a'; kind = 'AIServices'; sku = 'S0'; location = 'eastus'; resourceGroup = 'rg-ai'; subscriptionId = $script:E2ESubId }
+                [pscustomobject]@{ id = $script:AcctBId.ToLowerInvariant(); name = 'acct-b'; kind = 'AIServices'; sku = 'S0'; location = 'eastus'; resourceGroup = 'rg-ai'; subscriptionId = $script:E2ESubId }
+            )
+            [pscustomobject]@{ data = $Accounts }
+        }
+        Mock Invoke-AzRestMethod { script:New-FakeArmDeployments @('phi4-prod', 'mini-prod') } -ParameterFilter { $Path -like '*/acct-a/deployments*' }
+        Mock Invoke-AzRestMethod { script:New-FakeArmDeployments @('gpt-prod') } -ParameterFilter { $Path -like '*/acct-b/deployments*' }
+
+        # Runs the phase the way ExecuteInventoryProcessing does. The inputs it reads from its
+        # caller's scope arrive as parameters.
+        $script:RunFoundryPhases = [scriptblock]::Create(@'
+param($SubscriptionID, $Obfuscate)
+GetFoundryModelCoverage
+'@)
+
+        $script:PriorGlobals = @{}
+        foreach ($Name in 'Subscriptions', 'ConsumptionFileCsv', 'FoundryCoverageFileCsv', 'ResourceIdDictionary', 'FoundryCoverageRecordCount', 'FoundryCoverageFailedSubs', 'FoundryCoverageUnpricedCount')
+        {
+            $script:PriorGlobals[$Name] = Get-Variable -Scope Global -Name $Name -ValueOnly -ErrorAction SilentlyContinue
+        }
+        $Global:Subscriptions = @([pscustomobject]@{ Id = $script:E2ESubId; Name = 'Foundry test subscription' })
+        $Global:ResourceIdDictionary = @{}
+    }
+
+    AfterAll {
+        foreach ($Name in $script:PriorGlobals.Keys)
+        {
+            Set-Variable -Scope Global -Name $Name -Value $script:PriorGlobals[$Name]
+        }
+    }
+
+    BeforeEach {
+        $Stamp = [guid]::NewGuid().ToString('N')
+        $Global:ConsumptionFileCsv = Join-Path ([System.IO.Path]::GetTempPath()) ('Consumption_{0}.csv' -f $Stamp)
+        $Global:FoundryCoverageFileCsv = Join-Path ([System.IO.Path]::GetTempPath()) ('FoundryModelCoverage_{0}.csv' -f $Stamp)
+        foreach ($Name in 'FoundryCoverageRecordCount', 'FoundryCoverageFailedSubs', 'FoundryCoverageUnpricedCount')
+        {
+            Set-Variable -Scope Global -Name $Name -Value $null
+        }
+    }
+
+    AfterEach {
+        foreach ($Path in $Global:ConsumptionFileCsv, $Global:FoundryCoverageFileCsv)
+        {
+            if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+        }
+    }
+
+    It 'says NotRun on every deployment row, once in the log, and makes no metric calls' {
+        & $script:RunFoundryPhases -SubscriptionID $script:E2ESubId -Obfuscate ([pscustomobject]@{ IsPresent = $false })
+
+        $Rows = @(Import-Csv -LiteralPath $Global:FoundryCoverageFileCsv)
+        $Rows.Count | Should -Be 3
+        foreach ($Row in $Rows)
+        {
+            $Row.TokenProbeStatus | Should -Be 'NotRun'
+            $Row.TokenMetricsPresent | Should -Be 'False'
+            $Row.InputTokens | Should -Be ''
+        }
+        Should -Invoke Get-AzMetric -Times 0 -Exactly
+        Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'TokenProbeStatus NotRun' }
+    }
+
+    It 'judges only this run in its end-of-phase notices when a second subscription runs in the same process' {
+        # The wrapper calls ResourceInventory.ps1 once per subscription in one process: the $Global:
+        # counters carry over, and each call starts a fresh script scope, reset here by hand.
+        $SecondSubId = [guid]::NewGuid().ToString()
+        $PriorSubscriptions = $Global:Subscriptions
+        try
+        {
+            $Global:Subscriptions = @(
+                [pscustomobject]@{ Id = $script:E2ESubId; Name = 'Foundry test subscription' }
+                [pscustomobject]@{ Id = $SecondSubId; Name = 'Empty test subscription' }
+            )
+            # A readable catalog that prices none of the deployed models, so each one is UNPRICED.
+            Mock Get-RdaFoundryRetailCatalog { @([pscustomobject]@{ productName = 'Unrelated Model'; meterName = 'Unrelated Model Input Tokens'; skuName = 'Unrelated'; armSkuName = 'Unrelated'; retailPrice = 1 }) }
+            & $script:RunFoundryPhases -SubscriptionID $script:E2ESubId -Obfuscate ([pscustomobject]@{ IsPresent = $false })
+            Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'classified UNPRICED' }
+
+            $script:FoundryCoverageRecordsThisRun = $null
+            $script:FoundryCoverageUnpricedThisRun = $null
+            Mock Get-AzContext { [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $SecondSubId } } }
+            Mock Invoke-AzGraphQuerySafe { [pscustomobject]@{ data = @() } } -ParameterFilter { @($Subscription) -contains $SecondSubId }
+            & $script:RunFoundryPhases -SubscriptionID $SecondSubId -Obfuscate ([pscustomobject]@{ IsPresent = $false })
+
+            Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'classified UNPRICED' } -Because 'the second subscription has no deployments, so it has no UNPRICED rows to point at'
+            Should -Invoke Write-Log -Times 1 -Exactly -ParameterFilter { $Message -match 'This is a CONFIRMED ZERO' } -Because 'the second subscription enumerated its accounts and found none'
+            $Global:FoundryCoverageUnpricedCount | Should -Be 3 -Because 'the run total still counts the first subscription'
+        }
+        finally
+        {
+            $Global:Subscriptions = $PriorSubscriptions
+        }
+    }
+}

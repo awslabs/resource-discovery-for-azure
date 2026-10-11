@@ -34,12 +34,18 @@ cd resource-discovery-for-azure
 
 This:
 - Inventories every enabled subscription in the tenant.
-- Produces a full-fidelity report with real resource names and IDs. If you need to share it externally (e.g. with the AWS team), add `-Obfuscate` to mask identifying details first — see [Obfuscation Mode](#obfuscation-mode).
+- Produces a full-fidelity report with real resource names and IDs. This is the normal, recommended output.
 - Automatically tunes how many subscriptions run in parallel to the machine's CPU and memory: small boxes (e.g. 2 vCPU) run one subscription at a time, larger boxes scale up. Add `-ParallelStreams <N>` (and/or `-ConcurrencyLimit <N>`) only if you want to override the auto-detected values.
 
-The script tracks progress automatically as it goes. You don't need `-Resume` on the first run. Only if a run is interrupted (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added — it skips the subscriptions that already finished and picks up the rest. See [Resuming an interrupted run](#resuming-an-interrupted-run) for details.
+The script tracks progress automatically as it goes. You don't need `-Resume` on the first run. Only if a run is interrupted (network drop, Cloud Shell session timeout, accidental Ctrl+C), re-run the same command with `-Resume` added - it skips the subscriptions that already finished and picks up the rest. Signed in as a user at a console (not in Cloud Shell), you can also re-run the same command without `-Resume`: the script finds the earlier run and asks whether to resume it or start fresh. See [Resuming an interrupted run](#resuming-an-interrupted-run) for details.
 
-You'll find the consolidated report at `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`. This report contains real resource names and IDs. Before sharing it externally (e.g. with the AWS team), re-run with `-Obfuscate` to mask identifying details — see [Obfuscation Mode](#obfuscation-mode). You can also selectively un-mask an obfuscated report with `Reveal.ps1` if the recipient needs specific fields.
+**Send one file: `InventoryReports/AllSubscriptions_ResourcesReport_<timestamp>.zip`.** That single ZIP is the complete deliverable. At its root it holds one `ResourcesReport_<id>.zip` per subscription (each containing that subscription's inventory, metrics and consumption data), plus `MainSummary.html`, a browsable copy of each subscription's HTML report, and `RunSummary.log`. A tenant-wide `VMPlacement.txt` is included too when you pass `-CapacityPlan` and the run found any virtual machines (it is opt-in - see [Performance Parameters](#performance-parameters)). It is CSV text in a `.txt` file: to open it in Excel, use Data > From Text/CSV, which detects the comma (File > Open starts the import wizard instead, where you choose Delimited and then Comma). The run ends with a `What to send` block that prints the path and lists the bundle's confirmed contents, so you never have to guess which file to attach.
+
+**Do not zip or send the `InventoryReports` folder itself.** The folder also holds files that are deliberately kept local: the obfuscation dictionary (`ObfuscationDictionary_*.json`, which reverses the masking and undoes the whole point of `-Obfuscate`), PowerShell transcripts containing your signed-in account and tenant ID, and debug logs carrying real resource names. Sending the folder hands over all of it. It also accumulates every previous run's output, so a recipient cannot tell which report is current.
+
+This report contains real resource names and IDs, which is what makes it useful for analysis. Treat it as confidential and share it through whatever channel your agreement with the recipient allows.
+
+If a specific engagement requires identifying details to be masked before the report leaves your environment, that is available but is NOT the default - see [Obfuscation Mode](#obfuscation-mode). Do not turn it on speculatively: a masked report loses the resource names that make findings actionable, and it can only be interpreted by reconciling it against the local dictionary that never leaves your machine.
 
 For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) for sizing guidance. For all available options, see the [Run-AllSubscriptions Wrapper Parameters](#run-allsubscriptions-wrapper-parameters).
 
@@ -50,6 +56,7 @@ For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-w
 - [Getting Started](#getting-started)
 - [Usage](#usage)
 - [Output Files](#output-files)
+- [Searching Reports You Already Have](#searching-reports-you-already-have)
 - [Parameters Reference](#parameters-reference)
 - [Troubleshooting](#troubleshooting)
 
@@ -63,6 +70,23 @@ Before running the script, ensure your Azure user account has the following role
 - **✅ Billing Reader Role** - Access to billing and cost data
 - **✅ Monitoring Reader Role** - Access to Azure Monitor metrics
 - **✅ Cost Management Reader Role** - Access to cost management data
+
+> **⚠️ Scope Reader at the tenant-root management group — NOT per subscription.**
+> The tool discovers subscriptions with `Get-AzSubscription`, which only returns
+> subscriptions the identity holds a role on. If you assign Reader per
+> subscription and miss some, those subscriptions are **silently absent** from the
+> report — the run looks complete but isn't, and at scale that can be hundreds of
+> subscriptions. Assigning **Reader at the tenant-root management group** inherits
+> to every current *and future* subscription, so nothing is silently missed. It
+> also grants the management-group read the coverage check needs to *confirm* full
+> coverage. This is the **required** scope for a verifiably-complete run:
+> `Run-AllSubscriptions.ps1` runs an up-front coverage gate that compares the
+> subscriptions the identity can enumerate against the true set under the
+> tenant-root management group, and **hard-stops** if any are missing or if the
+> true set cannot be read (i.e. the identity lacks management-group read). Pass
+> `-AllowPartialAccess` to consciously downgrade that to a warning and proceed with
+> only the subscriptions the identity can currently see. (The AKS in-pod preflight
+> `deploy/Test-NodeReadiness.ps1` checks for exactly this gap too.)
 
 ### Environment Options
 
@@ -85,9 +109,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
-- Azure CLI Resource-Graph Extension (auto-installed by script)
-- **Az PowerShell module** — only four submodules are needed (install before running — see below)
+- **Az PowerShell module** - only five submodules are needed (install before running - see below)
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
@@ -98,19 +120,19 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 > **Cloud Shell users:** `Az` is pre-installed by Microsoft. Skip this section entirely.
 
-**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the four Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those four submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the four it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
+**You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the five Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`, `Az.ResourceGraph`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call - not mid-run - and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those five submodules, not the full ~80-submodule `Az` rollup (the full rollup works too - it loads only the five it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
 
 **Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
 ```powershell
 Get-Module Az* -ListAvailable | Uninstall-Module -Force
-Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
+Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
   
 
@@ -127,8 +149,8 @@ Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PS
 ![CloudShell](./docs/cloudshell.png)
 
 **For Local Environment:**
-1. Open PowerShell 7 as Administrator
-2. Ensure Azure CLI is installed and configured
+1. Open PowerShell 7
+2. Sign in with `Connect-AzAccount` (the tool also prompts you to authenticate on first run). The required Az PowerShell modules are checked — and offered for install on interactive runs — automatically; see [Installing the required PowerShell modules](#installing-the-required-powershell-modules) above.
 
 ### Step 2: Get the Script
 
@@ -172,6 +194,8 @@ You might get more than one authentication request due to different collector pr
 
 ### Basic Execution
 
+The entry scripts carry a `#!/usr/bin/env pwsh` shebang and are executable, so from Cloud Shell's **Bash** (or any POSIX shell) you can run them directly - `./Run-AllSubscriptions.ps1 ...` - without switching to PowerShell first.
+
 1. **Navigate to the script directory:**
    ```powershell
    cd resource-discovery-for-azure
@@ -201,7 +225,7 @@ For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it i
 ./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ConcurrencyLimit 8
 ```
 
-To mask identifying details before sharing externally, add `-Obfuscate` — see [Obfuscation Mode](#obfuscation-mode).
+If an engagement specifically requires identifying details to be masked, see [Obfuscation Mode](#obfuscation-mode). It is off by default and should stay off unless it has been asked for.
 
 #### Targeting a single subscription or resource group
 
@@ -243,13 +267,13 @@ To include every subscription regardless of state, pass `-IncludeDisabled`:
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -IncludeDisabled
 ```
 
-The wrapper prints the count of excluded subscriptions and a per-state breakdown so the filter is transparent.
+The wrapper prints the count of excluded subscriptions and a per-state breakdown, and lists each excluded subscription by name, id and state, so the filter is transparent.
 
 #### Subscription access check (up-front)
 
 Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
 
-The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+The check makes one cheap native control-plane call per subscription (an `Invoke-AzRestMethod` ARM resource-groups list) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
 
 By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
 
@@ -263,7 +287,30 @@ If you *intentionally* have access to only a subset of the tenant, pass `-AllowP
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -AllowPartialAccess
 ```
 
+If you run the wrapper yourself at a console, signed in as a user, and did not pass `-AllowPartialAccess`, it asks whether to continue with only the readable subscriptions instead of stopping. Unattended runs (no console, or a service principal or managed identity) are never asked and still stop.
+
 On `-Resume`, only the subscriptions that still need processing are probed. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs.
+
+#### Checking permissions before a run (`-Preflight`)
+
+The access check above proves *Reader*. The two data phases need two more roles - **Cost Management Reader** (consumption) and **Monitoring Reader** (metrics) - and without them a run only discovers the gap partway through, sometimes hours in. `-Preflight` runs the normal sign-in, tenant, coverage and Reader checks, then probes **every** in-scope subscription for both data-phase permissions, prints a per-subscription matrix with the exact role to grant, and stops without collecting anything:
+
+```powershell
+./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Preflight
+```
+
+```
+Permission matrix (per subscription):
+  Subscription                             Reader        Cost Mgmt        Monitoring
+  --------------------------------------------------------------------------------------
+  Production                               Ok            Ok               Ok
+  Sandbox                                  Ok            Denied           NoResource
+
+To fix before running:
+  - Grant Cost Management Reader on Sandbox (<id>) (or Billing Reader on the billing scope), or run with -SkipConsumption.
+```
+
+If the tenant-root management group cannot be read (so full coverage cannot be verified), the preflight reports that too and still probes the subscriptions it can see, instead of stopping at the coverage gate. `Ok` is verified, `Denied` is an RBAC denial and makes the preflight exit 1 (as does unverifiable coverage), `Unavailable` means the probe could not run (token or transient; the real run retries per subscription), `NoResource` means the subscription holds nothing metric-eligible to probe, and `Skipped` means you passed the matching `-Skip*` switch. Your Az context is restored afterwards.
 
 #### Resuming an interrupted run
 
@@ -273,9 +320,23 @@ For tenants with many subscriptions, the run can be cut short by environment-lev
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Resume
 ```
 
-After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The state file is cleared automatically after a clean run with no failures.
+After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`, together with the path of the per-subscription ZIP it wrote. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The consolidated bundle of a `-Resume` run still covers the skipped subscriptions: it carries the ZIP the earlier run recorded for each one, provided that ZIP is still on disk and has the same privacy mode as this run (an `-Obfuscate` run never carries a non-obfuscated ZIP, and the reverse). A skipped subscription whose ZIP cannot be carried is named under a `FAILED (earlier report not carried)` banner and the run exits with code `2`. The state file is cleared automatically after a clean run with no failures.
 
-`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription`, and existing state is left untouched.
+`-Resume` is opt-in. Without it, a run signed in as a user at a console that finds an earlier run's state listing at least one completed subscription asks what to do:
+
+```
+Found an earlier run for this tenant (started 2026-10-08 09:12):
+  3 subscription(s) done, 1 in the retry list.
+  [R] Resume - skip the 3 done subscription(s) (default)
+  [F] Start fresh - collect all again; the earlier state is kept as a backup
+Choice [R/f]:
+```
+
+Resume (or Enter) works exactly like `-Resume`. When some of the done subscriptions have no report this run can carry into its bundle (the recorded archive is gone, or it was written in the other privacy mode), the question says how many, and Enter means start fresh instead, because resuming would leave those reports out.
+
+Start fresh first saves the earlier state to a backup beside the state file, `.resume-state-<TenantID>.json.backup-<yyyyMMdd-HHmmss>` (always a local file, also with `-StateBlobContainerUri`). The state itself, the file and its blob, is cleared once the start-up checks (coverage, access, billing access, upload and `-Service`) have passed, before the subscriptions start, so a later `-Resume` or `-ResumeFailedOnly` does not act on the earlier run. If the backup cannot be written, the earlier state is kept. If the state cannot be cleared, a warning names what still holds it. The backup is never removed automatically, holds the same real subscription IDs as the state file, and is not added to any bundle: delete it when you no longer need it. To go back to the earlier run, copy the backup over the state file and re-run with `-Resume`. With `-StateBlobContainerUri`, also upload the backup over the state blob, `_state/.resume-state-<TenantID>.json` (`_state/shard-<Index>of<Count>/.resume-state-<TenantID>.json` for a shard run) in that container, under the folder path the URI names, if any: a run reads the blob before the file, so restoring only the file has no effect.
+
+`-ResumeFailedOnly` and `-Preflight` never ask and keep their own behaviour. A run with no person watching a real terminal (input or output redirected), or signed in as a service principal or managed identity, asks nothing either: as before, it processes every subscription returned by `Get-AzSubscription` and prints a note that the state exists. Under `pwsh -NonInteractive` at a terminal the question is shown but no answer can be read: the run says so and then behaves the same way. Azure Cloud Shell signs in with its own managed identity (`MSI@50342`), so it is not asked either: pass `-Resume` there.
 
 #### Parallel subscription processing
 
@@ -287,7 +348,9 @@ Pass `-ParallelStreams N` to process N subscriptions concurrently in separate `p
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -ParallelStreams 6
 ```
 
-Each stream is a separate background process. They don't share state with each other. Each has its own Azure session, its own progress tracking file, and its own output folder. The wrapper splits your subscription list across the streams in round-robin order so the workload stays balanced even when subscriptions vary in size.
+Each stream is a separate background process. They don't share state with each other. Each has its own Azure session, its own progress tracking file, and its own output folder. The wrapper splits your subscription list across the streams by estimated work (resources and metric-query volume per subscription) so the workload stays balanced even when subscriptions vary in size. If the estimates cannot be read, it falls back to round-robin order.
+
+To save memory, `-StreamIsolation Runspace` (experimental) runs the streams as runspaces inside the wrapper's own `pwsh` process instead, sharing its Azure session; each stream still keeps its own progress tracking file and output folder. The trade-off is that a crash or out-of-memory error in one stream stops them all. See [`-StreamIsolation`](docs/variables/scaling-sharding-output.md#-streamisolation).
 
 The default is `-ParallelStreams 1` (existing sequential behavior, fully preserved). Pick a higher value based on the environment you're running in. See the table in [Choosing where to run for large tenants](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) below.
 
@@ -344,17 +407,77 @@ Recommended `-ParallelStreams` per environment:
 
 **Cloud Shell anti-abuse limits:** Microsoft warns that Cloud Shell is "not a general purpose computing platform" and that excessive usage can result in your tenant being blocked from Cloud Shell ([source](https://learn.microsoft.com/en-us/azure/cloud-shell/faq-troubleshooting#terminal-output---sorry-your-cloud-shell-failed-to-provision-codetenantdisabled-)). Long parallel runs against large tenants can trigger this. If you're running RDA across many subscriptions for a few hours at a time, use a local PowerShell 7 install instead. It avoids the risk and is usually faster anyway.
 
+#### Horizontal scaling across machines (very large tenants)
+
+`-ParallelStreams` scales a run across the **cores of one machine**, capped at ~6 useful streams by tenant-wide Azure Resource Graph rate limits. For very large tenants (thousands of subscriptions), one machine — even a big one — becomes the wall: the run is still fundamentally the whole tenant processed by up to 6 streams.
+
+`-ShardCount` / `-ShardIndex` scale a run **across independent machines**. You split the tenant into N shards and run one shard per machine (VM, container, or CI runner). Each machine runs the *same* command with the same `-ShardCount` and a distinct `-ShardIndex` from `0` to `ShardCount-1`:
+
+```powershell
+# Machine 0:
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 0
+# Machine 1:
+./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -ShardCount 10 -ShardIndex 1
+# ... through ShardIndex 9
+```
+
+How it works:
+
+- Each machine enumerates the whole tenant, then keeps only the subscriptions **deterministically assigned to its shard** (a stable hash of each subscription id). The N shards are **disjoint and cover every subscription** with no coordination between machines — a subscription added, removed, or invisible on one machine only ever affects its own shard, never the others.
+- Sharding is **orthogonal to `-ParallelStreams`**: each machine still uses parallel streams across its own cores (auto-tuned, capped at ~6 by the tenant-wide Azure Resource Graph limit of ~15 req/sec). Sharding scales the phases that throttle **per subscription** — metrics and consumption, normally the wall-time-dominant part — roughly *machines × streams-per-machine*, because disjoint shards hit different per-subscription buckets. Resource Graph **discovery**, by contrast, draws from the one shared ~15 req/sec **tenant** budget across all shards, so it does not scale linearly with machine count. `-UseMetricsBatch` (Azure Monitor `metrics:getBatch`) further cuts the metrics phase's call volume. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md) — "Rate limits: why ~6 streams per machine, and what sharding actually speeds up".
+- Each shard keeps its own resume-state file (`.resume-state-<TenantID>-shard-<Index>of<Count>.json`), so `-Resume` / `-ResumeFailedOnly` work per machine independently.
+- **Run one shard per machine** (each with its own `InventoryReports` output directory). Two shards sharing one machine and output directory with `-ParallelStreams > 1` would collide on the per-stream working files — give each its own machine, or, for local testing, its own output directory.
+
+**Collecting the shards:** each machine produces its own `AllSubscriptions_ResourcesReport_<timestamp>.zip` covering only its shard — a complete, self-contained report identical in shape to a single-machine run's output.
+
+- **Recommended - upload the shard zips separately.** Each shard zip has the same shape as any normal run's output, so the N uploads together cover the whole tenant once (the shards are disjoint), with no duplicates and no gaps. This spreads the work across N smaller uploads and needs no local merge step.
+- **Optional - merge locally into one MainSummary.** Only needed if you want a single combined `MainSummary.html` on your own machine. `Build-MainSummaryFromZip.ps1` rebuilds the summary from **one** already-consolidated outer zip (`-InputZip`); it does not combine multiple. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md) for the full command sequence.
+  Extract each shard into its **own** subfolder rather than a shared one. Every shard's outer zip carries the same fixed root member names (`VMPlacement.txt`, `MainSummary.html`, `RunSummary.log`), so a shared destination has each shard overwrite the previous one's copies and keeps only the last. For `VMPlacement.txt` that is silent data loss - the tenant-wide AZ capacity view is the thing a sharded run is for. The command sequence in the doc extracts per shard, concatenates the shards' placement files into one tenant-wide `VMPlacement.txt` (disjoint slices, identical headers), and includes it in the merged bundle root so the result matches the shape a single non-sharded run produces.
+
+Rough sizing: splitting a very large tenant across N machines gives each machine roughly *(total ÷ N)* subscriptions; each machine at `-ParallelStreams 6` then does the same workload as a single-machine run of that smaller slice. Add machines to cut wall-clock roughly linearly (until you approach the tenant-wide ARM/Resource Graph quotas shared across all shards).
+
+**Running the shards on AKS / in CI-CD — and the access trade-off.** The shards are just the same command with a different `-ShardIndex`, so they run equally well as VMs, CI jobs, or AKS pods. Multi-node is *faster* but needs *more access* than a single-machine run: the non-interactive workers authenticate as an **AKS workload identity** (a user-assigned managed identity federated to a Kubernetes service account — no secrets stored or relayed), and that identity must be granted **Reader** (inventory) plus **Cost Management Reader** (consumption), **Monitoring Reader** (metrics), and **Storage Blob Data Contributor** (to collect each node's output zip). Standing up the cluster additionally needs rights to create AKS/ACR and to assign roles. Each node writes its report to local disk first and uploads its single consolidated zip to blob at the end (local-first is faster than streaming to blob). Before deploying, run the read-only readiness check — it verifies tooling, providers, an available x64 node size, and your permissions:
+
+```powershell
+./deploy/Test-MultiNodeReadiness.ps1 -Location <region>
+```
+
+For the step-by-step, copy-paste setup, follow the runbook **[deploy/AKS-WorkloadIdentity-Setup.md](deploy/AKS-WorkloadIdentity-Setup.md)** (readiness checks, cluster + identity, running the Job, collecting output, troubleshooting). To run RDA from an **Azure DevOps pipeline on KEDA-scaled AKS agents** (`AzurePowerShell@5` + service connection), see **[deploy/agent-pool/keda/README.md](deploy/agent-pool/keda/README.md)** instead. See [docs/horizontal-sharding.md](docs/horizontal-sharding.md#running-the-shards-on-aks-containers--ci-cd) for the same material with more of the "why" behind the sharding.
+
 #### Run transcript and failure diagnostics
 
 Every time you run `Run-AllSubscriptions.ps1`, it writes a transcript of the whole run to `InventoryReports/RunAllSubscriptions_transcript_<timestamp>.txt`. This is different from the per-subscription transcripts that the inner script `ResourceInventory.ps1` writes inside each subscription folder. The wrapper transcript covers the run end-to-end: which tenant was resolved, how authentication was handled, any resume-state messages, which subscription is being processed at each step, the final consolidation, and the run summary. You get this file every run, whether you process one subscription or many.
 
+When you run the wrapper at a console, it ends by clearing the screen and showing only the outcome with its exit code and the one file to send. Everything printed before that is in this transcript, and the screen is not cleared if the transcript could not be written.
+
 If a subscription fails, the wrapper also writes a structured failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`. This file captures the full exception type, the error message, up to five levels of inner exceptions, the script line number, the stack trace, and a snapshot of how much memory and free disk space the machine had when the failure happened. The final summary points at both files when failures occur.
 
-Inside each subscription's report folder, the inner script also writes a consolidated **local debug log**, `DebugLog_<ReportName>_<timestamp>.log` — the per-collector heartbeat (each collector's start/finish/failure) plus the metrics-phase diagnostics that used to scroll past on the terminal. It stays **local** and is never added to the shared ZIP: it can contain real service/resource names and raw exception text, so keep it for your own troubleshooting.
+Inside each subscription's report folder, the inner script also writes a consolidated **debug log**, `DebugLog_<ReportName>_<timestamp>.log`: the per-collector heartbeat (each collector's start/finish/failure) plus the metrics-phase diagnostics that used to scroll past on the terminal.
+It can contain real service/resource names and raw exception text.
+An `-Obfuscate` run keeps it **local** and never adds it to the shared ZIP, so keep it for your own troubleshooting.
+A default run adds it to the ZIP, with a warning on the console, because that report is not obfuscated anyway.
 
-Obfuscated runs (`-Obfuscate`) additionally produce a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP. It is human-readable and scrubbed — subscriptions appear as their obfuscated tokens and other identifiers are masked — and it summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer). Because it is safe to share, it can go to the AWS team alongside the report to explain any gaps without exposing real names. It is a plain `.log` on purpose so the ingestion pipeline treats it as an attachment, not as report data.
+Every run also produces a **shareable diagnostics log**, `Diagnostics_<ReportName>_<timestamp>.log`, which **is** included in the report ZIP.
+It is human-readable and scrubbed: in an `-Obfuscate` run subscriptions appear as their obfuscated tokens and other identifiers are masked, and in a default run it masks GUIDs and email addresses, though the report beside it carries real names.
+It summarises phase timings plus one-line health entries for any collector failures, metrics auth-skips, metrics left incomplete because the worker pool could not be opened, and consumption failures (including exactly where a consumption pull stopped, so a truncated billing sheet is obvious rather than something you have to infer).
+The console also prints a ready line per subscription for repairing one on its own, and that line stays out of every file that ships because it carries a local path and the tenant id.
+A subscription whose metrics were left incomplete stays in the retry list (see the `-Resume` and `-ResumeFailedOnly` rows below).
+The one from an `-Obfuscate` run is safe to share, so it can go to the AWS team alongside the report to explain any gaps without exposing real names.
 
-When reporting an issue, attach the wrapper transcript and the failure log (and, for obfuscated runs, the in-ZIP diagnostics log). The local `DebugLog_*.log` carries the most detail — share it too if you've confirmed it doesn't expose sensitive names. Together they contain enough context to diagnose most failures without a follow-up round trip.
+**Collecting everything in one step.** Rather than hunting these files down individually, run the log collector to gather them into a single zip you can hand to support:
+
+```
+pwsh ./Functions/Collect-SupportLogs.ps1
+```
+
+It bundles the wrapper transcript, the failure / access-verdict logs, the run summary, and every per-subscription log (`Diagnostics_*`, `DebugLog_*`, `ErrorLog_*`, `Transcript_Log_*`) into `InventoryReports/RdaSupportLogs_<timestamp>.zip`, with a `MANIFEST.txt` explaining each file. The obfuscation dictionary (the de-obfuscation reveal key) is deliberately **excluded**. Because the bundle contains real identifiers (the signed-in account, tenant/subscription IDs, resource names) it is a **private** artefact — send it over a secure channel, never post it publicly. Add `-IncludeMainSummary` to also fold in the aggregate summary, or `-InventoryRoot <path>` if your reports are not in the default location.
+
+**A failed run collects this for you automatically.** If `Run-AllSubscriptions.ps1` hard-stops *before* producing a report bundle — for example an authentication failure, the up-front subscription-access gate, or a consumption-access denial — it writes `InventoryReports/RdaSupportLogs_<timestamp>.zip` on its way out and prints the path. So even a run that "never worked" and produced no report still leaves exactly one file to send; you don't need to know which logs to gather.
+
+When reporting an issue, send the `RdaSupportLogs_*.zip`.
+(If you'd rather attach files individually: the wrapper transcript and the failure log, plus the in-ZIP diagnostics log.
+The `DebugLog_*.log` carries the most detail; share it too if you've confirmed it doesn't expose sensitive names.)
+Together these contain enough context to diagnose most failures without a follow-up round trip.
 
 ## Output Files
 
@@ -364,13 +487,15 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | Cost and billing data (first-party Azure usage) |
+| `Marketplace_ResourcesReport_(date).csv` | Azure Marketplace / third-party SaaS usage (additive; see [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas)). Empty header-only file when there are no Marketplace charges (a confirmed zero) |
+| `FoundryModelCoverage_ResourcesReport_(date).csv` | Azure AI Foundry per-deployed-model billing-plane coverage (additive). One row per deployed model with its detected billing plane(s) and a `CoverageStatus` of `AzureMetered` / `AzureMetered+Marketplace` / `MarketplaceOnly` / `UNPRICED` (plus `Unknown-*` when a plane could not be probed), so a Marketplace-only model (e.g. Claude via CCU) is flagged, never silently dropped. Its token columns are kept so the layout does not change, but they are not filled: token usage is already in the billed `Foundry Models` lines of the Consumption CSV, and `TokenProbeStatus` is `NotRun` on every deployment row (`NotApplicable` on a row that is not a deployment). Empty header-only file when no Foundry model deployments exist (a confirmed zero) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
 | `Transcript_Log_<ReportName>_(date).txt` | Plaintext transcript of script activity (excluded from the zip when `-Obfuscate` is used) |
-| `DebugLog_<ReportName>_(date).log` | Consolidated **local** debug log — per-collector heartbeat + metrics diagnostics. Never added to the zip (may contain real names/exception text) |
-| `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on `-Obfuscate` runs only** |
+| `DebugLog_<ReportName>_(date).log` | Consolidated debug log - per-collector heartbeat + metrics diagnostics. May contain real names and exception text, so an `-Obfuscate` run keeps it **local** and never adds it to the zip; a default run adds it, with a warning |
+| `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on every run** |
 | `ResourcesReport_(date).zip` | All files compressed |
 
 ### File Delivery
@@ -381,7 +506,11 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 ### Obfuscation Mode
 
-Obfuscation is **opt-in** (off by default). Add `-Obfuscate` to mask identifying details so the report can be shared externally — it works on both entry points:
+Obfuscation is **opt-in, off by default, and that is the intended state for most runs.**
+Use it only when an engagement has specifically asked for identifying details to be masked.
+It is not a general hardening step, and enabling it by habit has a real cost: the report loses the resource names that make findings actionable, and it can only be interpreted by reconciling it against the `ObfuscationDictionary_*.json` that stays on the machine that produced it.
+
+When it has been asked for, add `-Obfuscate` - it works on both entry points:
 
 ```powershell
 # Whole tenant (per-subscription reports):
@@ -423,17 +552,61 @@ If automatic compression fails:
 cd InventoryReports
 Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-Date -Format 'yyyy-MM-dd').zip"
 ```
+## Searching Reports You Already Have
+
+`FindResource.ps1` answers one question against report output that has **already been generated**: *does resource type X exist anywhere in this estate, and how big is it?* It makes no Azure calls and writes nothing back into the scanned tree.
+
+You need it because the report bundle's `Inventory_*.json` can be the only copy of a resource type's data. You cannot search for it in the HTML report either, because **each per-subscription report covers exactly one subscription** - there is no single report spanning an estate to search. This walks the bundles instead.
+
+```powershell
+# How many Azure VMware Solution private clouds are there, and how many hosts?
+./FindResource.ps1 -Path ./ScanRoot -ResourceType VMWare -SumBy ClusterSize -GroupBy Location
+
+# Same search, rows written out for further analysis
+./FindResource.ps1 -Path ./ScanRoot -ResourceType VMWare -CsvPath ./avs.csv
+
+# Rows go to the pipeline, so post-process with ordinary PowerShell
+./FindResource.ps1 -Path ./ScanRoot -ResourceType StorageAcc | Group-Object Location
+```
+
+`-Path` is searched recursively and accepts any mix of a sharded scan root, per-subscription `ResourcesReport*.zip` files, consolidated `AllSubscriptions_*.zip` bundles, and extracted folders holding a loose `Inventory_*.json`.
+
+`-ResourceType` is the `Inventory_*.json` key, which is the base name of the collector under `Services/`. It is **typo-protected**: the value is validated against the `Services` tree at parameter-binding time and tab completion offers the valid names, so a misspelling fails immediately with a suggestion rather than silently returning nothing. Note the collector name is not always the marketing name - Azure VMware Solution is `VMWare`.
+
+### It will not claim an absence it has not proved
+
+A wrong "no" is the worst answer this tool could give, so it only calls a zero a **confirmed** zero when the scan covered everything asked of it *and* every inventory it read actually contained the requested key. Otherwise it says which of those it could not establish:
+
+| Output | Meaning |
+|---|---|
+| `This is a confirmed zero` | Every inventory read carried the key and nothing was lost. The type really is absent. |
+| `CANNOT CONFIRM ABSENCE` | The key was in **no** inventory read. These bundles predate the collector, or the run was scoped with `-Service`. |
+| `PARTIAL COVERAGE` | Only some inventories carried the key. The count is a lower bound. |
+| `PARTIAL SCAN` | A path was missing or refused, a subtree was unreadable, or a bundle was skipped. |
+| `NOTHING WAS SCANNED` | No bundles were found. Check the path. |
+
+Exit codes mirror this, so an automated caller reading only `$LASTEXITCODE` reaches the same conclusion: `0` complete (a confirmed result), `1` nothing scanned, `2` read failures, `3` scope or coverage incomplete (a path lost, the key absent from some or all inventories read - the `CANNOT CONFIRM ABSENCE` and `PARTIAL COVERAGE` verdicts - or a subscription read more than once, which can inflate the counts), `4` output file could not be written. When more than one applies the lowest code wins. Only `0` means the scan proved what it reports.
+
+De-obfuscated reports produced by `Reveal.ps1` are **refused and reported**, never read, so a revealed copy left on disk cannot leak real identifiers into the results.
+
 ## Parameters Reference
+
+The sections below cover both entry points, so each row is tagged where it matters.
+**Inner script only** means the parameter exists on `ResourceInventory.ps1` and passing it to `Run-AllSubscriptions.ps1` fails parameter binding.
+**Wrapper only** means the reverse.
+Everything untagged is accepted by both, and the wrapper forwards it to the inner script unchanged.
+
+> For the **why behind each parameter** — the reasoning, invariants, and trade-offs behind every switch — see the parameter reference under [`docs/variables/`](docs/variables/README.md). The full documentation index is at [`docs/README.md`](docs/README.md).
 
 ### Core Parameters
 
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
-| `ReportName` | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
+| `ReportName` | String | **Inner script only.** **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
 | `TenantID` | String | Target specific Azure tenant | `-TenantID "12345678-1234-1234-1234-123456789012"` |
-| `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
-| `ResourceGroup` | String | Scan specific resource group only | `-ResourceGroup "Production-RG"` |
-| `OutputDirectory` | String | Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
+| `SubscriptionID` | String | **Inner script only.** Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
+| `ResourceGroup` | String | **Inner script only.** Scan specific resource group only | `-ResourceGroup "Production-RG"` |
+| `OutputDirectory` | String | **Inner script only.** Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
 
 ### Performance Parameters
 
@@ -441,8 +614,22 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
 | `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
-| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
-| `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
+| `SkipMarketplace` | Switch | Skip **only** the additive Azure Marketplace / third-party SaaS consumption collector (`Get-AzConsumptionMarketplace` → `Marketplace_*.csv`); first-party consumption is unaffected. Implied by `-SkipConsumption`. Reuses the same Cost Management Reader / Billing Reader access — no new role. See [Marketplace consumption](docs/consumption-data.md#marketplace-consumption-azure-marketplace--third-party-saas). | False | `-SkipMarketplace` |
+| `SkipFoundryCoverage` | Switch | Skip **only** the additive Azure AI Foundry model billing-plane coverage collector (`FoundryModelCoverage_*.csv`); first-party consumption and Marketplace are unaffected. Implied by `-SkipConsumption` (it needs the same Cost Management Reader / Billing Reader access to probe the Marketplace plane — no new role). The phase probes both billing planes per deployed Foundry model and flags Marketplace-only (e.g. Claude/CCU) and coverage-gap (`UNPRICED`) models so none is silently dropped. | False | `-SkipFoundryCoverage` |
+| `SkipMetrics` | Switch | Skip Azure Monitor metrics collection entirely | False | `-SkipMetrics` |
+| `IncludeStorageMetrics` | Switch | **Opt in** to the Storage Account `UsedCapacity` metric. It is **not collected by default**, because it costs one metric-query call per storage account and on a tenant with a very large storage estate that single capacity figure can dominate the metrics phase. Pass this when storage capacity is actually wanted. | False | `-IncludeStorageMetrics` |
+| `SkipDiskMetrics` | Switch | Skip only the Managed Disk composite I/O metrics (four calls per attached disk — often the largest metric source). Other metrics still collected. | False | `-SkipDiskMetrics` |
+| `MetricsIntervalMinutes` | Integer | Override the sampling grain of the high-frequency VM / Azure SQL DB / OSS-DB utilization series. `0` = the default grain (hourly, or each family's native cadence when `-MetricsDetailed` is set: 15 min VM, 30 min SQL, 60 min OSS-DB). A set value (5/15/30/60) is applied **uniformly** to all three families and honored as-is. Coarser than a family's native cadence cuts that family's data-point volume/memory; finer increases it (your choice — e.g. `30` for finer OSS-DB fidelity than its 60-min default). Does **not** change the API-call count. All values are supported (these series have a 1-minute base grain). Allowed: 0, 5, 15, 30, 60. | 0 | `-MetricsIntervalMinutes 60` |
+| `MetricsDetailed` | Switch | Collect the sampled utilization series at their native (finer) cadence: VM and disk I/O every 15 min, Azure SQL DB every 30 min, OSS-DB hourly. Without it the grain is hourly for all of them (the upstream default), which cuts VM data-point volume 4x. An explicit `-MetricsIntervalMinutes` overrides both for VM/SQL/OSS-DB. | False | `-MetricsDetailed` |
+| `CapacityPlan` | Switch | **Opt in** to the tenant-wide capacity-planning VM placement CSV (under the wrapper: `VMPlacement_<timestamp>.csv` on disk, bundled as `VMPlacement.txt`; availability-zone, SKU, vCPU/RAM and disk profile of every VM and scale set, for sizing nodes per AZ). It is **not produced by default**: without this switch no `VMPlacement*` file is written, aggregated, or folded into the bundle. It is a SEPARATE file and does not change any other output's schema. Makes no extra Azure calls (it joins data already collected). | False | `-CapacityPlan` |
+| `MetricsLookbackDays` | Integer (1-93) | How many days of history to request for the **lookback-bound trend / utilization** series (see below). Omit to use the 31-day default. Does **not** change the number of Azure Monitor queries, only the data points each one returns, so it trades right-sizing sample depth for run time / memory / `Metrics_*.json` size. Capacity and limit metrics use a fixed 24h window and are unaffected. Upper bound is Azure Monitor's 93-day platform-metric retention. | 31 | `-MetricsLookbackDays 14` |
+| `UseMetricsBatch` | Switch | Collect VM/disk/storage metrics via the Azure Monitor `metrics:getBatch` data-plane API (one request per ≤50 resources), which lowers the metric-query API-call count. Falls back to the per-call path on any failure. See `docs/metrics-batch-trial.md`. | False | `-UseMetricsBatch` |
+| `HeadRoom` | Integer (0–90) | **Wrapper only.** Leave this percentage of the chosen metrics concurrency unused so the run consumes less of the shared Azure API throttle budget (leaving room for the tenant's production workloads). `0` = full concurrency. | 0 | `-HeadRoom 20` |
+| `StreamMemoryGB` | Number (0-1024) | **Wrapper only.** Memory one parallel stream is allowed, in GB. When `-ParallelStreams` is auto-tuned, the run starts no more streams than the memory available at start-up (less 1 GB) allows at this much each; `0` is read as the default there. Raise it for tenants with very large billing data per subscription. No effect on the count when `-ParallelStreams` is passed. Under `-StreamIsolation Runspace` it is also the free memory a stream waits for before it starts a subscription while another is in progress; `0` turns that wait off. | 2 | `-StreamMemoryGB 4` |
+| `Plan` | Switch | **Wrapper only.** Assess-only sizing: authenticate, size the workload from live metric-query volume, print a single-machine or shard recommendation with ready-to-paste commands, then exit **without** inventorying anything. | False | `-Plan` |
+| `PlanPerQuerySeconds` | Double | **Wrapper only.** `-Plan` only: override the estimated per-metric-query wall-time (seconds) with a figure measured from a prior run's Diagnostics timings, for a tenant-accurate estimate. | 0 (auto) | `-PlanPerQuerySeconds 2.5` |
+| `UploadToBlobContainerUri` | String | **Wrapper only.** Upload each node's finalized report zip to a shared blob container (passwordless, via the run's own identity; requires `Az.Storage`). Omit to keep output node-local. | (none) | `-UploadToBlobContainerUri https://acct.blob.core.windows.net/container` |
+| `StateBlobContainerUri` | String | **Wrapper only.** Mirror the resume/state file to a blob container so a run survives local-disk loss (e.g. an AKS pod reschedule; requires `Az.Storage`). Omit to keep state local-only. | (none) | `-StateBlobContainerUri https://acct.blob.core.windows.net/container` |
 
 ### Metrics Lookback Window
 
@@ -462,16 +649,29 @@ captured.
 
 | Metric | Resource | Granularity |
 |--------|----------|-------------|
-| Percentage CPU | VMs, VMSS | 15-min (VM) / 1-hr (VMSS) |
-| Available Memory Bytes | VMs, VMSS | 15-min / 1-hr |
-| cpu_percent, memory_percent | SQL, MariaDB, MySQL(+Flexible), PostgreSQL(+Flexible) | 30-min / 1-hr |
-| cpu_used, dtu_used | SQL DB | 30-min |
+| Percentage CPU | VMs, VMSS | 1-hr default, 15-min with `-MetricsDetailed` (VM) / 1-hr (VMSS) |
+| Available Memory Bytes | VMs, VMSS | 1-hr default, 15-min with `-MetricsDetailed` / 1-hr |
+| cpu_percent, memory_percent | SQL, MariaDB, MySQL(+Flexible), PostgreSQL(+Flexible) | 1-hr default; 30-min (SQL) / 1-hr with `-MetricsDetailed` |
+| cpu_used, dtu_used | SQL DB | 1-hr default, 30-min with `-MetricsDetailed` |
 | physical_data_read_percent, log_write_percent | SQL DB | 1-hr |
 | FunctionExecutionCount/Units | Functions | daily |
+| Composite Disk Read/Write Operations/sec, Read/Write Bytes/sec | Managed Disks (attached) | 1-hr default, 15-min with `-MetricsDetailed` (not affected by `-MetricsIntervalMinutes`) |
 
 Capacity and point-in-time metrics (storage used, limits, CosmosDB throughput,
 ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 **not** affected by this setting.
+
+> The default grain is **hourly** (matching the upstream awslabs project); `-MetricsDetailed` restores the **native** cadences shown above. `-MetricsIntervalMinutes`
+> (see Performance Parameters) can override the VM (`Percentage CPU`, `Available
+> Memory Bytes`), Azure SQL DB (`cpu_used`, `dtu_used`, `cpu_percent`) and OSS-DB
+> (`cpu_percent`, `memory_percent`) sampled series to a coarser grain — e.g. `60`
+> gives one hourly (peak) point instead of the 15/30-min detailed cadence — to cut
+> data-point volume on very large tenants. A set value is applied **uniformly** to
+> all three families (VM, SQL, OSS-DB) and honored as-is: coarser than a family's
+> native cadence reduces its data-point volume, finer increases it — the operator's
+> choice (e.g. `30` for finer OSS-DB fidelity than its 60-min default). These series
+> are stored at Azure's 1-minute base grain, so every allowed value is supported. It
+> does not change VMSS, the daily reads, or the capacity/point-in-time metrics.
 
 ### Privacy & Obfuscation Parameters
 
@@ -483,8 +683,8 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
-| `Appid` | String | Service Principal application ID | `-Appid "app-id-here"` |
-| `Secret` | String | Service Principal client secret | `-Secret "secret-here"` |
+| `Appid` | String | **Inner script only.** Service Principal application ID | `-Appid "app-id-here"` |
+| `Secret` | String | **Inner script only.** Service Principal client secret | `-Secret "secret-here"` |
 | `DeviceLogin` | Switch | Use device code authentication | `-DeviceLogin` |
 
 ### Debugging Parameters
@@ -495,21 +695,31 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 
 ### Run-AllSubscriptions Wrapper Parameters
 
-These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`, 
-`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, and `-ConcurrencyLimit` to the inner `ResourceInventory.ps1`, so they behave the same in both contexts.
+These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper forwards `-DeviceLogin`,
+`-Obfuscate`, `-SkipMetrics`, `-SkipConsumption`, `-SkipMarketplace`, `-SkipFoundryCoverage`, `-IncludeStorageMetrics`, `-SkipDiskMetrics`, `-CapacityPlan`,
+`-MetricsIntervalMinutes`, `-MetricsLookbackDays`, `-UseMetricsBatch`, `-Service`, and `-ConcurrencyLimit` to the inner
+`ResourceInventory.ps1`, so they behave the same in both contexts (see
+[Performance Parameters](#performance-parameters) for the metric-volume controls).
 
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|---------|
 | `TenantID` | String | **Required.** Azure tenant GUID or verified domain. The wrapper resolves a domain to its GUID via OIDC discovery before authenticating. | — | `-TenantID "contoso.onmicrosoft.com"` |
-| `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
-| `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
+| `Resume` | Switch | Skip subscriptions already completed in a prior run, and collect the rest: the ones never attempted and the ones in the retry list, which holds both outright failures and subscriptions whose inventory finished but whose metrics were left incomplete. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. Without it, a user at a console is asked whether to resume or start fresh (see [Resuming an interrupted run](#resuming-an-interrupted-run)). | False | `-Resume` |
+| `ResumeFailedOnly` | Switch | Retry **only** the subscriptions in the retry list from a prior run, skipping both already-completed and never-attempted ones. The retry list holds a subscription that failed outright, and also one whose inventory finished but whose metrics were left incomplete (its reason starts `Metrics incomplete:`); both `-Resume` and `-ResumeFailedOnly` collect it again in full. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (retry list **and** not-yet-attempted subs); `-ResumeFailedOnly` targets the retry list only, which means a subscription collected again that way appears in its own bundle as well as in the earlier one - prefer `-Resume`, whose bundle carries every subscription once. While a never-attempted subscription remains, it is named at the end and the resume state is kept, so a later `-Resume` still skips what is done. A retry entry whose subscription is listed neither at the start nor at the end of a run is removed by that run, unless the tenant-root management group, when it can be read, still holds it, or the end-of-run listing failed; when none of the entries is listed, `-ResumeFailedOnly` stops with a warning first, and a normal or `-Resume` run clears them. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
 | `AllowPartialAccess` | Switch | Change the up-front access check from hard-stop to skip-and-continue. By default the wrapper verifies read access to every in-scope subscription before any work and **stops** if any is unreadable (see [Subscription access check](#subscription-access-check-up-front)). With this switch, unreadable subscriptions are skipped (and listed) and the run proceeds with the accessible ones. | False | `-AllowPartialAccess` |
-| `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
+| `ParallelStreams` | Integer | Number of subscriptions to process concurrently on ONE machine. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
+| `StreamIsolation` | String | How parallel streams run: `Process` (default) starts each as a separate `pwsh` process; `Runspace` (experimental) runs them as runspaces in the wrapper's own process, which uses less memory but lets one stream's crash stop them all. | Process | `-StreamIsolation Runspace` |
+| `ShardCount` | Integer | Split the tenant's subscriptions across N **independent machines** for horizontal scale-out. `1` (default) = no sharding. Run the same command on each machine with the same `-ShardCount` and a distinct `-ShardIndex`. See [Horizontal scaling across machines](#horizontal-scaling-across-machines-very-large-tenants). | 1 | `-ShardCount 10` |
+| `ShardIndex` | Integer | This machine's 0-based shard number (`0` .. `ShardCount-1`). Each machine processes only the subscriptions deterministically assigned to its shard. Only meaningful with `-ShardCount > 1`. | 0 | `-ShardIndex 3` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
 | `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `SkipMarketplace` | Switch | Forwarded. Skip **only** the additive Marketplace consumption collector (`Marketplace_*.csv`); first-party consumption still runs. Implied by `-SkipConsumption`. | False | `-SkipMarketplace` |
+| `SkipFoundryCoverage` | Switch | Forwarded. Skip **only** the additive Foundry model billing-plane coverage collector (`FoundryModelCoverage_*.csv`); first-party consumption and Marketplace still run. Implied by `-SkipConsumption`. | False | `-SkipFoundryCoverage` |
+| `CapacityPlan` | Switch | Forwarded. **Opt in** to the tenant-wide VM placement capacity-planning CSV, bundled as `VMPlacement.txt`. Off by default, so no `VMPlacement*` file is produced, aggregated, or folded into the bundle unless this is passed. See [Performance Parameters](#performance-parameters). | False | `-CapacityPlan` |
+| `Service` | String[] | Forwarded. Scope collection to ONLY these service collectors (by their `Services/*.ps1` base name, e.g. `VirtualMachines`, `Streamanalytics`), across every in-scope subscription — the rest are not collected. Useful for a migration that only cares about certain workloads. Accepts a comma list as one token or a PowerShell array; unknown names fail fast up front with the valid list. Omit to collect all services. | *(all)* | `-Service VirtualMachines,Streamanalytics` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting
@@ -530,7 +740,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Tenant-domain-style `-TenantID` (e.g. `contoso.onmicrosoft.com`) is resolved via Microsoft's public OIDC discovery endpoint, no sign-in needed. Pass the tenant GUID directly if discovery fails.
 
 **Subscription returned 0 resources:**
-- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
+- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `Search-AzGraph` acid-test command to confirm.
 - Less commonly, the subscription is genuinely empty.
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
 
@@ -542,7 +752,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
 - The wrapper surfaces this loudly at end-of-run if the consumption-record count is 0 or many subs failed in the consumption phase.
-- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
+- Reinstall: `Get-Module Az* -ListAvailable | Uninstall-Module -Force; Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing,Az.ResourceGraph -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser`
 
 **Cloud Shell session ended mid-run:**
 - Cloud Shell terminates inactive sessions after 20 minutes; long parallel runs can hit the same wall.
@@ -579,17 +789,21 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 |---|---|
 | `0` | Clean run — no failures of any kind. |
 | `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
-| `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
+| `2` | Per-subscription output gap - at least one subscription's report archive is **not in the bundle**. Either a subscription reported success but its zip is missing or empty, a subscription finished collecting and then failed to write its archive (see the "FAILED (report archive)" banner), collection was aborted by the collector circuit breaker (see the "FAILED (collection aborted)" banner), or a subscription failed outright - an inner hard failure, or a parallel stream worker that died before reporting. It is also set when a `-Resume` run cannot carry the report of a subscription it skipped as already completed (see the "FAILED (earlier report not carried)" banner). It is also set when the consolidated `AllSubscriptions_*.zip` itself could not be built, because then no report is in a bundle; the per-subscription archives stay on disk. A subscription that is no longer listed when the run ends counts too: it may be deleted, moved to another directory or hidden from the identity, so its failure still sets `2` and is reported under "Not listed at the end of the run". If the end-of-run subscription listing itself fails, that check is skipped and the run ends with a warning. Takes precedence over `3` to `5`, because a missing report is worse than an incomplete one. |
+| `3` | Completed, but a requested data phase was skipped or left incomplete for one or more subscriptions: either Metrics and/or Consumption was skipped because of an authentication problem (see the "FAILED (auth)" banner), or the metrics worker pool could not be opened, so the per-call metrics of the affected subscriptions were not collected (see the "FAILED (metrics incomplete)" banner - usually a host short of memory, not a token problem, so re-authenticating will not help; free memory, then re-run with `-Resume` or `-ResumeFailedOnly`, which collect those subscriptions again in full - a subscription whose metrics are incomplete stays in the retry list instead of the completed list, so neither resume mode skips it). |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
 
-Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
+Codes `3`–`5` still mean the report was produced - they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result. Code `2` is stronger: a subscription's report is absent from the bundle entirely, so it is reported even when `3`, `4` or `5` also applies.
+
+**Marketplace is a soft, best-effort phase and does NOT affect the exit code.** A Marketplace-only failure or auth-skip does not flip the wrapper exit code to non-zero and does not trigger the automatic support-log bundle. This is a deliberate choice matching Marketplace's optional, additive nature (it is the third-party / Marketplace-SaaS slice of consumption, opt-out via `-SkipMarketplace` and implied-skipped by `-SkipConsumption`). Marketplace health is still surfaced loudly — a `Marketplace Failures:` block in the console summary, a `Marketplace failed subs` / `Marketplace records collected` line in the shareable `RunSummary.log` Health block, and a banner in `MainSummary.html` — so a truncated or empty Marketplace CSV is never silent; it simply does not, by itself, mark the whole run failed. First-party Consumption, by contrast, participates fully in the exit code (auth-skips map to code `3`).
+
+`ResourceInventory.ps1` (the per-subscription inner script) sets its own exit code, which the wrapper reads: `0` = success, `1` = a hard pre-flight/setup failure, `2` = collection finished but the report archive could not be written, `3` = collection was aborted by the collector circuit breaker (several collectors failed in a row, so the inventory is partial and its archive is removed). The wrapper treats any non-zero as "this subscription failed", reports inner `2` and inner `3` under separate banners because the remedy differs, and maps both to its own `2`, since in both cases that subscription's report is not in the bundle. The consolidated bundle carries only the archives and report folders of the subscriptions that completed, so a partial report stays out even when its archive could not be removed or its `COLLECTION_ABORTED.txt` marker could not be written; any other report folder written during the run is named in a warning. `MainSummary.html` and `VMPlacement.txt` follow the same selection. A parallel stream worker records each report in its state file as soon as it finishes it, so if the worker dies before reporting back, the reports it recorded are still in the bundle and the console names them; their billing record counts and per-phase health were only in the report back, so the run summary says they are missing from its totals.
 
 ### Important Notes
 
 - The script does not upgrade existing PowerShell modules
-- Resource-Graph extension installs automatically if missing
+- Resource discovery uses the native `Az.ResourceGraph` module (no Azure CLI or CLI resource-graph extension required)
 - All operations are read-only and safe to execute
 - Historical data covers the previous 31 days
 

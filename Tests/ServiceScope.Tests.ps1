@@ -1,0 +1,68 @@
+# Output-level proof of the -Service filter: a -Service-scoped inventory must contain ONLY the requested collectors (plus non-service metadata like Version).
+# Driven by $env:TEST_ZIP_PATH + $env:TEST_EXPECTED_SERVICES; the whole suite self-skips when either is unset.
+
+BeforeAll {
+    # Non-service top-level keys that are always allowed regardless of -Service.
+    # 'Version' is the inventory metadata stamp the other suites exclude by name
+    # (e.g. DictionaryValidation / ProdNonprodPrefix use `$_.Name -ne 'Version'`).
+    $script:MetadataKeys = @('Version')
+
+    $ZipPath = $env:TEST_ZIP_PATH
+    $script:Expected = @()
+    if (-not [string]::IsNullOrEmpty($env:TEST_EXPECTED_SERVICES))
+    {
+        $script:Expected = @($env:TEST_EXPECTED_SERVICES -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    $script:Active = (-not [string]::IsNullOrEmpty($ZipPath)) -and (Test-Path $ZipPath) -and ($script:Expected.Count -gt 0)
+
+    $script:Inventory = $null
+    if ($script:Active)
+    {
+        $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
+        $script:ExtractPath = Join-Path $TmpBase ("ServiceScopeTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:ExtractPath -Force | Out-Null
+        Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
+
+        $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter 'Inventory_*.json' | Select-Object -First 1
+        if ($InvFile) { $script:Inventory = Get-Content $InvFile.FullName -Raw | ConvertFrom-Json }
+    }
+}
+
+AfterAll {
+    if ($script:ExtractPath -and (Test-Path $script:ExtractPath)) { Remove-Item -Path $script:ExtractPath -Recurse -Force }
+}
+
+Describe 'Service Scope' {
+    It 'inventory contains ONLY the requested service collectors (plus metadata)' {
+        if (-not $script:Active) { Set-ItResult -Skipped -Because 'TEST_ZIP_PATH / TEST_EXPECTED_SERVICES not set'; return }
+        $script:Inventory | Should -Not -BeNullOrEmpty -Because 'the scoped run must still produce an inventory'
+
+        $Allowed = @($script:Expected + $script:MetadataKeys)
+        $Keys = @($script:Inventory.PSObject.Properties.Name)
+        $Unexpected = @($Keys | Where-Object { $_ -notin $Allowed })
+        $Unexpected | Should -BeNullOrEmpty -Because ("only [{0}] (+ metadata) should be present; found disallowed key(s) [{1}]" -f ($script:Expected -join ', '), ($Unexpected -join ', '))
+        # Every collector that runs adds its key, with an empty array when it found nothing, so an
+        # inventory holding only the metadata key means the requested collectors never ran.
+        @($Keys | Where-Object { $_ -notin $script:MetadataKeys }).Count | Should -BeGreaterThan 0 -Because 'a -Service run must emit the requested collector keys, even when they are empty'
+    }
+
+    It 'does not emit any service key outside the requested set' {
+        if (-not $script:Active) { Set-ItResult -Skipped -Because 'TEST_ZIP_PATH / TEST_EXPECTED_SERVICES not set'; return }
+        # Redundant-but-explicit: every populated top-level service key (excluding
+        # metadata) must be one that was requested. Guards against a collector
+        # leaking output when it was not in -Service.
+        $Keys = @($script:Inventory.PSObject.Properties.Name | Where-Object { $_ -notin $script:MetadataKeys })
+        # With no keys the foreach never runs, so this It would report PASS having
+        # asserted nothing. An empty set is not evidence that scoping works, so skip
+        # loudly instead of passing green.
+        if ($Keys.Count -eq 0)
+        {
+            Set-ItResult -Skipped -Because 'the scoped run emitted no service keys; the sibling It pins the disallowed-key case'
+            return
+        }
+        foreach ($k in $Keys)
+        {
+            $k | Should -BeIn $script:Expected -Because "service key '$k' was not in the requested -Service set [$($script:Expected -join ', ')]"
+        }
+    }
+}

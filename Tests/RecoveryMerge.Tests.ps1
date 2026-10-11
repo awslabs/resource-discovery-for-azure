@@ -1,18 +1,5 @@
-# Merge-RecoveryData unit tests
-# =============================================================================
-# Offline, self-contained tests for the recovery-merge splice + re-package
-# helper in Functions/RecoveryMerge.Functions.ps1. Each test builds a synthetic
-# "gap" bundle (the incomplete run) and a "recovery" bundle (the scoped re-run)
-# in a temp dir - Inventory_*.json plus optional Consumption_*.csv,
-# Metrics_*.json and ObfuscationDictionary_*.json - then calls Merge-RecoveryData
-# and asserts the splice, the packaging, and the fail-loud guards.
-#
-# No live Azure and no external fixture zip: the function only reads/writes files
-# and re-invokes Extension/Summary.ps1 to regenerate the HTML, so a temp bundle
-# is enough to drive it end to end. The only literal GUID used in synthetic ARM
-# paths is the Azure docs placeholder (12345678-...-123456789012); obfuscation
-# tokens are minted at runtime. No customer data.
-# =============================================================================
+# Offline unit tests for Merge-RecoveryData (Functions/RecoveryMerge.Functions.ps1): build synthetic gap + recovery bundles in a temp dir,
+# call the splice/re-package, and assert the splice, packaging, and fail-loud guards. No live Azure; only literal GUID is the Azure docs placeholder.
 
 BeforeAll {
     $script:FnFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/RecoveryMerge.Functions.ps1'
@@ -30,7 +17,7 @@ BeforeAll {
     New-Item -ItemType Directory -Path $script:TmpRoot -Force | Out-Null
 
     # Canonical empty-consumption header the function writes when no CSV exists.
-    $script:CsvHeader = 'InstanceData,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId'
+    $script:CsvHeader = 'AdditionalInfo,MeterCategory,MeterId,MeterName,MeterRegion,MeterSubCategory,Quantity,Unit,UsageStartTime,UsageEndTime,ResourceId,ResourceLocation,ConsumptionMeter,ReservationId,ReservationOrderId'
     $script:DocsGuid = '12345678-1234-1234-1234-123456789012'
 
     # Fresh, isolated gap/recovery/output folders per test case.
@@ -206,6 +193,33 @@ Describe 'Merge-RecoveryData -Service selection and fail-loud guards' {
         { Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output } |
             Should -Throw -ExpectedMessage '*nothing to merge*'
     }
+
+    It 'does NOT throw on an empty recovery inventory when -RecoverConsumption is set: rebuilds consumption only, leaving the gap inventory untouched' {
+        # Complement of the "nothing to merge" throw above: the guard only fires
+        # when NO recover switch is set. With -RecoverConsumption (or -RecoverMetrics)
+        # an empty recovery inventory is intentional - the operator is recovering a
+        # data phase, not service keys - so the merge proceeds, splices no keys, and
+        # the gap inventory is carried forward verbatim.
+        $C = New-Case
+        $GapCsv = "$script:CsvHeader`n{},Compute,m1,GAP-METER,eastus,vm,1,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        $RecCsv = "$script:CsvHeader`n{},Compute,m1,REC-METER,eastus,vm,9,Hours,2026-01-01,2026-01-02,/id,eastus,,,"
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -ConsumptionCsv $GapCsv
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3' }) -ConsumptionCsv $RecCsv
+
+        { $script:NoThrowResult = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverConsumption -WarningAction SilentlyContinue } |
+            Should -Not -Throw
+        $Result = $script:NoThrowResult
+        Remove-Variable -Name NoThrowResult -Scope Script
+
+        @($Result.MergedServiceKeys | Where-Object { $_ }) | Should -HaveCount 0 -Because 'an empty recovery inventory splices no service keys'
+        $Result.ConsumptionSource | Should -Be 'recovery' -Because '-RecoverConsumption still rebuilds the consumption phase'
+
+        # The gap inventory must be untouched - its VirtualMachines key survives.
+        $Merged = Get-Content -Path $Result.OutputInventory -Raw | ConvertFrom-Json
+        $Merged.PSObject.Properties.Name | Should -Contain 'VirtualMachines' -Because 'the gap inventory is carried forward when only a data phase is recovered'
+        $OutCsv = Join-Path $C.Output ('Consumption_{0}.csv' -f $script:GapBase)
+        (Get-Content -Path $OutCsv -Raw) | Should -Match 'REC-METER'
+    }
 }
 
 Describe 'Merge-RecoveryData consumption handling' {
@@ -252,7 +266,8 @@ Describe 'Merge-RecoveryData consumption handling' {
         New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) })
         New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
 
-        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
+        # Return value is unused here; this case asserts on the emitted CSV.
+        $null = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
 
         $OutCsv = Join-Path $C.Output ('Consumption_{0}.csv' -f $script:GapBase)
         Test-Path -Path $OutCsv | Should -BeTrue
@@ -275,6 +290,25 @@ Describe 'Merge-RecoveryData metrics handling' {
         (Get-Content -Path $OutMetrics -Raw) | Should -Match 'gap-metric'
     }
 
+    It 'carries EVERY gap metrics batch forward, not just the newest (default = gap)' {
+        # The metrics phase writes one file per batch (Metrics_<base>__<idx>.json).
+        # Carrying only the newest would silently drop a batch, so drive the
+        # default path with TWO batches and assert both survive.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-batch-0"]}'; '__1' = '{"Metrics":["gap-batch-1"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
+
+        $Result.MetricsSource | Should -Be 'gap'
+        $Batch0 = Join-Path $C.Output ('Metrics_{0}__0.json' -f $script:GapBase)
+        $Batch1 = Join-Path $C.Output ('Metrics_{0}__1.json' -f $script:GapBase)
+        Test-Path -Path $Batch0 | Should -BeTrue -Because 'the first metrics batch must be carried forward'
+        Test-Path -Path $Batch1 | Should -BeTrue -Because 'a second metrics batch must NOT be dropped by a newest-wins regression'
+        (Get-Content -Path $Batch0 -Raw) | Should -Match 'gap-batch-0'
+        (Get-Content -Path $Batch1 -Raw) | Should -Match 'gap-batch-1'
+    }
+
     It 'replaces and rebases metrics to the gap base under -RecoverMetrics (MetricsSource = recovery)' {
         $C = New-Case
         New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
@@ -287,6 +321,26 @@ Describe 'Merge-RecoveryData metrics handling' {
         Test-Path -Path $Rebased | Should -BeTrue -Because 'recovery metrics are rebased to the output bundle base'
         (Get-Content -Path $Rebased -Raw) | Should -Match 'rec-metric'
         Test-Path -Path (Join-Path $C.Output ('Metrics_{0}__0.json' -f $script:RecBase)) | Should -BeFalse -Because 'the recovery base name must not survive into the output'
+    }
+
+    It 'rebases EVERY recovery metrics batch to the gap base, not just the newest (-RecoverMetrics)' {
+        # As above but for the recovery path: -RecoverMetrics must rebase EACH
+        # batch to the output base. Two recovery batches guard against a
+        # newest-wins regression that would rebase only one and drop the rest.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["rec-batch-0"]}'; '__1' = '{"Metrics":["rec-batch-1"]}' }
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverMetrics
+
+        $Result.MetricsSource | Should -Be 'recovery'
+        $Batch0 = Join-Path $C.Output ('Metrics_{0}__0.json' -f $script:GapBase)
+        $Batch1 = Join-Path $C.Output ('Metrics_{0}__1.json' -f $script:GapBase)
+        Test-Path -Path $Batch0 | Should -BeTrue -Because 'the first recovery batch must be rebased to the output base'
+        Test-Path -Path $Batch1 | Should -BeTrue -Because 'a second recovery batch must NOT be dropped by a newest-wins regression'
+        (Get-Content -Path $Batch0 -Raw) | Should -Match 'rec-batch-0'
+        (Get-Content -Path $Batch1 -Raw) | Should -Match 'rec-batch-1'
+        Test-Path -Path (Join-Path $C.Output ('Metrics_{0}__1.json' -f $script:RecBase)) | Should -BeFalse -Because 'no recovery base name may survive for any batch'
     }
 
     It 'throws when -RecoverMetrics is set but the recovery bundle has no metrics' {
@@ -475,6 +529,32 @@ Describe 'Merge-RecoveryData guards (advisory warnings)' {
 
         @($Result.Warnings).Count | Should -Be 0
     }
+
+    It 'warns and uses the newest when a bundle folder holds more than one Inventory match' {
+        # Get-BundleFile emits a non-fatal advisory when a folder holds >1 file
+        # matching a filter (the "InventoryRoot pointed at many runs" trap) and
+        # proceeds with the newest. Drive it by planting a SECOND Inventory_*.json
+        # in the gap folder with a newer timestamp, then assert both that the
+        # advisory fired and that the newer inventory (its DecoyOnly key) was used.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) })
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        # Second, NEWER inventory in the same gap folder (a different base so the
+        # 'Inventory_*.json' filter matches two files).
+        $NewerBase = 'GapReport_20260601_000000'
+        $NewerInventoryPath = Join-Path $C.Gap ('Inventory_{0}.json' -f $NewerBase)
+        ([ordered]@{ Version = '3.2.3'; DecoyOnly = @((New-Record 'decoy01')) } | ConvertTo-Json -Depth 100) | Out-File -FilePath $NewerInventoryPath -Encoding utf8
+        (Get-Item -LiteralPath $NewerInventoryPath).LastWriteTime = (Get-Date).AddMinutes(5)
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -Service 'AppServices' -WarningAction SilentlyContinue
+
+        ($Result.Warnings -join "`n") | Should -Match "files match 'Inventory_\*\.json'" -Because 'a folder with two inventories must raise the multi-match advisory'
+        # The newest inventory (DecoyOnly, no VirtualMachines) was the one read.
+        $Merged = Get-Content -Path $Result.OutputInventory -Raw | ConvertFrom-Json
+        $Merged.PSObject.Properties.Name | Should -Contain 'DecoyOnly' -Because 'Get-BundleFile uses the newest match'
+        $Merged.PSObject.Properties.Name | Should -Not -Contain 'VirtualMachines' -Because 'the older inventory must not be the one used'
+    }
 }
 
 Describe 'Merge-RecoveryData dictionary merge and packaging' {
@@ -532,4 +612,54 @@ Describe 'Merge-RecoveryData dictionary merge and packaging' {
         (Get-Content -Path $GapInvPath -Raw) | Should -Be $GapBefore -Because 'the merge writes to OutputPath only, never back into the gap bundle'
         (Get-Content -Path $RecInvPath -Raw) | Should -Be $RecBefore -Because 'the recovery bundle is read-only input'
     }
+
+    It 'zips only the files this merge wrote, never stale JSON left in a reused output folder' {
+        # Regression guard: the re-zip once globbed $OutputPath/*.json into a REUSED (never-cleaned) output folder, bundling stale JSON.
+        # Plant stale inventory + metrics files and assert neither survives into the zip while the real members do.
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-metric"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+
+        New-Item -ItemType Directory -Path $C.Output -Force | Out-Null
+        '{"stale":"inventory"}' | Out-File -FilePath (Join-Path $C.Output 'Inventory_STALE_from_previous_run.json') -Encoding utf8
+        '{"stale":"metrics"}' | Out-File -FilePath (Join-Path $C.Output 'Metrics_STALE.json') -Encoding utf8
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output
+
+        $Entries = Get-ZipEntryNames -ZipPath $Result.OutputZip
+        $Entries | Should -Not -Contain 'Inventory_STALE_from_previous_run.json' -Because 'a stale inventory left in a reused output folder must not be packaged'
+        $Entries | Should -Not -Contain 'Metrics_STALE.json' -Because 'a stale metrics file left in a reused output folder must not be packaged'
+        ($Entries | Where-Object { $_ -eq ('Inventory_{0}.json' -f $script:GapBase) }) | Should -Not -BeNullOrEmpty -Because 'the real merged inventory must still be packaged'
+        ($Entries | Where-Object { $_ -like '*.html' }) | Should -Not -BeNullOrEmpty -Because 'the regenerated HTML must still be packaged'
+        ($Entries | Where-Object { $_ -like 'Consumption_*.csv' }) | Should -Not -BeNullOrEmpty -Because 'the consumption CSV must still be packaged'
+        ($Entries | Where-Object { $_ -eq ('Metrics_{0}__0.json' -f $script:GapBase) }) | Should -Not -BeNullOrEmpty -Because 'the real gap metrics batch must still be packaged'
+    }
+
+    It 'packages the merged files, not a decoy sibling, when the output folder name contains brackets' {
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) })
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) })
+        # 'out [1]' is a wildcard pattern under -Path; it matches the sibling 'out 1'. Plant a decoy there
+        # with the exact names the merge will produce, so a -Path regression would zip the decoy instead.
+        $Bracketed = Join-Path $script:TmpRoot ('out [1]_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $Decoy = $Bracketed -replace '\[1\]', '1'
+        New-Item -ItemType Directory -Path $Decoy -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Decoy ('{0}.html' -f $script:GapBase)) -Value 'DECOY'
+        Set-Content -LiteralPath (Join-Path $Decoy ('Inventory_{0}.json' -f $script:GapBase)) -Value 'DECOY'
+
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $Bracketed
+
+        Test-Path -LiteralPath $Result.OutputZip | Should -BeTrue
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Result.OutputZip)
+        try
+        {
+            $Entry = $Archive.Entries | Where-Object { $_.Name -eq ('Inventory_{0}.json' -f $script:GapBase) } | Select-Object -First 1
+            $Entry | Should -Not -BeNullOrEmpty
+            $Reader = New-Object System.IO.StreamReader($Entry.Open()); try { $Text = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+            $Text | Should -Not -Match 'DECOY' -Because 'the zip must hold the files written to the bracketed folder, not the sibling that matches it as a wildcard'
+            $Text | Should -Match 'VirtualMachines'
+        }
+        finally { $Archive.Dispose() }
+    }
 }
+

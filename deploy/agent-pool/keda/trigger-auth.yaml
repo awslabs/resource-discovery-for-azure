@@ -1,0 +1,30 @@
+# Secret + KEDA TriggerAuthentication for the azure-pipelines scaler.
+#
+# The SAME PAT is used two ways:
+#   - AZP_URL / AZP_TOKEN  -> the agent pod (start.sh) registers with the pool
+#   - personalAccessToken  -> KEDA reads the pool's pending-job queue length
+#
+# Replace the placeholders. Use `stringData` so you paste plain values; do NOT
+# commit a real PAT - keep this file's real values out of git (the repo only
+# ships placeholders). The PAT needs "Agent Pools (Read & manage)".
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ado-agent-auth
+  namespace: ado
+type: Opaque
+stringData:
+  AZP_URL: "https://dev.azure.com/<your-org>"
+  AZP_TOKEN: "<your-pat>"
+  personalAccessToken: "<your-pat>"
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: pipeline-trigger-auth
+  namespace: ado
+spec:
+  secretTargetRef:
+    - parameter: personalAccessToken
+      name: ado-agent-auth
+      key: personalAccessToken

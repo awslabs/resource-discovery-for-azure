@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $MySQL = $Resources | Where-Object { $_.TYPE -eq 'microsoft.dbformysql/servers' }
+    $MySQL = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.dbformysql/servers') { $Row } }
 
     if ($MySQL)
     {
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'SKUFamily'                 = $Sku.family;
                 'Tier'                      = $Sku.tier;
                 'Capacity'                  = $Sku.capacity;
-                'MySQLVersion'              = "=$($Data.version)";
+                'MySQLVersion'              = $Data.version;
                 'BackupRetentionDays'       = $Data.storageProfile.backupRetentionDays;
                 'GeoRedundantBackup'        = $Data.storageProfile.geoRedundantBackup;
                 'AutoGrow'                  = $Data.storageProfile.storageAutogrow;

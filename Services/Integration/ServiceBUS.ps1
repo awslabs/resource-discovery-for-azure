@@ -2,7 +2,7 @@ param($Sub, $Resources, $Task, $ResourceIdDictionary)
 
 if ($Task -eq 'Processing')
 {
-    $Svchub = $Resources | Where-Object { $_.TYPE -eq 'microsoft.servicebus/namespaces' }
+    $Svchub = foreach ($Row in $Resources) { if ($Row.TYPE -eq 'microsoft.servicebus/namespaces') { $Row } }
 
     if ($Svchub)
     {
@@ -13,9 +13,7 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $Sku = $1.SKU
-            $Timecreated = $Data.createdAt
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            $Timecreated = try { if ($null -ne $Data.createdAt) { [datetime]($Data.createdAt) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                    = $1.id;

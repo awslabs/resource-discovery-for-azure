@@ -19,6 +19,10 @@ BeforeAll {
     Expand-Archive -Path $ZipPath -DestinationPath $script:ExtractPath -Force
 
     $InvFile = Get-ChildItem -Path $script:ExtractPath -Filter "Inventory_*.json" | Select-Object -First 1
+    if ($null -eq $InvFile)
+    {
+        throw "No Inventory_*.json found in the extracted zip. The fixture is empty, partial, or corrupt; failing loudly rather than skipping every test."
+    }
     $script:Inventory = if ($InvFile) { Get-Content $InvFile.FullName -Raw | ConvertFrom-Json } else { $null }
     $script:FrontDoors = @($script:Inventory.FRONTDOOR) | Where-Object { $null -ne $_ }
 
@@ -92,7 +96,7 @@ Describe "Front Door WAF Field" {
         }
     }
 
-    It "WAF value should be a known marker or a non-Azure-path string" {
+    It "WAF value is never the misleading 'Enabled' marker" {
         if ($script:FrontDoors.Count -eq 0) { Set-ItResult -Skipped -Because "no Front Door resources in fixture"; return }
         foreach ($fd in $script:FrontDoors)
         {

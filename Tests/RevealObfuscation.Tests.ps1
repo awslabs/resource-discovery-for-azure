@@ -1,27 +1,5 @@
-# Reveal-Obfuscation.ps1 unit tests
-# =============================================================================
-# Offline, self-contained tests for the partial-reveal helper. They build a
-# synthetic obfuscated report bundle (Inventory JSON + Consumption CSV) and a
-# matching ObfuscationDictionary fixture in a temp dir, zip it like an
-# -Obfuscate run would, then run Reveal-Obfuscation.ps1 against it and assert:
-#   - selected dimensions (Resource Group, Subscription name) are revealed,
-#     including the Resource-Group-name parsing edge cases (AKS MC_ managed
-#     groups, casing preserved) that the reveal tool shares
-#   - UNSELECTED dimensions (Resource Id, Resource Name, and tag values unless
-#     -Fields Tag is passed) stay masked
-#   - the rewritten members are still valid (JSON parses, CSV columns intact
-#     even when a revealed value contains a comma), and the literal 'obfuscated'
-#     sentinel is left untouched
-#   - older dictionaries (no SubscriptionNameMap) fall back to the sub GUID, and
-#     -Fields Tag is a no-op when the dictionary has no TagMap
-#   - the dictionary auto-discovers via -SearchDirectory, and the source zip is
-#     never mutated
-#
-# The obfuscated tokens are generated at runtime as 'prod_'/'nonprod_' + a fresh
-# GUID, so the tool's token regex matches them while no real GUID literal lives
-# in this source file. The only literal GUID is the Azure docs placeholder used
-# inside the synthetic ARM paths. No customer data.
-# =============================================================================
+# Offline, self-contained Pester tests for the single-report reveal engine (Reveal.ps1).
+# The only literal GUID is the Azure docs placeholder; tokens are runtime GUIDs - no customer data.
 
 BeforeAll {
     # The single-report reveal engine now lives in Reveal.ps1 (single mode), which
@@ -390,33 +368,8 @@ Describe "Reveal-Obfuscation dictionary handling and source safety" {
     }
 }
 
-# =============================================================================
-# FreeText round-trip via FreeTextMap (P3) — fixture-independent
-# -----------------------------------------------------------------------------
-# Task 5.2 | Requirements 5.2, 5.3 | Property: P3
-#
-# Closes a coverage gap. The live-dictionary determinism block in
-# Obfuscation.Tests.ps1 ("FreeText: each real free-text value maps to exactly
-# one token", P1 / Req 5.3) SKIPS whenever the run's FreeTextMap is empty —
-# which it is for the current obfuscated fixture — and the reveal FreeText
-# tests above exercise only a single token occurrence. These assertions depend
-# on neither: they build a self-contained obfuscated bundle whose FreeText
-# tokens model a deterministic Protect-FreeTextValue output (a real value seen
-# twice yields ONE shared token, a distinct value gets a distinct token) plus a
-# matching FreeTextMap, then run the real Reveal-Obfuscation substitution path
-# and prove the round-trip:
-#   - the tokens are present in the obfuscated ZIP and resolve to real values
-#     via FreeTextMap (Req 5.2), each stored value being a real value — not a
-#     token, null, or the 'obfuscated' sentinel (lossless intent);
-#   - a real value that appears more than once carries a single shared token
-#     (Req 5.3) and every occurrence round-trips back to that same real value,
-#     i.e. reveal(obfuscate(x)) == x (P3).
-# The real->token determinism itself is asserted against a live dictionary by
-# the P1 FreeTextMap block in Obfuscation.Tests.ps1; this block is its
-# fixture-independent round-trip counterpart and does not duplicate it. No
-# customer data: tokens are runtime GUIDs, the only literal GUID is the Azure
-# docs placeholder, and the free-text values are synthetic.
-# =============================================================================
+# FreeText round-trip (P3): a real value seen twice yields ONE shared token, and every occurrence reveals back to that same value.
+# Fixture-independent counterpart to the P1 FreeTextMap block in Obfuscation.Tests.ps1.
 Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
 
     BeforeAll {
@@ -489,25 +442,31 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
         }
     }
 
-    It "the free-text tokens are present in the obfuscated ZIP (pre-reveal)" {
+    It "fixture precondition: the free-text tokens are present in the obfuscated staging inventory (pre-reveal)" {
+        # Checks this BeforeAll's own fixture, not obfuscator output; the reveal assertions below rely on it.
         $script:P3RawObfuscated | Should -Match ([regex]::Escape($script:P3TokShared))
         $script:P3RawObfuscated | Should -Match ([regex]::Escape($script:P3TokOther))
     }
 
     It "FreeTextMap resolves each token to a real value (not a token, null, or the 'obfuscated' sentinel)" {
-        foreach ($tok in @($script:P3TokShared, $script:P3TokOther))
+        # Assert on the reveal engine's OUTPUT ($script:P3Revealed), not the
+        # fixture dictionary: each revealed free-text field must be a real value,
+        # proving the engine resolved every token via FreeTextMap (Req 5.2).
+        foreach ($Real in @($script:P3Revealed.VirtualMachines[0].CreatedBy, $script:P3Revealed.VirtualMachines[1].CreatedBy, $script:P3Revealed.VirtualMachines[2].RoleName))
         {
-            $Real = $script:P3Dict.FreeTextMap[$tok]
             $Real | Should -Not -BeNullOrEmpty
             $Real | Should -Not -Match $script:P3TokenRegex
             $Real | Should -Not -Be 'obfuscated'
         }
     }
 
-    It "a real value seen more than once carries a single shared token in the obfuscated ZIP (Req 5.3)" {
-        # vmA and vmB shared one real free-text value -> one shared token.
-        $script:P3Inventory.VirtualMachines[0].CreatedBy | Should -Be $script:P3Inventory.VirtualMachines[1].CreatedBy
-        $script:P3Inventory.VirtualMachines[0].CreatedBy | Should -Be $script:P3TokShared
+    It "fixture precondition: a real value seen more than once carries a single shared token in the staging inventory" {
+        # The staging inventory is this BeforeAll's own fixture, with P3TokShared assigned to both
+        # vmA and vmB, so this confirms the reveal input rather than obfuscator determinism (Req 5.3),
+        # which Obfuscation.Tests.ps1 (P1) covers.
+        $Obf = $script:P3RawObfuscated | ConvertFrom-Json
+        $Obf.VirtualMachines[0].CreatedBy | Should -Be $Obf.VirtualMachines[1].CreatedBy
+        $Obf.VirtualMachines[0].CreatedBy | Should -Be $script:P3TokShared
     }
 
     It "every occurrence of the shared token round-trips to the same real value (P3)" {
@@ -528,31 +487,8 @@ Describe "Reveal-Obfuscation FreeText round-trip via FreeTextMap (P3)" {
     }
 }
 
-# =============================================================================
-# Explicit -Fields subset reveal isolation (P4) — Task 7.2 | Requirements 7.2, 7.3
-# -----------------------------------------------------------------------------
-# Task 7.1 (the "default fields" Describe near the top) covers the no--Fields
-# default (ResourceGroup + Subscription). These blocks close the EXPLICIT-subset
-# gap for Property P4 (selective isolation / no bleed): for each single dimension
-# named explicitly on its own via -Fields, and for a multi-dimension subset,
-# assert the named dimension(s) round-trip to the real value AND every OTHER
-# dimension's token is left unchanged (still masked).
-#
-# The synthetic vm01 (VirtualMachines[0]) built in the top-level BeforeAll carries
-# all six revealable dimensions at once (ID, Name, Subscription, ResourceGroup,
-# Tags[0].Value, Description), so a single reveal per field set proves both the
-# reveal and the no-bleed for the remaining dimensions. Reuses that fixture, its
-# $script:Tok*/Real* vars and the Invoke-Reveal helper; no new fixture, no
-# customer data (tokens are runtime GUIDs; the only literal GUID is the Azure docs
-# placeholder inside the synthetic ARM paths).
-#
-# Non-duplication: the single-dimension ResourceName, ResourceId and FreeText
-# reveals (plus one no-bleed check each) are already asserted by the "opt-in
-# ResourceName / ResourceId" and "-Fields FreeText" Describes above, so the
-# corresponding contexts here add ONLY the remaining previously-unchecked
-# no-bleed dimensions for those three. The ResourceGroup-only, Subscription-only,
-# Tag-only single-dimension cases and the two-dimension subset are entirely new.
-# =============================================================================
+# Explicit -Fields subset isolation (P4): each named dimension reveals while every other dimension's token stays masked (no bleed).
+# vm01 carries all six revealable dimensions, so one reveal per field set proves both the reveal and the no-bleed.
 Describe "Reveal-Obfuscation explicit -Fields subset isolation (P4)" {
 
     Context "single dimension: -Fields ResourceGroup" {
@@ -717,31 +653,8 @@ Describe "Reveal-Obfuscation explicit -Fields subset isolation (P4)" {
     }
 }
 
-# =============================================================================
-# Full reveal -All: overrides -Fields + lossy-fields warning
-#   Task 8 | Requirements 8.1, 8.3 | Property: P3
-# -----------------------------------------------------------------------------
-# The "Reveal-Obfuscation -All full reveal" Describe above already asserts that
-# -All restores all six dictionary-backed dimensions in one pass (Req 8.1/8.2,
-# P3) and leaves the lossy 'obfuscated' sentinel unrecovered (Req 8.3). These
-# blocks close the two remaining Req 8 gaps, reusing the top-level synthetic
-# fixture (vm01 carries all six revealable dimensions plus an 'obfuscated'
-# sentinel) and the Invoke-Reveal helper:
-#   - Req 8.1 (override): passing '-All -Fields Subscription' must STILL reveal
-#     every dimension, not just Subscription. If -Fields had won, RG / Name / Id
-#     / Tag / FreeText would remain tokenized; asserting they are all revealed
-#     proves -All clobbered the explicit -Fields value. Invoke-Reveal forwards
-#     both switches, so this exercises the real precedence path.
-#   - Req 8.3 (warning): on completion under -All the reveal script surfaces a
-#     lossy-fields notice (a yellow host line naming values nulled at
-#     obfuscation time / stamped 'obfuscated' as unrecoverable). This captures
-#     the script's merged output stream (*>&1 - the same capture the rest of
-#     this file uses to invoke the script, and the stream Write-Host lands on
-#     under PowerShell 7) and asserts the notice is present, then confirms the
-#     'obfuscated' sentinel indeed survives unrecovered in that same -All output.
-# No production/reveal-logic change - assertions only. No customer data: reuses
-# runtime-GUID tokens and the Azure docs placeholder GUID from the fixture.
-# =============================================================================
+# -All overrides an explicit -Fields value (reveals every dimension, not just the named one) and warns that lossy fields remain unrecoverable.
+# The warning is captured off the script's merged output stream (*>&1).
 Describe "Reveal-Obfuscation -All overrides -Fields and warns of lossy fields (Req 8.1, 8.3, P3)" {
 
     Context "-All overrides an explicit -Fields value" {
@@ -798,30 +711,8 @@ Describe "Reveal-Obfuscation -All overrides -Fields and warns of lossy fields (R
     }
 }
 
-# =============================================================================
-# Structural preservation (P5) — Task 9.1 | Requirements 7.4 | Property: P5
-# -----------------------------------------------------------------------------
-# Reveal-Obfuscation.ps1 preserves structure by extracting the input ZIP
-# (Expand-Archive, line 304), rewriting each member IN PLACE under its original
-# filename through the format-correct writer (CSV via Export-Csv line 365,
-# JSON/HTML via Set-Content line 385 after the escapeMode switch at line 374),
-# and re-zipping the same temp tree (Compress-Archive line 397) — so member
-# names never change and every member stays valid in its own format.
-#
-# These assertions close the P5 gap left by the rest of this file: the default
-# "produces valid JSON that re-parses" check is incidental (it only inspects the
-# Inventory object the helper already parsed), and the CSV/HTML checks above are
-# value/escaping (P9) assertions, not structure-parity ones. NONE of them (a)
-# compare the revealed ZIP's member SET/filenames to the input ZIP's, (b) assert
-# every JSON member re-parses with no error, (c) compare revealed CSV column
-# headers to the INPUT's headers, or (d) check the HTML member is well-formed.
-# This block adds exactly those four, reusing the top-level synthetic fixture
-# (Inventory JSON + Consumption CSV + HTML report members), the Invoke-Reveal
-# helper, and the top-level AfterAll (the two extraction dirs live under
-# $script:TmpDir, so they are cleaned with it). No production/reveal-logic
-# change — assertions only. No customer data: reuses runtime-GUID tokens and the
-# Azure docs placeholder GUID from the fixture; revealed values are synthetic.
-# =============================================================================
+# Structural preservation (P5): the revealed ZIP keeps the input's member set/filenames, every JSON member re-parses,
+# CSV headers and row count match the input, and HTML members stay well-formed.
 Describe "Reveal-Obfuscation structural preservation (P5, Req 7.4)" {
 
     BeforeAll {
@@ -895,44 +786,8 @@ Describe "Reveal-Obfuscation structural preservation (P5, Req 7.4)" {
     }
 }
 
-# =============================================================================
-# No-op byte equality (P6) — Task 9.2 | Requirements 9.4 | Property: P6
-# -----------------------------------------------------------------------------
-# Reveal-Obfuscation.ps1 leaves a member with NO selected tokens byte-for-byte
-# unchanged: it re-writes a member only when that member's per-file hit counter
-# is greater than zero. CSV members are re-exported only under
-# `if ($script:fileHits -gt 0)` (Export-Csv, line 363-366); JSON/HTML/other
-# members are re-written only under the same guard (Set-Content, line 383-386).
-# A zero-hit member is therefore never opened for write on disk, so it survives
-# the extract -> (no change) -> re-zip -> extract round-trip with identical
-# bytes.
-#
-# This closes the P6 gap the rest of this file leaves open. The nearest existing
-# checks assert something different:
-#   - "does not mutate the input zip" hashes the INPUT zip (input immutability,
-#     not an output member being unchanged);
-#   - the P5 structural block compares member SET/filenames, JSON re-parse, CSV
-#     header/row parity, and HTML well-formedness — none of which is a byte
-#     comparison (a re-quoted or re-encoded member can pass all four yet differ
-#     byte-for-byte);
-#   - the FreeText/Tag "no-op" checks assert a token value is unchanged in the
-#     PARSED object, not that the raw member bytes are identical.
-#
-# Approach: reveal ONLY the Tag dimension against the top-level synthetic
-# fixture. The Tag token ($script:TokTag) lives EXCLUSIVELY in the Inventory
-# JSON member, so:
-#   - Inventory_Test.json       -> has Tag hits  -> rewritten (proves reveal ran)
-#   - Consumption_Test.csv      -> zero Tag hits -> must be byte-identical
-#   - ResourcesReport_Test.html -> zero Tag hits -> must be byte-identical
-# (The CSV/HTML carry only Subscription/ResourceGroup tokens, which are NOT in
-# the replacement map when -Fields is Tag, so their hit counters stay zero.)
-# Byte equality is proved with a SHA256 hash of each member extracted from the
-# input ZIP vs the revealed ZIP. Reuses the top-level fixture, its
-# $script:Tok*/Real* vars, and the Invoke-Reveal helper; the two extraction dirs
-# live under $script:TmpDir, so the top-level AfterAll cleans them. No
-# production/reveal-logic change — assertions only. No customer data: reuses
-# runtime-GUID tokens and the Azure docs placeholder GUID from the fixture.
-# =============================================================================
+# No-op byte equality (P6): a member with zero selected-token hits is never rewritten, so it stays byte-identical (SHA256) across the round-trip.
+# Reveals only Tag (present solely in the JSON member) so the CSV and HTML members keep zero hits.
 Describe "Reveal-Obfuscation no-op byte equality (P6, Req 9.4)" {
 
     BeforeAll {
@@ -969,54 +824,8 @@ Describe "Reveal-Obfuscation no-op byte equality (P6, Req 9.4)" {
     }
 }
 
-# =============================================================================
-# Per-format escaping safety (P9) — Task 10 | Requirements 9.1, 9.2, 9.3
-# -----------------------------------------------------------------------------
-# Reveal-Obfuscation.ps1 escapes each revealed value to match its destination
-# member's format so a real value carrying format-significant characters cannot
-# corrupt the file:
-#   - .json  -> Get-JsonEscaped (ConvertTo-Json -Compress then strip the
-#               wrapping quotes) so the value is a valid JSON string literal
-#               (Reveal-Obfuscation.ps1 lines 290-298; invoked at line 327).
-#   - .csv   -> per-field raw reveal (Convert-RevealString -EscapeMode 'None',
-#               line 359) then re-emit through Export-Csv (line 366), which
-#               re-quotes any field containing a comma/quote/newline so columns
-#               stay intact.
-#   - .html  -> [System.Net.WebUtility]::HtmlEncode (line 328) so '&', '<', '>'
-#               and '"' become entities, matching the report's own encoding.
-#
-# This closes the P9 gap the rest of this file leaves open. The existing
-# escaping checks in the "default fields" Describe exercise only a SUBSET of the
-# format-significant characters and only two of the three formats:
-#   - the HTML check uses $RealSubName ('Contoso, Inc. (Prod) & Co'), so only
-#     '&' is exercised for HTML — never '<' or '"';
-#   - the CSV check exercises only the embedded comma from the same value —
-#     never an embedded quote or newline;
-#   - no assertion anywhere feeds a JSON member a value bearing the
-#     JSON-significant characters ('"', backslash, newline) and proves the
-#     member re-parses to the exact real value.
-#
-# This block builds a DEDICATED synthetic obfuscated bundle whose single
-# revealable (FreeText) value carries ALL of { '"', ',', '&', '<', newline }
-# (plus '>'), embeds the SAME token in a JSON member, a CSV member and an HTML
-# member, runs the real Reveal-Obfuscation.ps1 FreeText substitution path, and
-# asserts per format:
-#   - JSON  (Req 9.1): the member re-parses via ConvertFrom-Json AND the revealed
-#     field equals the exact real value (proving proper string-literal escaping
-#     of the quote/backslash/newline/'<'/'&').
-#   - CSV   (Req 9.2): Import-Csv yields the SAME column set, the row count is
-#     unchanged, the neighbouring column is untouched (columns did not split on
-#     the embedded comma/quote/newline) and the revealed field round-trips to the
-#     exact real value.
-#   - HTML  (Req 9.3): the member is well-formed ([xml] load) AND the raw member
-#     contains the value entity-encoded exactly as [System.Net.WebUtility]::HtmlEncode
-#     produces (matching the report's own encoding), with the token consumed.
-#
-# No production/reveal-logic change — assertions only. No customer data: the
-# token is a runtime GUID, the only literal GUID is the Azure docs placeholder
-# inside the synthetic ARM paths, and the free-text value is synthetic. The
-# dedicated fixture lives under its own temp dir and is removed in AfterAll.
-# =============================================================================
+# Per-format escaping (P9): one FreeText value carrying " , & < > and a newline is embedded in JSON, CSV and HTML members.
+# Each must round-trip to the exact value while staying valid in its own format (JSON string literal, unsplit CSV columns, HTML entities).
 Describe "Reveal-Obfuscation per-format escaping safety (P9, Req 9.1/9.2/9.3)" {
 
     BeforeAll {
@@ -1156,36 +965,8 @@ Describe "Reveal-Obfuscation per-format escaping safety (P9, Req 9.1/9.2/9.3)" {
     }
 }
 
-# =============================================================================
-# Input / dictionary resolution and failure paths — Task 11
-# Requirements 10.1, 10.2, 10.3, 7.6, 12.4
-# -----------------------------------------------------------------------------
-# Purely-additive coverage for the reveal tool's resolution and failure
-# contract. These close gaps left by the existing "dictionary handling and
-# source safety" Describe (which asserts single-dictionary auto-discovery,
-# input-zip immutability, and the unresolvable-dictionary throw / Req 10.3),
-# without duplicating any of them:
-#
-#   - Req 10.1  auto-discovery picks the NEWEST ObfuscationDictionary_*.json
-#               among SEVERAL of differing timestamps under -SearchDirectory
-#               (the existing test proves discovery works with a lone file; it
-#               does NOT prove "newest wins"). Reveal-Obfuscation.ps1:122-123
-#               sorts by LastWriteTime -Descending and takes -First 1.
-#   - Req 10.2  a missing input ZIP throws an error that NAMES the file
-#               (Reveal-Obfuscation.ps1:115-119).
-#   - Req 7.6   a field selection yielding zero token mappings throws
-#               "Nothing to reveal" (Reveal-Obfuscation.ps1:277-280) AND emits
-#               NO output ZIP (the throw precedes temp-dir creation:299,
-#               extraction:304 and Compress-Archive:397).
-#   - Req 12.4  the temp extraction dir (Reveal_<guid> under the system temp
-#               path, Reveal-Obfuscation.ps1:299) is removed by the finally
-#               block (410) on BOTH a successful reveal and a failed one.
-#
-# All fixtures live under $script:TmpDir so the top-level AfterAll removes them.
-# Synthetic values only; the sole literal GUID is the Azure docs placeholder
-# inside the synthetic ARM paths, and reveal tokens are runtime GUIDs (reusing
-# $script:TokRg from the top-level fixture). No customer data.
-# =============================================================================
+# Resolution/failure paths: newest ObfuscationDictionary_*.json wins auto-discovery; a missing input ZIP and a zero-mapping field selection both throw and emit no output ZIP.
+# The Reveal_<guid> temp dir is cleaned up on both a successful and a failed reveal.
 Describe "Reveal-Obfuscation input/dictionary resolution and failure paths (Task 11)" {
 
     Context "auto-discovery picks the newest dictionary (Req 10.1)" {
@@ -1261,6 +1042,62 @@ Describe "Reveal-Obfuscation input/dictionary resolution and failure paths (Task
         }
     }
 
+    Context "empty-subscription report (no tokens, empty dictionary)" {
+
+        BeforeAll {
+            # What an -Obfuscate run writes for a subscription with no resources:
+            # every dictionary map is empty and no member carries a token.
+            $script:EmptyDir = Join-Path $script:TmpDir ("emptysub_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $EmptyStage = Join-Path $script:EmptyDir 'stage'
+            New-Item -ItemType Directory -Path $EmptyStage -Force | Out-Null
+            '{"VirtualMachines":[]}' | Set-Content -Path (Join-Path $EmptyStage 'Inventory_Empty.json') -Encoding utf8
+            '<html><body><p>0 resources</p></body></html>' | Set-Content -Path (Join-Path $EmptyStage 'ResourcesReport_Empty.html') -Encoding utf8
+            $script:EmptyZip = Join-Path $script:EmptyDir 'ResourcesReport_Empty.zip'
+            Compress-Archive -Path (Join-Path $EmptyStage '*') -DestinationPath $script:EmptyZip -Force
+            $script:EmptyDict = Join-Path $script:EmptyDir 'ObfuscationDictionary_Empty.json'
+            [ordered]@{
+                GeneratedAt         = '2026-06-30 00:00:00'
+                SubscriptionMap     = [ordered]@{}
+                SubscriptionNameMap = [ordered]@{}
+                ResourceGroupMap    = [ordered]@{}
+                ResourceIdMap       = [ordered]@{}
+                ResourceNameMap     = [ordered]@{}
+                TagMap              = [ordered]@{}
+                FreeTextMap         = [ordered]@{}
+            } | ConvertTo-Json -Depth 6 | Set-Content -Path $script:EmptyDict -Encoding utf8
+        }
+
+        It "writes an unchanged copy instead of failing" {
+            $Out = Join-Path $script:EmptyDir 'empty_revealed.zip'
+            { & $script:RevealScript -InputZip $script:EmptyZip -DictionaryPath $script:EmptyDict -OutputZip $Out *>&1 | Out-Null } |
+                Should -Not -Throw
+            (Get-FileHash -Path $Out -Algorithm SHA256).Hash | Should -Be (Get-FileHash -Path $script:EmptyZip -Algorithm SHA256).Hash
+            Test-Path -Path (($Out -replace '\.zip$', '') + '.partial.zip') | Should -BeFalse
+        }
+
+        It "keeps the empty subscription in a bulk reveal and exits 0" {
+            $Root = Join-Path $script:EmptyDir 'root'
+            $FullSub = Join-Path $Root 'ResourcesReportFull'
+            $EmptySub = Join-Path $Root 'ResourcesReportEmpty'
+            New-Item -ItemType Directory -Path $FullSub, $EmptySub -Force | Out-Null
+            Copy-Item -LiteralPath $script:InputZip -Destination (Join-Path $FullSub 'ResourcesReport_Full.zip')
+            Copy-Item -LiteralPath $script:DictPath -Destination (Join-Path $FullSub 'ObfuscationDictionary_Full.json')
+            Copy-Item -LiteralPath $script:EmptyZip -Destination (Join-Path $EmptySub 'ResourcesReport_Empty.zip')
+            Copy-Item -LiteralPath $script:EmptyDict -Destination (Join-Path $EmptySub 'ObfuscationDictionary_Empty.json')
+            $Outer = Join-Path $script:EmptyDir 'AllSubscriptions_Revealed_Test.zip'
+
+            & $script:RevealScript -InventoryRoot $Root -OutputZip $Outer -RemoveStaging *>&1 | Out-Null
+            $LASTEXITCODE | Should -Be 0
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $Archive = [System.IO.Compression.ZipFile]::OpenRead($Outer)
+            try { $Names = @($Archive.Entries | ForEach-Object Name) } finally { $Archive.Dispose() }
+            $Names | Should -Contain 'ResourcesReport_Full.zip'
+            $Names | Should -Contain 'ResourcesReport_Empty.zip'
+            @(Get-ChildItem -LiteralPath $Root -Directory -Filter 'RevealedStaging_*') | Should -BeNullOrEmpty
+        }
+    }
+
     Context "temp extraction dir cleanup (Req 12.4)" {
 
         BeforeAll { $script:SysTemp = [System.IO.Path]::GetTempPath() }
@@ -1274,7 +1111,7 @@ Describe "Reveal-Obfuscation input/dictionary resolution and failure paths (Task
 
         It "leaves no Reveal_* temp dir behind after a failed reveal (post-extraction failure)" {
             # A file that exists (so the input-zip guard passes) but is not a real
-            # archive, so Expand-Archive fails INSIDE the try block, exercising the
+            # archive, so ZipFile::ExtractToDirectory fails INSIDE the try block, exercising the
             # finally cleanup on the failure path.
             $CorruptZip = Join-Path $script:TmpDir ("corrupt_" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.zip')
             Set-Content -Path $CorruptZip -Value 'this is not a zip archive' -Encoding utf8
@@ -1288,46 +1125,8 @@ Describe "Reveal-Obfuscation input/dictionary resolution and failure paths (Task
     }
 }
 
-# =============================================================================
-# Backward compatibility with older / partial dictionaries — Task 12
-# Requirements 11.1, 11.2, 11.3
-# -----------------------------------------------------------------------------
-# Purely-additive coverage for graceful degradation against older-shaped
-# dictionaries. Reveal-Obfuscation.ps1 confirms the contract:
-#   - Req 11.1  Subscription reveal prefers SubscriptionNameMap; when a token
-#               has no friendly name it falls back to the /subscriptions/<guid>
-#               GUID (Reveal-Obfuscation.ps1:219-221) and, once the pass
-#               completes, emits a Write-Warning naming the missing
-#               SubscriptionNameMap (272-274).
-#   - Req 11.2  -Fields Tag against a dictionary with no TagMap emits a
-#               Write-Warning and skips Tag (empty TagMap loop adds nothing,
-#               229-235) WITHOUT throwing - the run still succeeds for the other
-#               selected dimensions. (Tag alone would hit the "Nothing to
-#               reveal" throw at 277-280, so it is asserted alongside a
-#               resolvable dimension, matching the tool's real behavior.)
-#   - Req 11.3  with the four core maps present but the optional maps
-#               (SubscriptionNameMap / TagMap / FreeTextMap) absent, the tool
-#               proceeds and reverses the dimensions it can - ResourceGroup
-#               (196-203) and ResourceId (234-241) still resolve off the core
-#               maps.
-#
-# Non-duplication: the existing "older / partial dictionaries" Describe already
-# asserts (a) Subscription falls back to the GUID (Req 11.1 value) and (b) tag
-# values stay masked with no TagMap (Req 11.2 skip). This block adds ONLY the
-# previously-unasserted pieces: the Req 11.1 WARNING, the Req 11.2 WARNING plus
-# an explicit does-NOT-throw, and the Req 11.3 proceed-with-reversible-dimensions
-# assertions (ResourceGroup + ResourceId revealed from a core-maps-only dict).
-#
-# Warnings are captured off the script's warning stream (3>&1, filtered to
-# WarningRecord); Write-Host status lines land on the information stream and are
-# not captured. Value assertions reuse the top-level Invoke-Reveal helper. All
-# synthetic older-shaped dictionaries are built here (not read from the real
-# fixture) and live under $script:TmpDir, so the top-level AfterAll removes them.
-# Synthetic values only: reveal tokens are runtime GUIDs reused from the
-# top-level fixture ($script:TokSub / $script:TokRg / $script:TokId /
-# $script:TokName / $script:TokTag), and the only literal GUID is the Azure docs
-# placeholder inside the synthetic ARM paths. No customer data.
-# =============================================================================
+# Backward compat with older dictionaries: missing SubscriptionNameMap falls back to the sub GUID (with a warning), -Fields Tag with no TagMap warns and skips without throwing, and core-maps-only dicts still reveal ResourceGroup + ResourceId.
+# Warnings are captured off the script's warning stream (3>&1).
 Describe "Reveal-Obfuscation backward compatibility with older dictionaries (Req 11.1, 11.2, 11.3)" {
 
     BeforeAll {
@@ -1452,5 +1251,39 @@ Describe 'Reveal atomic output packaging (F3)' {
         Test-Path -LiteralPath $Out | Should -BeTrue -Because 'the atomic rename must leave the completed archive at the final name'
         $Partial = ($Out -replace '\.zip$', '') + '.partial.zip'
         Test-Path -LiteralPath $Partial | Should -BeFalse -Because 'the temp .partial.zip must be renamed away, never left behind on a successful reveal'
+    }
+}
+
+Describe 'Reveal.ps1: -RemoveStaging names why the staging directory was kept' {
+    # The staging decision is lifted from Reveal.ps1's parsed source and run with its inputs.
+    BeforeAll {
+        $Tokens = $null
+        $ParseErrors = $null
+        $RevealAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Reveal.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $Found = @($RevealAst.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$RemoveStaging -and $CleanRun -and (Test-Path -LiteralPath $OutputZip)' }, $true))
+        if ($Found.Count -ne 1) { throw ("expected exactly one staging decision in Reveal.ps1, found {0}" -f $Found.Count) }
+        $script:StagingBlock = [scriptblock]::Create($Found[0].Extent.Text)
+
+        function Invoke-StagingDecision
+        {
+            param([int]$FailedCount, [string]$ConsolidationMessage)
+            Set-Variable -Name RemoveStaging -Value $true
+            Set-Variable -Name FailedItems -Value @(1..$FailedCount | Where-Object { $FailedCount -gt 0 })
+            Set-Variable -Name ConsolidationError -Value $(if ($ConsolidationMessage) { $ConsolidationMessage } else { $null })
+            Set-Variable -Name CleanRun -Value ($FailedCount -eq 0 -and -not $ConsolidationMessage)
+            Set-Variable -Name OutputZip -Value (Join-Path $TestDrive 'missing.zip')
+            Set-Variable -Name StagingDirectory -Value (Join-Path $TestDrive 'staging')
+            @(. $script:StagingBlock 6>&1 | ForEach-Object { [string]$_ })
+        }
+    }
+    It 'blames the outer zip, not the folders, when only consolidation failed' {
+        $Lines = Invoke-StagingDecision -FailedCount 0 -ConsolidationMessage 'Access denied'
+        @($Lines | Where-Object { $_ -like '-RemoveStaging skipped: the outer zip could not be built*' }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like '*folder(s) failed or timed out*' }).Count | Should -Be 0
+    }
+    It 'keeps the folder wording when folders failed' {
+        $Lines = Invoke-StagingDecision -FailedCount 2 -ConsolidationMessage ''
+        @($Lines | Where-Object { $_ -eq '-RemoveStaging skipped: 2 folder(s) failed or timed out. Staging kept so you can recover them with -Resume:' }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like '*outer zip could not be built*' }).Count | Should -Be 0
     }
 }

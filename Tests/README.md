@@ -5,11 +5,14 @@ Pester tests to validate that the obfuscation feature works correctly and no PII
 ## Prerequisites
 
 - PowerShell 7+
-- Pester module (v5+)
+- Pester module 5.7.1
 
 ```powershell
-Install-Module -Name Pester -Force -Scope CurrentUser
+Install-Module -Name Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser
 ```
+
+The suite is verified on 5.7.1.
+When a newer Pester is also installed, `Invoke-Pester` loads the newest one, so every run below imports 5.7.1 first.
 
 ## How to Run
 
@@ -28,7 +31,7 @@ cp /path/to/ResourcesReport_*.zip ./Tests/
 ### 3. Run the tests
 
 ```powershell
-pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
 
 Or set environment variables to avoid editing the test file:
@@ -40,6 +43,8 @@ $env:TEST_USER_EMAIL = "user@example.com"
 pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
 
+In this variant, put `Import-Module Pester -RequiredVersion 5.7.1;` in front of `Invoke-Pester` as well.
+
 ### 4. Run skip-mode tests (no Azure needed)
 
 Generate skip-mode output:
@@ -50,8 +55,36 @@ pwsh ./ResourceInventory.ps1 -SubscriptionID <your-sub-id> -SkipMetrics -SkipCon
 Then run:
 ```powershell
 $env:TEST_ZIP_PATH = "./Tests/ResourcesReport_skip.zip"
-pwsh -Command "Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/Obfuscation.Tests.ps1 -Output Detailed"
 ```
+
+## Outer Bundle Membership Tests
+
+`OuterBundleMembership.Tests.ps1` pins the member set of the consolidated
+`AllSubscriptions_ResourcesReport_<timestamp>.zip` - the one file an operator sends.
+Every other suite inspects an INNER per-subscription zip, so nothing else asserts
+what the outer bundle may and may not contain.
+
+Its most important assertions are the negative ones. The bundle must NEVER contain
+the obfuscation dictionary (the de-obfuscation key), a transcript, a debug/error
+log, resume state, a support-log bundle, or a nested `AllSubscriptions_*` bundle.
+Those are the tell-tales of a hand-zipped `InventoryReports` folder, which is what
+arrives when an operator cannot tell which file to send.
+
+This is a **human/wrapper-run-only** suite: it is not part of
+`Invoke-ScenarioMatrix.ps1`, because the matrix generates per-subscription zips via
+`ResourceInventory.ps1` rather than full wrapper bundles.
+
+```powershell
+pwsh ./Run-AllSubscriptions.ps1 -TenantID <tenant> -Obfuscate
+$env:TEST_ALLSUB_BUNDLE = "~/InventoryReports/AllSubscriptions_<timestamp>.zip"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/OuterBundleMembership.Tests.ps1 -Output Detailed"
+```
+
+If `TEST_ALLSUB_BUNDLE` is unset the whole suite is **skipped** (not failed), so it
+is safe inside a bare `Invoke-Pester ./Tests/` run. The VM-placement assertions
+additionally skip when the tenant has no virtual machines, since no CSV is produced
+in that case.
 
 ## Parallel-Streams Aggregation Tests
 
@@ -78,7 +111,7 @@ Both runs land an `AllSubscriptions_*.zip` bundle under `~/InventoryReports/`.
 ```powershell
 $env:TEST_SEQUENTIAL_BUNDLE = "~/InventoryReports/AllSubscriptions_<seq-timestamp>.zip"
 $env:TEST_PARALLEL_BUNDLE   = "~/InventoryReports/AllSubscriptions_<par-timestamp>.zip"
-pwsh -Command "Invoke-Pester ./Tests/ParallelStreamsAggregation.Tests.ps1 -Output Detailed"
+pwsh -Command "Import-Module Pester -RequiredVersion 5.7.1; Invoke-Pester ./Tests/ParallelStreamsAggregation.Tests.ps1 -Output Detailed"
 ```
 
 If either env var is unset the entire suite is **skipped** (not failed) so the
@@ -88,10 +121,10 @@ fixture pair available.
 ### What it asserts
 
 - Both bundles unpack to the same number of inner per-sub ZIPs
-- Each inner ZIP contains XLSX, Inventory JSON, Metrics JSON, Consumption CSV
+- Each inner ZIP contains HTML, Inventory JSON, Metrics JSON, Consumption CSV
 - Total resource count matches between modes (no resource dropping)
 - Per-sub set of populated resource types is identical
-- Per-sub XLSX worksheet name set is identical (Overview always present)
+- Per-sub HTML service-section set is identical (one `service-section` per populated resource type)
 - Inventory JSON top-level key set is identical
 - Consumption record count matches exactly (queries are sub-scoped)
 - Metrics record count matches within 5% (time-window queries can drift slightly)
@@ -106,15 +139,28 @@ that could affect output (metrics, consumption, obfuscation, schema, packaging,
 auth gating). It generates a fresh zip for each supported flag combination
 against a live subscription and runs the applicable Pester tests against each.
 
+A scenario also fails when its inventory run exits non-zero, throws, or leaves
+an entry in one of the phase-health lists (collector, metrics, consumption,
+Marketplace and Foundry problems do not change the exit code, so the matrix
+reads the lists itself). It fails too when a test file attached to it checked
+nothing because every test skipped. The Front Door and metric-volume tests are
+exempt when the subscription has nothing of that kind (`$DataDependentFiles` in
+the script). Skipped tests are listed under each scenario with their reasons.
+
 ### Scenarios
 
 | Scenario | Flags | Tests run |
 |---|---|---|
-| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) |
-| `obfuscate` | `-Obfuscate` (+ metrics + consumption) | structural **+** PII/obfuscation/prefix/dictionary |
+| `default` | metrics + consumption, no obfuscation | structural (schema, completeness, frontdoor) **+ live tenant reconciliation + schema-contract & linkage + metric-volume controls** (proves the storage capacity metric is absent unless opted into) |
+| `obfuscate` | `-Obfuscate` (+ metrics + consumption) | structural **+** PII/obfuscation/prefix/dictionary **+ schema-contract & linkage** |
 | `skipboth` | `-SkipMetrics -SkipConsumption` | structural |
 | `skipmetrics` | `-SkipMetrics` | structural |
 | `skipconsumption` | `-SkipConsumption` | structural |
+| `service` | `-Service VirtualMachines -SkipMetrics -SkipConsumption` | collector scoping |
+| `includestorage` | `-IncludeStorageMetrics` | structural **+** metric-volume controls (proves the opt-in turns the storage capacity metric ON) |
+| `skipdisk` | `-SkipDiskMetrics` | structural **+** metric-volume controls |
+| `metricinterval` | `-MetricsIntervalMinutes 60` | structural **+** metric-volume controls |
+| `recovery` | live recovery workflow (gap bundle, re-collect, `Merge-RecoveryData` splice) | structural **+** obfuscation **+** recovery-merge |
 
 ### Why PII tests only run on `obfuscate`
 
@@ -123,12 +169,94 @@ The PII-leak / obfuscation tests (DataIntegrity PII scan, OutputCompleteness
 assume obfuscated input. On a **non-obfuscated** zip the raw subscription paths
 and transcript are present *by design*, so those tests are EXPECTED to fail and
 are therefore not run for non-obfuscated scenarios. Only obfuscated zips are ever
-shared server-side, so this matches real usage.
+shared, so this matches real usage.
+
+### Live tenant reconciliation (`default` scenario)
+
+`TenantReconciliation.Tests.ps1` cross-checks the **non-obfuscated** `default`
+zip against the **live tenant** it was generated from, to catch a future change
+that silently drops, duplicates, mangles, or mis-attributes resources. It
+asserts:
+
+- every inventory resource ID resolves to a real resource in the tenant
+  (`Get-AzResource`) - no orphans/phantoms;
+- all inventory IDs (and all consumption `ResourceId`s) belong to the run's
+  subscription - no cross-subscription contamination;
+- per-type **distinct** resource counts match the tenant for one-row-per-resource
+  collectors (VMs, disks, storage accounts, public IPs, key vaults, SQL servers,
+  Service Bus), and SQL user databases match with the system `master` DB excluded;
+- those same sections contain no duplicate IDs.
+
+Expected values are read **live from the tenant at runtime** (never hardcoded),
+so it is tenant-portable. Because it needs a live Az session and real IDs, it is
+the one suite that talks to Azure - and it **skips itself** (never fails) when
+the zip is obfuscated, no live context exists, or the context can't see the
+run's subscription. That keeps it safe inside an offline `Invoke-Pester ./Tests/`
+or CI run; it only actually reconciles inside the `default` scenario (or when you
+point `$env:TEST_ZIP_PATH` at a non-obfuscated zip with a matching live session).
+Inside the matrix, `default` also fails when none of its "Live tenant
+reconciliation" tests ran, so a quiet skip cannot pass as a green run.
+
+### Schema contract & cross-dataset linkage (`default` + `obfuscate`)
+
+`SchemaContract.Tests.ps1` is a **pure-output, drift-immune** gate (no Azure
+calls) that protects the **emitted field names** and - above all - the
+**cross-dataset linkage** that makes the three datasets usable together. The
+owner's rule: Inventory, Metrics, and Consumption are *useless on their own*
+unless they stay joinable via a common identity key
+(`Inventory.ID` ↔ `Metrics.ID` ↔ `Consumption.ResourceId`). A field
+rename/removal/emptying that breaks that join leaves the three files
+unjoinable, and a parse-check or report render
+won't catch it - only asserting the emitted zip against the contract does.
+
+The pinned contract lives in `schema-contract.json` (data, separate from logic)
+so the bound keys can be read and adjusted in one place. It is deliberately
+**narrow**: it pins only the identity/join-key fields of the pinned
+inventory sections (VirtualMachines, VMDisk, Databricks, PostgreSQLflexible,
+MySQLflexible, SQLVM, SQLDB, SQLPOOL, SQLMI), the `AzureMetricRecord` identity
+fields, and the Consumption CSV columns - **not** the long tail of descriptive
+fields, which stay free to evolve.
+
+It asserts:
+
+- **Tier 1 (schema):** every present pinned inventory section carries the
+  identity field *names* on every row (a per-row rename/removal guard) and a
+  non-empty `ID`; metric rows carry their required field names and a non-empty
+  `ID`; the consumption header carries every required column;
+- **Tier 2 (linkage):** `Metrics.ID` resolves to `Inventory.ID` (the
+  metrics↔inventory join), `Consumption.ResourceId` overlaps the inventory id
+  space (the consumption↔inventory join), and under `-Obfuscate` the shared join
+  keys are deterministic `prod_`/`nonprod_` tokens (same real resource → same
+  token across all three datasets), never a raw ARM path.
+
+Because it needs no Azure and is valid whether IDs are raw paths or tokens, it
+runs as a hard gate in **both** the `default` and `obfuscate` scenarios. It
+self-skips only when there is genuinely nothing to check (no zip, or a phase
+suppressed by a `-Skip*` switch). Output-only limitation: it cannot distinguish
+a *whole-section* rename from a subscription that legitimately has none of that
+type, so an absent section is skipped, not failed - but Tier 2 stays
+name-agnostic and still linkage-checks a renamed section's rows by their IDs.
+In the matrix, a scenario where every schema-contract test skips fails.
+
+### Which subscription it runs against
+
+With no `-SubscriptionID`, the default target is the subscription named
+`Visual Studio Enterprise Subscription` - the sandbox the live gates run
+against. The name is resolved against the live tenant at runtime, so no
+subscription id is stored in the script. When the current context cannot see a
+subscription of that name (another operator, another tenant), it falls back to
+auto-discovering the first enabled subscription that has metric-eligible
+resources, so the schema tests still see metric data.
+
+Picking a subscription has to point the Az context at each candidate to count
+its resources. That move is confined to this process (`-Scope Process`), so the
+saved default subscription the next session starts on is untouched, and the
+context the run started with is restored before the scenarios begin.
 
 ### Run it
 
 ```powershell
-# Auto-discover a subscription (prefers one with metric-eligible resources):
+# Default: the sandbox subscription, resolved by name at runtime:
 pwsh ./Tests/Invoke-ScenarioMatrix.ps1
 
 # Pin a specific subscription / tenant:
@@ -141,7 +269,64 @@ pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -Scenarios default,obfuscate
 pwsh ./Tests/Invoke-ScenarioMatrix.ps1 -KeepOutput
 ```
 
-Exit code is `0` only if every scenario passed its applicable tests, else `1`
-(suitable for CI / a pre-merge gate). Generated zips are deleted automatically
+Exit code is `0` only if every scenario passed its applicable tests and the
+`Problems` column of the summary is `0`, else `1` (suitable for CI / a
+pre-merge gate). Generated zips are deleted automatically
 unless `-KeepOutput` is passed, because non-obfuscated zips contain real
 subscription identifiers.
+
+## Wrapper Scenarios (`Invoke-WrapperScenarios.ps1`)
+
+The scenario matrix exercises `ResourceInventory.ps1` and asserts the zip it produced.
+`Invoke-WrapperScenarios.ps1` is its sibling for `Run-AllSubscriptions.ps1`, and asserts what the wrapper decided rather than what it wrote: the exit code, the reconciliation it reported, and whether it kept or cleared the resume state.
+Those decisions leave no artifact to inspect, so each case states them as expectations and the run fails when one is not met.
+
+Every run is read-only against the tenant and skips every billed phase, so a full pass costs nothing but Resource Graph and control-plane reads.
+Faults are injected the way a live-run harness injects them: `Get-AzSubscription` and `Search-AzGraph` are shadowed by functions in a driver process, so the real wrapper runs unmodified and the real tenant answers everything that is not injected.
+Each case runs in its own child `pwsh`, so a shim cannot reach the next case.
+
+### Cases
+
+| Case | What is injected | Expected |
+|---|---|---|
+| `narrow` | nothing; the listing is narrowed to the one subscription | exit 0, every listed subscription processed |
+| `notlisted` | that subscription fails, and the end-of-run listing names a different one instead | exit 2, reported under "Not listed at the end of the run" |
+| `endlisting` | the end-of-run listing returns nothing with a token warning | exit 0, reconciliation skipped rather than acted on, run ends with warnings |
+| `corruptstate` | a truncated resume-state file the JSON parser stops on | exit 0, the run starts fresh and says so |
+| `resumefailedonly` | a state where one subscription failed and a second listed one was never reached, run with `-ResumeFailedOnly` | exit 0 with warnings, the never-collected one is named, the state file is kept |
+| `parallel` | nothing; two subscriptions and `-ParallelStreams 2` | exit 0, one stream per subscription |
+| `obfuscate` | nothing; `-Obfuscate` | exit 0, then the outer-bundle and obfuscation suites against the bundle it produced |
+
+### Which subscription it runs against
+
+Collection is confined to the subscription named by `-SubscriptionName`, which defaults to the sandbox subscription every live gate uses.
+The name is resolved against the live tenant at runtime, so no subscription id is stored in the script.
+
+Two cases list a second subscription without ever collecting it: `notlisted` needs the end-of-run listing to name a different subscription, and `resumefailedonly` needs a second eligible subscription for `-ResumeFailedOnly` to leave uncollected.
+One case, `parallel`, genuinely has to collect a second subscription, because a stream is sized per subscription and two streams cannot start against one.
+Pass `-SingleSubscriptionOnly` to skip that case and keep collection inside the named subscription.
+A case that cannot run says so and is reported as skipped, never quietly passed.
+
+### The report folder
+
+The wrapper resolves its own output root and has no output-directory parameter, so this runner cannot redirect it.
+It snapshots the root's entries instead, and after each case deletes exactly the entries that are new against that snapshot AND newer than the case's own start marker, then checks the root matches the snapshot again.
+An entry that is new but older than the marker belongs to something else and is left alone.
+The runner refuses to start when the root already holds a resume-state file, because a case seeds that file and would otherwise overwrite the state of an interrupted real run.
+
+### Run it
+
+```powershell
+# Every case:
+pwsh ./Tests/Invoke-WrapperScenarios.ps1
+
+# A subset:
+pwsh ./Tests/Invoke-WrapperScenarios.ps1 -Cases narrow,obfuscate
+
+# Stay inside one subscription (skips the two-streams case):
+pwsh ./Tests/Invoke-WrapperScenarios.ps1 -SingleSubscriptionOnly
+```
+
+Output is counts and yes/no only, because the wrapper's own lines name subscriptions.
+The captured transcripts stay in the work directory when a case fails or `-KeepOutput` is passed, and they carry real identifiers, so they are not shared.
+Exit code is `0` only when every case passed and the report folder was restored, else `1`.

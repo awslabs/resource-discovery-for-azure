@@ -38,6 +38,10 @@ BeforeAll {
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
     $script:TestRoot = Join-Path $TmpBase ("RunAllSubsReconTest_" + [guid]::NewGuid().ToString().Substring(0, 8))
     New-Item -ItemType Directory -Path $script:TestRoot -Force | Out-Null
+    # Windows can name the temp folder by its short form (C:\Users\RUNNER~1\...), and Get-ChildItem
+    # then reports the long form of the same folder. Take the path from Get-ChildItem, so a path this
+    # test builds and the same path read back from disk are spelled the same way.
+    $script:TestRoot = (Get-ChildItem -LiteralPath $TmpBase -Directory -Filter (Split-Path -Path $script:TestRoot -Leaf) -Force).FullName
 
     # True when THIS test's transcript file is still recording. Probing with Stop-Transcript instead
     # would stop a transcript the caller's own session may have running. Redirected host output is

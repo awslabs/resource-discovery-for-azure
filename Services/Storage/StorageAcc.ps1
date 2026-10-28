@@ -13,7 +13,8 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $Timecreated = $Data.creationTime
-            $Timecreated = [datetime]$Timecreated
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal')
             $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
 
             if ($Data.isHnsEnabled) { $HnsEnabled = $true } else { $HnsEnabled = $false }

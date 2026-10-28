@@ -12,7 +12,8 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
-            $Timecreated = [datetime]($Data.creationDate) | Get-Date -Format "yyyy-MM-dd HH:mm"
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = [datetime]::Parse($Data.creationDate, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal') | Get-Date -Format "yyyy-MM-dd HH:mm"
 
             $Obj = @{
                 'ID'                        = $1.id;

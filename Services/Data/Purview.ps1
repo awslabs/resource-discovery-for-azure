@@ -13,7 +13,8 @@ if ($Task -eq 'Processing')
             $Data = $1.PROPERTIES
 
             $Timecreated = $Data.createdAt
-            $Timecreated = [datetime]$Timecreated
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal')
             $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
 
             $Obj = @{

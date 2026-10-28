@@ -13,7 +13,8 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $Timecreated = $Data.CreationDate
-            $Timecreated = [datetime]$Timecreated
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal')
             $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
             $Sampling = if ([string]::IsNullOrEmpty($Data.SamplingPercentage)) { 'Disabled' }else { $Data.SamplingPercentage }
 

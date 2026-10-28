@@ -217,7 +217,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ("Azure CLI Not Found. Please install and run the script again.") -Severity 'Error'
             Read-Host "Press <Enter> to exit"
-            Exit
+            exit 1
         }
 
         Write-Log -Message ('CLI Version: {0}' -f $AzCliVersion[0]) -Severity 'Success'
@@ -338,7 +338,7 @@ Function RunInventorySetup()
             catch
             {
                 Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
-                Exit
+                exit 1
             }
         }
 
@@ -523,7 +523,7 @@ Function RunInventorySetup()
                     Write-Log -Message ("You are trying to use Service Principal Authentication Method in a wrong way.") -Severity 'Error'
                     Write-Log -Message ("It's Mandatory to specify Application ID, Secret and Tenant ID in Azure Resource Inventory") -Severity 'Error'
                     Write-Log -Message (".\ResourceInventory.ps1 -appid <SP AppID> -secret <SP Secret> -tenant <TenantID>") -Severity 'Error'
-                    Exit
+                    exit 1
                 }
             }
 
@@ -557,7 +557,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
             Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            Exit
+            exit 1
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup))
@@ -1639,7 +1639,10 @@ if (-not $RunAllSubs.IsPresent)
     {
         try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
-        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+        # A top-level throw does not stop the run under the default SilentlyContinue
+        # preference, so stop here the way the -Service and -ObfuscationDictionary checks do.
+        Write-Host ("ERROR: Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Red
+        exit 1
     }
 
     Write-Host "Pre-flight checks passed." -ForegroundColor Green
@@ -1831,4 +1834,15 @@ catch
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
+
+# A direct run reaches this point even when it wrote no report (collection stopped,
+# or the HTML report or the zip failed), so it must not end as a success. Under
+# -RunAllSubs the exit code is left alone: the wrapper treats any non-zero exit as a
+# failed subscription and checks each subscription's zip itself.
+if (-not $RunAllSubs.IsPresent -and ([string]::IsNullOrEmpty($Global:ZipOutputFile) -or -not (Test-Path -LiteralPath $Global:ZipOutputFile)))
+{
+    Write-Log -Message ("No report was written: {0} was not created. See the errors above, fix the cause and re-run." -f $Global:ZipOutputFile) -Severity 'Error'
+    exit 2
+}
+
 Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'

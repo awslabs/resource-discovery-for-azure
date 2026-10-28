@@ -586,6 +586,12 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 
 Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
 
+### Exit Codes 1 and 2 (ResourceInventory.ps1, direct run)
+
+A direct `ResourceInventory.ps1` run (without `-RunAllSubs`) that ends without writing its report zip exits `2`, and its last console line says `No report was written`. This happens, for example, when 5 collectors failed in a row and collection stopped, or when the HTML report or the zip could not be written; the errors printed before that line give the cause. Under `-RunAllSubs` the script's exit code is unchanged and the wrapper's codes above apply.
+
+A run that stops during setup, before it collects anything, exits `1`, and the red error line printed before it gives the cause: for example the output folder cannot be written, the Azure CLI is not installed, a service principal sign-in has no `-Secret`, or `-ResourceGroup` is given without `-SubscriptionID`. Under `-RunAllSubs` the wrapper counts that subscription as failed.
+
 ### Important Notes
 
 - The script does not upgrade existing PowerShell modules

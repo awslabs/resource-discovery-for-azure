@@ -22,16 +22,18 @@
 
 function GetLocalVersion()
 {
-    $VersionJsonPath = "./Version.json"
-    if (Test-Path $VersionJsonPath)
+    # Version.json sits next to ResourceInventory.ps1, one level above this file,
+    # so the run does not depend on the folder it was started from.
+    $VersionJsonPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Version.json'
+    if (Test-Path -LiteralPath $VersionJsonPath -PathType Leaf)
     {
-        $LocalVersionJson = Get-Content $VersionJsonPath | ConvertFrom-Json
+        $LocalVersionJson = Get-Content -LiteralPath $VersionJsonPath | ConvertFrom-Json
         return ('{0}.{1}.{2}' -f $LocalVersionJson.MajorVersion, $LocalVersionJson.MinorVersion, $LocalVersionJson.BuildVersion)
     }
     else
     {
-        Write-Host "Local Version.json not found. Clone the repo and execute the script from the root. Exiting." -ForegroundColor Red
-        Exit
+        Write-Host ("Local Version.json not found at {0}. Clone the full repo and run the script from it. Exiting." -f $VersionJsonPath) -ForegroundColor Red
+        exit 1
     }
 }
 

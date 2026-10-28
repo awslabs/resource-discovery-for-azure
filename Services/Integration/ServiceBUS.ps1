@@ -16,6 +16,10 @@ if ($Task -eq 'Processing')
             $Timecreated = $Data.createdAt
             $Timecreated = [datetime]$Timecreated
             $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            # Geo replication: the namespace lists every region it replicates to,
+            # the primary included, in geoDataReplication.locations; one entry or
+            # none means no replica in another region.
+            $GeoRep = @($Data.geoDataReplication.locations | Where-Object { $null -ne $_ }).Count -gt 1
 
             $Obj = @{
                 'ID'                    = $1.id;
@@ -25,7 +29,7 @@ if ($Task -eq 'Processing')
                 'Location'              = $1.LOCATION;
                 'SKU'                   = $Sku.name;
                 'Status'                = $Data.status;
-                'GeoRep'                = $Data.zoneRedundant;
+                'GeoRep'                = $GeoRep;
                 'ThroughputUnits'       = $1.sku.capacity;
                 'CreatedTime'           = $Timecreated;
             }

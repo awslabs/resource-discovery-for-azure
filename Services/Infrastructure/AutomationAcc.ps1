@@ -35,7 +35,7 @@ if ($Task -eq 'Processing')
                         'AutomationAccountCreatedTime'  = $Timecreated;
                         'Location'                      = $0.LOCATION;
                         'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
-                        'LastModifiedTime'              = ([datetime]$Data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
+                        'LastModifiedTime'              = ([datetime]$Data.lastModifiedTime).ToString("yyyy-MM-dd HH:mm");
                         'RunbookState'                  = $Data.state;
                         'RunbookType'                   = $Data.runbookType;
                         'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };

@@ -48,8 +48,10 @@ if ($Task -eq 'Processing')
                     # so only the boolean true is 'true'; any value that is not a boolean
                     # is an empty cell.
                     'Autoscale'                 = if ($2.enableAutoScaling -is [bool]) { if ($2.enableAutoScaling) { 'true' } else { 'false' } } elseif ($null -eq $2.enableAutoScaling) { 'false' } else { $null }
-                    'AutoscaleMax'              = if ($null -ne $2.maxCount) { $2.maxCount } else { '0' }
-                    'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' }
+                    # Azure sets maxCount and minCount only on a pool with autoscaling on;
+                    # without them the cell is empty, not 0. A real 0 is kept.
+                    'AutoscaleMax'              = $2.maxCount;
+                    'AutoscaleMin'              = $2.minCount;
                     'MaxPodsPerNode'            = $2.maxPods;
                     'OrchestratorVersion'       = $2.orchestratorVersion;
                     'Tags'                      = $Tags;

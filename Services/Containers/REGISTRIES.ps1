@@ -12,8 +12,10 @@ if ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
+            # A missing value, or one that does not convert to a date, is 'Unknown'
+            # rather than an exception that fails the whole collector.
             # A valid value is written in UTC on every host; one with no zone is taken as UTC.
-            $Timecreated = [datetime]::Parse($Data.creationDate, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal') | Get-Date -Format "yyyy-MM-dd HH:mm"
+            $Timecreated = try { if ($null -ne $Data.creationDate) { [datetime]::Parse($Data.creationDate, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal') | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                        = $1.id;

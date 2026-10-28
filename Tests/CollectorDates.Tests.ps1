@@ -11,6 +11,13 @@
 # in host local time always differs between the two. A host whose child pwsh
 # does not apply TZ skips that case.
 #
+# A date that is missing, null, empty or does not convert to a date threw, and
+# the throw failed the whole collector, so one such record lost every resource
+# of that type in the subscription. Such a date is now 'Unknown' and every
+# record keeps its row. Stream Analytics keeps an empty cell for a missing time
+# (a job that has not produced output) and writes 'Unknown' only for a time that
+# is present and does not convert.
+#
 # Records are built the way Resource Graph answers reach the collectors: JSON
 # text, lowercased (Invoke-AzGraphQuerySafe -Lowercase), then ConvertFrom-Json.
 # No live Azure is needed. All ids use the Azure documentation placeholder
@@ -99,6 +106,107 @@ foreach (`$Case in `$Cases)
         {
             $Line = '{0}|{1}' -f $Case.Collector, ((@($Case.Expect.Keys | Sort-Object) | ForEach-Object { '{0}={1}' -f $_, $Case.Expect[$_] }) -join ';')
             for ($i = 0; $i -lt $script:Forms.Count; $i++) { $Line }
+        }
+    }
+
+    # One valid date, then a date that is absent, null, empty and not a date.
+    $script:GuardForms = [ordered]@{ 'valid' = '2024-03-15T21:41:27.1234567Z'; 'absent' = $null; 'null' = $null; 'empty' = ''; 'not-a-date' = 'not-a-date' }
+
+    # One record per form, named res-<form> (rb-<form> for runbooks of the
+    # account aa-guard), in the lowercase form Resource Graph answers arrive in.
+    function New-GuardRecords
+    {
+        param([string]$Type, [string[]]$Props, [bool]$Runbook)
+        $Rg = "/subscriptions/$script:DocGuid/resourceGroups/RG-Guard/providers"
+        $Records = @()
+        if ($Runbook)
+        {
+            $Records += [ordered]@{ id = "$Rg/microsoft.automation/automationaccounts/aa-guard"; name = 'aa-guard'; type = 'microsoft.automation/automationaccounts'; resourceGroup = 'RG-Guard'; location = 'eastus'; subscriptionId = $script:DocGuid; properties = [ordered]@{ creationTime = $script:GuardForms['valid']; state = 'Ok' } }
+        }
+        foreach ($Form in $script:GuardForms.Keys)
+        {
+            $P = if ($Runbook) { [ordered]@{ state = 'Published'; runbookType = 'PowerShell' } } else { [ordered]@{} }
+            if ($Form -ne 'absent') { foreach ($Name in $Props) { $P[$Name] = $script:GuardForms[$Form] } }
+            $Id = if ($Runbook) { "$Rg/microsoft.automation/automationaccounts/aa-guard/runbooks/rb-$Form" } else { "$Rg/$Type/res-$Form" }
+            $Name = if ($Runbook) { "aa-guard/rb-$Form" } else { "res-$Form" }
+            $Records += [ordered]@{ id = $Id; name = $Name; type = $Type; resourceGroup = 'RG-Guard'; location = 'eastus'; subscriptionId = $script:DocGuid; properties = $P }
+        }
+        return (ConvertTo-Json -InputObject @($Records) -Depth 10).ToLower() | ConvertFrom-Json
+    }
+
+    function Invoke-Collector
+    {
+        param([string]$Collector, $Resources)
+        $Subs = @([pscustomobject]@{ id = $script:DocGuid; Name = 'sub-placeholder' })
+        return @(& (Join-Path $script:Root ("Services/{0}.ps1" -f $Collector)) -Sub $Subs -Resources $Resources -Task 'Processing' -ResourceIdDictionary $null)
+    }
+}
+
+Describe 'A missing or unreadable collector date' {
+    # Collector, record type, the date properties it reads, the text each date
+    # column gets for 2024-03-15 21:41:27.1234567 UTC, and what a missing date
+    # gives. Runbook = $true puts the dates on runbooks of one account.
+    Context '<Collector> <Type>' -ForEach @(
+        @{ Collector = 'Analytics/Databricks'; Type = 'microsoft.databricks/workspaces'; Props = @('createdDateTime'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Analytics/EvtHub'; Type = 'microsoft.eventhub/namespaces'; Props = @('createdAt'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Analytics/MachineLearning'; Type = 'microsoft.machinelearningservices/workspaces'; Props = @('creationTime'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Analytics/Streamanalytics'; Type = 'microsoft.streamanalytics/streamingjobs'; Props = @('createdDate', 'lastOutputEventTime', 'outputStartTime'); Valid = @{ CreatedDate = '2024-03-15 21:41:27'; LastOutputEventTime = '2024-03-15 21:41:27:1234'; OutputStartTime = '2024-03-15 21:41:27:1234' }; Missing = 'an empty cell' }
+        @{ Collector = 'Analytics/WrkSpace'; Type = 'microsoft.operationalinsights/workspaces'; Props = @('createdDate'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Containers/REGISTRIES'; Type = 'microsoft.containerregistry/registries'; Props = @('creationDate'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Data/Purview'; Type = 'microsoft.purview/accounts'; Props = @('createdAt'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Infrastructure/AutomationAcc'; Type = 'microsoft.automation/automationaccounts'; Props = @('creationTime'); Valid = @{ AutomationAccountCreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Infrastructure/AutomationAcc'; Type = 'microsoft.automation/automationaccounts/runbooks'; Props = @('lastModifiedTime'); Valid = @{ LastModifiedTime = '2024-03-15 21:41' }; Missing = 'Unknown'; Runbook = $true }
+        @{ Collector = 'Integration/AppInsights'; Type = 'microsoft.insights/components'; Props = @('CreationDate'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Integration/ServiceBUS'; Type = 'microsoft.servicebus/namespaces'; Props = @('createdAt'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Storage/ComputeSnapshots'; Type = 'microsoft.compute/snapshots'; Props = @('timeCreated'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Storage/StorageAcc'; Type = 'microsoft.storage/storageaccounts'; Props = @('creationTime'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+        @{ Collector = 'Storage/VMDisk'; Type = 'microsoft.compute/disks'; Props = @('timeCreated'); Valid = @{ CreatedTime = '2024-03-15 21:41' }; Missing = 'Unknown' }
+    ) {
+        BeforeAll {
+            $Rows = Invoke-Collector $Collector (New-GuardRecords -Type $Type -Props $Props -Runbook ([bool]$Runbook))
+            # Rows by the last segment of their id: res-<form> or rb-<form>.
+            $ByForm = @{}
+            foreach ($Row in $Rows) { $ByForm[(($Row['ID'] -split '/')[-1] -replace '^(res|rb)-', '')] = $Row }
+        }
+
+        It 'writes a row for every record' {
+            $Rows.Count | Should -Be 5
+            @($ByForm.Keys | Sort-Object) | Should -Be @('absent', 'empty', 'not-a-date', 'null', 'valid')
+        }
+
+        It 'writes the UTC text for a valid date' {
+            foreach ($Column in $Valid.Keys) { $ByForm['valid'][$Column] | Should -BeExactly $Valid[$Column] -Because $Column }
+        }
+
+        It "writes 'Unknown' for a date that is present but does not convert" {
+            foreach ($Column in $Valid.Keys) { $ByForm['not-a-date'][$Column] | Should -BeExactly 'Unknown' -Because $Column }
+        }
+
+        It 'writes <Missing> for a date that is absent, null or empty' {
+            foreach ($Form in 'absent', 'null', 'empty')
+            {
+                foreach ($Column in $Valid.Keys)
+                {
+                    if ($Missing -eq 'an empty cell') { $ByForm[$Form][$Column] | Should -BeNullOrEmpty -Because "$Column ($Form)" }
+                    else { $ByForm[$Form][$Column] | Should -BeExactly $Missing -Because "$Column ($Form)" }
+                }
+            }
+        }
+
+        It 'writes every other column as for a valid date' {
+            $Reference = $ByForm['valid']
+            foreach ($Form in 'absent', 'null', 'empty', 'not-a-date')
+            {
+                $Row = $ByForm[$Form]
+                @($Row.Keys | Sort-Object) | Should -Be @($Reference.Keys | Sort-Object)
+                foreach ($Key in $Reference.Keys)
+                {
+                    if ($Valid.ContainsKey($Key)) { continue }
+                    # Ids and names carry the record's own name.
+                    $Expected = if ($Reference[$Key] -is [string]) { $Reference[$Key].Replace('-valid', "-$Form") } else { $Reference[$Key] }
+                    $Row[$Key] | Should -Be $Expected -Because "column $Key ($Form)"
+                }
+            }
         }
     }
 }

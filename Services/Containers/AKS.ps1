@@ -44,7 +44,10 @@ if ($Task -eq 'Processing')
                     'NodeSize'                  = $2.vmSize;
                     'OSDiskSize'                = $2.osDiskSizeGB;
                     'Nodes'                     = $2.count;
-                    'Autoscale'                 = if ($null -ne $2.enableAutoScaling) { 'true' } else { 'false' }
+                    # enableAutoScaling is false (or absent) on a pool with autoscaling off,
+                    # so only the boolean true is 'true'; any value that is not a boolean
+                    # is an empty cell.
+                    'Autoscale'                 = if ($2.enableAutoScaling -is [bool]) { if ($2.enableAutoScaling) { 'true' } else { 'false' } } elseif ($null -eq $2.enableAutoScaling) { 'false' } else { $null }
                     'AutoscaleMax'              = if ($null -ne $2.maxCount) { $2.maxCount } else { '0' }
                     'AutoscaleMin'              = if ($null -ne $2.minCount) { $2.minCount } else { '0' }
                     'MaxPodsPerNode'            = $2.maxPods;

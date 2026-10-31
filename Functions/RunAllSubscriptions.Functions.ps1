@@ -795,13 +795,22 @@ function Get-RetryLimitedAttempts
 # empty list.
 function Write-RetryLimitSummary
 {
-    param([object]$RetryLimited, [string]$TenantID)
+    param([object]$RetryLimited, [string]$TenantID, [string[]]$ExcludedIds = @())
     $List = @(@($RetryLimited) | Where-Object { $null -ne $_ })
     if ($List.Count -eq 0) { return }
     Write-Host ("Retry Limit Reached:     {0} ({1}) - incomplete; -Resume and -ResumeFailedOnly do not collect these" -f $List.Count, (@($List | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
     foreach ($Entry in $List)
     {
         Write-Host ("  - {0} ({1}): failed {2} runs in a row; last reason: {3}" -f $Entry.Name, $Entry.Id, (Get-FailedAttemptCount -Entry $Entry), $Entry.Reason) -ForegroundColor Yellow
+    }
+    # A subscription that is not Enabled is left out of every run without
+    # -IncludeDisabled, so the advice for it adds that switch.
+    $NotEnabled = @($List | Where-Object { @($ExcludedIds) -contains [string]$_.Id })
+    if ($NotEnabled.Count -gt 0)
+    {
+        Write-Host ("  To try them again, start a run without -Resume or -ResumeFailedOnly; {0} not Enabled, so add -IncludeDisabled, for example:" -f ((@($NotEnabled | ForEach-Object { $_.Name }) -join ', ') + $(if ($NotEnabled.Count -eq 1) { ' is' } else { ' are' }))) -ForegroundColor Yellow
+        Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -IncludeDisabled" -f $TenantID) -ForegroundColor Yellow
+        return
     }
     Write-Host "  To try them again, start a run without -Resume or -ResumeFailedOnly (it collects every subscription), for example:" -ForegroundColor Yellow
     Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow

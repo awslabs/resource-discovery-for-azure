@@ -130,10 +130,12 @@ function Get-MetricGroupKey
 # Returns a list of groups; each group is an array of definitions, in their original
 # order, that can share one Get-AzMetric call. A resource's definitions are added
 # consecutively, so grouping only looks within a run of definitions that share the
-# same resource Id.
+# same resource Id. Azure Monitor accepts at most 20 metric names in one request, so
+# a group holds at most $MaxMetricNames distinct names; definitions that share a
+# metric name stay in the same group.
 function Group-MetricDefinition
 {
-    param($MetricDefs)
+    param($MetricDefs, [int]$MaxMetricNames = 20)
 
     $MetricGroups = [System.Collections.Generic.List[object]]::new()
     $ResourceGroups = [ordered]@{}
@@ -152,7 +154,32 @@ function Group-MetricDefinition
     }
     foreach ($Members in $ResourceGroups.Values) { $MetricGroups.Add($Members.ToArray()) }
 
-    Write-Output -NoEnumerate -InputObject $MetricGroups
+    # Split every group that names more than $MaxMetricNames metrics.
+    $Capped = [System.Collections.Generic.List[object]]::new()
+    foreach ($Group in $MetricGroups)
+    {
+        $Chunks = [System.Collections.Generic.List[object]]::new()
+        $ChunkOfName = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $NamesInLast = 0
+        foreach ($Def in $Group)
+        {
+            $Name = [string]$Def.MetricName
+            if (-not $ChunkOfName.ContainsKey($Name))
+            {
+                if ($Chunks.Count -eq 0 -or $NamesInLast -ge $MaxMetricNames)
+                {
+                    $Chunks.Add([System.Collections.Generic.List[object]]::new())
+                    $NamesInLast = 0
+                }
+                $ChunkOfName[$Name] = $Chunks.Count - 1
+                $NamesInLast++
+            }
+            $Chunks[$ChunkOfName[$Name]].Add($Def)
+        }
+        foreach ($Chunk in $Chunks) { $Capped.Add($Chunk.ToArray()) }
+    }
+
+    Write-Output -NoEnumerate -InputObject $Capped
 }
 
 if ($Task -eq 'Processing')

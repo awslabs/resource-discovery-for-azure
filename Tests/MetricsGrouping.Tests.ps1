@@ -12,6 +12,7 @@
 #     one call per metric, so only the invalid metric is marked as an error;
 #   - a group that fails for another reason (throttling, server error) is retried
 #     and does not fall back to one call per metric;
+#   - one call never asks for more than 20 metric names;
 #   - each metric's diagnostics time is the time of the request that answered it;
 #   - a batch written to Metrics_*.json never splits one call's metrics, and
 #     there are no more batches than with one definition at a time.
@@ -319,6 +320,35 @@ Describe 'Metrics.ps1 metric grouping key' {
         @($Groups[1] | ForEach-Object { $_.MetricName }) | Should -Be @('m3')
         @($Groups[2] | ForEach-Object { $_.MetricName }) | Should -Be @('m4')
         @($Groups[3] | ForEach-Object { $_.MetricName }) | Should -Be @('m5')
+    }
+
+    It 'puts at most 20 metric names in one group' {
+        $Id = '/subscriptions/{0}/resourceGroups/rg-metrics-test/providers/Microsoft.Compute/disks/disk-many' -f $script:SubscriptionId
+        $Defs = @(1..45 | ForEach-Object {
+                [PSCustomObject]@{ MetricName = ('m{0:d2}' -f $_); Id = $Id; StartTime = $script:Start; EndTime = $script:End; Interval = '1:00:00'; Aggregation = 'Maximum' }
+            })
+
+        $Groups = Group-MetricDefinition -MetricDefs $Defs
+
+        $Groups.Count | Should -Be 3
+        @($Groups | ForEach-Object { @($_).Count }) | Should -Be @(20, 20, 5)
+        @($Groups | ForEach-Object { $_ } | ForEach-Object { $_.MetricName }) | Should -Be @($Defs | ForEach-Object { $_.MetricName })
+    }
+
+    It 'keeps definitions that share a metric name in one group when splitting at 20 names' {
+        $Id = '/subscriptions/{0}/resourceGroups/rg-metrics-test/providers/Microsoft.Compute/disks/disk-dup' -f $script:SubscriptionId
+        # 21 distinct names; 'm01' is defined twice, the second time after the 20th name.
+        $Names = @(1..21 | ForEach-Object { 'm{0:d2}' -f $_ }) + @('m01')
+        $Defs = @($Names | ForEach-Object {
+                [PSCustomObject]@{ MetricName = $_; Id = $Id; StartTime = $script:Start; EndTime = $script:End; Interval = '1:00:00'; Aggregation = 'Maximum' }
+            })
+
+        $Groups = Group-MetricDefinition -MetricDefs $Defs
+
+        $Groups.Count | Should -Be 2
+        @($Groups[0] | ForEach-Object { $_.MetricName } | Select-Object -Unique).Count | Should -Be 20
+        @($Groups[0] | Where-Object { $_.MetricName -eq 'm01' }).Count | Should -Be 2
+        @($Groups[1] | ForEach-Object { $_.MetricName }) | Should -Be @('m21')
     }
 
     It 'never groups definitions of different resources' {

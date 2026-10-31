@@ -906,7 +906,7 @@ if (($Resume -or $ResumeFailedOnly) -and @($FailedAttempts | Where-Object { $nul
     $SkippedForRetryLimit = @(Get-RetryLimitedAttempts -FailedAttempts $FailedAttempts | Where-Object { $EligibleIds -contains [string]$_.Id })
     foreach ($Limited in $SkippedForRetryLimit)
     {
-        Write-Host ("Not retried: {0} ({1}) failed {2} runs in a row; last reason: {3}. To try it again, run ./ResourceInventory.ps1 -TenantID {4} -SubscriptionID {1} on its own, or start a run without -Resume." -f $Limited.Name, $Limited.Id, (Get-FailedAttemptCount -Entry $Limited), $Limited.Reason, $TenantID) -ForegroundColor Yellow
+        Write-Host ("Not retried: {0} ({1}) failed {2} runs in a row; last reason: {3}. To try it again, start a run without -Resume or -ResumeFailedOnly." -f $Limited.Name, $Limited.Id, (Get-FailedAttemptCount -Entry $Limited), $Limited.Reason) -ForegroundColor Yellow
     }
     if ($SkippedForRetryLimit.Count -gt 0)
     {
@@ -2054,8 +2054,9 @@ $RetryLimited = @(Get-RetryLimitedAttempts -FailedAttempts $FailedAttempts)
 # Every entry keeps the state, those past the limit included: clearing the
 # state would forget their count, so the next -Resume would collect them again
 # from the first attempt and the limit would never end the cycle. They leave
-# the state only when a run collects them (without -Resume, or the subscription
-# on its own) or they are no longer visible.
+# the state only when a run without -Resume or -ResumeFailedOnly collects them,
+# or when they are no longer visible. ResourceInventory.ps1 run on its own does
+# not read or write the state.
 $RetryOwedCount = @($FailedAttempts | Where-Object { $null -ne $_ }).Count
 if ($FailedSubscriptions.Count -eq 0 -and $RetryOwedCount -eq 0 -and $NotCollected.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {

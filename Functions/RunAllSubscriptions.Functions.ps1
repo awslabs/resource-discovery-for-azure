@@ -795,7 +795,7 @@ function Get-RetryLimitedAttempts
 # empty list.
 function Write-RetryLimitSummary
 {
-    param([object]$RetryLimited, [string]$TenantID, [string[]]$ExcludedIds = @())
+    param([object]$RetryLimited, [string]$TenantID, [string[]]$ExcludedIds = @(), [string[]]$NotListedIds = @())
     $List = @(@($RetryLimited) | Where-Object { $null -ne $_ })
     if ($List.Count -eq 0) { return }
     Write-Host ("Retry Limit Reached:     {0} ({1}) - incomplete; -Resume and -ResumeFailedOnly do not collect these" -f $List.Count, (@($List | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
@@ -803,6 +803,18 @@ function Write-RetryLimitSummary
     {
         Write-Host ("  - {0} ({1}): failed {2} runs in a row; last reason: {3}" -f $Entry.Name, $Entry.Id, (Get-FailedAttemptCount -Entry $Entry), $Entry.Reason) -ForegroundColor Yellow
     }
+    # A subscription missing from a listing that came back with warnings or
+    # errors is kept until a complete listing: no run can tell whether it is
+    # gone (then the run drops it) or only hidden (then a run without -Resume
+    # collects it), so the advice is to fix the listing first.
+    $NotListed = @($List | Where-Object { @($NotListedIds) -contains [string]$_.Id })
+    if ($NotListed.Count -gt 0)
+    {
+        Write-Host ("  {0} not in the subscription list, which came back with warnings or errors (printed at the start of the run). Fix those until 'Get-AzSubscription -TenantId {1}' lists the tenant without them, then run again: the run drops a subscription that is gone from the retry list, and collects one that is listed again, for example:" -f ((@($NotListed | ForEach-Object { $_.Name }) -join ', ') + $(if ($NotListed.Count -eq 1) { ' is' } else { ' are' })), $TenantID) -ForegroundColor Yellow
+        Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
+    }
+    $List = @($List | Where-Object { @($NotListedIds) -notcontains [string]$_.Id })
+    if ($List.Count -eq 0) { return }
     # A subscription that is not Enabled is left out of every run without
     # -IncludeDisabled, so the advice for it adds that switch.
     $NotEnabled = @($List | Where-Object { @($ExcludedIds) -contains [string]$_.Id })

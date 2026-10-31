@@ -678,7 +678,10 @@ Describe 'A subscription listing that came back with warnings or errors' {
         else { $Global:RdaRlListErrors = @('stand-in: a page of the subscription list could not be read') }
         $R2 = script:Invoke-Run -Subs @($script:A, $script:B) -Resume
         @(script:Get-Lines -Run $R2 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
-        @(script:Get-Lines -Run $R2 -Like 'Kept on the retry list:*') | Should -Be @('Kept on the retry list: 1 subscription(s) not in the subscription list (Sub X (sub-x)), because Get-AzSubscription returned warnings or errors, so the list may be incomplete.')
+        @(script:Get-Lines -Run $R2 -Like 'Kept on the retry list:*') | Should -Be @('Kept on the retry list: 1 subscription(s) not in the subscription list (Sub X (sub-x)), because Get-AzSubscription returned warnings or errors, so the list may be incomplete:')
+        # What the listing said, so the user can see what to fix.
+        $Said = if ($Kind -eq 'warnings') { '  - stand-in: unable to acquire a token for part of the tenant' } else { '  - stand-in: a page of the subscription list could not be read' }
+        @(script:Get-Lines -Run $R2 -Like '  - stand-in:*') | Should -Be @($Said)
         [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 1
         Test-Path -LiteralPath $script:State | Should -BeTrue
         $Global:RdaRlListWarnings = @()
@@ -686,6 +689,75 @@ Describe 'A subscription listing that came back with warnings or errors' {
         $R3 = script:Invoke-Run -Subs @($script:A, $script:B) -Resume
         @(script:Get-Lines -Run $R3 -Like 'Dropped from the retry list:*').Count | Should -Be 1
         script:Get-Entry -Id 'sub-x' | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+    }
+}
+
+Describe 'A subscription past the retry limit that is no longer listed' {
+    BeforeAll {
+        Mock Import-Module -ParameterFilter { $Name -eq 'Az.Accounts' } -MockWith { }
+        Mock Disable-AzContextAutosave -MockWith { }
+        Mock Import-AzContext -MockWith { }
+    }
+    BeforeEach { script:New-Case }
+
+    # A run without -Resume reads and writes the same retry list, so it drops the
+    # entry of a subscription a complete listing no longer has; else that entry
+    # would end every such run with exit 2 and advise the same run again.
+    It 'is dropped by the next run without -Resume, which exits 0, and the run after it starts clean (<Streams> stream(s))' -ForEach @(@{ Streams = 1 }, @{ Streams = 2 }) {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:B, $script:X)
+        $null = script:Invoke-Run -Subs $Subs -Streams $Streams
+        $null = script:Invoke-Run -Subs $Subs -Streams $Streams -Resume
+        $null = script:Invoke-Run -Subs $Subs -Streams $Streams -Resume
+        [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3
+        $Global:RdaRlFailIds = @()
+        # Sub X is deleted: a complete listing no longer has it.
+        $R1 = script:Invoke-Run -Subs @($script:A, $script:B) -Streams $Streams
+        @(script:Get-Lines -Run $R1 -Like 'Dropped from the retry list:*') | Should -Be @('Dropped from the retry list: Sub X (sub-x) is no longer visible to the signed-in identity, so no run can retry it.')
+        @(script:Get-Lines -Run $R1 -Like 'Retry Limit Reached:*') | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R1 -Like 'Resume state cleared (clean run).').Count | Should -Be 1
+        $R1.ExitCode | Should -BeNullOrEmpty
+        $R1.Result.WrapperExitCode | Should -Be 0
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+        $R2 = script:Invoke-Run -Subs @($script:A, $script:B) -Streams $Streams
+        @(script:Get-Lines -Run $R2 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R2 -Like 'Retry Limit Reached:*') | Should -BeNullOrEmpty
+        @($R2.Calls | Sort-Object -Unique) | Should -Be @('sub-a', 'sub-b')
+        $R2.Result.WrapperExitCode | Should -Be 0
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+    }
+
+    It 'is kept while the listing warns, with the warning shown, exit 2 and advice to fix the listing and run again; the run named then drops it' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:B, $script:X)
+        $null = script:Invoke-Run -Subs $Subs
+        $null = script:Invoke-Run -Subs $Subs -Resume
+        $null = script:Invoke-Run -Subs $Subs -Resume
+        $Global:RdaRlFailIds = @()
+        # Sub X is not in the listing, and the listing came back with a warning.
+        $Global:RdaRlListWarnings = @('stand-in: unable to acquire a token for part of the tenant')
+        $R1 = script:Invoke-Run -Subs @($script:A, $script:B)
+        @(script:Get-Lines -Run $R1 -Like 'Kept on the retry list:*') | Should -Be @('Kept on the retry list: 1 subscription(s) not in the subscription list (Sub X (sub-x)), because Get-AzSubscription returned warnings or errors, so the list may be incomplete:')
+        @(script:Get-Lines -Run $R1 -Like '  - stand-in:*') | Should -Be @('  - stand-in: unable to acquire a token for part of the tenant')
+        @(script:Get-Lines -Run $R1 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R1 -Like 'Retry Limit Reached:*') | Should -Be @('Retry Limit Reached:     1 (Sub X) - incomplete; -Resume and -ResumeFailedOnly do not collect these')
+        @(script:Get-Lines -Run $R1 -Like '  Sub X is not in the subscription list*') | Should -Be @("  Sub X is not in the subscription list, which came back with warnings or errors (printed at the start of the run). Fix those until 'Get-AzSubscription -TenantId t' lists the tenant without them, then run again: the run drops a subscription that is gone from the retry list, and collects one that is listed again, for example:")
+        @(script:Get-Lines -Run $R1 -Like '    ./Run-AllSubscriptions.ps1 *') | Should -Be @('    ./Run-AllSubscriptions.ps1 -TenantID t')
+        @(script:Get-Lines -Run $R1 -Like '*start a run without -Resume or -ResumeFailedOnly*') | Should -BeNullOrEmpty -Because 'that run alone would leave it as it is while the listing warns'
+        $R1.Result.WrapperExitCode | Should -Be 2 -Because 'its report is missing and its entry is kept'
+        Test-Path -LiteralPath $script:State | Should -BeTrue
+        [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3
+        # The listing is complete again; the run the advice names.
+        $Global:RdaRlListWarnings = @()
+        $R2 = script:Invoke-Run -Subs @($script:A, $script:B)
+        @(script:Get-Lines -Run $R2 -Like 'Dropped from the retry list:*').Count | Should -Be 1
+        @(script:Get-Lines -Run $R2 -Like 'Retry Limit Reached:*') | Should -BeNullOrEmpty
+        $R2.Result.WrapperExitCode | Should -Be 0
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+        $R3 = script:Invoke-Run -Subs @($script:A, $script:B)
+        @(script:Get-Lines -Run $R3 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
+        $R3.Result.WrapperExitCode | Should -Be 0
         Test-Path -LiteralPath $script:State | Should -BeFalse
     }
 }

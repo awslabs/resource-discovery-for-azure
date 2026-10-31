@@ -836,19 +836,33 @@ else
 # happen if the catch/success paths are correct, but cheap to defend).
 # A retry-list entry for a subscription the signed-in identity no longer sees
 # at all (deleted, moved to another tenant) can never be retried or counted, so
-# it would keep the resume state forever. Drop it, say so, and keep the rest.
+# it would keep the resume state forever. Every run drops it, with or without
+# -Resume (a run without it reads and writes the same retry list), before the
+# entries past the retry limit are worked out, so a gone one is never owed.
 # A disabled subscription is still listed by Get-AzSubscription, so its entry
 # stays (-IncludeDisabled retries it). A listing that came back with warnings or
 # errors can leave out a subscription that is only hidden for now, so then no
-# entry is dropped.
+# entry is dropped, and the warnings and errors are printed.
 $DroppedGoneEntries = $false
-if (($Resume -or $ResumeFailedOnly) -and @($FailedAttempts | Where-Object { $null -ne $_ }).Count -gt 0)
+$KeptNotListedIds = @()
+if (@($FailedAttempts | Where-Object { $null -ne $_ }).Count -gt 0)
 {
     $VisibleIds = @($AllSubscriptions | ForEach-Object { [string]$_.Id })
     $GoneAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and $VisibleIds -notcontains [string]$_.Id })
-    if ($GoneAttempts.Count -gt 0 -and (@($SubWarnings | Where-Object { $_ }).Count + @($SubErrors | Where-Object { $_ }).Count) -gt 0)
+    $ListingProblems = @(@($SubWarnings) + @($SubErrors) | Where-Object { $_ } | ForEach-Object {
+            $Text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } elseif ($_ -is [System.Management.Automation.WarningRecord]) { $_.Message } else { [string]$_ }
+            # The first line, at most 300 characters: what to fix, not the whole record.
+            $Line = @(([string]$Text) -split "`r?`n" | Where-Object { $_.Trim() })[0]
+            if ($null -eq $Line) { $Line = '' }
+            if ($Line.Length -gt 300) { $Line = $Line.Substring(0, 300) + '...' }
+            $Line.Trim()
+        } | Where-Object { $_ } | Select-Object -Unique)
+    if ($GoneAttempts.Count -gt 0 -and $ListingProblems.Count -gt 0)
     {
-        Write-Host ("Kept on the retry list: {0} subscription(s) not in the subscription list ({1}), because Get-AzSubscription returned warnings or errors, so the list may be incomplete." -f $GoneAttempts.Count, (@($GoneAttempts | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
+        Write-Host ("Kept on the retry list: {0} subscription(s) not in the subscription list ({1}), because Get-AzSubscription returned warnings or errors, so the list may be incomplete:" -f $GoneAttempts.Count, (@($GoneAttempts | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
+        foreach ($Problem in @($ListingProblems | Select-Object -First 5)) { Write-Host ("  - {0}" -f $Problem) -ForegroundColor Yellow }
+        if ($ListingProblems.Count -gt 5) { Write-Host ("  - ... and {0} more" -f ($ListingProblems.Count - 5)) -ForegroundColor Yellow }
+        $KeptNotListedIds = @($GoneAttempts | ForEach-Object { [string]$_.Id })
     }
     elseif ($GoneAttempts.Count -gt 0)
     {
@@ -2348,7 +2362,7 @@ if ($NotCollected.Count -gt 0)
 if ($RetryLimited.Count -gt 0)
 {
     # Set by the resume-state cleanup above.
-    Write-RetryLimitSummary -RetryLimited $RetryLimited -TenantID $TenantID -ExcludedIds @($Excluded | ForEach-Object { [string]$_.Id })
+    Write-RetryLimitSummary -RetryLimited $RetryLimited -TenantID $TenantID -ExcludedIds @($Excluded | ForEach-Object { [string]$_.Id }) -NotListedIds $KeptNotListedIds
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)

@@ -786,6 +786,11 @@ if ($ParallelStreams -le 1)
 
         try
         {
+            # ResourceInventory.ps1 ends without `exit` when it succeeds, and
+            # that leaves $LASTEXITCODE as it was: an earlier subscription's
+            # `exit 1`, or a native command run in this session before the
+            # wrapper started, would mark this subscription failed.
+            $global:LASTEXITCODE = 0
             & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
             # Only treat as failure if the inner script set a non-zero exit code.
             # Some completion paths leave $LASTEXITCODE unset ($null), and
@@ -988,6 +993,8 @@ else
             Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
             try
             {
+                # Cleared first, as in the sequential branch above.
+                $global:LASTEXITCODE = 0
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
                 # Same null-guard as the sequential branch above.
                 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }

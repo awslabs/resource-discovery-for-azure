@@ -13,6 +13,7 @@
 #   - a group that fails for another reason (throttling, server error) is retried
 #     and does not fall back to one call per metric;
 #   - one call never asks for more than 20 metric names;
+#   - the diagnostics summary counts metric definitions, not calls;
 #   - each metric's diagnostics time is the time of the request that answered it;
 #   - a batch written to Metrics_*.json never splits one call's metrics, and
 #     there are no more batches than with one definition at a time.
@@ -524,6 +525,13 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
         {
             @($Run.DebugLines | Where-Object { $_ -match ('  Throttled idx=[0-9]+ .*/{0} interval=.* attempts=4 ' -f [regex]::Escape($Name)) }).Count | Should -Be 1
         }
+    }
+
+    It 'counts metric definitions, not calls, in the diagnostics summary outcome line' {
+        # One grouped request answered all four definitions.
+        @($script:Clean.DebugLines | Where-Object { $_ -match '\[Metrics\] Metric definitions: 4 \| Success: 4 \| Timeout: 0 \| Throttled: 0 \| Error: 0 \| Elapsed: ' }).Count | Should -Be 1
+        @($script:Rejected.DebugLines | Where-Object { $_ -match '\[Metrics\] Metric definitions: 4 \| Success: 3 \| Timeout: 0 \| Throttled: 0 \| Error: 1 \| Elapsed: ' }).Count | Should -Be 1
+        @($script:Clean.DebugLines + $script:Rejected.DebugLines | Where-Object { $_ -match 'Total calls:' }).Count | Should -Be 0
     }
 
     It 'reports the number of Azure Monitor requests in the diagnostics summary' {

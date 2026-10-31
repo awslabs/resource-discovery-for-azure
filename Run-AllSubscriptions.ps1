@@ -1581,7 +1581,7 @@ else
                     {
                         # Not collected this run either: each goes on the retry
                         # list as a failed run (below), so -ResumeFailedOnly
-                        # retries it and the retry limit ends a cause that stays.
+                        # retries it and its count of failed runs goes up.
                         $StreamNotStarted += @($StreamSummary.Failed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) -and [string]$_.Id -ne '<unknown>' })
                     }
                 }

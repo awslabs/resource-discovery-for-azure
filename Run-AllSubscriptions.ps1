@@ -1988,4 +1988,8 @@ if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode
 }
+# A clean run sets its exit code too. Without it, a PowerShell session that
+# starts the run (Cloud Shell, a calling script) reads $LASTEXITCODE as it was
+# before the run, for example 1 from a failed command or an earlier run.
+exit 0
 

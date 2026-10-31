@@ -16,6 +16,10 @@
 # its report was written; a native command that failed in the session before
 # the wrapper started did the same to every subscription.
 #
+# A clean run also has to set the code itself: inside a PowerShell session a
+# run with two or more streams calls no inventory in the session, so without
+# its own `exit 0` the session read the code it held before the run.
+#
 # HOW
 # ---
 # The tool is copied to a temp dir and the REAL Run-AllSubscriptions.ps1 runs
@@ -199,6 +203,51 @@ if ($FailSub)
                 FailedIds = @(if ($null -ne $State) { @($State.FailedAttempts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } })
             }
         }
+
+        # One pwsh session (`pwsh -Command -`, its lines on stdin, as typed at a
+        # prompt) with a fresh home. {Run} in a line becomes the wrapper call
+        # with -ParallelStreams $Streams. Returns the session's exit code and
+        # the lines it printed.
+        function script:Invoke-SessionRun
+        {
+            param([object[]]$Subs, [string[]]$Lines, [int]$Streams = 2)
+            $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            $CaseHome = Join-Path $CaseDir 'home'
+            New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
+            $Scenario = Join-Path $CaseDir 'scenario.json'
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = '' } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            $Call = "& '{0}' -TenantID '{1}' -SkipMetrics -SkipConsumption -ParallelStreams {2}" -f ($script:Wrapper -replace "'", "''"), $script:Tenant, $Streams
+
+            $Info = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh'))
+            foreach ($Arg in @('-NoLogo', '-NoProfile', '-Command', '-')) { $Info.ArgumentList.Add($Arg) }
+            $Info.UseShellExecute = $false
+            $Info.RedirectStandardInput = $true
+            $Info.RedirectStandardOutput = $true
+            $Info.RedirectStandardError = $true
+            $Info.WorkingDirectory = $script:Tool
+            $Info.Environment['HOME'] = $CaseHome
+            $Info.Environment['PSModulePath'] = $script:Modules
+            $Info.Environment['RDA_STANDIN_AZURE'] = $Scenario
+            $Info.Environment['NO_COLOR'] = '1'
+            $Proc = [System.Diagnostics.Process]::Start($Info)
+            foreach ($Line in $Lines) { $Proc.StandardInput.WriteLine($Line.Replace('{Run}', $Call)) }
+            $Proc.StandardInput.Close()
+            $Out = $Proc.StandardOutput.ReadToEndAsync()
+            $Err = $Proc.StandardError.ReadToEndAsync()
+            if (-not $Proc.WaitForExit(300000))
+            {
+                $Proc.Kill($true)
+                throw 'The session did not end within 300 seconds.'
+            }
+            $Proc.WaitForExit()
+            $Text = @(($Out.Result + $Err.Result) -split "`r?`n" | ForEach-Object { $_.Trim() })
+            return [pscustomobject]@{
+                ExitCode = $Proc.ExitCode
+                Console  = ($Text -join "`n")
+                After    = @($Text | Where-Object { $_ -match '^after\d?: ' })
+                Open     = @($Text | Where-Object { $_ -eq 'session still open' }).Count -eq 1
+            }
+        }
     }
 
     AfterAll {
@@ -248,5 +297,41 @@ if ($FailSub)
         $Run = Invoke-CarryOverRun -Subs @($script:SubA) -Streams 2 -FailSub $script:SubA.Id
         $Run.Console | Should -Match 'ERROR processing subscription Sub A: Script exited with code 1'
         $Run.FailedIds | Should -Be @($script:SubA.Id)
+    }
+
+    # With two streams the session runs no inventory itself, so only the
+    # wrapper's own exit sets $LASTEXITCODE there.
+    It 'inside a PowerShell session: a clean run with 2 streams sets $LASTEXITCODE to 0 where the session held 1, and the session stays open' {
+        $Session = Invoke-SessionRun -Subs @($script:SubA, $script:SubB) -Lines @('$global:LASTEXITCODE = 1', '{Run}', '"after: $LASTEXITCODE"', '"session still open"', 'exit 0')
+        $Session.Console | Should -Match '2 subscription\(s\), 2 total resource\(s\), 0 empty, 0 failed'
+        $Session.After | Should -Be @('after: 0') -Because $Session.Console
+        $Session.Open | Should -BeTrue
+        $Session.ExitCode | Should -Be 0
+    }
+
+    It 'inside a PowerShell session: after a run that stopped with exit 1, the next clean run with 2 streams reads 0' {
+        # The first run finds no Az modules on the session's module path and
+        # stops with exit 1 at the wrapper's module check.
+        $Session = Invoke-SessionRun -Subs @($script:SubA, $script:SubB) -Lines @(
+            '$Saved = $env:PSModulePath'
+            '$env:PSModulePath = (New-Item -ItemType Directory -Force -Path (Join-Path $HOME "no-modules")).FullName'
+            '{Run}'
+            '"after1: $LASTEXITCODE"'
+            '$env:PSModulePath = $Saved'
+            '{Run}'
+            '"after2: $LASTEXITCODE"'
+            '"session still open"'
+            'exit 0'
+        )
+        $Session.Console | Should -Match 'Required Az submodule\(s\) not found'
+        $Session.After | Should -Be @('after1: 1', 'after2: 0') -Because $Session.Console
+        $Session.Open | Should -BeTrue
+    }
+
+    It 'pwsh -File: a clean run with 2 streams exits 0' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2
+        $Run.Console | Should -Match '\[stream-1\] done: Sub B'
+        $Run.FailedIds.Count | Should -Be 0
+        $Run.ExitCode | Should -Be 0
     }
 }

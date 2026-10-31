@@ -149,7 +149,7 @@ $Global:ResourceCount = 1
     "`$Obfuscate = [bool]`$ObfuscateRun; `$SkippedCount = 0; `$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null`n" +
     "`$InventoryPassthrough = @{ ConcurrencyLimit = 6 }; `$WrapperTranscriptStarted = `$false; `$Elapsed = [timespan]::Zero`n" +
     "`$ConcurrencyLimit = 6; `$DeviceLogin = `$false; `$SkipMetrics = `$false; `$SkipConsumption = `$false; `$AllowPartialAccess = `$false`n" +
-    "`$AllSubscriptions = @(`$Subscriptions); `$Excluded = @(); `$RunStartTime = Get-Date; `$BundleVer = 'test'`n" +
+    "`$AllSubscriptions = @(@(`$Subscriptions) + @(`$Global:RdaRlAlsoVisible | Where-Object { `$_ })); `$Excluded = @(); `$RunStartTime = Get-Date; `$BundleVer = 'test'`n" +
     "`$NoAccessSubs = @(); `$GenuinelyEmptySubs = @(); `$UnknownSubs = @(); `$ConsumptionRecordTotal = 0`n" +
     "`$AutoTune = [pscustomobject]@{ VCpu = 2; RamGB = 4 }; `$StreamsSrc = 'explicit'; `$ConcurrencySrc = 'auto'; `$AuthSkippedPhases = @(); `$UncarriedSkipped = @()`n"
     $Params = "param(`$FakeScriptRoot, `$Subscriptions, `$InventoryRoot, `$ResumeStateFile, `$TenantID, `$Resume, `$ResumeFailedOnly, `$ParallelStreams, `$ObfuscateRun)`n"
@@ -218,12 +218,15 @@ $Global:ResourceCount = 1
         $Global:RdaRlRoot = $script:Root
         $Global:RdaRlFailIds = @()
         $Global:RdaRlIncompleteIds = @()
+        # Subscriptions Azure lists that are not in the run's set (for example
+        # disabled ones without -IncludeDisabled).
+        $Global:RdaRlAlsoVisible = @()
         $script:State = Join-Path $script:Root '.resume-state-t.json'
     }
 }
 
 AfterAll {
-    Remove-Variable -Name RdaRlRoot, RdaRlFailIds, RdaRlIncompleteIds, RdaRlHome, RdaRlCalls -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name RdaRlRoot, RdaRlFailIds, RdaRlIncompleteIds, RdaRlHome, RdaRlCalls, RdaRlAlsoVisible -Scope Global -ErrorAction SilentlyContinue
     if ($script:TestBase -and (Test-Path $script:TestBase)) { Remove-Item -Path $script:TestBase -Recurse -Force }
 }
 
@@ -545,5 +548,24 @@ Describe 'A retry-list entry for a subscription that is no longer visible' {
         $R3 = script:Invoke-Run -Subs @($script:A, $script:B) -Resume
         @(script:Get-Lines -Run $R3 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
         Test-Path -LiteralPath $script:State | Should -BeFalse -Because 'nothing is owed any more'
+    }
+}
+
+Describe 'A retry-list entry for a subscription outside the current subscription set' {
+    BeforeEach { script:New-Case }
+
+    It '-ResumeFailedOnly whose retry list holds only a disabled subscription says none are visible and exits 2' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $null = script:Invoke-Run -Subs @($script:A, $script:X)
+        $Global:RdaRlFailIds = @()
+        # Sub X is disabled now: Azure still lists it, but it is not in the run's set.
+        $Global:RdaRlAlsoVisible = @($script:X)
+        $R = script:Invoke-Run -Subs @($script:A) -ResumeFailedOnly
+
+        $R.ExitCode | Should -Be 2 -Because 'the retry list still holds it, so the run is not a success'
+        @(script:Get-Lines -Run $R -Like 'WARNING: FailedAttempts list contained IDs but none are visible in the current subscription set*').Count | Should -Be 1
+        @(script:Get-Lines -Run $R -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty -Because 'a disabled subscription is still listed by Azure'
+        @($R.Calls) | Should -BeNullOrEmpty
+        [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 1
     }
 }

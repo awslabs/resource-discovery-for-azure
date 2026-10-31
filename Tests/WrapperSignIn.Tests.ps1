@@ -47,6 +47,8 @@ Describe 'Connect-RdaWrapperSession' {
         }
         Mock Disconnect-AzAccount { }
         Mock Write-Host { }
+        # A console to sign in from, unless a case says otherwise.
+        Mock Test-RdaInteractiveSession { $true }
     }
 
     AfterEach {
@@ -99,6 +101,31 @@ Describe 'Connect-RdaWrapperSession' {
 
         { Connect-RdaWrapperSession -TenantID $script:Tenant } | Should -Throw -ExpectedMessage '*did not give a usable token*'
         Should -Invoke Connect-AzAccount -Times 1 -Exactly -Because 'never a second prompt in one run'
+    }
+
+    It 'stops without opening a browser when there is no console and no -DeviceLogin' {
+        Mock Test-RdaInteractiveSession { $false }
+
+        { Connect-RdaWrapperSession -TenantID $script:Tenant } | Should -Throw -ExpectedMessage '*no console to sign in from*'
+        Should -Invoke Connect-AzAccount -Times 0 -Exactly
+    }
+
+    It 'still reuses a usable sign-in when there is no console' {
+        Mock Test-RdaInteractiveSession { $false }
+        $script:Sim.Tenant = $script:Tenant
+        $script:Sim.TokenOk = $true
+
+        Connect-RdaWrapperSession -TenantID $script:Tenant
+
+        Should -Invoke Connect-AzAccount -Times 0 -Exactly
+    }
+
+    It 'uses device code sign-in with -DeviceLogin when there is no console' {
+        Mock Test-RdaInteractiveSession { $false }
+
+        Connect-RdaWrapperSession -TenantID $script:Tenant -DeviceLogin
+
+        Should -Invoke Connect-AzAccount -Times 1 -Exactly -ParameterFilter { $UseDeviceAuthentication.IsPresent }
     }
 
     It 'throws after one attempt when the sign-in itself fails' {

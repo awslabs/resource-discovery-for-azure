@@ -377,6 +377,12 @@ function Connect-RdaWrapperSession
         Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
     }
 
+    # As a direct run does: with no console to sign in from (a scheduled task,
+    # CI, pwsh -NonInteractive), stop instead of opening a browser.
+    if (-not $DeviceLogin -and -not (Test-RdaInteractiveSession))
+    {
+        throw ("Az PowerShell: no usable sign-in for tenant {0}, and this session has no console to sign in from (non-interactive); stopping instead of opening a browser. Run 'Connect-AzAccount -Tenant {0}' before the run, or pass -DeviceLogin." -f $TenantID)
+    }
     if ($DeviceLogin) { Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication -ErrorAction Stop | Out-Null }
     else { Connect-AzAccount -Tenant $TenantID -ErrorAction Stop | Out-Null }
 

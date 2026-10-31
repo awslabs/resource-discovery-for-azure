@@ -460,7 +460,16 @@ if ($Task -eq 'Processing')
     # lock (Monitor) on the array itself.
     $MetricRequestCounts = [long[]]::new(2)
 
-    $MetricGroups = Group-MetricDefinition -MetricDefs $MetricDefs
+    # $MetricCount is the number of definitions to send, as it was when the batch
+    # loop counted definitions: with none to send, no group and no call is made.
+    if ($MetricCount -gt 0)
+    {
+        $MetricGroups = Group-MetricDefinition -MetricDefs $MetricDefs
+    }
+    else
+    {
+        $MetricGroups = [System.Collections.Generic.List[object]]::new()
+    }
 
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays))

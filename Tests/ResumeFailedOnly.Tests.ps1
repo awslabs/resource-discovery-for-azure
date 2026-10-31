@@ -232,13 +232,13 @@ Describe '-ResumeFailedOnly after an interrupted run' {
 
 Describe '-ResumeFailedOnly with nothing on the retry list' {
     BeforeEach { script:New-Case }
-    It 'after an interrupted run with no failure, names the subscriptions it never reached and exits 0' {
+    It 'after an interrupted run with no failure, names the subscriptions it never reached and exits 2' {
         # Run 1: Sub A completes, the session ends before Sub B.
         $null = script:Invoke-Run -Subs @($script:A) -Interrupted
         $R = script:Invoke-Run -Subs @($script:A, $script:B, $script:C) -ResumeFailedOnly
         $S = script:Read-State -Path $script:State
 
-        $R.ExitCode | Should -Be 0
+        $R.ExitCode | Should -Be 2 -Because 'work remains that -ResumeFailedOnly does not do, so it is not a success'
         @($R.Text | Where-Object { $_ -eq 'ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry.' }).Count | Should -Be 1
         @($R.Text | Where-Object { $_ -eq 'Not Collected:           2 (Sub B, Sub C) - no run has completed these and -ResumeFailedOnly retries only the retry list' }).Count | Should -Be 1
         @($R.Text | Where-Object { $_ -eq ('Resume State:            {0} (kept)' -f $script:State) }).Count | Should -Be 1
@@ -300,7 +300,7 @@ Describe '-ResumeFailedOnly and a subscription the access check skipped as not r
         $null = script:Invoke-Run -Subs @($script:A, $script:C) -Unreadable 'sub-c' -Interrupted
         $R = script:Invoke-Run -Subs @($script:A, $script:B, $script:C) -Unreadable 'sub-c' -ResumeFailedOnly
 
-        $R.ExitCode | Should -Be 0
+        $R.ExitCode | Should -Be 2 -Because 'Sub B is still owed'
         @($R.Text | Where-Object { $_ -eq 'Not Collected:           1 (Sub B) - no run has completed these and -ResumeFailedOnly retries only the retry list' }).Count | Should -Be 1
     }
 

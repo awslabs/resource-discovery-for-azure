@@ -252,7 +252,7 @@ Describe 'Retry limit on the sequential path' {
         @($Run4.Calls | Sort-Object -Unique) | Should -Not -Contain 'sub-x'
         @(script:Get-Lines -Run $Run4 -Like 'Not retried:*') | Should -Be @($script:NotRetriedX)
         $Run4.ExitCode | Should -BeNullOrEmpty -Because 'the run goes on with the other subscriptions'
-        $Run4.Result.WrapperExitCode | Should -Be 0
+        $Run4.Result.WrapperExitCode | Should -Be 2 -Because 'its report is missing from the consolidated zip'
     }
 
     It '-ResumeFailedOnly skips it too and still retries a subscription below the limit' {
@@ -270,10 +270,10 @@ Describe 'Retry limit on the sequential path' {
         [int](script:Get-Entry -Id 'sub-y').Attempts | Should -Be 2
         [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3 -Because 'a skipped run is not a failed run'
         $Run4.ExitCode | Should -BeNullOrEmpty
-        $Run4.Result.WrapperExitCode | Should -Be 0
+        $Run4.Result.WrapperExitCode | Should -Be 2 -Because 'the report of Sub X, skipped for the retry limit, is missing from the consolidated zip'
     }
 
-    It '-ResumeFailedOnly with only skipped subscriptions left says nothing is left to retry, names them and exits 0' {
+    It '-ResumeFailedOnly with only skipped subscriptions left says nothing is left to retry, names them and exits 2' {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)
         $null = script:Invoke-Run -Subs $Subs
@@ -282,7 +282,7 @@ Describe 'Retry limit on the sequential path' {
         $Run4 = script:Invoke-Run -Subs $Subs -ResumeFailedOnly
 
         @($Run4.Calls) | Should -BeNullOrEmpty
-        $Run4.ExitCode | Should -Be 0
+        $Run4.ExitCode | Should -Be 2 -Because 'their reports are missing, so the run is not a success'
         @(script:Get-Lines -Run $Run4 -Like 'Not retried:*') | Should -Be @($script:NotRetriedX)
         @(script:Get-Lines -Run $Run4 -Like 'ResumeFailedOnly: nothing left to retry*').Count | Should -Be 1
         @(script:Get-Lines -Run $Run4 -Like 'Not Collected:*').Count | Should -Be 0 -Because 'a subscription past the limit is not one no run reached'
@@ -297,7 +297,7 @@ Describe 'Retry limit on the sequential path' {
         # Sub C is new: no run has reached it.
         $Run4 = script:Invoke-Run -Subs @($script:A, $script:B, $script:C, $script:X) -ResumeFailedOnly
 
-        $Run4.ExitCode | Should -Be 0
+        $Run4.ExitCode | Should -Be 2
         @(script:Get-Lines -Run $Run4 -Like 'Not Collected:*') | Should -Be @('Not Collected:           1 (Sub C) - no run has completed these and -ResumeFailedOnly retries only the retry list')
         Test-Path -LiteralPath $script:State | Should -BeTrue
     }
@@ -319,7 +319,7 @@ Describe 'Retry limit on the sequential path' {
         [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3
     }
 
-    It 'clears the resume state once every other subscription is done, and still lists the skipped one as incomplete' {
+    It 'keeps the resume state once every other subscription is done, lists the skipped one as incomplete, and the next two -Resume runs skip it too' {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)
         $null = script:Invoke-Run -Subs $Subs
@@ -327,13 +327,22 @@ Describe 'Retry limit on the sequential path' {
         $null = script:Invoke-Run -Subs $Subs -Resume
         $Run4 = script:Invoke-Run -Subs $Subs -Resume
 
-        @(script:Get-Lines -Run $Run4 -Like 'Resume state cleared*') | Should -Be @('Resume state cleared (clean run).')
-        Test-Path -LiteralPath $script:State | Should -BeFalse
+        # The state holds the count, so clearing it would start the count again
+        # and the limit would never end the cycle.
+        @(script:Get-Lines -Run $Run4 -Like 'Resume state cleared*') | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:State | Should -BeTrue
         @(script:Get-Lines -Run $Run4 -Like 'Retry Limit Reached:*') | Should -Be @('Retry Limit Reached:     1 (Sub X) - incomplete; -Resume and -ResumeFailedOnly do not collect these')
         @(script:Get-Lines -Run $Run4 -Like '  - Sub X (sub-x):*') | Should -Be @('  - Sub X (sub-x): failed 3 runs in a row; last reason: stand-in failure for this subscription')
         @(script:Get-Lines -Run $Run4 -Like '    ./ResourceInventory.ps1 -TenantID t -SubscriptionID sub-x') | Should -HaveCount 1
         @(script:Get-Lines -Run $Run4 -Like 'Pending Retries:*') | Should -BeNullOrEmpty -Because '-ResumeFailedOnly would not retry it'
-        $Run4.Result.WrapperExitCode | Should -Be 0
+        $Run4.Result.WrapperExitCode | Should -Be 2
+        foreach ($n in 5..6)
+        {
+            $Next = script:Invoke-Run -Subs $Subs -Resume
+            @($Next.Calls) | Should -Not -Contain 'sub-x'
+            $Next.Result.WrapperExitCode | Should -Be 2
+            [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3 -Because 'a skipped run neither counts nor forgets'
+        }
     }
 
     It 'RunSummary.log keeps the skipped subscription as incomplete with its count and reason, and an obfuscated run gives the count only' {
@@ -410,7 +419,7 @@ Describe 'Retry limit on the parallel path' {
         @($Run4.Calls) | Should -Not -Contain 'sub-x'
         @(script:Get-Lines -Run $Run4 -Like 'Not retried:*') | Should -Be @($script:NotRetriedX)
         $Run4.ExitCode | Should -BeNullOrEmpty
-        $Run4.Result.WrapperExitCode | Should -Be 0
+        $Run4.Result.WrapperExitCode | Should -Be 2
     }
 
     It 'keeps counting across sequential and parallel runs, and -ResumeFailedOnly skips it' {
@@ -467,5 +476,28 @@ Describe 'Retry limit for a subscription whose metrics stay incomplete' {
 
         @($Run4.Calls) | Should -Not -Contain 'sub-x'
         @(script:Get-Lines -Run $Run4 -Like 'Not retried: Sub X (sub-x) failed 3 runs in a row; last reason: Metrics incomplete*').Count | Should -Be 1
+    }
+}
+
+Describe 'A retry-list entry for a subscription that is no longer visible' {
+    BeforeAll {
+        Mock Import-Module -ParameterFilter { $Name -eq 'Az.Accounts' } -MockWith { }
+        Mock Disable-AzContextAutosave -MockWith { }
+        Mock Import-AzContext -MockWith { }
+    }
+    BeforeEach { script:New-Case }
+
+    # No run could retry or count it, so it used to keep the resume state forever.
+    It 'is dropped with a line naming it, and the state clears once everything else is done (<Mode>)' -ForEach @(@{ Mode = '-Resume' }, @{ Mode = '-ResumeFailedOnly' }) {
+        $Global:RdaRlFailIds = @('sub-x')
+        $null = script:Invoke-Run -Subs @($script:A, $script:B, $script:X)
+        $Global:RdaRlFailIds = @()
+        # Sub X is gone (deleted or moved to another tenant).
+        $R2 = if ($Mode -eq '-Resume') { script:Invoke-Run -Subs @($script:A, $script:B) -Resume } else { script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly }
+        @(script:Get-Lines -Run $R2 -Like 'Dropped from the retry list:*') | Should -Be @('Dropped from the retry list: Sub X (sub-x) is no longer visible to the signed-in identity, so no run can retry it.')
+        script:Get-Entry -Id 'sub-x' | Should -BeNullOrEmpty
+        $R3 = script:Invoke-Run -Subs @($script:A, $script:B) -Resume
+        @(script:Get-Lines -Run $R3 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:State | Should -BeFalse -Because 'nothing is owed any more'
     }
 }

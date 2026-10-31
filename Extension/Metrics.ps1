@@ -572,7 +572,7 @@ if ($Task -eq 'Processing')
                     }
                     $CallOutcome = 'Success'
                     $CallAttempts = 0
-                    $Request = [PSCustomObject]@{ Succeeded = $false; Query = $null; Outcome = $null; Attempts = 0; ErrorMessage = $null }
+                    $Request = [PSCustomObject]@{ Succeeded = $false; Query = $null; Outcome = $null; Attempts = 0; ErrorMessage = $null; BadRequest = $false }
 
                     $MetricArgs = @{
                         ResourceId      = $Def.Id
@@ -652,6 +652,7 @@ if ($Task -eq 'Processing')
                             if ($BadRequest)
                             {
                                 $CallOutcome = 'Error'
+                                $Request.BadRequest = $true
                                 break
                             }
 
@@ -863,13 +864,20 @@ if ($Task -eq 'Processing')
                         {
                             Add-MetricRecord -Def $Def -Request $Request -MetricQuery $ReturnedMetrics[[string]$Def.MetricName] -ExtraSeconds $GroupSeconds
                         }
+                        elseif (-not $Request.Succeeded -and -not $Request.BadRequest)
+                        {
+                            # The group failed after its retries for a reason that does not depend
+                            # on the metric names (throttling, timeout, server error). Requesting
+                            # each metric again would repeat the same failure once per metric, so
+                            # every metric of the group records the group request's outcome.
+                            Add-MetricRecord -Def $Def -Request $Request -MetricQuery $null -ExtraSeconds $GroupSeconds
+                        }
                         else
                         {
                             # One invalid metric name makes Azure reject the whole request with
                             # BadRequest, so a rejected group is not retried and falls back to one
                             # request per metric; only a metric that also fails on its own is
-                            # marked as an error. A group that fails for another reason falls back
-                            # after its retries. A metric missing from a successful response is
+                            # marked as an error. A metric missing from a successful response is
                             # requested on its own too. Its elapsed time includes the group request.
                             $SingleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
                             $SingleRequest = Invoke-MetricRequest -Def $Def -MetricNames $Def.MetricName -Kind 'Fallback'

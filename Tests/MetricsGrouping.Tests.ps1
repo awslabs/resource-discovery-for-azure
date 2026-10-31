@@ -10,6 +10,8 @@
 #     point's Count, not from the number of data points;
 #   - a group that Azure rejects with BadRequest is not retried and falls back to
 #     one call per metric, so only the invalid metric is marked as an error;
+#   - a group that fails for another reason (throttling, server error) is retried
+#     and does not fall back to one call per metric;
 #   - each metric's diagnostics time is the time of the request that answered it;
 #   - a batch written to Metrics_*.json never splits one call's metrics, and
 #     there are no more batches than with one definition at a time.
@@ -95,6 +97,7 @@ function Get-AzMetric
         'Status500Wrapping400' { throw [System.Net.Http.HttpRequestException]::new('The server failed.', [System.Net.Http.HttpRequestException]::new('The request was rejected.', $null, [System.Net.HttpStatusCode]::BadRequest), [System.Net.HttpStatusCode]::InternalServerError) }
         'Status500Wrapping503' { throw [System.Net.Http.HttpRequestException]::new('The server failed.', [System.Net.Http.HttpRequestException]::new('The service is unavailable.', $null, [System.Net.HttpStatusCode]::ServiceUnavailable), [System.Net.HttpStatusCode]::InternalServerError) }
         'ServerError' { throw "Operation returned an invalid status code 'InternalServerError'" }
+        'Throttled' { throw "Operation returned an invalid status code 'TooManyRequests'" }
     }
 
     $Omitted = @($env:RDA_TEST_METRIC_OMIT -split ';' | Where-Object { $_ })
@@ -458,19 +461,38 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
         $Run = Invoke-MetricsRun -Resources @($script:Disk) -RunName 'fallback-wrapped503' -MultiError 'Status500Wrapping503'
 
         @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 4 }).Count | Should -Be 4
-        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 4
+        # Not a BadRequest, so the group's metrics are not requested again one by one.
+        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 0
+        $Run.Records.Count | Should -Be 4
+        @($Run.Records | Where-Object { -not $_.MetricError }).Count | Should -Be 0
     }
 
-    It 'retries a grouped request that fails for another reason before falling back' {
+    It 'retries a grouped request that fails for another reason and does not fall back to one request per metric' {
         $Run = Invoke-MetricsRun -Resources @($script:Disk) -RunName 'fallback-server-error' -MultiError 'ServerError'
 
         @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 4 }).Count | Should -Be 4
-        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 4
-        $CleanMap = ConvertTo-RecordMap -Records $script:Clean.Records
-        $RunMap = ConvertTo-RecordMap -Records $Run.Records
-        foreach ($Key in $CleanMap.Keys)
+        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 0
+        $Run.Records.Count | Should -Be 4
+        @($Run.Records | Where-Object { $_.MetricError -and $_.MetricValue -eq 0 -and $_.MetricTotalCount -eq 0 }).Count | Should -Be 4
+        @(($script:DiskMetricNames | Sort-Object)) | Should -Be @($Run.Records | ForEach-Object { $_.Metric } | Sort-Object)
+        # Each metric carries the group request's outcome and attempts.
+        foreach ($Name in $script:DiskMetricNames)
         {
-            $RunMap[$Key] | Should -Be $CleanMap[$Key]
+            @($Run.DebugLines | Where-Object { $_ -match ('  Error idx=[0-9]+ .*/{0} interval=.* attempts=4 .*InternalServerError' -f [regex]::Escape($Name)) }).Count | Should -Be 1
+        }
+        @($Run.DebugLines | Where-Object { $_ -match 'Azure Monitor requests: 1 for 4 metric definition\(s\), of which 0 single-metric fallback request\(s\)' }).Count | Should -Be 1
+    }
+
+    It 'retries a throttled grouped request and does not fall back to one request per metric' {
+        $Run = Invoke-MetricsRun -Resources @($script:Disk) -RunName 'fallback-throttled' -MultiError 'Throttled'
+
+        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 4 }).Count | Should -Be 4
+        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 0
+        $Run.Records.Count | Should -Be 4
+        @($Run.Records | Where-Object { -not $_.MetricError }).Count | Should -Be 0
+        foreach ($Name in $script:DiskMetricNames)
+        {
+            @($Run.DebugLines | Where-Object { $_ -match ('  Throttled idx=[0-9]+ .*/{0} interval=.* attempts=4 ' -f [regex]::Escape($Name)) }).Count | Should -Be 1
         }
     }
 

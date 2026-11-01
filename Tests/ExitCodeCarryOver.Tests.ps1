@@ -42,9 +42,12 @@ Describe 'Run-AllSubscriptions.ps1 reports only the subscriptions that failed' -
         $script:RepoRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' | Resolve-Path | Select-Object -ExpandProperty Path
         $script:WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ('ExitCodeCarryOver_' + [guid]::NewGuid().ToString('N'))
         $script:Tenant = '12345678-1234-1234-1234-123456789012'
-        $script:SubA = [pscustomobject]@{ Id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'; Name = 'Sub A' }
-        $script:SubB = [pscustomobject]@{ Id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'; Name = 'Sub B' }
-        $script:SubC = [pscustomobject]@{ Id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'; Name = 'Sub C' }
+        # ResourceInventory.ps1 takes only a GUID as -SubscriptionID. The stand-in
+        # ids are built here from 32 hex digits, so the file holds no id but the
+        # documentation placeholder.
+        $script:SubA = [pscustomobject]@{ Id = [guid]::new(('0' * 31) + 'a').ToString(); Name = 'Sub A' }
+        $script:SubB = [pscustomobject]@{ Id = [guid]::new(('0' * 31) + 'b').ToString(); Name = 'Sub B' }
+        $script:SubC = [pscustomobject]@{ Id = [guid]::new(('0' * 31) + 'c').ToString(); Name = 'Sub C' }
 
         $script:Tool = Join-Path $script:WorkDir 'tool'
         New-Item -ItemType Directory -Path $script:Tool -Force | Out-Null
@@ -58,6 +61,12 @@ Describe 'Run-AllSubscriptions.ps1 reports only the subscriptions that failed' -
         # calls, the role checks, the per-subscription resource count and
         # Resource Graph discovery (one public IP per subscription).
         $Accounts = @'
+# Every process that runs the tool loads this stand-in first (the wrapper and
+# each stream), so it skips ResourceInventory.ps1's online version check there,
+# as Tests/SetupStop.Tests.ps1 does in its harness. The platform is set because
+# the same flag also skips the environment check that sets it.
+$Global:RdaSessionInitialized = $true
+$Global:PlatformOS = 'PowerShell Unix'
 function Get-RdaStandInScenario { Get-Content -LiteralPath $env:RDA_STANDIN_AZURE -Raw | ConvertFrom-Json }
 function Get-RdaStandInContext
 {
@@ -185,6 +194,7 @@ if ($FailSub)
             $Info.Environment['PSModulePath'] = $script:Modules
             $Info.Environment['RDA_STANDIN_AZURE'] = $Scenario
             $Info.Environment['NO_COLOR'] = '1'
+            $Info.Environment['POWERSHELL_TELEMETRY_OPTOUT'] = '1'
             $Proc = [System.Diagnostics.Process]::Start($Info)
             $Proc.StandardInput.Close()
             $Out = $Proc.StandardOutput.ReadToEndAsync()
@@ -229,6 +239,7 @@ if ($FailSub)
             $Info.Environment['PSModulePath'] = $script:Modules
             $Info.Environment['RDA_STANDIN_AZURE'] = $Scenario
             $Info.Environment['NO_COLOR'] = '1'
+            $Info.Environment['POWERSHELL_TELEMETRY_OPTOUT'] = '1'
             $Proc = [System.Diagnostics.Process]::Start($Info)
             foreach ($Line in $Lines) { $Proc.StandardInput.WriteLine($Line.Replace('{Run}', $Call)) }
             $Proc.StandardInput.Close()

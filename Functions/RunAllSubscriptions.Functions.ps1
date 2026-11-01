@@ -795,7 +795,7 @@ function Get-RetryLimitedAttempts
 # empty list.
 function Write-RetryLimitSummary
 {
-    param([object]$RetryLimited, [string]$TenantID, [string[]]$ExcludedIds = @(), [string[]]$NotListedIds = @())
+    param([object]$RetryLimited, [string]$TenantID, [string[]]$ExcludedIds = @(), [string[]]$NotListedIds = @(), [string[]]$NotReadableIds = @())
     $List = @(@($RetryLimited) | Where-Object { $null -ne $_ })
     if ($List.Count -eq 0) { return }
     Write-Host ("Retry Limit Reached:     {0} ({1}) - incomplete; -Resume and -ResumeFailedOnly do not collect these" -f $List.Count, (@($List | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
@@ -814,6 +814,16 @@ function Write-RetryLimitSummary
         Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
     }
     $List = @($List | Where-Object { @($NotListedIds) -notcontains [string]$_.Id })
+    if ($List.Count -eq 0) { return }
+    # A subscription this run's access check skipped stays out of every run until
+    # the identity can read it, so the advice names that first.
+    $NotReadable = @($List | Where-Object { @($NotReadableIds) -contains [string]$_.Id })
+    if ($NotReadable.Count -gt 0)
+    {
+        Write-Host ("  {0} skipped by the access check at the start of this run (the reason is printed there). Grant the identity Reader on {1}, then start a run without -Resume or -ResumeFailedOnly, for example:" -f ((@($NotReadable | ForEach-Object { $_.Name }) -join ', ')), $(if ($NotReadable.Count -eq 1) { 'it' } else { 'them' })) -ForegroundColor Yellow
+        Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
+    }
+    $List = @($List | Where-Object { @($NotReadableIds) -notcontains [string]$_.Id })
     if ($List.Count -eq 0) { return }
     # A subscription that is not Enabled is left out of every run without
     # -IncludeDisabled, so the advice for it adds that switch.

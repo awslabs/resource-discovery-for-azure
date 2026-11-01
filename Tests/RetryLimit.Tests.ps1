@@ -89,9 +89,15 @@ $Global:ResourceCount = 1
         '$CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID' + "`n",
         '$CompletedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $_ })' + "`n")
 
-    # The access check: its scope as written, then a stand-in that finds every
-    # subscription readable; then the record of what it skipped, as written.
-    $GateText = $Top[$ScopeAt].Extent.Text + "`n`$AccessDecision = [pscustomobject]@{ InaccessibleIds = @() }`n"
+    # The access check: its scope as written, then a stand-in that finds the ids in
+    # $Global:RdaRlUnreadableIds not readable and every other readable (under
+    # -AllowPartialAccess the run then leaves them out, as the check does); then
+    # the list of retry-limited subscriptions this run does not collect, as
+    # written (built after the check), and the record of what it skipped.
+    $GateText = $Top[$ScopeAt].Extent.Text + "`n`$AccessDecision = [pscustomobject]@{ InaccessibleIds = @(@(`$Global:RdaRlUnreadableIds) | Where-Object { `$_ -and @(`$ScopeForProbe | ForEach-Object { [string]`$_.Id }) -contains `$_ }) }`n" +
+        "if (`$AllowPartialAccess) { `$Subscriptions = @(`$Subscriptions | Where-Object { `$AccessDecision.InaccessibleIds -notcontains `$_.Id }) }`n"
+    $OwedAt = script:Find-TopIndex -After $ScopeAt -What 'the retry-limited ids this run does not collect' -Match { param($s) $s.Extent.Text.StartsWith('$RetryLimitedNotInRunIds = ') }
+    $GateText += (script:Join-Top -From ($OwedAt - 1) -To $OwedAt) + "`n"
     $RecordText = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ScopeForProbe.Count -gt 0' -and $_.Extent.Text.Contains('-NotReadable $NotReadableIds') } | ForEach-Object { $_.Extent.Text }) -join "`n"
 
     # The sequential loop: the body of `if ($ParallelStreams -le 1)`.
@@ -148,7 +154,7 @@ $Global:ResourceCount = 1
     "`$Global:MetricsFailedSubs = @(); `$Global:ConsumptionFailedSubs = @(); `$Global:CollectorFailures = @(); `$Global:ConsumptionRecordCount = 0`n" +
     "`$Obfuscate = [bool]`$ObfuscateRun; `$SkippedCount = 0; `$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null`n" +
     "`$InventoryPassthrough = @{ ConcurrencyLimit = 6 }; `$WrapperTranscriptStarted = `$false; `$Elapsed = [timespan]::Zero`n" +
-    "`$ConcurrencyLimit = 6; `$DeviceLogin = `$false; `$SkipMetrics = `$false; `$SkipConsumption = `$false; `$AllowPartialAccess = `$false`n" +
+    "`$ConcurrencyLimit = 6; `$DeviceLogin = `$false; `$SkipMetrics = `$false; `$SkipConsumption = `$false; `$AllowPartialAccess = [bool]`$Global:RdaRlAllowPartialAccess`n" +
     "`$AllSubscriptions = @(@(`$Subscriptions) + @(`$Global:RdaRlAlsoVisible | Where-Object { `$_ })); `$Excluded = @(`$Global:RdaRlAlsoVisible | Where-Object { `$_ }); `$RunStartTime = Get-Date; `$BundleVer = 'test'`n" +
     "`$SubWarnings = @(`$Global:RdaRlListWarnings | Where-Object { `$_ }); `$SubErrors = @(`$Global:RdaRlListErrors | Where-Object { `$_ })`n" +
     "`$NoAccessSubs = @(); `$GenuinelyEmptySubs = @(); `$UnknownSubs = @(); `$ConsumptionRecordTotal = 0`n" +
@@ -225,12 +231,16 @@ $Global:ResourceCount = 1
         # Warnings and errors the subscription listing came back with.
         $Global:RdaRlListWarnings = @()
         $Global:RdaRlListErrors = @()
+        # Subscriptions the access check's stand-in finds not readable, and
+        # whether the run has -AllowPartialAccess.
+        $Global:RdaRlUnreadableIds = @()
+        $Global:RdaRlAllowPartialAccess = $false
         $script:State = Join-Path $script:Root '.resume-state-t.json'
     }
 }
 
 AfterAll {
-    Remove-Variable -Name RdaRlRoot, RdaRlFailIds, RdaRlIncompleteIds, RdaRlNoZipIds, RdaRlHome, RdaRlCalls, RdaRlAlsoVisible, RdaRlListWarnings, RdaRlListErrors -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name RdaRlRoot, RdaRlFailIds, RdaRlIncompleteIds, RdaRlNoZipIds, RdaRlHome, RdaRlCalls, RdaRlAlsoVisible, RdaRlListWarnings, RdaRlListErrors, RdaRlUnreadableIds, RdaRlAllowPartialAccess -Scope Global -ErrorAction SilentlyContinue
     if ($script:TestBase -and (Test-Path $script:TestBase)) { Remove-Item -Path $script:TestBase -Recurse -Force }
 }
 
@@ -759,5 +769,39 @@ Describe 'A subscription past the retry limit that is no longer listed' {
         @(script:Get-Lines -Run $R3 -Like 'Dropped from the retry list:*') | Should -BeNullOrEmpty
         $R3.Result.WrapperExitCode | Should -Be 0
         Test-Path -LiteralPath $script:State | Should -BeFalse
+    }
+}
+
+Describe 'A subscription past the retry limit that the access check finds not readable' {
+    BeforeEach { script:New-Case }
+
+    It 'keeps its entry, exits 2 under -AllowPartialAccess with advice that names the access problem, and the run after access is fixed collects it' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:X)
+        $null = script:Invoke-Run -Subs $Subs
+        $null = script:Invoke-Run -Subs $Subs -Resume
+        $null = script:Invoke-Run -Subs $Subs -Resume
+        [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3
+        $Global:RdaRlFailIds = @()
+        $Global:RdaRlUnreadableIds = @('sub-x')
+        $Global:RdaRlAllowPartialAccess = $true
+
+        # The run the advice names, without -Resume: the access check skips Sub X.
+        $R = script:Invoke-Run -Subs $Subs
+        @($R.Calls) | Should -Not -Contain 'sub-x'
+        @($R.Calls) | Should -Contain 'sub-a'
+        script:Get-Entry -Id 'sub-x' | Should -Not -BeNullOrEmpty
+        $R.Result.WrapperExitCode | Should -Be 2 -Because 'Sub X stays on the retry list and its report is missing'
+        @(script:Get-Lines -Run $R -Like 'Retry Limit Reached:*').Count | Should -Be 1
+        @(script:Get-Lines -Run $R -Like '  Sub X skipped by the access check at the start of this run*') | Should -Be @('  Sub X skipped by the access check at the start of this run (the reason is printed there). Grant the identity Reader on it, then start a run without -Resume or -ResumeFailedOnly, for example:')
+        @($R.Text | Where-Object { $_ -match 'IncludeDisabled' }) | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:State | Should -BeTrue
+
+        # Access fixed: the same run collects it and ends clean.
+        $Global:RdaRlUnreadableIds = @()
+        $R2 = script:Invoke-Run -Subs $Subs
+        @($R2.Calls) | Should -Contain 'sub-x'
+        script:Get-Entry -Id 'sub-x' | Should -BeNullOrEmpty
+        $R2.Result.WrapperExitCode | Should -Be 0
     }
 }

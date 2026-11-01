@@ -962,12 +962,6 @@ if (($Resume -or $ResumeFailedOnly) -and @($FailedAttempts | Where-Object { $nul
         }
     }
 }
-# The retry-list entries past the limit that this run does not collect: those
-# skipped above, and those outside this run's subscription set (for example a
-# disabled subscription without -IncludeDisabled). While one is still on the
-# retry list at the end, its report is missing, so the run ends with exit 2.
-$RunSubscriptionIds = @($Subscriptions | ForEach-Object { [string]$_.Id })
-$RetryLimitedNotInRunIds = @(Get-RetryLimitedAttempts -FailedAttempts $FailedAttempts | Where-Object { $RunSubscriptionIds -notcontains [string]$_.Id } | ForEach-Object { [string]$_.Id })
 
 # ---------------------------------------------------------------------------
 # Up-front access gate. Before ANY per-subscription work, verify the signed-in
@@ -1013,6 +1007,16 @@ if ($ScopeForProbe.Count -gt 0)
         Write-Host ("  Access verified: all {0} in-scope subscription(s) are readable." -f $ScopeForProbe.Count) -ForegroundColor Green
     }
 }
+
+# The retry-list entries past the limit that this run does not collect: those
+# skipped above, those the access check skipped as not readable, and those
+# outside this run's subscription set (for example a disabled subscription
+# without -IncludeDisabled, or one a listing with warnings or errors did not show).
+# Built after every start-up filter of the subscription list. While one is
+# still on the retry list at the end, its report is missing, so the run ends
+# with exit 2.
+$RunSubscriptionIds = @($Subscriptions | ForEach-Object { [string]$_.Id })
+$RetryLimitedNotInRunIds = @(Get-RetryLimitedAttempts -FailedAttempts $FailedAttempts | Where-Object { $RunSubscriptionIds -notcontains [string]$_.Id } | ForEach-Object { [string]$_.Id })
 
 # ---------------------------------------------------------------------------
 # Up-front consumption (billing) access gate. Consumption was REQUESTED unless
@@ -2362,7 +2366,7 @@ if ($NotCollected.Count -gt 0)
 if ($RetryLimited.Count -gt 0)
 {
     # Set by the resume-state cleanup above.
-    Write-RetryLimitSummary -RetryLimited $RetryLimited -TenantID $TenantID -ExcludedIds @($Excluded | ForEach-Object { [string]$_.Id }) -NotListedIds $KeptNotListedIds
+    Write-RetryLimitSummary -RetryLimited $RetryLimited -TenantID $TenantID -ExcludedIds @($Excluded | ForEach-Object { [string]$_.Id }) -NotListedIds $KeptNotListedIds -NotReadableIds @(if ($null -ne $AccessDecision) { @($AccessDecision.InaccessibleIds) | Where-Object { $_ } | ForEach-Object { [string]$_ } })
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)

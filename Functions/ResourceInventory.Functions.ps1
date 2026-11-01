@@ -470,11 +470,26 @@ function Invoke-AzGraphQuerySafe
 
 # The total of a count probe (`... | summarize count()`) across every row of an
 # Invoke-AzGraphQuerySafe result: one row per subscription batch. 0 for none.
+# A count_ that is present but not a whole number of 0 or more ends the function
+# with an error, as a failure in Invoke-AzGraphQuerySafe does, instead of being
+# read as 0, rounded or added as a negative number. 'Stop' here for the same
+# reason as there: the inventory's SilentlyContinue would otherwise let the
+# function go on past the throw.
 function Get-AzGraphCount
 {
     param([Parameter(Mandatory = $true)]$Result)
+    $ErrorActionPreference = 'Stop'
     $Total = [long]0
-    foreach ($Row in @($Result.data)) { if ($null -ne $Row -and $null -ne $Row.count_) { $Total += [long]$Row.count_ } }
+    foreach ($Row in @($Result.data))
+    {
+        if ($null -eq $Row -or $null -eq $Row.count_) { continue }
+        $Value = [long]0
+        if (-not [long]::TryParse([string]$Row.count_, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$Value) -or $Value -lt 0)
+        {
+            throw ("Resource Graph returned a count (count_, a {0}) that is not a whole number of 0 or more." -f $Row.count_.GetType().Name)
+        }
+        $Total += $Value
+    }
     return $Total
 }
 

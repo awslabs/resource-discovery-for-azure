@@ -86,6 +86,20 @@ Describe 'Invoke-AzGraphQuerySafe result shape' {
         Get-AzGraphCount -Result ([pscustomobject]@{ data = @() }) | Should -Be 0
     }
 
+    It 'stops on a count that is not a whole number of 0 or more (<Value>), instead of reading it as 0' -ForEach @(@{ Value = 'not-a-number' }, @{ Value = '1.5' }, @{ Value = -5 }) {
+        $Result = [pscustomobject]@{ data = @([pscustomobject]@{ count_ = 7 }, [pscustomobject]@{ count_ = $Value }) }
+        { Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, a *) that is not a whole number of 0 or more.'
+    }
+
+    It 'stops under the inventory''s SilentlyContinue too, for a count that is not a number' {
+        $Result = [pscustomobject]@{ data = @([pscustomobject]@{ count_ = 'not-a-number' }) }
+        { $ErrorActionPreference = 'SilentlyContinue'; Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, a String) that is not a whole number of 0 or more.'
+    }
+
+    It 'adds a whole number given as text' {
+        Get-AzGraphCount -Result ([pscustomobject]@{ data = @([pscustomobject]@{ count_ = '12' }, [pscustomobject]@{ count_ = 3 }) }) | Should -Be 15
+    }
+
     It 'sends the subscriptions, the query and an object-array page of 1000 rows' {
         $script:Bodies = [System.Collections.Generic.List[object]]::new()
         Mock -CommandName Invoke-AzRestMethod -MockWith { $script:Bodies.Add(($Payload | ConvertFrom-Json)); New-GraphResponse -Rows @() }

@@ -805,3 +805,25 @@ Describe 'A subscription past the retry limit that the access check finds not re
         $R2.Result.WrapperExitCode | Should -Be 0
     }
 }
+
+Describe 'The Pending Retries line' {
+    BeforeEach { script:New-Case }
+
+    It 'counts only the retry-list entries below the limit' {
+        $Global:RdaRlFailIds = @('sub-x', 'sub-y')
+        $null = script:Invoke-Run -Subs @($script:A, $script:X, $script:Y)
+        # Sub Y is left out of a subscription listing that came back with
+        # warnings now, so it stays on the retry list with one failed run.
+        $Global:RdaRlFailIds = @('sub-x')
+        $Global:RdaRlListWarnings = @('stand-in: unable to acquire a token for part of the tenant')
+        $null = script:Invoke-Run -Subs @($script:A, $script:X) -Resume
+        $null = script:Invoke-Run -Subs @($script:A, $script:X) -Resume
+        [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3
+        [int](script:Get-Entry -Id 'sub-y').Attempts | Should -Be 1
+
+        $Global:RdaRlFailIds = @()
+        $R = script:Invoke-Run -Subs @($script:A, $script:X) -Resume
+        @($R.Result.FailedSubscriptions) | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R -Like 'Pending Retries:*') | Should -Be @('Pending Retries:         1 subscription(s) from a prior run still in FailedAttempts')
+    }
+}

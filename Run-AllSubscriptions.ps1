@@ -2349,13 +2349,15 @@ if ($FailedSubscriptions.Count -gt 0)
         Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
     }
 }
-elseif (($FailedAttempts.Count - $RetryLimited.Count) -gt 0)
+elseif ((@($FailedAttempts | Where-Object { $null -ne $_ }).Count - $RetryLimited.Count) -gt 0)
 {
     # No new failures this run, but the resume-state file still has lingering
     # FailedAttempts from a prior run that have not yet been retried. Surface
     # them so the operator does not lose track of historical failures simply
-    # because the most recent run was clean.
-    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
+    # because the most recent run was clean. The entries past the retry limit
+    # are named under Retry Limit Reached instead; -ResumeFailedOnly does not
+    # retry them, so they are not counted here.
+    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f (@($FailedAttempts | Where-Object { $null -ne $_ }).Count - $RetryLimited.Count)) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 if ($NotCollected.Count -gt 0)

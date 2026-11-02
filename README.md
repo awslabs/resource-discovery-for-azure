@@ -19,6 +19,8 @@ For most users, this is everything you need.
 
 **1. Open Azure Cloud Shell** at [shell.azure.com](https://shell.azure.com), or run a local PowerShell 7 prompt with the [prerequisites](#prerequisites) installed.
 
+The tool needs Az PowerShell only: PowerShell 7 and the four Az submodules `Az.Accounts`, `Az.Compute`, `Az.Monitor` and `Az.Billing`. The Azure CLI is not needed and is not used. On a local machine, sign in with `Connect-AzAccount -Tenant <tenant>` first, or let the script sign you in.
+
 **2. Download the script:**
 
 ```powershell
@@ -127,6 +129,7 @@ Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PS
 **For Local Environment:**
 1. Open PowerShell 7 as Administrator
 2. Ensure the four Az PowerShell submodules are installed (see [Installing the required PowerShell modules](#installing-the-required-powershell-modules))
+3. Sign in with Az PowerShell (`Connect-AzAccount -Tenant <tenant>`), or let the script sign you in. The Azure CLI is not needed.
 
 ### Step 2: Get the Script
 

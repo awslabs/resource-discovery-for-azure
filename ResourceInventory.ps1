@@ -802,8 +802,9 @@ Function RunInventorySetup()
 
         if ($AVDSizeCount -ge 1)
         {
-            # Every page, read with the skip token.
-            $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
+            # Every page, read with the skip token, sorted by the id in lower
+            # case for the reason given above ResourceInventoryLoop.
+            $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
             $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId $RunSubscriptionIds -Lowercase -HideRawOutput:$Obfuscate.IsPresent
 
             $Global:Resources += $AVD.data

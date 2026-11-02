@@ -457,6 +457,28 @@ Describe 'New-RdaAllSubHtmlSummary marks the row of a subscription whose consump
         Get-RowHealth -Html $Html -Folder $A | Should -Be 'ok'
     }
 
+    It 'the row of a subscription whose metrics were skipped for sign-in says metrics incomplete, under -Obfuscated too' {
+        $Run = New-Run
+        $A = Split-Path -Leaf (New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated)
+        $B = Split-Path -Leaf (New-SubFolder -Root $Run -Services @{ VirtualMachines = 1 } -Obfuscated)
+        $C = Split-Path -Leaf (New-SubFolder -Root $Run -Services @{ VirtualMachines = 1 } -Obfuscated)
+        $Out = Join-Path $Run 'main.html'
+        $Skip = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+        $MetricsSkips = @(
+            [pscustomobject]@{ Name = 'y'; Id = 'sub-b'; Message = $Skip; ReportFolder = $B }
+            [pscustomobject]@{ Name = 'z'; Id = 'sub-c'; Message = $Skip; ReportFolder = $C }
+        )
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated `
+            -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'x'; Id = 'sub-c'; ReportFolder = $C }) `
+            -MetricsFailedSubs $MetricsSkips | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        Get-RowHealth -Html $Html -Folder $B | Should -Be 'metrics incomplete'
+        Get-RowHealth -Html $Html -Folder $C | Should -Be 'consumption and metrics incomplete'
+        Get-RowHealth -Html $Html -Folder $A | Should -Be 'ok'
+    }
+
     It 'a subscription with 0 resources whose consumption failed says consumption incomplete and still counts as empty' {
         $Run = New-Run
         $E = Split-Path -Leaf (New-SubFolder -Root $Run -Services @{} -Obfuscated)
@@ -502,5 +524,45 @@ Describe 'New-RdaAllSubHtmlSummary marks the row of a subscription whose consump
         Get-RowHealth -Html $Html -Folder $B | Should -Be 'consumption incomplete'
         Get-RowHealth -Html $Html -Folder $A | Should -Be 'ok'
         $Html | Should -Not -Match 'had consumption \(billing\) issues' -Because 'the banner does not count a sign-in skip (unchanged)'
+    }
+}
+
+# The metrics phase of ResourceInventory.ps1 (CreateMetricsJob), lifted from its
+# AST and run as written, records the report folder on the entry it adds when
+# the sign-in cannot be refreshed, as the consumption phase does, so the main
+# summary can mark that row.
+Describe 'ResourceInventory.ps1 names the report folder when metrics are skipped for sign-in' {
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'CreateMetricsJob' }, $true))
+        if ($Fn.Count -ne 1) { throw 'CreateMetricsJob was not found in ResourceInventory.ps1.' }
+        . ([scriptblock]::Create($Fn[0].Extent.Text))
+        # Write-Log, which the lifted function calls.
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1')
+        function Test-DataPlaneAuthReady { param($Phase) $false }
+        Mock Write-Log { }
+    }
+
+    BeforeEach {
+        $script:Saved = @{}
+        foreach ($Name in @('MetricsFailedSubs', 'Subscriptions', 'DefaultPath', 'AzMetrics')) { $script:Saved[$Name] = Get-Variable -Name $Name -Scope Global -ValueOnly -ErrorAction SilentlyContinue }
+    }
+
+    AfterEach {
+        foreach ($Name in $script:Saved.Keys) { Set-Variable -Name $Name -Scope Global -Value $script:Saved[$Name] }
+        Remove-Variable -Name SkipMetrics, SubscriptionID -Scope Script -ErrorAction SilentlyContinue
+    }
+
+    It 'records ReportFolder, the run''s report folder name, on each subscription''s entry' {
+        $Global:MetricsFailedSubs = @()
+        $Global:Subscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Alpha' }, [pscustomobject]@{ Id = 'sub-b'; Name = 'Beta' })
+        $Sep = [IO.Path]::DirectorySeparatorChar
+        $Global:DefaultPath = (Join-Path $TestDrive 'ResourcesReport202611020000000000000') + $Sep
+        $script:SkipMetrics = [switch]$false
+        $script:SubscriptionID = 'sub-b'
+        CreateMetricsJob
+        @($Global:MetricsFailedSubs).Count | Should -Be 1
+        $Global:MetricsFailedSubs[0].Id | Should -Be 'sub-b'
+        $Global:MetricsFailedSubs[0].ReportFolder | Should -Be 'ResourcesReport202611020000000000000'
     }
 }

@@ -188,9 +188,10 @@ function New-RdaAllSubHtmlSummary
         $SinceTime,
 
         # Optional run-health collections passed through from the wrapper. Each is an
-        # array; when empty the corresponding banner is omitted. A consumption entry
-        # whose ReportFolder names a report folder of this run also marks that
-        # folder's row "consumption incomplete".
+        # array; when empty the corresponding banner is omitted. A consumption or
+        # metrics entry whose ReportFolder names a report folder of this run also
+        # marks that folder's row "consumption incomplete" or "metrics incomplete"
+        # ("consumption and metrics incomplete" for both).
         $FailedSubscriptions = @(),
         $ConsumptionFailedSubs = @(),
         $MetricsFailedSubs = @(),
@@ -383,6 +384,8 @@ function New-RdaAllSubHtmlSummary
     # entry), but its row is marked too. The folder ties an entry to its row:
     # under -Obfuscate the row's name is a token, so a name cannot.
     $ConsumpFolders = @(@($ConsumptionFailedSubs) | Where-Object { $_ } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    # The same for metrics skipped because the sign-in could not be refreshed.
+    $MetricsFolders = @(@($MetricsFailedSubs) | Where-Object { $_ } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
     # Per-subscription table.
     $Rows = New-Object System.Text.StringBuilder
@@ -390,7 +393,8 @@ function New-RdaAllSubHtmlSummary
     {
         $NameSafe = ConvertTo-HtmlSafe $Sr.Name
         $CountText = '{0:N0}' -f $Sr.Total
-        $HealthCell = if ($ConsumpFolders -contains $Sr.Folder) { '<span class="tag warn">consumption incomplete</span>' } elseif ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
+        $Incomplete = @(if ($ConsumpFolders -contains $Sr.Folder) { 'consumption' }; if ($MetricsFolders -contains $Sr.Folder) { 'metrics' })
+        $HealthCell = if ($Incomplete.Count -gt 0) { '<span class="tag warn">{0} incomplete</span>' -f ($Incomplete -join ' and ') } elseif ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
         $LinkCell = if ($Sr.Link) { ('<a href="{0}">open &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.Link)) } else { '<span class="muted">no report</span>' }
         [void]$Rows.AppendFormat('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td>{3}</td></tr>', $NameSafe, $CountText, $HealthCell, $LinkCell)
     }

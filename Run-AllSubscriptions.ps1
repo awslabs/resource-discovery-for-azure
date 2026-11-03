@@ -238,23 +238,58 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
 # cause "command not found" because nothing outside these four is ever called.
 # Check per-submodule (a slim install has no `Az` meta-module, so the old
 # Get-Module -Name Az check would have false-negatived a perfectly good install).
+#
+# Az.Accounts must also be the supported version or newer (the number lives in
+# Functions/AzModules.Functions.ps1): an older Az.Accounts on disk counts as
+# missing here and is installed at the supported version or newer; an older
+# Az.Accounts already loaded in this session stops the run with advice to open
+# a new session, since it cannot be replaced in a running one.
+$AzModulesFunctionsFile = Join-Path $PSScriptRoot 'Functions/AzModules.Functions.ps1'
+if (-not (Test-Path -Path $AzModulesFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $AzModulesFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $AzModulesFunctionsFile
+
 $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
-$MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
+$AzAccountsCheck = Test-RdaAzAccountsVersion
+if ($AzAccountsCheck.Status -eq 'LoadedTooOld')
+{
+    foreach ($AzAccountsLine in $AzAccountsCheck.Messages)
+    {
+        Write-Host $AzAccountsLine -ForegroundColor Red
+    }
+    exit 1
+}
+$MissingAzSubModules = @($RequiredAzSubModules | Where-Object {
+        if ($_ -eq 'Az.Accounts') { $AzAccountsCheck.Status -ne 'Ok' }
+        else { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) }
+    })
 if ($MissingAzSubModules.Count -gt 0)
 {
     $AzModuleManualHint = ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser' -f ($RequiredAzSubModules -join ','))
     $AzModuleInteractive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 
+    if ($AzAccountsCheck.Status -ne 'Ok')
+    {
+        foreach ($AzAccountsLine in $AzAccountsCheck.Messages)
+        {
+            Write-Host $AzAccountsLine -ForegroundColor Yellow
+        }
+    }
+
     if (-not $AzModuleInteractive)
     {
-        Write-Host ("Required Az submodule(s) not found ({0}), and this is a non-interactive session, so I will not prompt to install them." -f ($MissingAzSubModules -join ', ')) -ForegroundColor Red
+        Write-Host ("Required Az submodule(s) not found or too old ({0}), and this is a non-interactive session, so I will not prompt to install them." -f ($MissingAzSubModules -join ', ')) -ForegroundColor Red
         Write-Host "Install them and re-run:" -ForegroundColor Yellow
         Write-Host $AzModuleManualHint -ForegroundColor Yellow
         exit 1
     }
 
     Write-Host ""
-    $AzModuleAnswer = Read-Host ("These Az submodules are required but not installed: {0}. Install them now (into your user scope)? [y/N]" -f ($MissingAzSubModules -join ', '))
+    $AzModuleAnswer = Read-Host ("These Az submodules are required but not installed or too old: {0}. Install them now (into your user scope)? [y/N]" -f ($MissingAzSubModules -join ', '))
     if ($AzModuleAnswer -notmatch '^(y|yes)$')
     {
         Write-Host "Not installing. Install them and re-run:" -ForegroundColor Yellow
@@ -270,14 +305,28 @@ if ($MissingAzSubModules.Count -gt 0)
         # the provider non-interactively so the install cannot hang on it.
         # (-Force on Install-Module below suppresses the untrusted-PSGallery prompt.)
         $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -ErrorAction SilentlyContinue
-        # Install only the missing required submodules, not the full Az rollup.
-        Install-Module -Name $MissingAzSubModules -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser -ErrorAction Stop
+        # Install only the missing required submodules, not the full Az rollup;
+        # Az.Accounts at the supported version or newer.
+        Install-RdaAzSubModule -Name $MissingAzSubModules
     }
     catch
     {
         Write-Host ("Az submodule install failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
         Write-Host "Install them manually then re-run:" -ForegroundColor Yellow
         Write-Host $AzModuleManualHint -ForegroundColor Yellow
+        Write-Host ('  ' + (Get-RdaAzAccountsInstallCommand)) -ForegroundColor Yellow
+        exit 1
+    }
+
+    # Check once more after the install: no second install, no loop. If the
+    # install did not give a supported Az.Accounts, stop with the command.
+    $AzAccountsCheck = Test-RdaAzAccountsVersion
+    if ($AzAccountsCheck.Status -ne 'Ok')
+    {
+        foreach ($AzAccountsLine in $AzAccountsCheck.Messages)
+        {
+            Write-Host $AzAccountsLine -ForegroundColor Red
+        }
         exit 1
     }
 }

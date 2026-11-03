@@ -37,6 +37,15 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 }
 . $CommonFunctionsFile
 
+$AzModulesFunctionsFile = Join-Path $PSScriptRoot 'Functions/AzModules.Functions.ps1'
+if (-not (Test-Path -Path $AzModulesFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $AzModulesFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $AzModulesFunctionsFile
+
 if ($Debug.IsPresent) { $DebugPreference = 'Continue' }
 
 if ($Debug.IsPresent) { $ErrorActionPreference = "Continue" }Else { $ErrorActionPreference = "silentlycontinue" }
@@ -216,12 +225,7 @@ Function RunInventorySetup()
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
-        if ($MissingAzSubModules.Count -eq 0)
-        {
-            $VarAzPs = Get-Module -Name Az.Accounts -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-            Write-Log -Message ('Azure PowerShell modules present (Az.Accounts {0}); required: {1}' -f $VarAzPs.Version, ($RequiredAzSubModules -join ', ')) -Severity 'Success'
-        }
-        else
+        if ($MissingAzSubModules.Count -gt 0)
         {
             Write-Log -Message ('Required Azure PowerShell module(s) not found: {0}' -f ($MissingAzSubModules -join ', ')) -Severity 'Error'
             Write-Log -Message ('This tool needs only these Az submodules. Install them manually before re-running. From an elevated PowerShell 7 prompt:') -Severity 'Error'
@@ -233,6 +237,22 @@ Function RunInventorySetup()
             # collect without the modules its collectors need.
             exit 1
         }
+
+        # Az.Accounts must be the supported version or newer, on disk and in
+        # this session (Functions/AzModules.Functions.ps1 holds the number).
+        # The printed command is the way out: once it has run, the next run
+        # passes this check.
+        $AzAccountsCheck = Test-RdaAzAccountsVersion
+        if ($AzAccountsCheck.Status -ne 'Ok')
+        {
+            foreach ($Line in $AzAccountsCheck.Messages)
+            {
+                Write-Log -Message $Line -Severity 'Error'
+            }
+            # exit, not throw, for the same reason as above.
+            exit 1
+        }
+        Write-Log -Message ('Azure PowerShell modules present (Az.Accounts {0}, {1} or newer needed); required: {2}' -f $AzAccountsCheck.Installed, $AzAccountsCheck.Required, ($RequiredAzSubModules -join ', ')) -Severity 'Success'
 
         try
         {

@@ -87,7 +87,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
-- **Az PowerShell module** — only four submodules are needed: `Az.Accounts`, `Az.Compute`, `Az.Monitor` and `Az.Billing` (install before running — see below). The Azure CLI is not needed, and neither is `Az.ResourceGraph`: Resource Graph is queried through `Invoke-AzRestMethod` from `Az.Accounts`.
+- **Az PowerShell module** — only four submodules are needed: `Az.Accounts` **5.5.4 or newer**, `Az.Compute`, `Az.Monitor` and `Az.Billing` (install before running — see below). The Azure CLI is not needed, and neither is `Az.ResourceGraph`: Resource Graph is queried through `Invoke-AzRestMethod` from `Az.Accounts`.
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
@@ -105,6 +105,14 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 ```powershell
 Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
+
+**Az.Accounts 5.5.4 or newer is required.** Both scripts check this before any Azure call. If the newest installed `Az.Accounts` is older (or missing), the run prints the version it found, the version it needs and this command, then stops with exit code `1` (the wrapper offers to run it for you on interactive runs):
+
+```powershell
+Install-Module -Name Az.Accounts -MinimumVersion 5.5.4 -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+```
+
+If an older `Az.Accounts` is already loaded in your PowerShell session, it cannot be replaced while the session runs: the run stops and asks you to open a new PowerShell session (use `pwsh -NoProfile` if your profile loads `Az.Accounts`).
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 

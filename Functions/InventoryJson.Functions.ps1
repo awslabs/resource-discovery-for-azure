@@ -30,16 +30,19 @@ function Write-InventoryJson
         [string]$Path
     )
 
-    if ($InputObject -is [System.Collections.IDictionary])
-    {
-        throw ("Write-InventoryJson: -InputObject is a dictionary ({0}). Pass a [pscustomobject] with one property per collector, for example [pscustomobject]`$Table." -f $InputObject.GetType().FullName)
-    }
-
     $FullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $TempPath = '{0}.{1}.tmp' -f $FullPath, [guid]::NewGuid().ToString('N')
     $Moved = $false
     try
     {
+        # Inside the try: a throw outside any try is skipped when the caller runs with
+        # $ErrorActionPreference = 'SilentlyContinue', as ResourceInventory.ps1 does.
+        # Here it always stops the function, before the temporary file is created.
+        if ($InputObject -is [System.Collections.IDictionary])
+        {
+            throw ("Write-InventoryJson: -InputObject is a dictionary ({0}). Pass a [pscustomobject] with one property per collector, for example [pscustomobject]`$Table." -f $InputObject.GetType().FullName)
+        }
+
         $Writer = [System.IO.StreamWriter]::new($TempPath, $false, [System.Text.UTF8Encoding]::new($false))
         try
         {

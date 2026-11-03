@@ -557,6 +557,39 @@ Describe 'Write-InventoryJson' {
         Get-WriterCaseFiles $Dir | Should -Be @('Inventory_test.json')
     }
 
+    # Pester runs each test inside a try, and a throw inside a try always stops. So the
+    # caller here is a child pwsh with no try at all, as a script run on its own would be.
+    It 'refuses a dictionary under ErrorActionPreference <Preference> with no enclosing try, writing nothing' -ForEach @(
+        @{ Preference = 'SilentlyContinue' }
+        @{ Preference = 'Ignore' }
+    ) {
+        $EmptyDir = New-WriterCaseDir
+        $EmptyPath = Join-Path $EmptyDir 'Inventory_test.json'
+        $ExistingDir = New-WriterCaseDir
+        $ExistingPath = Join-Path $ExistingDir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($ExistingPath, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($ExistingPath)
+
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('silent_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            ('$ErrorActionPreference = {0}' -f (& $Q $Preference))
+            ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
+            ('Write-InventoryJson -InputObject @{{ VirtualMachines = @(); Version = ''1.2.3'' }} -Path {0}' -f (& $Q $EmptyPath))
+            'Write-Output ''AFTER_FIRST'''
+            ('Write-InventoryJson -InputObject ([ordered]@{{ Version = ''1.2.3'' }}) -Path {0}' -f (& $Q $ExistingPath))
+            'Write-Output ''AFTER_SECOND'''
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        # The child gets past both calls (its own preference lets it go on); the writer must not.
+        $Output | Should -Contain 'AFTER_SECOND' -Because ($Output -join [Environment]::NewLine)
+        Get-WriterCaseFiles $EmptyDir | Should -BeNullOrEmpty -Because 'no inventory and no temporary file is written for a dictionary'
+        Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
+    }
+
     It 'still writes a [pscustomobject] built from an ordered dictionary' {
         $Dir = New-WriterCaseDir
         $Path = Join-Path $Dir 'Inventory_test.json'

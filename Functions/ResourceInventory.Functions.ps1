@@ -19,7 +19,7 @@
 # ResourceInventory.ps1 dot-sources Common.Functions.ps1 at startup, so Write-Log
 # is available here exactly as before. Its default behavior is unchanged; it
 # gained additive -NoConsole / -ToDebugLog switches. See that file for detail.
-# Write-InventoryJson also moved to Functions/Common.Functions.ps1, so
+# Write-InventoryJson moved to Functions/InventoryJson.Functions.ps1, so
 # Functions/RecoveryMerge.Functions.ps1 can load it without this file.
 
 function GetLocalVersion()

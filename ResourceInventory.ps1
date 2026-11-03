@@ -36,6 +36,15 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 }
 . $CommonFunctionsFile
 
+$InventoryJsonFunctionsFile = Join-Path $PSScriptRoot 'Functions/InventoryJson.Functions.ps1'
+if (-not (Test-Path -Path $InventoryJsonFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $InventoryJsonFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $InventoryJsonFunctionsFile
+
 if ($Debug.IsPresent) { $DebugPreference = 'Continue' }
 
 if ($Debug.IsPresent) { $ErrorActionPreference = "Continue" }Else { $ErrorActionPreference = "silentlycontinue" }

@@ -16,7 +16,7 @@
 #
 # HOW
 # ---
-# Write-InventoryJson is dot-sourced from Functions/Common.Functions.ps1
+# Write-InventoryJson is dot-sourced from Functions/InventoryJson.Functions.ps1
 # and tested directly. ResourceInventory.ps1 runs login and collection when
 # invoked, so its parts are lifted out with the PowerShell parser: the functions
 # it defines, the top-level statements of RunInventorySetup and
@@ -42,7 +42,8 @@ BeforeAll {
     $script:InventoryScript = Join-Path $script:RepoRoot 'ResourceInventory.ps1'
     $script:CommonFunctions = Join-Path $script:RepoRoot 'Functions/Common.Functions.ps1'
     $script:InventoryFunctions = Join-Path $script:RepoRoot 'Functions/ResourceInventory.Functions.ps1'
-    foreach ($Required in @($script:InventoryScript, $script:CommonFunctions, $script:InventoryFunctions))
+    $script:InventoryJsonFunctions = Join-Path $script:RepoRoot 'Functions/InventoryJson.Functions.ps1'
+    foreach ($Required in @($script:InventoryScript, $script:CommonFunctions, $script:InventoryFunctions, $script:InventoryJsonFunctions))
     {
         if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) { throw "Required file not found: $Required" }
     }
@@ -251,6 +252,7 @@ function Get-AzContext { }
                 '$ErrorActionPreference = ''silentlycontinue'''
                 ('. {0}' -f (& $Q $script:CommonFunctions))
                 ('. {0}' -f (& $Q $script:InventoryFunctions))
+                ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
                 'function GetLocalVersion { ''1.2.3'' }'
                 'function Write-RdaShareableDiagnosticsLog { $null }'
                 ('$Global:DefaultPath = {0}' -f (& $Q ($RunDir + [IO.Path]::DirectorySeparatorChar)))
@@ -380,10 +382,10 @@ AfterAll {
 Describe 'Write-InventoryJson' {
 
     BeforeAll {
-        . $script:CommonFunctions
+        . $script:InventoryJsonFunctions
         if (-not (Get-Command -Name 'Write-InventoryJson' -CommandType Function -ErrorAction SilentlyContinue))
         {
-            throw "Expected function 'Write-InventoryJson' to be defined by $script:CommonFunctions, but it was not."
+            throw "Expected function 'Write-InventoryJson' to be defined by $script:InventoryJsonFunctions, but it was not."
         }
 
         # An empty folder of its own, so a test can check every file the writer left behind.
@@ -530,11 +532,43 @@ Describe 'Write-InventoryJson' {
     }
 }
 
+Describe 'ResourceInventory.ps1 start-up loads Write-InventoryJson' {
+
+    It 'defines Write-InventoryJson after the start-up load statements run in a fresh pwsh' {
+        # The top-level statements before the first '$Debug.IsPresent' check are the
+        # functions-file loads. Run them in a child pwsh with $PSScriptRoot set to the repo.
+        $Tokens = $null
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$Tokens, [ref]$ParseErrors)
+        $Load = @()
+        foreach ($Statement in $Ast.EndBlock.Statements)
+        {
+            if ($Statement.Extent.Text -match '^\s*if\s*\(\s*\$Debug\.IsPresent') { break }
+            $Load += $Statement.Extent.Text
+        }
+        $Load.Count | Should -BeGreaterThan 0
+
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('startup_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            ('$RepoRoot = {0}' -f (& $Q $script:RepoRoot))
+            (($Load -join [Environment]::NewLine) -replace '\$PSScriptRoot', '$RepoRoot')
+            'Write-Output (''HAS_WRITER='' + [bool](Get-Command -Name ''Write-InventoryJson'' -CommandType Function -ErrorAction SilentlyContinue))'
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        $LASTEXITCODE | Should -Be 0 -Because ($Output -join [Environment]::NewLine)
+        $Output | Should -Contain 'HAS_WRITER=True'
+    }
+}
+
 Describe 'ProcessResourceResult' {
 
     BeforeAll {
         . $script:CommonFunctions
         . $script:InventoryFunctions
+        . $script:InventoryJsonFunctions
         . ([scriptblock]::Create($script:ProcessResourceResultText))
         $Global:ErrorLogFile = $null
         $Global:Version = '1.2.3'

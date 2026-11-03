@@ -28,19 +28,17 @@
 # Definitions only - dot-source this file, then call Merge-RecoveryData. It has
 # no dependency on ResourceInventory.ps1's globals; it only reads/writes files
 # and re-invokes Extension/Summary.ps1 to regenerate the HTML report. It loads
-# Functions/Common.Functions.ps1 (for Write-InventoryJson) itself, so it works
-# when dot-sourced on its own.
+# Functions/InventoryJson.Functions.ps1 (Write-InventoryJson) itself, so it
+# works when dot-sourced on its own.
 # =============================================================================
 
-# Common.Functions.ps1 holds definitions only, so loading it again when the
-# caller already has it just redefines the same functions.
-$RecoveryMergeCommonFunctions = Join-Path $PSScriptRoot 'Common.Functions.ps1'
-if (-not (Test-Path -LiteralPath $RecoveryMergeCommonFunctions -PathType Leaf))
+# InventoryJson.Functions.ps1 defines only Write-InventoryJson, so loading it
+# sets no variable and leaves the caller's other functions as they were.
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1') -PathType Leaf))
 {
-    throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f $RecoveryMergeCommonFunctions)
+    throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1'))
 }
-. $RecoveryMergeCommonFunctions
-Remove-Variable -Name 'RecoveryMergeCommonFunctions'
+. (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1')
 
 function Merge-RecoveryData
 {
@@ -347,8 +345,9 @@ function Merge-RecoveryData
     # -- Write the merged inventory with Write-InventoryJson, as
     #    ResourceInventory.ps1 does: one collector at a time, so the whole
     #    document is never one string, and the same bytes as
-    #    'ConvertTo-Json -Depth 100 -Compress | Out-File'. A failed write leaves
-    #    no file at $OutInventoryFile and stops the merge. -----------------------
+    #    'ConvertTo-Json -Depth 100 -Compress | Out-File'. A failed write stops
+    #    the merge and leaves no new, empty or partial inventory; an inventory
+    #    already at $OutInventoryFile is left unchanged. -------------------------
     Write-InventoryJson -InputObject $GapInventory -Path $OutInventoryFile
 
     # -- Consumption source. By default carry the gap bundle's CSV forward: an

@@ -154,6 +154,42 @@ Describe 'Merge-RecoveryData run from a fresh pwsh that loads only RecoveryMerge
         [Convert]::ToBase64String($New) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Case)))
         @(Get-ChildItem -LiteralPath $Case.Output -Filter '*.tmp' -Force).Count | Should -Be 0
     }
+
+    It 'leaves the caller''s variables and its own Write-Log and Write-RdaProgress as they were' {
+        # docs/recovery-and-diagnostics.md has operators dot-source the file at their own
+        # prompt, so loading it must change nothing there but add its own functions.
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Q = { param($s) "'" + ($s -replace "'", "''") + "'" }
+        $ChildScript = @(
+            '$ErrorActionPreference = ''Stop'''
+            'function Global:Write-Log { ''sentinel-log'' }'
+            'function Write-RdaProgress { ''sentinel-progress'' }'
+            '$RecoveryMergeCommonFunctions = ''sentinel-var'''
+            '$Before = @(Get-Variable | ForEach-Object { $_.Name })'
+            ('. {0}' -f (& $Q $script:FnFile))
+            '$After = @(Get-Variable | ForEach-Object { $_.Name })'
+            'Write-Output (''LOG='' + (Get-Command -Name ''Write-Log'' -CommandType Function).ScriptBlock.ToString().Trim())'
+            'Write-Output (''PROGRESS='' + (Get-Command -Name ''Write-RdaProgress'' -CommandType Function).ScriptBlock.ToString().Trim())'
+            'Write-Output (''VAR='' + $RecoveryMergeCommonFunctions)'
+            'Write-Output (''NEWVARS='' + ((@($After | Where-Object { $Before -notcontains $_ -and $_ -ne ''Before'' }) | Sort-Object) -join '',''))'
+            'Write-Output (''HAS_WRITER='' + [bool](Get-Command -Name ''Write-InventoryJson'' -CommandType Function -ErrorAction SilentlyContinue))'
+            'Write-Output (''HAS_MERGE='' + [bool](Get-Command -Name ''Merge-RecoveryData'' -CommandType Function -ErrorAction SilentlyContinue))'
+        ) -join [Environment]::NewLine
+        $ChildFile = Join-Path $script:TmpRoot ('child_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Value $ChildScript -Encoding utf8
+
+        $ChildOutput = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+        $LASTEXITCODE | Should -Be 0 -Because ($ChildOutput -join [Environment]::NewLine)
+        # One comparison, so a failure shows every line that differs.
+        @($ChildOutput | Where-Object { $_ -match '^(LOG|PROGRESS|VAR|NEWVARS|HAS_WRITER|HAS_MERGE)=' }) | Should -Be @(
+            'LOG=''sentinel-log'''
+            'PROGRESS=''sentinel-progress'''
+            'VAR=sentinel-var'
+            'NEWVARS='
+            'HAS_WRITER=True'
+            'HAS_MERGE=True'
+        ) -Because 'loading the file must keep the caller''s Write-Log, Write-RdaProgress and variables, add no variable, and define Write-InventoryJson and Merge-RecoveryData'
+    }
 }
 
 Describe 'Merge-RecoveryData inventory write' {
@@ -193,7 +229,26 @@ Describe 'Merge-RecoveryData inventory write' {
         @(Get-ChildItem -LiteralPath $Case.Output -Force | ForEach-Object { $_.Name }) | Should -BeNullOrEmpty -Because 'the merge stops at the inventory write and leaves nothing behind'
     }
 
-    It 'succeeds on the next run after a failed write, with nothing kept from the failed one' {
+    It 'leaves an existing inventory in the output folder byte-for-byte unchanged when the write fails' {
+        $Case = New-WriteCase -RecoveryVmName 'fail-marker'
+        New-Item -ItemType Directory -Path $Case.Output -Force | Out-Null
+        $Existing = Get-OutputInventoryPath $Case
+        # An inventory from an earlier good run, longer than a cut-off write would be.
+        [System.IO.File]::WriteAllText($Existing, ('{"VirtualMachines":[' + ((1..200 | ForEach-Object { '{"Name":"vm-old-' + $_ + '"}' }) -join ',') + '],"Version":"1.2.3"}' + [Environment]::NewLine))
+        $Before = [System.IO.File]::ReadAllBytes($Existing)
+
+        Mock -CommandName ConvertTo-Json -MockWith $script:FailingConvertToJson
+        { Merge-RecoveryData -GapBundlePath $Case.Gap -RecoveryBundlePath $Case.Recovery -OutputPath $Case.Output 3>$null } | Should -Throw '*simulated out of memory*'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Existing)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'a failed write must not truncate or replace the inventory already there'
+        @(Get-ChildItem -LiteralPath $Case.Output -Force | ForEach-Object { $_.Name }) | Should -Be @(Split-Path -Leaf $Existing) -Because 'no temporary file is left next to it'
+    }
+
+    # Regression check, not a proof of the fix: this also passes with the old
+    # ConvertTo-Json | Out-File line, which overwrote its own 0-byte file on the
+    # next run. It guards that nothing the new write path leaves after a failure
+    # stops the next run. The fix itself is proven by the two tests above.
+    It 'regression check: the next run after a failed write succeeds, with nothing kept from the failed one' {
         $Case = New-WriteCase -RecoveryVmName 'fail-marker'
 
         Mock -CommandName ConvertTo-Json -MockWith $script:FailingConvertToJson

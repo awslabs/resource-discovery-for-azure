@@ -17,6 +17,9 @@
 # location, as Out-File does. The file is written under a temporary name in the same folder and
 # moved to $Path only once it is complete, so a failed write never leaves a cut-off file: on any
 # failure the temporary file is closed and removed, and the error is re-thrown.
+# A dictionary (hashtable, [ordered]) is refused before anything is written: its PSObject
+# properties are Keys, Count, IsReadOnly and so on, not its entries, so it would be written as
+# the wrong shape.
 function Write-InventoryJson
 {
     param(
@@ -26,6 +29,11 @@ function Write-InventoryJson
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
+
+    if ($InputObject -is [System.Collections.IDictionary])
+    {
+        throw ("Write-InventoryJson: -InputObject is a dictionary ({0}). Pass a [pscustomobject] with one property per collector, for example [pscustomobject]`$Table." -f $InputObject.GetType().FullName)
+    }
 
     $FullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $TempPath = '{0}.{1}.tmp' -f $FullPath, [guid]::NewGuid().ToString('N')

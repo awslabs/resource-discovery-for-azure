@@ -530,6 +530,42 @@ Describe 'Write-InventoryJson' {
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Inventory)))
         Get-WriterCaseFiles $Dir | Should -Be @('Inventory_test.json')
     }
+
+    # A dictionary's PSObject properties are Keys, Values, Count and so on, not its entries,
+    # so writing one property at a time would give the wrong shape with no error.
+    It 'refuses a <Kind> input with a clear error and writes nothing' -ForEach @(
+        @{ Kind = 'hashtable'; Make = { @{ VirtualMachines = @(); Version = '1.2.3' } } }
+        @{ Kind = 'ordered dictionary'; Make = { [ordered]@{ VirtualMachines = @(); Version = '1.2.3' } } }
+    ) {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+
+        { Write-InventoryJson -InputObject (& $Make) -Path $Path 3>$null } | Should -Throw '*-InputObject is a dictionary*'
+
+        Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'nothing is written for a refused input'
+    }
+
+    It 'refuses a dictionary without touching an existing file at the path' {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($Path, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($Path)
+
+        { Write-InventoryJson -InputObject @{ Version = '1.2.3' } -Path $Path 3>$null } | Should -Throw '*-InputObject is a dictionary*'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String($Before))
+        Get-WriterCaseFiles $Dir | Should -Be @('Inventory_test.json')
+    }
+
+    It 'still writes a [pscustomobject] built from an ordered dictionary' {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        $Inventory = [pscustomobject][ordered]@{ VirtualMachines = @([ordered]@{ Name = 'vm-01' }); Version = '1.2.3' }
+
+        Write-InventoryJson -InputObject $Inventory -Path $Path 3>$null
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Inventory)))
+    }
 }
 
 Describe 'ResourceInventory.ps1 start-up loads Write-InventoryJson' {

@@ -27,7 +27,8 @@
 #
 # Dot-source this file, then call Merge-RecoveryData. On load it runs one step:
 # it checks that Functions/InventoryJson.Functions.ps1 is next to it (throws if
-# not) and dot-sources it, which defines Write-InventoryJson. So it works when
+# not, and the throw stops the caller under any $ErrorActionPreference) and
+# dot-sources it, which defines Write-InventoryJson. So it works when
 # dot-sourced on its own. The rest is definitions. Merge-RecoveryData has no
 # dependency on ResourceInventory.ps1's globals; it only reads/writes files and
 # re-invokes Extension/Summary.ps1 to regenerate the HTML report.
@@ -37,7 +38,14 @@
 # sets no variable and leaves the caller's other functions as they were.
 if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1') -PathType Leaf))
 {
-    throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1'))
+    # A plain throw here, even one re-thrown from a catch, is skipped when the caller
+    # runs with $ErrorActionPreference = 'SilentlyContinue' or 'Ignore'. Thrown from a
+    # child scope set to Stop, it stops the caller under any preference. The child
+    # scope ends here, so the caller's own preference is left as it was.
+    & {
+        $ErrorActionPreference = 'Stop'
+        throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1'))
+    }
 }
 . (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1')
 

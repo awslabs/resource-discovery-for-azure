@@ -190,6 +190,38 @@ Describe 'Merge-RecoveryData run from a fresh pwsh that loads only RecoveryMerge
             'HAS_MERGE=True'
         ) -Because 'loading the file must keep the caller''s Write-Log, Write-RdaProgress and variables, add no variable, and define Write-InventoryJson and Merge-RecoveryData'
     }
+
+    # Pester runs each test inside a try, and a throw inside a try always stops. So the
+    # caller here is a child pwsh with no try at all, as an operator's own script would be.
+    It 'stops the caller when InventoryJson.Functions.ps1 is missing, under ErrorActionPreference <Preference>' -ForEach @(
+        @{ Preference = 'SilentlyContinue' }
+        @{ Preference = 'Ignore' }
+        @{ Preference = 'Continue' }
+    ) {
+        # A Functions folder holding only RecoveryMerge.Functions.ps1.
+        $LoneDir = Join-Path $script:TmpRoot ('lone_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $LoneDir -Force | Out-Null
+        $LoneFile = Join-Path $LoneDir 'RecoveryMerge.Functions.ps1'
+        Copy-Item -LiteralPath $script:FnFile -Destination $LoneFile
+
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Q = { param($s) "'" + ($s -replace "'", "''") + "'" }
+        $ChildScript = @(
+            ('$ErrorActionPreference = {0}' -f (& $Q $Preference))
+            ('. {0}' -f (& $Q $LoneFile))
+            'Write-Output ''AFTER_LOAD'''
+            'Write-Output (''HAS_MERGE='' + [bool](Get-Command -Name ''Merge-RecoveryData'' -CommandType Function -ErrorAction SilentlyContinue))'
+        ) -join [Environment]::NewLine
+        $ChildFile = Join-Path $script:TmpRoot ('child_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Value $ChildScript -Encoding utf8
+
+        $ChildOutput = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+        $Because = $ChildOutput -join [Environment]::NewLine
+        $ChildOutput | Should -Not -Contain 'AFTER_LOAD' -Because ('the load must stop the caller, not let it go on. Output: ' + $Because)
+        @($ChildOutput | Where-Object { $_ -like 'HAS_MERGE=*' }) | Should -BeNullOrEmpty -Because $Because
+        $Because | Should -BeLike '*required file not found*InventoryJson.Functions.ps1*Keep the Functions folder together*'
+        $LASTEXITCODE | Should -Not -Be 0 -Because $Because
+    }
 }
 
 Describe 'Merge-RecoveryData inventory write' {

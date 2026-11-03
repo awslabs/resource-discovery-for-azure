@@ -147,10 +147,15 @@ function Merge-RecoveryData
         }
 
         # Collect the DISTINCT obfuscation tokens present in the inventory text.
-        # The pattern matches only flat per-resource tokens (prod_/nonprod_<guid>),
-        # which are what the inventory ID/Name fields carry and what the dictionary
-        # maps key on. Consumption-style tokens (prod_sub_/prod_rg_...) live in the
-        # CSV, not the inventory JSON, so they never enter this scan.
+        # The pattern matches single prod_/nonprod_<guid> tokens. Inventory IDs are not
+        # flat tokens: they are ARM-shaped paths
+        # (/subscriptions/<token>/resourcegroups/<token>/providers/<type>/<token>),
+        # so the pattern finds the subscription, resource-group and name tokens inside
+        # each path, and the Name/Subscription/ResourceGroup fields carry the same
+        # tokens. Those single tokens are keys of the name, subscription and
+        # resource-group maps, so they are what this check counts. Consumption-style
+        # tokens (prod_sub_/prod_rg_...) live in the CSV, not the inventory JSON, so
+        # they never enter this scan.
         $InventoryText = Get-Content -Path $InventoryPath -Raw
         $InventoryTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))

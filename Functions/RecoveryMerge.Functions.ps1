@@ -25,11 +25,12 @@
 # match the gap bundle's tokens exactly, so the recovered rows can be spliced in
 # with no remapping. This function performs that splice + re-package.
 #
-# Definitions only - dot-source this file, then call Merge-RecoveryData. It has
-# no dependency on ResourceInventory.ps1's globals; it only reads/writes files
-# and re-invokes Extension/Summary.ps1 to regenerate the HTML report. It loads
-# Functions/InventoryJson.Functions.ps1 (Write-InventoryJson) itself, so it
-# works when dot-sourced on its own.
+# Dot-source this file, then call Merge-RecoveryData. On load it runs one step:
+# it checks that Functions/InventoryJson.Functions.ps1 is next to it (throws if
+# not) and dot-sources it, which defines Write-InventoryJson. So it works when
+# dot-sourced on its own. The rest is definitions. Merge-RecoveryData has no
+# dependency on ResourceInventory.ps1's globals; it only reads/writes files and
+# re-invokes Extension/Summary.ps1 to regenerate the HTML report.
 # =============================================================================
 
 # InventoryJson.Functions.ps1 defines only Write-InventoryJson, so loading it

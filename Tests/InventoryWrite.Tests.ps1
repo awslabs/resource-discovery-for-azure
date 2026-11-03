@@ -32,6 +32,11 @@
 # Run with: Invoke-Pester ./Tests/InventoryWrite.Tests.ps1 -Output Detailed
 # =============================================================================
 
+BeforeDiscovery {
+    # The behaviour test for the Azure session read needs the real Az.Accounts module.
+    $script:HasAzAccounts = [bool](Get-Module -ListAvailable -Name Az.Accounts)
+}
+
 BeforeAll {
     $script:RepoRoot = Split-Path $PSScriptRoot -Parent
     $script:InventoryScript = Join-Path $script:RepoRoot 'ResourceInventory.ps1'
@@ -215,6 +220,7 @@ function CreateResourceJobs
     $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Disks' -Value $Disks
 }
 function GetResorceConsumption { }
+function Get-AzContext { }
 '@
 
     # Summary.ps1 stand-in that also records whether the collector data is still held
@@ -283,6 +289,7 @@ function GetResorceConsumption { }
             '    $ReportState = Join-Path $RunDir ''report-state.json'''
             '    [pscustomobject]@{'
             '        ExitCode             = $LASTEXITCODE'
+            '        AzAccountsLoaded     = [bool](Get-Module -Name Az.Accounts)'
             '        Escaped              = $Escaped'
             '        ResourceCount        = $Global:ResourceCount'
             '        ResourcesReleased    = ($null -eq $Global:Resources)'
@@ -560,6 +567,7 @@ Describe 'Collector data is released once the inventory is written' {
         $R[0].Escaped | Should -BeNullOrEmpty
         $R[0].ExitCode | Should -Be 0
         $R[0].ResourceCount | Should -Be 3 -Because 'two disks and one AVD host pool were discovered'
+        $R[0].AzAccountsLoaded | Should -BeFalse -Because 'the run harness stubs every Az cmdlet, so it never loads Az.Accounts or reaches the network'
     }
 
     It 'releases the collector output and the discovery rows after the write and before the report step' {
@@ -596,6 +604,163 @@ function CreateResourceJobs { throw 'collector step failed' }
         $R[0].ResourceCount | Should -Be 3
         $R[1].Escaped | Should -Match 'collector step failed'
         $R[1].ResourceCount | Should -Be 1 -Because 'the count belongs to the run that just stopped, not the one before it'
+    }
+
+    Context 'Azure session read after the release' {
+
+        BeforeAll {
+            # Offsets in ResourceInventory.ps1. Every search starts at the release line inside
+            # ExecuteInventoryProcessing, so the billing function's definition above it is never matched.
+            $script:ScriptText = [System.IO.File]::ReadAllText($script:InventoryScript)
+            $Tokens = $null
+            $ParseErrors = $null
+            $script:ScriptAst = [System.Management.Automation.Language.Parser]::ParseInput($script:ScriptText, [ref]$Tokens, [ref]$ParseErrors)
+            $Fn = $script:ScriptAst.FindAll({
+                    param($Node)
+                    $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'ExecuteInventoryProcessing'
+                }, $false) | Select-Object -First 1
+            if ($null -eq $Fn) { throw 'ExecuteInventoryProcessing was not found in ResourceInventory.ps1.' }
+
+            $Release = [regex]::new('(?m)^[ \t]*\$Global:Resources = \$null[ \t]*\r?$').Match($script:ScriptText, $Fn.Extent.StartOffset)
+            if (-not $Release.Success -or $Release.Index -ge $Fn.Extent.EndOffset) { throw 'The release line ($Global:Resources = $null) was not found in ExecuteInventoryProcessing.' }
+            $script:ReleaseStart = $Release.Index
+            $script:ReleaseEnd = $Release.Index + $Release.Length
+
+            $Billing = [regex]::new('(?m)^[ \t]*GetResorceConsumption[ \t]*\r?$').Match($script:ScriptText, $script:ReleaseEnd)
+            if (-not $Billing.Success -or $Billing.Index -ge $Fn.Extent.EndOffset) { throw 'The billing call (GetResorceConsumption) was not found after the release line.' }
+            $script:BillingStart = $Billing.Index
+
+            $script:FirstCollect = $script:ScriptText.IndexOf('[System.GC]::Collect()', $script:ReleaseEnd, [System.StringComparison]::Ordinal)
+            $script:ReadPattern = [regex]::new('(?m)^[ \t]*\$null = Get-AzContext -ErrorAction SilentlyContinue[ \t]*\r?$')
+        }
+
+        It 'reads the Azure context after the release and before the release collects and before the billing step' {
+            $Read = $script:ReadPattern.Match($script:ScriptText, $script:ReleaseEnd)
+
+            $Read.Success | Should -BeTrue -Because 'the release frees nothing until an Az cmdlet replaces the stream handlers the last collector left in the Azure session'
+            $script:FirstCollect | Should -BeGreaterThan $script:ReleaseEnd -Because 'the release collects after setting the globals to $null'
+            $Read.Index | Should -BeLessThan $script:FirstCollect -Because 'the read must come before the release collects, or the rows are still held when it runs'
+            $Read.Index | Should -BeLessThan $script:BillingStart -Because 'the read must not depend on the billing step, which -SkipConsumption leaves out'
+        }
+
+        It 'reads the Azure context exactly once between the release and the billing step' {
+            $Between = $script:ScriptText.Substring($script:ReleaseEnd, $script:BillingStart - $script:ReleaseEnd)
+
+            $script:ReadPattern.Matches($Between).Count | Should -Be 1
+        }
+
+        It 'frees the rows a piped Az call in a collector kept, where a call that is not an Az cmdlet does not' -Skip:(-not $script:HasAzAccounts) {
+            # The shipped try block, lifted out of ResourceInventory.ps1.
+            $Tries = @($script:ScriptAst.FindAll({
+                        param($Node)
+                        $Node -is [System.Management.Automation.Language.TryStatementAst] -and
+                        $Node.Extent.StartOffset -gt $script:ReleaseEnd -and $Node.Extent.EndOffset -lt $script:BillingStart
+                    }, $true))
+            $Tries.Count | Should -Be 1 -Because 'one guarded Azure session read follows the release'
+
+            $CaseDir = Join-Path $script:TmpRoot ('session-read_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $ChildHome = Join-Path $CaseDir 'home'
+            New-Item -ItemType Directory -Path (Join-Path $ChildHome '.Azure') -Force | Out-Null
+            # Az usage data collection off, so the child sends nothing.
+            Set-Content -LiteralPath (Join-Path $ChildHome '.Azure/AzurePSDataCollectionProfile.json') -Value '{"enableAzureDataCollection":false}' -Encoding ascii
+            $BlockFile = Join-Path $CaseDir 'block.ps1'
+            Set-Content -LiteralPath $BlockFile -Value $Tries[0].Extent.Text -Encoding utf8
+            $ResultFile = Join-Path $CaseDir 'result.json'
+
+            # Runs in its own process: a fresh Azure session with no context, autosave off.
+            # The fake collector keeps the real four-parameter contract and pipes its Az call
+            # into a script-block filter, as the VM size lookup does.
+            $Child = @'
+param([string]$BlockFile, [string]$ResultFile)
+$ErrorActionPreference = 'silentlycontinue'
+Import-Module -Name Az.Accounts -ErrorAction Stop -WarningAction SilentlyContinue
+$null = Disable-AzContextAutosave -Scope Process
+function Write-Log { param($Message, [switch]$NoConsole, [switch]$ToDebugLog) }
+function Invoke-Plain { $null = 1 }
+$Block = [scriptblock]::Create([System.IO.File]::ReadAllText($BlockFile))
+$Settle = { [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect() }
+$Collector = {
+    param($Sub, $Resources, $Task, $ResourceIdDictionary)
+    $VirtualMachines = $Resources | Where-Object { $_.TYPE -eq 'microsoft.compute/virtualmachines' }
+    if ($Task -eq 'Processing' -and $VirtualMachines)
+    {
+        $null = Get-AzContext -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ }
+    }
+    @($VirtualMachines).Count
+}
+function New-CollectorRound
+{
+    $List = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt 2000; $i++)
+    {
+        $List.Add([pscustomobject]@{ TYPE = 'microsoft.compute/virtualmachines'; location = 'westeurope'; Blob = ('{0:d6}' -f $i).PadRight(20000, [char](65 + ($i % 26))) })
+    }
+    $List.Add([pscustomobject]@{ TYPE = 'microsoft.compute/disks'; location = 'westeurope'; Blob = 'disk' })
+    $Rows = $List.ToArray()
+    $List = $null
+    $null = & $Collector -Sub @() -Resources $Rows -Task 'Processing' -ResourceIdDictionary $null
+    [WeakReference]::new($Rows[0])
+}
+# A fresh profile's first Az cmdlet can stay referenced for a moment; a real run signs in first.
+$null = Get-AzContext -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+$Rounds = foreach ($Round in 1..3)
+{
+    $Weak = New-CollectorRound
+    Invoke-Plain
+    & $Settle
+    $HeldAfterPlain = $Weak.IsAlive
+    $null = Get-Date
+    & $Settle
+    $HeldAfterNonAz = $Weak.IsAlive
+    & $Block
+    $Watch = [System.Diagnostics.Stopwatch]::StartNew()
+    & $Settle
+    while ($Weak.IsAlive -and $Watch.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 250; & $Settle }
+    [pscustomobject]@{ Round = $Round; HeldAfterPlain = $HeldAfterPlain; HeldAfterNonAz = $HeldAfterNonAz; HeldAfterBlock = $Weak.IsAlive }
+}
+[pscustomobject]@{ AzAccountsLoaded = [bool](Get-Module -Name Az.Accounts); Rounds = @($Rounds) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile
+'@
+            $ChildFile = Join-Path $CaseDir 'child.ps1'
+            Set-Content -LiteralPath $ChildFile -Value $Child -Encoding utf8
+
+            # A local port with nothing listening, so any web request the child makes fails at once.
+            $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $Listener.Start()
+            $ClosedPort = $Listener.LocalEndpoint.Port
+            $Listener.Stop()
+            $AzModule = Get-Module -ListAvailable -Name Az.Accounts | Sort-Object Version -Descending | Select-Object -First 1
+            $ModuleRoot = Split-Path (Split-Path $AzModule.ModuleBase -Parent) -Parent
+            $ChildEnv = @{
+                HOME         = $ChildHome
+                USERPROFILE  = $ChildHome
+                PSModulePath = ($ModuleRoot, (Join-Path $PSHOME 'Modules')) -join [System.IO.Path]::PathSeparator
+                HTTPS_PROXY  = ('http://127.0.0.1:{0}' -f $ClosedPort)
+                HTTP_PROXY   = ('http://127.0.0.1:{0}' -f $ClosedPort)
+            }
+            $SavedEnv = @{}
+            foreach ($Key in $ChildEnv.Keys) { $SavedEnv[$Key] = [Environment]::GetEnvironmentVariable($Key) }
+            try
+            {
+                foreach ($Key in $ChildEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $ChildEnv[$Key]) }
+                $Output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $ChildFile -BlockFile $BlockFile -ResultFile $ResultFile 2>&1 | Out-String
+            }
+            finally
+            {
+                foreach ($Key in $SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $SavedEnv[$Key]) }
+            }
+            Test-Path -LiteralPath $ResultFile | Should -BeTrue -Because "the child process writes its result. Output:`n$Output"
+            $Result = Get-Content -LiteralPath $ResultFile -Raw | ConvertFrom-Json
+
+            $Result.AzAccountsLoaded | Should -BeTrue
+            @($Result.Rounds).Count | Should -Be 3
+            foreach ($Round in $Result.Rounds)
+            {
+                $Round.HeldAfterPlain | Should -BeTrue -Because "round $($Round.Round): the piped Az call keeps the collector's rows, or this test proves nothing"
+                $Round.HeldAfterNonAz | Should -BeTrue -Because "round $($Round.Round): a statement that is not an Az cmdlet does not free them"
+                $Round.HeldAfterBlock | Should -BeFalse -Because "round $($Round.Round): the session read after the release frees them"
+            }
+        }
     }
 }
 

@@ -1477,6 +1477,18 @@ function ExecuteInventoryProcessing()
     # on a large estate the report step needs that memory. The count stays in $Global:ResourceCount.
     $Global:SmaResources = $null
     $Global:Resources = $null
+    # Setting the two globals to $null does not free the rows on its own. Az cmdlets leave their stream
+    # handlers in the shared Azure session when they return, so the collector that made the last Azure
+    # call (the VM size lookup) stays referenced, and with it the rows it was given. The next Az cmdlet
+    # replaces those handlers; this read is that call, made from a scope that holds no rows.
+    try
+    {
+        $null = Get-AzContext -ErrorAction SilentlyContinue
+    }
+    catch
+    {
+        Write-Log -Message ('Azure session read after the release failed: {0}. The collector data may stay in memory until the next Azure call.' -f $_.Exception.Message) -NoConsole -ToDebugLog
+    }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
     [System.GC]::Collect()

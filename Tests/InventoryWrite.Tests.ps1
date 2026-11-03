@@ -559,9 +559,12 @@ Describe 'Write-InventoryJson' {
 
     # Pester runs each test inside a try, and a throw inside a try always stops. So the
     # caller here is a child pwsh with no try at all, as a script run on its own would be.
-    It 'refuses a dictionary under ErrorActionPreference <Preference> with no enclosing try, writing nothing' -ForEach @(
-        @{ Preference = 'SilentlyContinue' }
-        @{ Preference = 'Ignore' }
+    # The third case passes -ErrorAction SilentlyContinue at the call site instead, with the
+    # caller's own preference left at Continue.
+    It 'refuses a dictionary under <Label> with no enclosing try, writing nothing' -ForEach @(
+        @{ Label = 'ErrorActionPreference SilentlyContinue'; Preference = 'SilentlyContinue'; CallSite = '' }
+        @{ Label = 'ErrorActionPreference Ignore'; Preference = 'Ignore'; CallSite = '' }
+        @{ Label = 'call-site -ErrorAction SilentlyContinue'; Preference = 'Continue'; CallSite = ' -ErrorAction SilentlyContinue' }
     ) {
         $EmptyDir = New-WriterCaseDir
         $EmptyPath = Join-Path $EmptyDir 'Inventory_test.json'
@@ -575,9 +578,9 @@ Describe 'Write-InventoryJson' {
         Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
             ('$ErrorActionPreference = {0}' -f (& $Q $Preference))
             ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
-            ('Write-InventoryJson -InputObject @{{ VirtualMachines = @(); Version = ''1.2.3'' }} -Path {0}' -f (& $Q $EmptyPath))
+            ('Write-InventoryJson -InputObject @{{ VirtualMachines = @(); Version = ''1.2.3'' }} -Path {0}{1}' -f (& $Q $EmptyPath), $CallSite)
             'Write-Output ''AFTER_FIRST'''
-            ('Write-InventoryJson -InputObject ([ordered]@{{ Version = ''1.2.3'' }}) -Path {0}' -f (& $Q $ExistingPath))
+            ('Write-InventoryJson -InputObject ([ordered]@{{ Version = ''1.2.3'' }}) -Path {0}{1}' -f (& $Q $ExistingPath), $CallSite)
             'Write-Output ''AFTER_SECOND'''
         )
         $Pwsh = (Get-Process -Id $PID).Path

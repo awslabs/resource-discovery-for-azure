@@ -16,7 +16,7 @@
 #
 # HOW
 # ---
-# Write-InventoryJson is dot-sourced from Functions/ResourceInventory.Functions.ps1
+# Write-InventoryJson is dot-sourced from Functions/Common.Functions.ps1
 # and tested directly. ResourceInventory.ps1 runs login and collection when
 # invoked, so its parts are lifted out with the PowerShell parser: the functions
 # it defines, the top-level statements of RunInventorySetup and
@@ -380,10 +380,10 @@ AfterAll {
 Describe 'Write-InventoryJson' {
 
     BeforeAll {
-        . $script:InventoryFunctions
+        . $script:CommonFunctions
         if (-not (Get-Command -Name 'Write-InventoryJson' -CommandType Function -ErrorAction SilentlyContinue))
         {
-            throw "Expected function 'Write-InventoryJson' to be defined by $script:InventoryFunctions, but it was not."
+            throw "Expected function 'Write-InventoryJson' to be defined by $script:CommonFunctions, but it was not."
         }
 
         # An empty folder of its own, so a test can check every file the writer left behind.

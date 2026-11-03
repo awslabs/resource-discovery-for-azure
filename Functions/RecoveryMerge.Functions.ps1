@@ -27,8 +27,20 @@
 #
 # Definitions only - dot-source this file, then call Merge-RecoveryData. It has
 # no dependency on ResourceInventory.ps1's globals; it only reads/writes files
-# and re-invokes Extension/Summary.ps1 to regenerate the HTML report.
+# and re-invokes Extension/Summary.ps1 to regenerate the HTML report. It loads
+# Functions/Common.Functions.ps1 (for Write-InventoryJson) itself, so it works
+# when dot-sourced on its own.
 # =============================================================================
+
+# Common.Functions.ps1 holds definitions only, so loading it again when the
+# caller already has it just redefines the same functions.
+$RecoveryMergeCommonFunctions = Join-Path $PSScriptRoot 'Common.Functions.ps1'
+if (-not (Test-Path -LiteralPath $RecoveryMergeCommonFunctions -PathType Leaf))
+{
+    throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f $RecoveryMergeCommonFunctions)
+}
+. $RecoveryMergeCommonFunctions
+Remove-Variable -Name 'RecoveryMergeCommonFunctions'
 
 function Merge-RecoveryData
 {
@@ -332,9 +344,12 @@ function Merge-RecoveryData
     $OutZipFile = Join-Path $OutputPath ("{0}.zip" -f $BundleBase)
     $OutDictionaryFile = Join-Path $OutputPath ("ObfuscationDictionary_{0}.json" -f $BundleBase)
 
-    # -- Write the merged inventory (depth 100 + compressed, matching the
-    #    original serialization in ResourceInventory.ps1) ----------------------
-    $GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File -FilePath $OutInventoryFile
+    # -- Write the merged inventory with Write-InventoryJson, as
+    #    ResourceInventory.ps1 does: one collector at a time, so the whole
+    #    document is never one string, and the same bytes as
+    #    'ConvertTo-Json -Depth 100 -Compress | Out-File'. A failed write leaves
+    #    no file at $OutInventoryFile and stops the merge. -----------------------
+    Write-InventoryJson -InputObject $GapInventory -Path $OutInventoryFile
 
     # -- Consumption source. By default carry the gap bundle's CSV forward: an
     #    inventory gap does not affect the whole-subscription consumption file.

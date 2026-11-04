@@ -678,8 +678,29 @@ if ($Task -eq 'Processing')
                     }
                     else
                     {
-                        if (![string]::IsNullOrEmpty($OriginalId))
+                        if (![string]::IsNullOrEmpty($OriginalId) -and (Get-Command -Name 'Get-ObfuscatedResourceId' -CommandType Function -ErrorAction SilentlyContinue))
                         {
+                            # In a run of ResourceInventory.ps1: the masked path the
+                            # inventory and consumption rows get, from the run's own
+                            # subscription, resource group and name tokens and their
+                            # prefix rule, and the row's fields are that path's
+                            # segments (Get-ObfuscatedResourceId records them).
+                            $ObfuscatedId = Get-ObfuscatedResourceId -ResourceId $OriginalId
+                            $ResourceIdDictionary[$OriginalId] = $ObfuscatedId
+                            $FbPrefix = Get-ObfuscationPrefix $OriginalId
+                            if (-not $ResourceNameDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$OriginalId])) { $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
+                            if (-not $ResourceSubDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceSubDictionary[$OriginalId])) { $ResourceSubDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
+                            if (-not $ResourceGroupDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceGroupDictionary[$OriginalId])) { $ResourceGroupDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
+
+                            $metric.ID = $ObfuscatedId
+                            $metric.Name = $ResourceNameDictionary[$OriginalId]
+                            $metric.Subscription = $ResourceSubDictionary[$OriginalId]
+                            $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
+                        }
+                        elseif (![string]::IsNullOrEmpty($OriginalId))
+                        {
+                            # Metrics.ps1 run on its own, without the run's token
+                            # functions: its own token caches, as before.
                             $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
 
                             if (-not $script:MetricsFallbackSubCache) { $script:MetricsFallbackSubCache = @{} }

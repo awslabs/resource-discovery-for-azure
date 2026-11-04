@@ -1544,9 +1544,9 @@ function FinalizeOutputs
 {
     function ProcessSummary()
     {
-        # Set only once Summary.ps1 has returned: an HTML file left by a report step that failed
-        # part-way is not a report to zip.
-        $Global:HtmlReportWritten = $false
+        # Set when Summary.ps1 fails: an HTML file left by a report step that failed part-way is
+        # not a report to zip.
+        $Global:HtmlReportFailed = $false
         if (-not (Test-Path -LiteralPath $Global:JsonFile))
         {
             # Summary.ps1 would only fail with 'Inventory JSON not found'; say why there is no report.
@@ -1574,10 +1574,10 @@ function FinalizeOutputs
         try
         {
             $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
-            $Global:HtmlReportWritten = $true
         }
         catch
         {
+            $Global:HtmlReportFailed = $true
             Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
             Write-Log -Message ("The data files this run did write are still in {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
             throw
@@ -1744,7 +1744,7 @@ FinalizeOutputs
 
 # Without the inventory or a finished HTML report there is no report to compress (the zip
 # step below then says so), so the run does not announce it.
-$ReportInputsReady = $Global:HtmlReportWritten -and (Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile)
+$ReportInputsReady = -not $Global:HtmlReportFailed -and (Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile)
 if ($ReportInputsReady)
 {
     Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'

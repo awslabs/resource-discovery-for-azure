@@ -328,6 +328,98 @@ Describe 'A run seeded with an obfuscation dictionary' {
     }
 }
 
+Describe 'The seed is checked when it is read' {
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Vars = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Variables' }, $false)
+        . ([scriptblock]::Create("function Invoke-RunVariables4 { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
+        $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
+        $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
+        . ([scriptblock]::Create("function Invoke-SeededBuild4 { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { }; $($Build[0].Extent.Text) }"))
+        function GetLocalVersion { '0.0.0-test' }
+        $script:SeedDir4 = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-seed4-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:SeedDir4 -Force | Out-Null
+        function New-Tok { param([string]$Hint = '') 'prod_' + $Hint + [guid]::NewGuid().ToString() }
+        # One run: seed file in, the run's dictionaries out.
+        function Invoke-SeededRun
+        {
+            param([hashtable]$SeedMaps, [object[]]$Rows)
+            $Path = Join-Path $script:SeedDir4 ('seed-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.json')
+            $SeedMaps | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding utf8
+            Invoke-RunVariables4
+            $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+            $Global:ObfuscationSubscriptionIndex = $null
+            $Global:Resources = @($Rows)
+            Invoke-SeededBuild4 -Seed $Path
+        }
+        # The maps a run's dictionary file writes, from its dictionaries.
+        function Get-RunDictionaryMaps
+        {
+            $Ids = @{}; foreach ($K in @($Global:ResourceIdDictionary.Keys)) { $Ids[$Global:ResourceIdDictionary[$K]] = $K }
+            $Names = @{}; foreach ($K in @($Global:ResourceNameDictionary.Keys)) { $Names[$Global:ResourceNameDictionary[$K]] = $K }
+            $SubNames = @{}; foreach ($K in @($Global:ObfuscationSubscriptionTokens.Keys)) { $SubNames[$Global:ObfuscationSubscriptionTokens[$K]] = $K }
+            @{ ResourceIdMap = $Ids; ResourceNameMap = $Names; SubscriptionNameMap = $SubNames }
+        }
+        function New-Res { param([string]$Id) [pscustomobject]@{ id = $Id; name = ($Id -split '/')[-1]; subscriptionId = $script:Sub; resourceGroup = ($Id -split '/')[4] } }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:SeedDir4 -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Scope Global -Name TagValueDictionary, FreeTextDictionary, ResourceCount, ResourceContainers, ReportName, Version, RawRepo, TableStyle -ErrorAction SilentlyContinue
+    }
+
+    It 'does not keep a seeded id of another shape for a resource this run does not see: <Label>' -ForEach @(
+        @{ Label = 'a flat token'; Masked = 'prod_{0}' }
+        @{ Label = 'a real parent name'; Masked = '/subscriptions/prod_{0}/resourcegroups/prod_{0}/providers/microsoft.sql/servers/srv-gone/databases/prod_{0}' }
+        @{ Label = 'the metric step''s old sub_/rg_ tokens'; Masked = '/subscriptions/prod_sub_{0}/resourcegroups/prod_rg_{0}/providers/microsoft.sql/servers/prod_{0}/databases/prod_{0}' }
+    ) {
+        $Gone = "$script:Base/microsoft.sql/servers/srv-gone/databases/db-gone"
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ ($Masked -f [guid]::NewGuid().ToString()) = $Gone } } -Rows @()
+        $Global:ResourceIdDictionary.ContainsKey($Gone) | Should -BeFalse -Because 'consumption or metrics that meet it mask it again'
+    }
+
+    It 'keeps a good seeded id for a resource this run does not see' {
+        $Gone = "$script:Base/microsoft.compute/virtualmachines/vm-gone"
+        $Masked = "/subscriptions/$(New-Tok)/resourcegroups/$(New-Tok)/providers/microsoft.compute/virtualmachines/$(New-Tok)"
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Masked = $Gone } } -Rows @()
+        $Global:ResourceIdDictionary[$Gone] | Should -BeExactly $Masked
+    }
+
+    It 'takes the subscription and group tokens of the seeded ids over a map entry that disagrees' {
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $Sub = New-Tok; $Rg = New-Tok
+        Invoke-SeededRun -SeedMaps @{
+            ResourceIdMap       = @{ "/subscriptions/$Sub/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/$(New-Tok)" = $Vm }
+            SubscriptionNameMap = @{ (New-Tok) = 'Demo Subscription' }
+            ResourceGroupMap    = @{ (New-Tok) = $Vm }
+        } -Rows @((New-Res $Vm), (New-Res "$script:Base/microsoft.compute/disks/disk-a"))
+        ($Global:ResourceIdDictionary["$script:Base/microsoft.compute/disks/disk-a"] -split '/')[2] | Should -BeExactly $Sub
+        ($Global:ResourceIdDictionary["$script:Base/microsoft.compute/disks/disk-a"] -split '/')[4] | Should -BeExactly $Rg
+    }
+
+    It 'gives a subscription whose seeded ids hold two tokens one token again, and the next seeded run keeps every id' {
+        $A = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $B = "$script:Base/microsoft.compute/virtualmachines/vm-b"
+        $Rg = New-Tok
+        $SeedIds = @{}
+        $SeedIds["/subscriptions/$(New-Tok)/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/$(New-Tok)"] = $A
+        $SeedIds["/subscriptions/$(New-Tok)/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/$(New-Tok)"] = $B
+        $Seed1 = @{ ResourceIdMap = $SeedIds }
+        Invoke-SeededRun -SeedMaps $Seed1 -Rows @((New-Res $A), (New-Res $B))
+        $Run1 = @{ A = $Global:ResourceIdDictionary[$A]; B = $Global:ResourceIdDictionary[$B] }
+        ($Run1.A -split '/')[2] | Should -BeExactly ($Run1.B -split '/')[2] -Because 'one subscription, one token'
+        $Seed2 = Get-RunDictionaryMaps
+        # Run 2 and run 3, each seeded from the run before: every id kept.
+        foreach ($Run in 2, 3)
+        {
+            Invoke-SeededRun -SeedMaps $Seed2 -Rows @((New-Res $A), (New-Res $B))
+            $Global:ResourceIdDictionary[$A] | Should -BeExactly $Run1.A -Because "run $Run keeps run 1's id"
+            $Global:ResourceIdDictionary[$B] | Should -BeExactly $Run1.B
+            $Seed2 = Get-RunDictionaryMaps
+        }
+    }
+}
+
 Describe 'Test-ObfuscatedIdShape' {
     BeforeAll {
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)

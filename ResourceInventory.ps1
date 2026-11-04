@@ -973,25 +973,72 @@ Function RunInventorySetup()
 
         $SubIndex = Get-ObfuscationSubscriptionIndex
 
-        # A seed with no SubscriptionNameMap or ResourceGroupMap entry for a
-        # subscription or group (an older dictionary, a renamed subscription)
-        # still holds their tokens in its masked ids: take them from there, so
-        # the seeded and the new rows of one subscription or group share one
-        # token. Only ids of the right shape count; a map entry wins.
+        # The seed's ids, checked once here, so every place that reuses a
+        # seeded id (the token loop, the collector rows, consumption, metrics)
+        # and the dictionary file this run writes see only good ones:
+        # - an id of another shape (Test-ObfuscatedIdShape: an older
+        #   dictionary's child id with a real parent name, a flat token, the
+        #   metric step's old sub_/rg_ tokens) is dropped, and masked again
+        #   wherever this run meets its resource;
+        # - the subscription and group tokens of the good ids win over the
+        #   seed's SubscriptionNameMap and ResourceGroupMap, so seeded and new
+        #   rows of one subscription or group share one token, and a group's
+        #   name token entry follows its id;
+        # - a subscription or group whose good ids hold two tokens (a seed
+        #   written before this check) has all those ids dropped, so it gets
+        #   one token again. The dictionary this run writes is then
+        #   consistent, so the next seeded run keeps every id: no repeat.
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
+            $SeedSubTokens = @{}
+            $SeedRgTokens = @{}
+            $SeedSubOf = @{}
+            $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
                 $SeedMasked = $ResourceIdDictionary[$SeedRealId]
-                if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked)) { continue }
+                if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked))
+                {
+                    [void]$ResourceIdDictionary.Remove($SeedRealId)
+                    $SeedDropped++
+                    continue
+                }
                 $RealParts = $SeedRealId.Split('/')
-                $MaskedParts = $SeedMasked.Split('/')
                 if ($RealParts[1] -ine 'subscriptions') { continue }
+                $MaskedParts = $SeedMasked.Split('/')
                 $SeedSubName = ''
                 foreach ($SubEntry in @($SubIndex.ById[$RealParts[2]])) { if ($null -ne $SubEntry) { $SeedSubName = [string]$SubEntry.Name; break } }
                 if ([string]::IsNullOrEmpty($SeedSubName)) { $SeedSubName = $RealParts[2] }
-                if (-not $SubLookup.ContainsKey($SeedSubName)) { $SubLookup[$SeedSubName] = $MaskedParts[2] }
-                if ($RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups' -and -not $RgLookup.ContainsKey($RealParts[4])) { $RgLookup[$RealParts[4]] = $MaskedParts[4] }
+                $SeedSubOf[$SeedRealId] = $SeedSubName
+                if (-not $SeedSubTokens.ContainsKey($SeedSubName)) { $SeedSubTokens[$SeedSubName] = @{} }
+                $SeedSubTokens[$SeedSubName][$MaskedParts[2]] = $true
+                if ($RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups')
+                {
+                    if (-not $SeedRgTokens.ContainsKey($RealParts[4])) { $SeedRgTokens[$RealParts[4]] = @{} }
+                    $SeedRgTokens[$RealParts[4]][$MaskedParts[4]] = $true
+                }
+            }
+            foreach ($SeedRealId in @($SeedSubOf.Keys))
+            {
+                $RealParts = $SeedRealId.Split('/')
+                $TwoSub = $SeedSubTokens[$SeedSubOf[$SeedRealId]].Count -gt 1
+                $TwoRg = $RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups' -and $SeedRgTokens[$RealParts[4]].Count -gt 1
+                if ($TwoSub -or $TwoRg)
+                {
+                    [void]$ResourceIdDictionary.Remove($SeedRealId)
+                    $SeedDropped++
+                    continue
+                }
+                $MaskedParts = $ResourceIdDictionary[$SeedRealId].Split('/')
+                $SubLookup[$SeedSubOf[$SeedRealId]] = $MaskedParts[2]
+                if ($RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups') { $RgLookup[$RealParts[4]] = $MaskedParts[4] }
+                $ResourceNameDictionary[$SeedRealId] = $MaskedParts[-1]
+            }
+            foreach ($SeedName in @($SeedSubTokens.Keys)) { if ($SeedSubTokens[$SeedName].Count -gt 1) { [void]$SubLookup.Remove($SeedName) } }
+            foreach ($SeedName in @($SeedRgTokens.Keys)) { if ($SeedRgTokens[$SeedName].Count -gt 1) { [void]$RgLookup.Remove($SeedName) } }
+            if ($SeedDropped -gt 0)
+            {
+                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or of a subscription or resource group with two tokens, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
             }
         }
 

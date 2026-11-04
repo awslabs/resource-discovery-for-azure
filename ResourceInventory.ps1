@@ -210,6 +210,21 @@ function Get-ObfuscationSubscriptionIndex
     return $Global:ObfuscationSubscriptionIndex
 }
 
+# Whether Get-ObfuscatedResourceId keeps $ResourceId as a tenant-scope path
+# ('/providers/<namespace>/<type>/<name>...': each type has a name, no
+# segment is empty or '$system'); any other '/providers/...' value gets one
+# flat token. The seed check asks the same, so it treats a seeded value the
+# way this run would write it.
+function Test-RdaTenantScopeIdMaskable
+{
+    param([string]$ResourceId)
+    if ([string]::IsNullOrEmpty($ResourceId)) { return $false }
+    $Parts = $ResourceId.Split('/')
+    if ($Parts.Count -lt 5 -or ($Parts.Count % 2) -ne 1 -or $Parts[0] -ne '' -or $Parts[1] -ine 'providers') { return $false }
+    foreach ($Part in $Parts[1..($Parts.Count - 1)]) { if ([string]::IsNullOrEmpty($Part) -or $Part -eq '$system') { return $false } }
+    return $true
+}
+
 # The masked form of a resource id. Every name segment is replaced (the
 # subscription, the resource group and each resource name, a parent's
 # included) and the 'subscriptions', 'resourcegroups', 'providers', namespace
@@ -229,13 +244,15 @@ function Get-ObfuscatedResourceId
     $Parts = $ResourceId.Split('/')
     $Masked = [System.Collections.Generic.List[string]]::new()
     $Masked.Add('')
-    $IsTenantScope = ($Parts.Count -ge 4 -and $Parts[0] -eq '' -and $Parts[1] -ieq 'providers' -and -not [string]::IsNullOrEmpty($Parts[2]))
+    # A tenant-scope id with no subscription (a reservation order, a
+    # management group): '/providers/<namespace>/<type>/<name>...'. It keeps
+    # its own path, every name segment masked as below, but only when every
+    # name segment can be a token: each type has a name, and no segment is
+    # empty or the fixed name '$system'. Any other '/providers/...' value
+    # gets one flat token, as before (parked with the owner, R2-3/R2-5).
+    $IsTenantScope = Test-RdaTenantScopeIdMaskable -ResourceId $ResourceId
     if ($IsTenantScope)
     {
-        # A tenant-scope id with no subscription (a reservation order, a
-        # management group): '/providers/<namespace>/<type>/<name>...'. It
-        # keeps its own path, every name segment masked as below, so it is
-        # never cut to one flat token.
         $i = 1
     }
     elseif ($Parts.Count -lt 3 -or $Parts[0] -ne '' -or $Parts[1] -ine 'subscriptions' -or [string]::IsNullOrEmpty($Parts[2]))
@@ -1028,7 +1045,7 @@ Function RunInventorySetup()
                 # with the owner); a seeded flat token of that form is kept as
                 # it is, so it stays the same across seeded runs. Any other
                 # value (empty, plain text) is not kept.
-                if ($SeedRealId -notmatch '(?i)^/(subscriptions|providers)/[^/]')
+                if ($SeedRealId -notmatch '(?i)^/subscriptions/[^/]' -and -not (Test-RdaTenantScopeIdMaskable -ResourceId $SeedRealId))
                 {
                     if ([string]$SeedMasked -cnotmatch ('^(prod|nonprod)_' + $SeedGuid + '$'))
                     {

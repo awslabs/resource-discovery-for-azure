@@ -13,7 +13,7 @@
 BeforeAll {
     $Script = Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'
     $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
-    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Get-ObfuscatedResourceId'))
+    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Test-RdaTenantScopeIdMaskable', 'Get-ObfuscatedResourceId'))
     {
         $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $Name }, $false))
         if ($Fn.Count -ne 1) { throw "$Name was not found in ResourceInventory.ps1." }
@@ -115,6 +115,16 @@ Describe 'Get-ObfuscatedResourceId' {
         ($Second -split '/')[4] | Should -BeExactly ($Masked -split '/')[4] -Because 'one reservation order keeps one token'
         (Get-ObfuscatedResourceId -ResourceId '/providers/Microsoft.Management/managementGroups/mg-a') | Should -Match ('^/providers/Microsoft\.Management/managementGroups/' + $script:Token + '$')
         $Global:ResourceNameDictionary.ContainsKey("$Order/reservations/res-a") | Should -BeTrue -Because 'the dictionary can reverse every segment'
+    }
+
+    It 'gives a /providers/ id that cannot be fully masked one flat token, never a path with a real part: <Label>' -ForEach @(
+        @{ Label = 'a type with no name'; Id = '/providers/Microsoft.Capacity/reservationOrders' }
+        @{ Label = 'an empty segment'; Id = '/providers/Microsoft.Capacity/reservationOrders//reservations/res-a' }
+        @{ Label = 'a $system name'; Id = '/providers/Microsoft.Capacity/reservationOrders/$system' }
+        @{ Label = 'a trailing slash'; Id = '/providers/Microsoft.Capacity/reservationOrders/ro-a/' }
+    ) {
+        $Masked = Get-ObfuscatedResourceId -ResourceId $Id
+        $Masked | Should -Match ('^' + $script:Token + '$')
     }
 
     It 'returns ''obfuscated'' for an empty id and one token for an id that is not subscription-scoped' {
@@ -422,6 +432,12 @@ Describe 'The seed is checked when it is read' {
         $Flat = New-Tok
         Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Flat = 'not-an-arm-id' } } -Rows @()
         $Global:ResourceIdDictionary['not-an-arm-id'] | Should -BeExactly $Flat
+    }
+
+    It 'keeps the seeded flat token of a /providers/ id this run writes flat too' {
+        $Flat = New-Tok
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Flat = '/providers/Microsoft.Capacity/reservationOrders' } } -Rows @()
+        $Global:ResourceIdDictionary['/providers/Microsoft.Capacity/reservationOrders'] | Should -BeExactly $Flat
     }
 
     It 'does not keep a seeded flat value that is not a flat token (plain text)' {

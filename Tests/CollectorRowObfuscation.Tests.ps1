@@ -19,7 +19,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Helpers/ContractIdPattern.ps1')
     $Script = Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'
     $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
-    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Get-ObfuscatedResourceId', 'Test-ObfuscatedIdShape', 'New-ObfuscatedRowIdWithoutId'))
+    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Test-RdaTenantScopeIdMaskable', 'Get-ObfuscatedResourceId', 'Test-ObfuscatedIdShape', 'New-ObfuscatedRowIdWithoutId'))
     {
         $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $Name }, $false))
         # A missing helper fails the tests that need it, not the whole file.

@@ -74,16 +74,18 @@ Describe 'Get-ObfuscatedResourceId picks the subscription the list scan picked' 
         $ScanName | Should -BeExactly $Expect
 
         $Masked = Get-ObfuscatedResourceId -ResourceId $Id
-        @($Global:ObfuscationSubscriptionTokens.Keys) | Should -Be @($Expect)
-        $Masked.Split('/')[2] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$Expect]
-        $Global:ResourceSubscriptionDictionary[$Id] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$Expect]
+        # One token, keyed by the subscription id; the prefix from the name the scan found.
+        @($Global:ObfuscationSubscriptionTokens.Keys) | Should -Be @($Sub)
+        $Masked.Split('/')[2] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$Sub]
+        $Masked.Split('/')[2] | Should -BeLike ((Get-ObfuscationPrefix $Expect) + '*')
+        $Global:ResourceSubscriptionDictionary[$Id] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$Sub]
     }
 
     It 'takes the first entry when the list holds an id twice' {
         Reset-ObfuscationState (@($script:List) + [pscustomobject]@{ id = 'DEMO-SUB-A'; name = 'Demo Subscription A Again' })
         Get-ScanName 'demo-sub-a' | Should -BeExactly 'Demo Subscription A'
         $null = Get-ObfuscatedResourceId -ResourceId "/subscriptions/demo-sub-a/$script:Child"
-        @($Global:ObfuscationSubscriptionTokens.Keys) | Should -Be @('Demo Subscription A')
+        @($Global:ObfuscationSubscriptionTokens.Keys) | Should -Be @('demo-sub-a')
     }
 
     It 'returns ''obfuscated'' for a missing or empty id and one token for an id with no subscription, as before' {
@@ -98,9 +100,9 @@ Describe 'Get-ObfuscatedResourceId picks the subscription the list scan picked' 
     It 'reads the new list after $Global:Subscriptions is replaced' {
         Reset-ObfuscationState $script:List
         $null = Get-ObfuscatedResourceId -ResourceId "/subscriptions/demo-sub-a/$script:Child"
-        Reset-ObfuscationState @([pscustomobject]@{ id = 'demo-sub-a'; name = 'Renamed Subscription' })
-        $null = Get-ObfuscatedResourceId -ResourceId "/subscriptions/demo-sub-a/$script:Child"
-        @($Global:ObfuscationSubscriptionTokens.Keys) | Should -Be @('Renamed Subscription')
+        Reset-ObfuscationState @([pscustomobject]@{ id = 'demo-sub-a'; name = 'Renamed dev Subscription' })
+        $Masked = Get-ObfuscatedResourceId -ResourceId "/subscriptions/demo-sub-a/$script:Child"
+        $Masked.Split('/')[2] | Should -BeLike 'nonprod_*' -Because 'the prefix follows the name in the new list'
     }
 }
 
@@ -127,8 +129,9 @@ Describe 'The dictionary build picks the subscription the list scan picked' {
         @{ Name = 'db-known' }, @{ Name = 'db-upper' }, @{ Name = 'db-case' }, @{ Name = 'db-unknown' }, @{ Name = 'db-noname' }, @{ Name = 'db-empty' }, @{ Name = 'db-missing' }
     ) {
         $Res = @($Global:Resources | Where-Object { $_.name -eq $Name })[0]
-        $Expect = Get-ScanRealSub $Res.subscriptionId
-        if ([string]::IsNullOrEmpty($Expect)) { $Expect = $Res.subscriptionId }
+        # Keyed by the subscription id; a resource with none by the name the scan found.
+        $Expect = if (-not [string]::IsNullOrEmpty($Res.subscriptionId)) { $Res.subscriptionId } else { Get-ScanRealSub $Res.subscriptionId }
+        if ($null -eq $Expect) { $Expect = [string]$Res.subscriptionId }
         $Global:ObfuscationSubscriptionTokens.ContainsKey($Expect) | Should -BeTrue
         $Global:ResourceSubscriptionDictionary[$Res.id] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$Expect]
     }

@@ -74,8 +74,9 @@ function Variables
         $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        # Subscription display name -> token and resource group name -> token,
-        # shared by the inventory and the consumption rows.
+        # Subscription id -> token (the prefix from its display name) and
+        # resource group name -> token, shared by the inventory and the
+        # consumption rows.
         $Global:ObfuscationSubscriptionTokens = @{}
         $Global:ObfuscationResourceGroupTokens = @{}
     }
@@ -265,8 +266,10 @@ function Get-ObfuscatedResourceId
         $SubEntries = $SubscriptionIndex.ById[$Parts[2]]
         $SubName = if ($null -ne $SubEntries) { [string]$SubEntries[0].name } else { '' }
         if ([string]::IsNullOrEmpty($SubName)) { $SubName = $Parts[2] }
-        if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($SubName)) { $Global:ObfuscationSubscriptionTokens[$SubName] = (Get-ObfuscationPrefix $SubName) + [guid]::NewGuid().ToString() }
-        $SubToken = $Global:ObfuscationSubscriptionTokens[$SubName]
+        # One token per subscription id (two subscriptions may share a
+        # display name); its prod_/nonprod_ prefix comes from the name.
+        if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($Parts[2])) { $Global:ObfuscationSubscriptionTokens[$Parts[2]] = (Get-ObfuscationPrefix $SubName) + [guid]::NewGuid().ToString() }
+        $SubToken = $Global:ObfuscationSubscriptionTokens[$Parts[2]]
         if (-not $ResourceSubscriptionDictionary.ContainsKey($ResourceId)) { $ResourceSubscriptionDictionary[$ResourceId] = $SubToken }
 
         $Masked.Add($Parts[1])
@@ -989,9 +992,16 @@ Function RunInventorySetup()
             }
             if ($null -ne $SeedDictionary.SubscriptionNameMap)
             {
+                # The map holds token -> display name; the run keys tokens by
+                # subscription id. A name that one listed subscription has
+                # gives that id its token; a name two subscriptions share is
+                # left to the seeded ids, which hold each one's own token.
                 foreach ($SeedProp in $SeedDictionary.SubscriptionNameMap.PSObject.Properties)
                 {
-                    if (-not [string]::IsNullOrEmpty($SeedProp.Value)) { $SubLookup[$SeedProp.Value] = $SeedProp.Name }
+                    if ([string]::IsNullOrEmpty($SeedProp.Value)) { continue }
+                    $SeedSubIds = @($Global:Subscriptions | Where-Object { $null -ne $_ -and [string]$_.name -eq [string]$SeedProp.Value -and -not [string]::IsNullOrEmpty([string]$_.id) } | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+                    if ($SeedSubIds.Count -eq 1) { $SubLookup[$SeedSubIds[0]] = $SeedProp.Name }
+                    elseif ($SeedSubIds.Count -eq 0) { $SubLookup[$SeedProp.Value] = $SeedProp.Name }
                 }
             }
             if ($null -ne $SeedDictionary.ResourceGroupMap)
@@ -1068,10 +1078,8 @@ Function RunInventorySetup()
                 $Slots = [System.Collections.Generic.List[object]]::new()
                 if ($RealParts[1] -ieq 'subscriptions')
                 {
-                    $SeedSubName = ''
-                    foreach ($SubEntry in @($SubIndex.ById[$RealParts[2]])) { if ($null -ne $SubEntry) { $SeedSubName = [string]$SubEntry.Name; break } }
-                    if ([string]::IsNullOrEmpty($SeedSubName)) { $SeedSubName = $RealParts[2] }
-                    $Slots.Add([pscustomobject]@{ Kind = 'sub'; Real = $SeedSubName; Token = $MaskedParts[2] })
+                    # Keyed by subscription id, as Get-ObfuscatedResourceId keys it.
+                    $Slots.Add([pscustomobject]@{ Kind = 'sub'; Real = $RealParts[2]; Token = $MaskedParts[2] })
                     $i = 3
                 }
                 else { $i = 1 }
@@ -1153,12 +1161,15 @@ Function RunInventorySetup()
             $RealSub = ''
             foreach ($SubEntry in @($SubEntries)) { if ($null -ne $SubEntry) { $RealSub = [string]$SubEntry.Name; break } }
             if ([string]::IsNullOrEmpty($RealSub)) { $RealSub = $resourceItem.subscriptionId }
-            if (-not $SubLookup.ContainsKey($RealSub))
+            # The token is keyed by subscription id, as Get-ObfuscatedResourceId
+            # keys it; the prefix comes from the display name.
+            $SubKey = if ([string]::IsNullOrEmpty([string]$resourceItem.subscriptionId)) { $RealSub } else { [string]$resourceItem.subscriptionId }
+            if (-not $SubLookup.ContainsKey($SubKey))
             {
                 $SubPrefix = if ($RealSub -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $RealSub -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                $SubLookup[$RealSub] = $SubPrefix + [guid]::NewGuid().ToString()
+                $SubLookup[$SubKey] = $SubPrefix + [guid]::NewGuid().ToString()
             }
-            $ObfuscatedSubscription = $SubLookup[$RealSub]
+            $ObfuscatedSubscription = $SubLookup[$SubKey]
 
             $RealRG = $resourceItem.resourceGroup
             if ([string]::IsNullOrEmpty($RealRG)) { $RealRG = '__none__' }

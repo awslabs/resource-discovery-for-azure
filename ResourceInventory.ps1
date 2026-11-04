@@ -1910,7 +1910,10 @@ catch
     $ZipWritten = $false
     # Write-Log, not Write-Error: the script's 'silentlycontinue' preference hides Write-Error.
     Write-Log -Message ("Error Compressing Output File: {0}: {1}" -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
-    Write-Log -Message ("Please zip the output files manually: {0}" -f ((@(Resolve-Path -Path $CompressionOutput.Path -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath }) | Select-Object -Unique) -join ', ')) -Severity 'Error'
+    # Only this run's files: in a reused output folder the zip's '*.json' input also matches
+    # files of earlier runs, which may hold real names.
+    $ManualZipFiles = @(Resolve-Path -Path $CompressionOutput.Path -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath } | Where-Object { (Split-Path -Leaf $_) -like "*$($Global:CurrentDateTime)*" } | Select-Object -Unique)
+    Write-Log -Message ("Please zip the output files manually: {0}" -f ($ManualZipFiles -join ', ')) -Severity 'Error'
     if ($Obfuscate.IsPresent)
     {
         Write-Log -Message ("Add only those files: the obfuscation dictionary, the transcript and the logs hold real names and stay local.") -Severity 'Error'

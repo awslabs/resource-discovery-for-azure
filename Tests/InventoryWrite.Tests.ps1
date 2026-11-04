@@ -695,6 +695,19 @@ function CreateResourceJobs
         $Output | Should -Match 'No report was written'
     }
 
+    It 'names only this run''s files in the manual-zip advice when the output folder holds an earlier run' {
+        $Stub = @(
+            'Set-Content -LiteralPath ($Global:DefaultPath + ''Inventory_ResourcesReport_earlier.json'') -Value ''{}'''
+            'function Compress-Archive { throw ''stand-in: no space left on device'' }'
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name 'zip-fail-reused-folder' -Runs @($Stub) -Direct)
+
+        $Line = @(([string]$R[0].Output) -split '\r?\n' | Where-Object { $_ -like 'Please zip the output files manually*' })
+        $Line.Count | Should -Be 1 -Because "Output:`n$($R[0].Output)"
+        $Line[0] | Should -Match 'Inventory_ResourcesReport_test\.json'
+        $Line[0] | Should -Not -Match 'Inventory_ResourcesReport_earlier\.json' -Because 'an earlier run''s file is not part of this report'
+    }
+
     It 'does not name a zip that was already at the path as the report of this run' {
         # Compress-Archive refuses to overwrite it, so it is not this run's report.
         $R = @(Invoke-InventoryRun -Name 'zip-exists-direct' -Runs @('Set-Content -LiteralPath ($Global:DefaultPath + ''ResourcesReport_test.zip'') -Value ''older file''') -Direct)

@@ -620,7 +620,9 @@ function CreateResourceJobs
         $R[0].ErrorLog | Should -BeLike ('*Inventory write FAILED*' + $Failure.Expect.Trim('*') + '*') -Because 'the error log the run keeps gets the same line'
         $Output | Should -Not -Match 'Resource Reporting Phase Done' -Because 'the reporting phase did not finish'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
-        $Output | Should -Match 'No report zip was written' -Because 'the run says plainly that there is no zip'
+        # 'No report zip was written' from this script's last line, or 'No report was written'
+        # from the exit-code check a direct run may make just before it.
+        $Output | Should -Match 'No report (zip )?was written' -Because 'the run says plainly that there is no zip'
         @($R[0].Files | Where-Object { $_ -like 'Inventory_*' -or $_ -like '*.tmp' -or $_ -like '*.zip' }) | Should -BeNullOrEmpty -Because 'a failed write leaves no inventory, no cut-off or temporary file and no zip'
     }
 
@@ -633,13 +635,28 @@ function CreateResourceJobs
         $R[0].ErrorLog | Should -Not -BeLike '*HTML report generation FAILED*' -Because 'the run stops at the write, so the report step never runs'
     }
 
+    It 'leaves nothing behind that changes the next two runs in the same process' {
+        $Failure = $script:WriteFailures['out of memory (stand-in writer)']
+        $R = @(Invoke-InventoryRun -Name 'write-fail-then-ok' -Runs @($Failure.Stub, '', ''))
+
+        $R[0].Escaped | Should -BeLike $Failure.Expect
+        foreach ($i in 1, 2)
+        {
+            $R[$i].Escaped | Should -BeNullOrEmpty -Because "run $i has a writer that works"
+            @($R[$i].Inventory.Disks).Count | Should -Be 2 -Because "run $i writes its inventory as usual"
+            $R[$i].Files | Should -Contain 'ResourcesReport_test.zip'
+            $R[$i].ErrorLog | Should -BeNullOrEmpty -Because "run $i logs no error"
+            $R[$i].ResourceCount | Should -Be 3
+        }
+    }
+
     It 'reports the zip on a direct run that wrote it' {
         $R = @(Invoke-InventoryRun -Name 'write-ok-direct' -Runs @('') -Direct)
 
         $Output = [string]$R[0].Output
         $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
         $Output | Should -Match 'Reporting Data File: .*ResourcesReport_test\.zip' -Because "Output:`n$Output"
-        $Output | Should -Not -Match 'No report zip was written'
+        $Output | Should -Not -Match 'No report (zip )?was written'
     }
 }
 

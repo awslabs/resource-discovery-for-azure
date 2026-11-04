@@ -1874,8 +1874,8 @@ catch
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
-# A direct run reaches this line even when a step above failed and no zip was made (a throw
-# does not stop the script under 'silentlycontinue'), so name the zip only when it is there.
+# A run can reach this line with no zip: when a step above failed, its throw does not stop
+# the script under 'silentlycontinue'. So name the zip only when it is there.
 if (-not [string]::IsNullOrEmpty($Global:ZipOutputFile) -and (Test-Path -LiteralPath $Global:ZipOutputFile))
 {
     Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'

@@ -339,6 +339,7 @@ Describe 'The seed is checked when it is read' {
         function GetLocalVersion { '0.0.0-test' }
         $script:SeedDir4 = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-seed4-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $script:SeedDir4 -Force | Out-Null
+        $script:SeedDirW = $script:SeedDir4
         function New-Tok { param([string]$Hint = '') 'prod_' + $Hint + [guid]::NewGuid().ToString() }
         # One run: seed file in, the run's dictionaries out.
         function Invoke-SeededRun
@@ -352,13 +353,18 @@ Describe 'The seed is checked when it is read' {
             $Global:Resources = @($Rows)
             Invoke-SeededBuild4 -Seed $Path
         }
-        # The maps a run's dictionary file writes, from its dictionaries.
+        # The run's dictionary file, written by ResourceInventory.ps1's own
+        # writer, read back as the next run's seed.
+        $Writer = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Clauses[0].Item2.Extent.Text -match '\$Global:DictionaryFile = ' }, $false))
+        if ($Writer.Count -ne 1) { throw 'The dictionary writer was not found in ResourceInventory.ps1.' }
+        . ([scriptblock]::Create("function Invoke-DictionaryWriter { param(`$DefaultPath) `$Obfuscate = [switch]`$true; `$CurrentDateTime = 'test'; function Write-Log { }; $($Writer[0].Extent.Text) }"))
         function Get-RunDictionaryMaps
         {
-            $Ids = @{}; foreach ($K in @($Global:ResourceIdDictionary.Keys)) { $Ids[$Global:ResourceIdDictionary[$K]] = $K }
-            $Names = @{}; foreach ($K in @($Global:ResourceNameDictionary.Keys)) { $Names[$Global:ResourceNameDictionary[$K]] = $K }
-            $SubNames = @{}; foreach ($K in @($Global:ObfuscationSubscriptionTokens.Keys)) { $SubNames[$Global:ObfuscationSubscriptionTokens[$K]] = $K }
-            @{ ResourceIdMap = $Ids; ResourceNameMap = $Names; SubscriptionNameMap = $SubNames }
+            $Dir = Join-Path $script:SeedDirW ([guid]::NewGuid().ToString('N').Substring(0, 6))
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            $Global:ReportName = 'ResourcesReport'
+            Invoke-DictionaryWriter -DefaultPath ($Dir + [System.IO.Path]::DirectorySeparatorChar)
+            Get-Content -LiteralPath (Get-ChildItem -LiteralPath $Dir -Filter 'ObfuscationDictionary_*.json').FullName -Raw | ConvertFrom-Json -AsHashtable
         }
         function New-Res { param([string]$Id) [pscustomobject]@{ id = $Id; name = ($Id -split '/')[-1]; subscriptionId = $script:Sub; resourceGroup = ($Id -split '/')[4] } }
     }
@@ -465,12 +471,15 @@ Describe 'The seed''s parent tokens' {
             $Global:Resources = @($Rows)
             Invoke-SeededBuild5 -Seed $Path
         }
+        $Writer = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Clauses[0].Item2.Extent.Text -match '\$Global:DictionaryFile = ' }, $false))
+        . ([scriptblock]::Create("function Invoke-DictionaryWriter5 { param(`$DefaultPath) `$Obfuscate = [switch]`$true; `$CurrentDateTime = 'test'; function Write-Log { }; $($Writer[0].Extent.Text) }"))
         function Get-RunMaps5
         {
-            $Ids = @{}; foreach ($K in @($Global:ResourceIdDictionary.Keys)) { $Ids[$Global:ResourceIdDictionary[$K]] = $K }
-            $Names = @{}; foreach ($K in @($Global:ResourceNameDictionary.Keys)) { $Names[$Global:ResourceNameDictionary[$K]] = $K }
-            $SubNames = @{}; foreach ($K in @($Global:ObfuscationSubscriptionTokens.Keys)) { $SubNames[$Global:ObfuscationSubscriptionTokens[$K]] = $K }
-            @{ ResourceIdMap = $Ids; ResourceNameMap = $Names; SubscriptionNameMap = $SubNames }
+            $Dir = Join-Path $script:SeedDir5 ([guid]::NewGuid().ToString('N').Substring(0, 6))
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            $Global:ReportName = 'ResourcesReport'
+            Invoke-DictionaryWriter5 -DefaultPath ($Dir + [System.IO.Path]::DirectorySeparatorChar)
+            Get-Content -LiteralPath (Get-ChildItem -LiteralPath $Dir -Filter 'ObfuscationDictionary_*.json').FullName -Raw | ConvertFrom-Json -AsHashtable
         }
         function New-Res5 { param([string]$Id) [pscustomobject]@{ id = $Id; name = ($Id -split '/')[-1]; subscriptionId = $script:Sub; resourceGroup = ($Id -split '/')[4] } }
     }

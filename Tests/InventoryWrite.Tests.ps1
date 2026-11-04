@@ -628,6 +628,8 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'excluded from zip' -Because 'no zip is made'
         $Output | Should -Match 'No HTML report: the inventory .*Inventory_ResourcesReport_test\.json was not written'
         $Output | Should -Not -Match 'HTML report generation FAILED' -Because 'the report step is not run without the inventory, so it does not fail as a second fault'
+        $Output | Should -Not -Match 'Creating Summary Report|Starting Summary Report Processing Job' -Because 'the report step does not start'
+        $Output | Should -Not -Match 'Error Compressing Output File' -Because 'the zip step is not tried, so it cannot fail'
         $Output | Should -Match 'Reporting Time: not measured' -Because 'the processing step stopped before its time was taken'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'

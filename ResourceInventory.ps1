@@ -1533,6 +1533,15 @@ function FinalizeOutputs
 {
     function ProcessSummary()
     {
+        if (-not (Test-Path -LiteralPath $Global:JsonFile))
+        {
+            # Summary.ps1 would only fail with 'Inventory JSON not found'; say why there is no report.
+            Write-Log -Message ("No HTML report: the inventory {0} was not written. See the error above." -f $Global:JsonFile) -Severity 'Error'
+            throw ("No HTML report: the inventory {0} was not written." -f $Global:JsonFile)
+            # Under 'silentlycontinue' with no caller catching it (a direct run), the throw does not stop here.
+            return
+        }
+
         Write-Log -Message ('Creating Summary Report') -Severity 'Info'
         Write-Log -Message ('Starting Summary Report Processing Job.') -Severity 'Info'
 
@@ -1543,15 +1552,6 @@ function FinalizeOutputs
         else
         {
             $SummaryPath = Get-ChildItem -Path ($PSScriptRoot + '/Extension/Summary.ps1') -Recurse
-        }
-
-        if (-not (Test-Path -LiteralPath $Global:JsonFile))
-        {
-            # Summary.ps1 would only fail with 'Inventory JSON not found'; say why there is no report.
-            Write-Log -Message ("No HTML report: the inventory {0} was not written. See the error above." -f $Global:JsonFile) -Severity 'Error'
-            throw ("No HTML report: the inventory {0} was not written." -f $Global:JsonFile)
-            # Under 'silentlycontinue' with no caller catching it (a direct run), the throw does not stop here.
-            return
         }
 
         $ReportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
@@ -1885,25 +1885,17 @@ $ZipWritten = $true
 $ZipExistedBefore = Test-Path -LiteralPath $Global:ZipOutputFile
 try
 {
-    if (-not $ReportInputsReady) { throw 'the inventory or the HTML report was not written' }
-    Compress-Archive @CompressionOutput -ErrorAction Stop
+    if ($ReportInputsReady) { Compress-Archive @CompressionOutput -ErrorAction Stop } else { $ZipWritten = $false }
 }
 catch
 {
     $ZipWritten = $false
     # Write-Log, not Write-Error: the script's 'silentlycontinue' preference hides Write-Error.
     Write-Log -Message ("Error Compressing Output File: {0}: {1}" -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
-    if ($ReportInputsReady)
+    Write-Log -Message ("Please zip the output files manually: {0}" -f ((@(Resolve-Path -Path $CompressionOutput.Path -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath }) | Select-Object -Unique) -join ', ')) -Severity 'Error'
+    if ($Obfuscate.IsPresent)
     {
-        Write-Log -Message ("Please zip the output files manually: {0}" -f ((@(Resolve-Path -Path $CompressionOutput.Path -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath }) | Select-Object -Unique) -join ', ')) -Severity 'Error'
-        if ($Obfuscate.IsPresent)
-        {
-            Write-Log -Message ("Add only those files: the obfuscation dictionary, the transcript and the logs hold real names and stay local.") -Severity 'Error'
-        }
-    }
-    else
-    {
-        Write-Log -Message ("There is no report to zip: the inventory or the HTML report was not written. See the errors above.") -Severity 'Error'
+        Write-Log -Message ("Add only those files: the obfuscation dictionary, the transcript and the logs hold real names and stay local.") -Severity 'Error'
     }
     # Compress-Archive removes its own unfinished zip; this is a backstop so a cut-off zip is
     # never left to be shared. One that was there before this step is not this step's to remove.
@@ -1920,6 +1912,10 @@ catch
     }
 }
 
+if (-not $ReportInputsReady)
+{
+    Write-Log -Message ("There is no report to zip: the inventory or the HTML report was not written. See the errors above.") -Severity 'Error'
+}
 $ZipWritten = $ZipWritten -and (Test-Path -LiteralPath $Global:ZipOutputFile)
 
 if ($ZipWritten)

@@ -936,6 +936,28 @@ Function RunInventorySetup()
 
         $SubIndex = Get-ObfuscationSubscriptionIndex
 
+        # A seed with no SubscriptionNameMap or ResourceGroupMap entry for a
+        # subscription or group (an older dictionary, a renamed subscription)
+        # still holds their tokens in its masked ids: take them from there, so
+        # the seeded and the new rows of one subscription or group share one
+        # token. Only ids of the right shape count; a map entry wins.
+        if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
+        {
+            foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
+            {
+                $SeedMasked = $ResourceIdDictionary[$SeedRealId]
+                if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked)) { continue }
+                $RealParts = $SeedRealId.Split('/')
+                $MaskedParts = $SeedMasked.Split('/')
+                if ($RealParts[1] -ine 'subscriptions') { continue }
+                $SeedSubName = ''
+                foreach ($SubEntry in @($SubIndex.ById[$RealParts[2]])) { if ($null -ne $SubEntry) { $SeedSubName = [string]$SubEntry.Name; break } }
+                if ([string]::IsNullOrEmpty($SeedSubName)) { $SeedSubName = $RealParts[2] }
+                if (-not $SubLookup.ContainsKey($SeedSubName)) { $SubLookup[$SeedSubName] = $MaskedParts[2] }
+                if ($RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups' -and -not $RgLookup.ContainsKey($RealParts[4])) { $RgLookup[$RealParts[4]] = $MaskedParts[4] }
+            }
+        }
+
         foreach ($resourceItem in $Global:Resources)
         {
             if ($IdsToMask.Contains($resourceItem.ID)) { continue }

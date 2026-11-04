@@ -305,6 +305,27 @@ Describe 'A run seeded with an obfuscation dictionary' {
         $Global:ResourceSubscriptionDictionary[$Db] | Should -BeExactly ($Masked -split '/')[2]
         $Global:ResourceResourceGroupDictionary[$Db] | Should -BeExactly ($Masked -split '/')[4]
     }
+
+    It 'gives a new resource the subscription and group tokens of the seeded ids when the seed has no map entry for them' {
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $SubTok = 'prod_' + [guid]::NewGuid().ToString()
+        $RgTok = 'prod_' + [guid]::NewGuid().ToString()
+        $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Seed = Join-Path $script:SeedDir 'seed-nomaps.json'
+        @{ ResourceIdMap = @{ "/subscriptions/$SubTok/resourcegroups/$RgTok/providers/microsoft.compute/virtualmachines/$NameTok" = $Vm } } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+        Invoke-RunVariables3
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+        $Global:ObfuscationSubscriptionIndex = $null
+        $Disk = "$script:Base/microsoft.compute/disks/disk-a"
+        $Global:Resources = @(
+            [pscustomobject]@{ id = $Vm; name = 'vm-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+            [pscustomobject]@{ id = $Disk; name = 'disk-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+        )
+        Invoke-SeededBuild -Seed $Seed
+        $Global:ResourceSubscriptionDictionary[$Disk] | Should -BeExactly $SubTok
+        $Global:ResourceResourceGroupDictionary[$Disk] | Should -BeExactly $RgTok
+        ($Global:ResourceIdDictionary[$Disk] -split '/')[2] | Should -BeExactly $SubTok
+    }
 }
 
 Describe 'Test-ObfuscatedIdShape' {

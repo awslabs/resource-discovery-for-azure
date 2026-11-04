@@ -298,10 +298,17 @@ function Test-ObfuscatedIdShape
     $R = $RealId.Split('/')
     $M = $MaskedId.Split('/')
     if ($R.Count -ne $M.Count -or $R.Count -lt 3 -or $R[0] -ne '' -or $M[0] -ne '') { return $false }
-    $Token = '^(prod|nonprod)_[a-z_]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    # The tokens each slot takes: a subscription token has no hint, a resource
+    # group token at most the older 'mc_' one, a name token at most the
+    # databricks_/aks_/vmss_ hint. So the metric step's old sub_/rg_ tokens,
+    # or any other word in a token, fail.
+    $Guid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    $SubToken = '^(prod|nonprod)_' + $Guid + '$'
+    $RgToken = '^(prod|nonprod)_(mc_)?' + $Guid + '$'
+    $Token = '^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $Guid + '$'
     if ($R[1] -ieq 'subscriptions')
     {
-        if ($M[1] -ine 'subscriptions' -or $M[2] -notmatch $Token) { return $false }
+        if ($M[1] -ine 'subscriptions' -or $M[2] -cnotmatch $SubToken) { return $false }
         $i = 3
     }
     elseif ($R[1] -ieq 'providers') { $i = 1 }
@@ -315,7 +322,11 @@ function Test-ObfuscatedIdShape
         {
             if ($M[$i + 1] -ine $Next) { return $false }
         }
-        elseif ($M[$i + 1] -notmatch $Token) { return $false }
+        elseif ($i -eq 3 -and $R[$i] -ieq 'resourcegroups' -and $R[1] -ieq 'subscriptions')
+        {
+            if ($M[$i + 1] -cnotmatch $RgToken) { return $false }
+        }
+        elseif ($M[$i + 1] -cnotmatch $Token) { return $false }
         $i += 2
     }
     return $true

@@ -349,6 +349,8 @@ Describe 'Test-ObfuscatedIdShape' {
         @{ Label = 'a flat token'; Masked = '{0}' }
         @{ Label = 'another type'; Masked = '/subscriptions/{0}/resourcegroups/{0}/providers/microsoft.sql/servers/{0}/elasticpools/{0}' }
         @{ Label = 'a real resource group'; Masked = '/subscriptions/{0}/resourcegroups/rg-demo/providers/microsoft.sql/servers/{0}/databases/{0}' }
+        @{ Label = 'the metric step''s old sub_ and rg_ tokens'; Masked = '/subscriptions/prod_sub_0f0e0d0c-0b0a-4908-8706-050403020100/resourcegroups/prod_rg_0f0e0d0c-0b0a-4908-8706-050403020100/providers/microsoft.sql/servers/{0}/databases/{0}' }
+        @{ Label = 'a word in a name token'; Masked = '/subscriptions/{0}/resourcegroups/{0}/providers/microsoft.sql/servers/prod_secret_0f0e0d0c-0b0a-4908-8706-050403020100/databases/{0}' }
     ) {
         Test-ObfuscatedIdShape -RealId "$script:Base/microsoft.sql/servers/srv-a/databases/db-a" -MaskedId ($Masked -f $script:T) | Should -BeFalse
     }

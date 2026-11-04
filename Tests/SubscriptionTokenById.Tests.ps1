@@ -26,7 +26,8 @@ BeforeAll {
     . ([scriptblock]::Create("function Invoke-RunVariables { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
     $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
     $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
-    . ([scriptblock]::Create("function Invoke-DictionaryBuild { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { }; $($Build[0].Extent.Text) }"))
+    . ([scriptblock]::Create("function Invoke-DictionaryBuild { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { param(`$Message, `$Severity) if (`$Severity -eq 'Warning') { `$script:BuildWarnings.Add([string]`$Message) } }; $($Build[0].Extent.Text) }"))
+    $script:BuildWarnings = [System.Collections.Generic.List[string]]::new()
     $MetAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
     $Step = @($MetAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate' -and $N.Clauses[0].Item2.Extent.Text -match '^\{\s*foreach \(\$metric in \$Tmp\.Metrics\)' }, $true))
     . ([scriptblock]::Create("function Invoke-MetricMasking { param(`$Tmp) `$Obfuscate = `$true; `$ResourceIdDictionary = `$Global:ResourceIdDictionary; `$ResourceNameDictionary = `$Global:ResourceNameDictionary; `$ResourceSubDictionary = `$Global:ResourceSubscriptionDictionary; `$ResourceGroupDictionary = `$Global:ResourceResourceGroupDictionary; $($Step[0].Extent.Text); return `$Tmp }"))
@@ -151,6 +152,7 @@ Describe 'An older seed that gave two subscriptions with one display name one to
             }
             finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
             $A = ($Global:ResourceIdDictionary[$VmA] -split '/')[2]; $B = ($Global:ResourceIdDictionary[$VmB] -split '/')[2]
+            if ($Run -eq 1) { ($script:BuildWarnings -join "`n") | Should -Match 'a subscription token two subscriptions share' }
             $A | Should -Not -BeExactly $B -Because "run $Run"
             $A | Should -Not -BeExactly $Shared
             if ($Run -eq 1) { $First = @($A, $B) } else { @($A, $B) | Should -Be $First -Because "run $Run keeps run 1's tokens" }
@@ -170,6 +172,31 @@ Describe 'A row whose subscriptionId is missing' {
         $Global:Resources = @([pscustomobject]@{ id = $Vm; name = 'vm-a'; subscriptionId = $null; resourceGroup = 'rg-shared' })
         Invoke-DictionaryBuild
         $Global:ResourceSubscriptionDictionary[$Vm] | Should -BeExactly ($Global:ResourceIdDictionary[$Vm] -split '/')[2]
+    }
+}
+
+Describe 'A seed whose name map gives a renamed subscription''s old name' {
+    It 'does not give that token to the subscription that has the old name now' {
+        $SubC = '33333333-3333-3333-3333-333333333333'
+        $TokA = 'prod_' + [guid]::NewGuid().ToString(); $Rg = 'prod_' + [guid]::NewGuid().ToString()
+        $VmA = Get-Id $script:SubA 'microsoft.compute/virtualmachines' 'vm-a'
+        $VmC = Get-Id $SubC 'microsoft.compute/virtualmachines' 'vm-c'
+        $Seed = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-subseed-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
+        @{ ResourceIdMap = @{ "/subscriptions/$TokA/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/prod_$([guid]::NewGuid())" = $VmA }; SubscriptionNameMap = @{ $TokA = 'Foo' } } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+        try
+        {
+            Invoke-RunVariables
+            $Global:Subscriptions = @([pscustomobject]@{ id = $script:SubA; name = 'Bar' }, [pscustomobject]@{ id = $SubC; name = 'Foo' })
+            $Global:ObfuscationSubscriptionIndex = $null
+            $Global:Resources = @(
+                [pscustomobject]@{ id = $VmA; name = 'vm-a'; subscriptionId = $script:SubA; resourceGroup = 'rg-shared' }
+                [pscustomobject]@{ id = $VmC; name = 'vm-c'; subscriptionId = $SubC; resourceGroup = 'rg-shared' }
+            )
+            Invoke-DictionaryBuild -Seed $Seed
+        }
+        finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
+        ($Global:ResourceIdDictionary[$VmA] -split '/')[2] | Should -BeExactly $TokA
+        ($Global:ResourceIdDictionary[$VmC] -split '/')[2] | Should -Not -BeExactly $TokA
     }
 }
 

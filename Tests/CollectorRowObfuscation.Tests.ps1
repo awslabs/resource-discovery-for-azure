@@ -153,9 +153,11 @@ Describe 'Masking the collector rows under -Obfuscate' {
         $Global:ObfuscationSubscriptionIndex = $null
         $script:Warned = [System.Collections.Generic.List[string]]::new()
         function global:Write-Log { param($Message, $Severity) if ($Severity -eq 'Warning') { $script:Warned.Add([string]$Message) } }
-        try { $null = Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan' }
+        $script:RdaNoIdNameIndex = $null
+        try { $null = Invoke-RowMasking -Result @((New-Row -Id ''), (New-Row -Id '' -Name 'plan-b'), (New-Row -Id '' -Name 'plan-c')) -ModName 'AppServicePlan' }
         finally { Remove-Item -Path function:global:Write-Log -ErrorAction SilentlyContinue }
         ($script:Warned -join "`n") | Should -Match 'which 2 subscriptions share'
+        @($script:Warned | Where-Object { $_ -match 'which 2 subscriptions share' }).Count | Should -Be 1 -Because 'it is said once per name'
     }
 
     It 'gives two rows with no id two ids' {

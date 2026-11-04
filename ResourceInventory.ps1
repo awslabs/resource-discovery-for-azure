@@ -353,7 +353,12 @@ function New-ObfuscatedRowIdWithoutId
     $SubSegment = $SubSegment -replace '/', '_'
     $RgSegment = $RgSegment -replace '/', '_'
     $Key = ('{0}|{1}|{2}|{3}' -f $Type, $SubSegment, $RgSegment, $NameBase).ToLowerInvariant()
-    $Hash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($Key))).Substring(0, 8).ToLowerInvariant()
+    # SHA256.Create() and ComputeHash, as Get-TenantFileKey: SHA256.HashData
+    # and Convert.ToHexString need .NET 5, which PowerShell 7.0 does not have.
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Key)) }
+    finally { $Sha.Dispose() }
+    $Hash = -join @($HashBytes[0..3] | ForEach-Object { $_.ToString('x2') })
     if ($null -eq $script:RdaNoIdRowsSeen) { $script:RdaNoIdRowsSeen = @{} }
     $script:RdaNoIdRowsSeen[$Key] = 1 + [int]$script:RdaNoIdRowsSeen[$Key]
     $Suffix = if ($script:RdaNoIdRowsSeen[$Key] -gt 1) { '{0}-{1}' -f $Hash, $script:RdaNoIdRowsSeen[$Key] } else { $Hash }

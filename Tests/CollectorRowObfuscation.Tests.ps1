@@ -154,6 +154,14 @@ Describe 'Masking the collector rows under -Obfuscate' {
         @($Global:ResourceIdDictionary.Keys | Where-Object { $_ -match '~[0-9a-f]{8}-2$' }).Count | Should -Be 1 -Because 'the second row with the same four values adds -2'
     }
 
+    It 'hashes with SHA256.Create and ComputeHash, not SHA256.HashData or Convert.ToHexString, which need .NET 5 (PowerShell 7.1), while the scripts accept PowerShell 7.0' {
+        $Ast = (Get-Command -Name New-ObfuscatedRowIdWithoutId -CommandType Function).ScriptBlock.Ast
+        $Members = @($Ast.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.MemberExpressionAst] }, $true) | ForEach-Object { [string]$_.Member })
+        $Members | Should -Contain 'ComputeHash'
+        $Members | Should -Not -Contain 'HashData'
+        $Members | Should -Not -Contain 'ToHexString'
+    }
+
     It 'gives the same row with no id the same stand-in id in the next run' {
         $null = Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan'
         $First = @($Global:ResourceIdDictionary.Keys)

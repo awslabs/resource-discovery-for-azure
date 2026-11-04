@@ -221,24 +221,35 @@ function Get-ObfuscatedResourceId
 
     if ([string]::IsNullOrEmpty($ResourceId)) { return 'obfuscated' }
     $Parts = $ResourceId.Split('/')
-    if ($Parts.Count -lt 3 -or $Parts[0] -ne '' -or $Parts[1] -ine 'subscriptions' -or [string]::IsNullOrEmpty($Parts[2]))
+    $Masked = [System.Collections.Generic.List[string]]::new()
+    $Masked.Add('')
+    $IsTenantScope = ($Parts.Count -ge 4 -and $Parts[0] -eq '' -and $Parts[1] -ieq 'providers' -and -not [string]::IsNullOrEmpty($Parts[2]))
+    if ($IsTenantScope)
+    {
+        # A tenant-scope id with no subscription (a reservation order, a
+        # management group): '/providers/<namespace>/<type>/<name>...'. It
+        # keeps its own path, every name segment masked as below, so it is
+        # never cut to one flat token.
+        $i = 1
+    }
+    elseif ($Parts.Count -lt 3 -or $Parts[0] -ne '' -or $Parts[1] -ine 'subscriptions' -or [string]::IsNullOrEmpty($Parts[2]))
     {
         return (Get-ObfuscationPrefix $ResourceId) + [guid]::NewGuid().ToString()
     }
+    else
+    {
+        if ($null -eq $SubscriptionIndex) { $SubscriptionIndex = Get-ObfuscationSubscriptionIndex }
+        $SubEntries = $SubscriptionIndex.ById[$Parts[2]]
+        $SubName = if ($null -ne $SubEntries) { [string]$SubEntries[0].name } else { '' }
+        if ([string]::IsNullOrEmpty($SubName)) { $SubName = $Parts[2] }
+        if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($SubName)) { $Global:ObfuscationSubscriptionTokens[$SubName] = (Get-ObfuscationPrefix $SubName) + [guid]::NewGuid().ToString() }
+        $SubToken = $Global:ObfuscationSubscriptionTokens[$SubName]
+        if (-not $ResourceSubscriptionDictionary.ContainsKey($ResourceId)) { $ResourceSubscriptionDictionary[$ResourceId] = $SubToken }
 
-    if ($null -eq $SubscriptionIndex) { $SubscriptionIndex = Get-ObfuscationSubscriptionIndex }
-    $SubEntries = $SubscriptionIndex.ById[$Parts[2]]
-    $SubName = if ($null -ne $SubEntries) { [string]$SubEntries[0].name } else { '' }
-    if ([string]::IsNullOrEmpty($SubName)) { $SubName = $Parts[2] }
-    if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($SubName)) { $Global:ObfuscationSubscriptionTokens[$SubName] = (Get-ObfuscationPrefix $SubName) + [guid]::NewGuid().ToString() }
-    $SubToken = $Global:ObfuscationSubscriptionTokens[$SubName]
-    if (-not $ResourceSubscriptionDictionary.ContainsKey($ResourceId)) { $ResourceSubscriptionDictionary[$ResourceId] = $SubToken }
-
-    $Masked = [System.Collections.Generic.List[string]]::new()
-    $Masked.Add('')
-    $Masked.Add($Parts[1])
-    $Masked.Add($SubToken)
-    $i = 3
+        $Masked.Add($Parts[1])
+        $Masked.Add($SubToken)
+        $i = 3
+    }
     while ($i -lt $Parts.Count)
     {
         $Segment = $Parts[$i]

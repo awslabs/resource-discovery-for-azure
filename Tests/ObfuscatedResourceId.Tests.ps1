@@ -103,6 +103,17 @@ Describe 'Get-ObfuscatedResourceId' {
         ($Aks -split '/')[-1] | Should -Match '^(prod|nonprod)_aks_'
     }
 
+    It 'keeps the path of a tenant-scope id (no subscription), masks each name, and gives a parent one token' {
+        $Order = '/providers/Microsoft.Capacity/reservationOrders/ro-a'
+        $Masked = Get-ObfuscatedResourceId -ResourceId "$Order/reservations/res-a"
+        $Masked | Should -Match ('^/providers/Microsoft\.Capacity/reservationOrders/' + $script:Token + '/reservations/' + $script:Token + '$')
+        $Masked | Should -Not -Match 'ro-a|res-a'
+        $Second = Get-ObfuscatedResourceId -ResourceId "$Order/reservations/res-b"
+        ($Second -split '/')[4] | Should -BeExactly ($Masked -split '/')[4] -Because 'one reservation order keeps one token'
+        (Get-ObfuscatedResourceId -ResourceId '/providers/Microsoft.Management/managementGroups/mg-a') | Should -Match ('^/providers/Microsoft\.Management/managementGroups/' + $script:Token + '$')
+        $Global:ResourceNameDictionary.ContainsKey("$Order/reservations/res-a") | Should -BeTrue -Because 'the dictionary can reverse every segment'
+    }
+
     It 'returns ''obfuscated'' for an empty id and one token for an id that is not subscription-scoped' {
         Get-ObfuscatedResourceId -ResourceId '' | Should -BeExactly 'obfuscated'
         Get-ObfuscatedResourceId -ResourceId 'not-an-arm-id' | Should -Match ('^' + $script:Token + '$')

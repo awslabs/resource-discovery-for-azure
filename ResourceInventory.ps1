@@ -1725,6 +1725,9 @@ $Global:Runtime = Measure-Command -Expression {
     Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
+# Reset, so a run whose processing step stops does not show the time of an earlier run in
+# the same session.
+$Global:ReportingRunTime = $null
 try
 {
     $Global:ReportingRunTime = Measure-Command -Expression {

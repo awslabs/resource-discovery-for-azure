@@ -801,6 +801,19 @@ function Remove-Item
         $Output | Should -Match 'No report was written'
     }
 
+    It 'does not show the processing time of an earlier run in the same session' {
+        # The time an earlier run left behind, then a run whose inventory write fails.
+        $Stub = @(
+            '$Global:ReportingRunTime = [timespan]::FromSeconds(4242)'
+            'function Write-InventoryJson { param($InputObject, $Path) throw ''stand-in: out of memory while writing'' }'
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name 'stale-time' -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'Reporting Time: not measured' -Because "Output:`n$Output"
+        $Output | Should -Not -Match '01:10:42'
+    }
+
     It 'reports the zip on a direct run that wrote it' {
         $R = @(Invoke-InventoryRun -Name 'write-ok-direct' -Runs @('') -Direct)
 

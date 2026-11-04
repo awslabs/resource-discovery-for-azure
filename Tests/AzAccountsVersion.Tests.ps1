@@ -210,10 +210,25 @@ function global:Get-Module
 }
 function global:Import-Module
 {
-    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [switch]$Force)
+    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [switch]$Force, [version]$MinimumVersion)
     if (@($Name).Count -eq 1 -and $Name[0] -like 'Az.*')
     {
         Add-Content -LiteralPath $Global:AzvCallLog -Value ('import ' + $Name[0])
+        Add-Content -LiteralPath $Global:AzvCallLog -Value ('importmin ' + $Name[0] + ' ' + $MinimumVersion)
+        # AZV_IMPORT_LOADS: the version a plain import takes (an older copy
+        # earlier in PSModulePath). With -MinimumVersion, PowerShell takes a
+        # copy at or above it; 'ignore-min' takes the older copy anyway.
+        if ($Name[0] -eq 'Az.Accounts' -and $env:AZV_IMPORT_LOADS)
+        {
+            if ($MinimumVersion -and $env:AZV_IMPORT_MIN -ne 'ignore-min' -and [version]$env:AZV_IMPORT_LOADS -lt $MinimumVersion)
+            {
+                $Global:AzvLoaded = ($Global:AzvInstalled | ForEach-Object { [version]$_ } | Sort-Object -Descending | Select-Object -First 1).ToString()
+            }
+            else
+            {
+                $Global:AzvLoaded = $env:AZV_IMPORT_LOADS
+            }
+        }
         return
     }
     Microsoft.PowerShell.Core\Import-Module @PSBoundParameters
@@ -250,7 +265,7 @@ exit $LASTEXITCODE
 
         function Invoke-AzvRun
         {
-            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails')
+            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '')
             $Name = [guid]::NewGuid().ToString('N')
             $Out = Join-Path $script:WorkDir ('out_' + $Name)
             New-Item -ItemType Directory -Path $Out -Force | Out-Null
@@ -259,6 +274,8 @@ exit $LASTEXITCODE
             # The wrapper writes under $HOME/InventoryReports; keep that in the temp dir.
             $env:HOME = $Out
             $env:AZV_INSTALL = $Install
+            $env:AZV_IMPORT_LOADS = $ImportLoads
+            $env:AZV_IMPORT_MIN = $ImportMin
             $Pwsh = Join-Path $PSHOME 'pwsh'
             try
             {
@@ -280,6 +297,8 @@ exit $LASTEXITCODE
             {
                 $env:HOME = $OldHome
                 Remove-Item Env:AZV_INSTALL -ErrorAction SilentlyContinue
+                Remove-Item Env:AZV_IMPORT_LOADS -ErrorAction SilentlyContinue
+                Remove-Item Env:AZV_IMPORT_MIN -ErrorAction SilentlyContinue
             }
             $Calls = if (Test-Path -LiteralPath $CallLog) { @(Get-Content -LiteralPath $CallLog) } else { @() }
             [pscustomobject]@{
@@ -287,6 +306,7 @@ exit $LASTEXITCODE
                 Output     = $Output
                 AzureCalls = @($Calls | Where-Object { $_ -like 'azure *' })
                 Imports    = @($Calls | Where-Object { $_ -like 'import *' })
+                ImportMins = @($Calls | Where-Object { $_ -like 'importmin *' })
                 Installs   = @($Calls | Where-Object { $_ -like 'install *' })
                 Prompts    = @($Calls | Where-Object { $_ -eq 'prompt' })
             }
@@ -377,5 +397,78 @@ exit $LASTEXITCODE
         $Run.Installs | Should -BeNullOrEmpty
         $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
         $Run.Output | Should -Match 'new PowerShell session'
+    }
+
+    It 'direct run: imports Az.Accounts with -MinimumVersion 5.5.4, so an older copy earlier in PSModulePath is not taken' {
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.3,5.5.4' -ImportLoads '5.5.3'
+
+        $Run.ImportMins | Should -Contain 'importmin Az.Accounts 5.5.4'
+        $Run.ExitCode | Should -Be 7 -Because 'the supported copy loads and the run goes on to the sign-in'
+    }
+
+    It 'direct run: stops with exit 1 before any Azure call when the copy that loaded is older anyway' {
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.3,5.5.4' -ImportLoads '5.5.3' -ImportMin 'ignore-min'
+
+        $Run.ExitCode | Should -Be 1
+        $Run.AzureCalls | Should -BeNullOrEmpty
+        $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+    }
+
+    It 'wrapper: imports Az.Accounts with -MinimumVersion 5.5.4, so an older copy earlier in PSModulePath is not taken' {
+        $Run = Invoke-AzvRun -Entry 'wrapper' -Installed '5.5.3,5.5.4' -ImportLoads '5.5.3'
+
+        $Run.ImportMins | Should -Contain 'importmin Az.Accounts 5.5.4'
+        $Run.Output | Should -Not -Match 'is already loaded'
+    }
+
+    It 'wrapper: stops with exit 1 before any Azure call when the copy that loaded is older anyway' {
+        $Run = Invoke-AzvRun -Entry 'wrapper' -Installed '5.5.3,5.5.4' -ImportLoads '5.5.3' -ImportMin 'ignore-min'
+
+        $Run.ExitCode | Should -Be 1
+        $Run.AzureCalls | Should -BeNullOrEmpty
+        $Run.Installs | Should -BeNullOrEmpty
+        $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+    }
+}
+
+Describe 'Every Az.Accounts import asks for the supported version' {
+
+    # A plain Import-Module takes the first copy in PSModulePath order, which
+    # can be older than the copy the version check saw. Every import of
+    # Az.Accounts in the entry scripts must name -MinimumVersion, and an
+    # import by variable must loop over a list that leaves Az.Accounts out.
+    It '<_> imports Az.Accounts only with -MinimumVersion' -ForEach @('ResourceInventory.ps1', 'Run-AllSubscriptions.ps1', 'Run-AllSubscriptions.Stream.ps1') {
+        $Path = Join-Path $script:RepoRoot $_
+        $Tokens = $null
+        $Errors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$Errors)
+        $Imports = @($Ast.FindAll({
+                    param($Node)
+                    $Node -is [System.Management.Automation.Language.CommandAst] -and $Node.GetCommandName() -eq 'Import-Module'
+                }, $true))
+        $Bad = [System.Collections.Generic.List[string]]::new()
+        $Literal = 0
+        foreach ($Import in $Imports)
+        {
+            $Target = $Import.CommandElements[1]
+            $Text = $Import.Extent.Text
+            if ($Target -is [System.Management.Automation.Language.StringConstantExpressionAst])
+            {
+                if ($Target.Value -ne 'Az.Accounts') { continue }
+                $Literal++
+                if ($Text -notmatch '-MinimumVersion\b') { $Bad.Add("line $($Import.Extent.StartLineNumber): $Text") }
+            }
+            elseif ($Target -is [System.Management.Automation.Language.VariableExpressionAst])
+            {
+                $Loop = $Import.Parent
+                while ($Loop -and $Loop -isnot [System.Management.Automation.Language.ForEachStatementAst]) { $Loop = $Loop.Parent }
+                if ($Text -notmatch '-MinimumVersion\b' -and -not ($Loop -and $Loop.Condition.Extent.Text -match "-ne 'Az\.Accounts'"))
+                {
+                    $Bad.Add("line $($Import.Extent.StartLineNumber): $Text")
+                }
+            }
+        }
+        $Literal | Should -BeGreaterThan 0 -Because "$_ loads Az.Accounts by name"
+        @($Bad) | Should -BeNullOrEmpty
     }
 }

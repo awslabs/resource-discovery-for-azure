@@ -256,7 +256,12 @@ Function RunInventorySetup()
 
         try
         {
-            foreach ($AzSubModule in $RequiredAzSubModules)
+            # Az.Accounts first, with -MinimumVersion: the check above saw the
+            # highest copy on disk, but a plain import takes the first copy in
+            # PSModulePath order, which can be an older one.
+            Write-Log -Message 'Loading Az.Accounts...' -Severity 'Info'
+            Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -ErrorAction Stop -DisableNameChecking | Out-Null
+            foreach ($AzSubModule in @($RequiredAzSubModules | Where-Object { $_ -ne 'Az.Accounts' }))
             {
                 Write-Log -Message ('Loading {0}...' -f $AzSubModule) -Severity 'Info'
                 Import-Module $AzSubModule -ErrorAction Stop -DisableNameChecking | Out-Null
@@ -269,6 +274,20 @@ Function RunInventorySetup()
             Write-Log -Message ('This usually indicates a broken install - the module manifest is present but its bundled assemblies (MSAL, Azure.Core, etc.) are missing or unloadable.') -Severity 'Error'
             Write-Log -Message ('Reinstall with: Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
             Write-Log -Message ('If the broken install was created by a previous run of this script, also run: Get-Module Az* -ListAvailable | Uninstall-Module -Force') -Severity 'Error'
+            $Global:AzPowerShellLoaded = $false
+            # exit, not throw, for the same reason as above.
+            exit 1
+        }
+
+        # Check the copy that actually loaded. The printed advice (a new
+        # session, or the install command) is the way out; nothing retries.
+        $AzAccountsCheck = Test-RdaAzAccountsVersion
+        if ($AzAccountsCheck.Status -ne 'Ok')
+        {
+            foreach ($Line in $AzAccountsCheck.Messages)
+            {
+                Write-Log -Message $Line -Severity 'Error'
+            }
             $Global:AzPowerShellLoaded = $false
             # exit, not throw, for the same reason as above.
             exit 1

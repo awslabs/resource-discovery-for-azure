@@ -67,6 +67,14 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 }
 . $FunctionsFile
 
+# The supported Az.Accounts version (Get-RdaAzAccountsMinimumVersion). The
+# wrapper already stopped when this file is missing; it only defines functions.
+$AzModulesFunctionsFile = Join-Path $PSScriptRoot 'Functions/AzModules.Functions.ps1'
+if (Test-Path -LiteralPath $AzModulesFunctionsFile -PathType Leaf)
+{
+    . $AzModulesFunctionsFile
+}
+
 # Tag used to prefix all stdout lines so the parent wrapper can demultiplex
 # interleaved output across streams.
 $Tag = "[stream-$StreamId]"
@@ -102,7 +110,16 @@ Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 # context without prompting for sign-in. Import-AzContext is idempotent.
 try
 {
-    Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
+    # -MinimumVersion, as in the wrapper: a plain import takes the first copy
+    # in PSModulePath order, which can be older than the supported one.
+    # Without Functions/AzModules.Functions.ps1 (the wrapper stops before it
+    # starts a stream then) any version is taken, as before.
+    $AzAccountsMinimum = [version]'0.0'
+    if (Get-Command -Name Get-RdaAzAccountsMinimumVersion -CommandType Function -ErrorAction SilentlyContinue)
+    {
+        $AzAccountsMinimum = Get-RdaAzAccountsMinimumVersion
+    }
+    Import-Module Az.Accounts -MinimumVersion $AzAccountsMinimum -ErrorAction Stop -Force | Out-Null
     # Prevent the imported context from being persisted to the user's on-disk
     # AzureRmContext.json. Without this, every parallel worker writes its
     # token cache to the same shared profile and the streams race on disk

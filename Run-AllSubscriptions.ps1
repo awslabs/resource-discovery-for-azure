@@ -338,7 +338,9 @@ if ($MissingAzSubModules.Count -gt 0)
 # installed Az or found it preinstalled.
 try
 {
-    Import-Module Az.Accounts -ErrorAction Stop
+    # -MinimumVersion: a plain import takes the first copy in PSModulePath
+    # order, which can be older than the one the check above saw.
+    Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -ErrorAction Stop
 }
 catch
 {
@@ -347,6 +349,18 @@ catch
     Write-Host "Repair it, then re-run:" -ForegroundColor Yellow
     Write-Host "  Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
     Write-Host "  Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
+    exit 1
+}
+
+# Check the copy that actually loaded. The printed advice is the way out;
+# nothing retries.
+$AzAccountsCheck = Test-RdaAzAccountsVersion
+if ($AzAccountsCheck.Status -ne 'Ok')
+{
+    foreach ($AzAccountsLine in $AzAccountsCheck.Messages)
+    {
+        Write-Host $AzAccountsLine -ForegroundColor Red
+    }
     exit 1
 }
 

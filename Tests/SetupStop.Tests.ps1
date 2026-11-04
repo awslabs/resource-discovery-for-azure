@@ -67,7 +67,7 @@ function global:Get-Module
 }
 function global:Import-Module
 {
-    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking)
+    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [version]$MinimumVersion)
     if (@($Name).Count -eq 1 -and $Name[0] -like 'Az.*')
     {
         Add-Content -LiteralPath $Global:SetupStopCallLog -Value ('import ' + $Name[0])

@@ -781,6 +781,26 @@ function Remove-Item
         $Output | Should -Match 'No report was written'
     }
 
+    It 'makes no zip from an HTML file the report step left when it failed' {
+        # Summary.ps1 stand-in that writes the HTML file and then fails.
+        $Stub = @(
+            '$SummaryFailsAfterWrite = @('
+            '    ''param($JsonFile, $HtmlFile, $Title, $TenantId, $Version, $ExtractionRunTime, $ReportingRunTime, $PhaseTimings, $PlatOS, $ConsumptionFile)'''
+            '    ''Set-Content -LiteralPath $HtmlFile -Value ''''<html>cut off'''''''
+            '    ''throw ''''stand-in: disk full after the HTML write'''''''
+            ') -join [Environment]::NewLine'
+            'Set-Content -LiteralPath (Join-Path $PSScriptRoot ''Extension/Summary.ps1'') -Value $SummaryFailsAfterWrite'
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name 'html-cut-off' -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'HTML report generation FAILED: stand-in: disk full after the HTML write' -Because "the stand-in ran. Output:`n$Output"
+        $R[0].Files | Should -Contain 'ResourcesReport_test.html' -Because 'the stand-in left its HTML file'
+        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a report step that failed did not make a report to share'
+        $Output | Should -Not -Match 'Reporting Data File'
+        $Output | Should -Match 'No report was written'
+    }
+
     It 'reports the zip on a direct run that wrote it' {
         $R = @(Invoke-InventoryRun -Name 'write-ok-direct' -Runs @('') -Direct)
 
@@ -1032,6 +1052,19 @@ $Rounds = foreach ($Round in 1..3)
                 $Round.HeldAfterNonAz | Should -BeTrue -Because "round $($Round.Round): a statement that is not an Az cmdlet does not free them"
                 $Round.HeldAfterBlock | Should -BeFalse -Because "round $($Round.Round): the session read after the release frees them"
             }
+        }
+
+        It 'reads the Azure context and removes the handler after a failed inventory write too' {
+            # The failure path throws past the release, so it lets go of the rows the Azure session holds itself.
+            $Fn = $script:ScriptAst.FindAll({
+                    param($Node)
+                    $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'ProcessResourceResult'
+                }, $true) | Select-Object -First 1
+            $Catch = @($Fn.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.TryStatementAst] }, $true))[0].CatchClauses[0].Body.Extent.Text
+
+            $script:ReadPattern.Match($Catch).Success | Should -BeTrue
+            $Catch | Should -Match 'ClientFactory\.RemoveHandler\(\[Microsoft\.Azure\.Commands\.Common\.Authentication\.Models\.RPRegistrationDelegatingHandler\]\)'
+            $Catch.IndexOf('RemoveHandler') | Should -BeLessThan $Catch.LastIndexOf('throw') -Because 'both run before the error is thrown on'
         }
 
         It 'removes the provider-registration handler right after the read, in the same guarded block' {

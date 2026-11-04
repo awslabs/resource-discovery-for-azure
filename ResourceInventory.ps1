@@ -1221,9 +1221,20 @@ function ExecuteInventoryProcessing()
         {
             Write-Log -Message ("Inventory write FAILED: {0} was not written: {1}" -f $Global:JsonFile, $_.Exception.Message) -Severity 'Error' -ToDebugLog
             # The throw skips the release below, so free the collector data here: the report step,
-            # and under the wrappers the next subscription, must not share memory with it.
+            # and under the wrappers the next subscription, must not share memory with it. As in the
+            # release, the Azure context read and the handler removal let go of the rows the Azure
+            # session still holds.
             $Global:SmaResources = $null
             $Global:Resources = $null
+            try
+            {
+                $null = Get-AzContext -ErrorAction Stop
+                [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.ClientFactory.RemoveHandler([Microsoft.Azure.Commands.Common.Authentication.Models.RPRegistrationDelegatingHandler])
+            }
+            catch
+            {
+                Write-Log -Message ('Azure session read or handler removal after the failed inventory write failed: {0}.' -f $_.Exception.Message) -NoConsole -ToDebugLog
+            }
             throw
         }
 
@@ -1533,6 +1544,9 @@ function FinalizeOutputs
 {
     function ProcessSummary()
     {
+        # Set only once Summary.ps1 has returned: an HTML file left by a report step that failed
+        # part-way is not a report to zip.
+        $Global:HtmlReportWritten = $false
         if (-not (Test-Path -LiteralPath $Global:JsonFile))
         {
             # Summary.ps1 would only fail with 'Inventory JSON not found'; say why there is no report.
@@ -1560,6 +1574,7 @@ function FinalizeOutputs
         try
         {
             $null = & $SummaryPath -JsonFile $Global:JsonFile -HtmlFile $Global:HtmlFile -Title $ReportTitle -TenantId $ReportTenantId -Version $Global:Version -ExtractionRunTime $Runtime -ReportingRunTime $ReportingRunTime -PhaseTimings $script:PhaseTimings -PlatOS $PlatformOS -ConsumptionFile $Global:ConsumptionFileCsv
+            $Global:HtmlReportWritten = $true
         }
         catch
         {
@@ -1724,9 +1739,9 @@ finally
 
 FinalizeOutputs
 
-# Without the inventory or the HTML report there is no report to compress (the zip step
-# below then says so), so the run does not announce it.
-$ReportInputsReady = (Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile)
+# Without the inventory or a finished HTML report there is no report to compress (the zip
+# step below then says so), so the run does not announce it.
+$ReportInputsReady = $Global:HtmlReportWritten -and (Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile)
 if ($ReportInputsReady)
 {
     Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'

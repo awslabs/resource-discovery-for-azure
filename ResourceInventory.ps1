@@ -1479,11 +1479,13 @@ function ExecuteInventoryProcessing()
     $Global:Resources = $null
     # Setting the two globals to $null does not free the rows on its own. Az cmdlets leave their stream
     # handlers in the shared Azure session when they return, so the collector that made the last Azure
-    # call (the VM size lookup) stays referenced, and with it the rows it was given. The next Az cmdlet
-    # replaces those handlers; this read is that call, made from a scope that holds no rows.
+    # call piped into a filter (the VM or scale set size lookup) stays referenced, and with it the rows
+    # it was given. The next Az cmdlet replaces those handlers; this read is that call, made from a
+    # scope that holds no rows. -ErrorAction Stop sends any failure to the catch, so it is logged and
+    # the run goes on.
     try
     {
-        $null = Get-AzContext -ErrorAction SilentlyContinue
+        $null = Get-AzContext -ErrorAction Stop
     }
     catch
     {

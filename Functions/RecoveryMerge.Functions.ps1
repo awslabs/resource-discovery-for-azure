@@ -374,9 +374,10 @@ function Merge-RecoveryData
     #    takes that resource's whole masked path from the run's ResourceIdMap;
     #    any other ResourceUri gets subscription, resource group and name
     #    tokens minted for that run's consumption file. So a replaced
-    #    consumption file matches the RECOVERY run's tokens, is internally
-    #    consistent and categorises correctly, but its tokens can differ from
-    #    the gap run's. If the chosen
+    #    consumption file categorises correctly, but its tokens can differ
+    #    from the gap run's, and a resource that is not in the inventory can
+    #    carry subscription and resource group tokens different from the
+    #    inventory's for the same real values. If the chosen
     #    source has none, write a canonical empty file so the bundle is
     #    structurally complete. --------------------------------------------------
     $ConsumptionSource = 'gap'

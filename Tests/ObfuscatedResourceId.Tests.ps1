@@ -201,3 +201,60 @@ Describe 'The run''s resource dictionaries ignore the case of an id' {
         @($Global:ResourceIdDictionary.Keys).Count | Should -Be 1
     }
 }
+
+Describe 'A run seeded with an obfuscation dictionary' {
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Vars = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Variables' }, $false)
+        . ([scriptblock]::Create("function Invoke-RunVariables3 { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
+        $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
+        $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
+        . ([scriptblock]::Create("function Invoke-SeededBuild { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { }; $($Build[0].Extent.Text) }"))
+        function GetLocalVersion { '0.0.0-test' }
+        $script:SeedDir = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-seed-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:SeedDir -Force | Out-Null
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:SeedDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Scope Global -Name TagValueDictionary, FreeTextDictionary, ResourceCount, ResourceContainers, ReportName, Version, RawRepo, TableStyle -ErrorAction SilentlyContinue
+    }
+
+    It 'gives each seeded resource the subscription, resource group and name tokens of its own seeded id' {
+        # A first run's tokens, written as its dictionary file is.
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $SubTok = 'prod_' + [guid]::NewGuid().ToString()
+        $RgTok = 'prod_' + [guid]::NewGuid().ToString()
+        $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Masked = "/subscriptions/$SubTok/resourcegroups/$RgTok/providers/microsoft.compute/virtualmachines/$NameTok"
+        $Seed = Join-Path $script:SeedDir 'seed.json'
+        @{
+            ResourceIdMap       = @{ $Masked = $Vm }
+            ResourceNameMap     = @{ $NameTok = $Vm }
+            SubscriptionNameMap = @{ $SubTok = 'Demo Subscription' }
+            ResourceGroupMap    = @{ $RgTok = $Vm }
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+
+        Invoke-RunVariables3
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+        $Global:ObfuscationSubscriptionIndex = $null
+        $Global:Resources = @(
+            [pscustomobject]@{ id = $Vm; name = 'vm-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+            [pscustomobject]@{ id = "$script:Base/microsoft.compute/disks/disk-a"; name = 'disk-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+        )
+        Invoke-SeededBuild -Seed $Seed
+
+        $Global:ResourceIdDictionary[$Vm] | Should -BeExactly $Masked
+        $Global:ResourceSubscriptionDictionary[$Vm] | Should -BeExactly $SubTok
+        $Global:ResourceResourceGroupDictionary[$Vm] | Should -BeExactly $RgTok
+        $Global:ResourceNameDictionary[$Vm] | Should -BeExactly $NameTok
+        # The unseeded disk of the same group gets the same seeded tokens.
+        $Disk = "$script:Base/microsoft.compute/disks/disk-a"
+        ($Global:ResourceIdDictionary[$Disk] -split '/')[2] | Should -BeExactly $SubTok
+        ($Global:ResourceIdDictionary[$Disk] -split '/')[4] | Should -BeExactly $RgTok
+        foreach ($D in @($Global:ResourceSubscriptionDictionary, $Global:ResourceResourceGroupDictionary, $Global:ResourceNameDictionary))
+        {
+            @($D.Values | Where-Object { [string]::IsNullOrEmpty($_) }) | Should -BeNullOrEmpty
+        }
+    }
+}

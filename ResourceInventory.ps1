@@ -927,10 +927,20 @@ Function RunInventorySetup()
 
             if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
             {
+                # A seeded id (-ObfuscationDictionary): the seed gives its
+                # masked id but no subscription or resource group entry, so
+                # reading those dictionaries gave empty values and every row
+                # then got random tokens. The name, subscription and resource
+                # group tokens are the seeded path's own segments, so the
+                # row's fields always equal its id.
                 $ObfuscatedID = $ResourceIdDictionary[$resourceItem.ID]
-                $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
-                $ObfuscatedSubscription = $ResourceSubscriptionDictionary[$resourceItem.ID]
-                $ObfuscatedResourceGroup = $ResourceResourceGroupDictionary[$resourceItem.ID]
+                $SeedParts = ([string]$ObfuscatedID).Split('/')
+                if ($SeedParts.Count -ge 3 -and $SeedParts[1] -ieq 'subscriptions' -and -not [string]::IsNullOrEmpty($SeedParts[2])) { $ObfuscatedSubscription = $SeedParts[2] }
+                if ($SeedParts.Count -ge 5 -and $SeedParts[3] -ieq 'resourcegroups' -and -not [string]::IsNullOrEmpty($SeedParts[4])) { $ObfuscatedResourceGroup = $SeedParts[4] }
+                if ($SeedParts.Count -ge 2 -and -not [string]::IsNullOrEmpty($SeedParts[-1])) { $ObfuscatedName = $SeedParts[-1] }
+                # A seeded id that is not a path keeps the seed's name token.
+                $Known = $null
+                if ($SeedParts.Count -lt 3 -and $ResourceNameDictionary.TryGetValue($resourceItem.ID, [ref]$Known) -and -not [string]::IsNullOrEmpty($Known)) { $ObfuscatedName = $Known }
             }
             else
             {

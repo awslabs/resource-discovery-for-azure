@@ -142,6 +142,7 @@ Describe 'An older seed that gave two subscriptions with one display name one to
         foreach ($Run in 1, 2, 3)
         {
             $script:BuildWarnings.Clear()
+            $script:BuildLog.Clear()
             $Seed = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-subseed-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
             $SeedMaps | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
             try
@@ -158,6 +159,7 @@ Describe 'An older seed that gave two subscriptions with one display name one to
             finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
             $A = ($Global:ResourceIdDictionary[$VmA] -split '/')[2]; $B = ($Global:ResourceIdDictionary[$VmB] -split '/')[2]
             $Drop = @($script:BuildWarnings | Where-Object { $_ -match 'seeded id\(s\)' })
+            if ($Run -eq 1) { ($script:BuildLog -join "`n") | Should -Match 'Obfuscation dictionary: 0 subscription token\(s\) kept' -Because 'the shared token is given to neither' }
             if ($Run -eq 1) { $Drop | Should -Match '^Obfuscation dictionary: 2 seeded id\(s\)' -Because 'both ids holding the shared token are dropped' }
             else { $Drop | Should -BeNullOrEmpty -Because "run $Run keeps every id: the loop has ended" }
             $A | Should -Not -BeExactly $B -Because "run $Run"

@@ -550,6 +550,18 @@ Describe 'The seed''s parent tokens' {
     }
 }
 
+Describe 'The seed check frees what it built' {
+    It 'sets its slot index to null once the check is done, before the token loop' {
+        $Text = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1')
+        $Start = $Text.IndexOf('$SeedSlotTokens = @{}')
+        $Loop = $Text.IndexOf('foreach ($resourceItem in $Global:Resources)', $Start)
+        $Start | Should -BeGreaterThan 0
+        $Between = $Text.Substring($Start, $Loop - $Start)
+        $Between | Should -Match '\$SeedSlotsOf = \$null'
+        $Between | Should -Match '\$SeedSlotTokens = \$null'
+    }
+}
+
 Describe 'Test-ObfuscatedIdShape' {
     BeforeAll {
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)

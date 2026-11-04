@@ -1091,6 +1091,9 @@ Function RunInventorySetup()
             {
                 Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
             }
+            # The slot index is only for this check: free it before the token loop.
+            $SeedSlotsOf = $null
+            $SeedSlotTokens = $null
         }
 
         foreach ($resourceItem in $Global:Resources)

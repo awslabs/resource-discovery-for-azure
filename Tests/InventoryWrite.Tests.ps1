@@ -626,6 +626,8 @@ function CreateResourceJobs
         $Output | Should -Match 'There is no report to zip'
         $Output | Should -Not -Match 'Compressing Resources Output' -Because 'there is nothing to compress'
         $Output | Should -Not -Match 'excluded from zip' -Because 'no zip is made'
+        $Output | Should -Match 'No HTML report: the inventory .*Inventory_ResourcesReport_test\.json was not written'
+        $Output | Should -Not -Match 'HTML report generation FAILED' -Because 'the report step is not run without the inventory, so it does not fail as a second fault'
         $Output | Should -Match 'Reporting Time: not measured' -Because 'the processing step stopped before its time was taken'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'
@@ -646,6 +648,8 @@ function CreateResourceJobs
         $R = @(Invoke-InventoryRun -Name 'write-fail-then-ok' -Runs @($Failure.Stub, '', ''))
 
         $R[0].Escaped | Should -BeLike $Failure.Expect
+        $R[0].SmaResourcesReleased | Should -BeTrue -Because 'the collector output is freed even though the write failed'
+        $R[0].ResourcesReleased | Should -BeTrue -Because 'the discovery rows are freed even though the write failed'
         foreach ($i in 1, 2)
         {
             $R[$i].Escaped | Should -BeNullOrEmpty -Because "run $i has a writer that works"
@@ -665,7 +669,9 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Reporting Data File'
         $Output | Should -Match 'No report was written'
         $R[0].Files | Should -Contain 'Inventory_ResourcesReport_test.json' -Because 'only the zip step failed'
-        $Output | Should -Match 'Please zip the output files manually' -Because 'the inventory and the HTML report are there to zip by hand'
+        $Output | Should -Match 'Please zip the output files manually: .*Inventory_ResourcesReport_test\.json' -Because 'the inventory and the HTML report are there to zip by hand, and the run names the files'
+        $Output | Should -Match 'Please zip the output files manually: .*Consumption_ResourcesReport_test\.csv'
+        $Output | Should -Not -Match 'Add only those files' -Because 'that warning is for -Obfuscate runs'
     }
 
     It 'removes a zip the failed zip step left cut off and does not report it' {
@@ -756,6 +762,21 @@ function Remove-Item
         ($Output -match 'The ZIP file is safe to share') | Should -Be $Expect -Because "Output:`n$Output"
         ($R[0].Files -contains 'ResourcesReport_test.zip') | Should -Be $Expect
         ($Output -match 'transcript log excluded from zip') | Should -Be $Expect
+        ($Output -match 'Add only those files: the obfuscation dictionary') | Should -Be ($Case -eq 'zip step failed') -Because 'a hand-made zip under -Obfuscate must leave out the files with real names'
+    }
+
+    It 'makes no zip from an HTML report that has no inventory next to it' {
+        # A writer that writes nothing and does not fail, and an HTML file already there.
+        $Stub = @(
+            'function Write-InventoryJson { param($InputObject, $Path) }'
+            'Set-Content -LiteralPath ($Global:DefaultPath + ''ResourcesReport_test.html'') -Value ''<html></html>'''
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name 'html-without-inventory' -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because "a zip without the inventory fails the whole upload. Output:`n$Output"
+        $Output | Should -Not -Match 'Reporting Data File'
+        $Output | Should -Match 'No report was written'
     }
 
     It 'reports the zip on a direct run that wrote it' {
@@ -832,7 +853,10 @@ function CreateResourceJobs { throw 'collector step failed' }
                 }, $false) | Select-Object -First 1
             if ($null -eq $Fn) { throw 'ExecuteInventoryProcessing was not found in ResourceInventory.ps1.' }
 
-            $Release = [regex]::new('(?m)^[ \t]*\$Global:Resources = \$null[ \t]*\r?$').Match($script:ScriptText, $Fn.Extent.StartOffset)
+            # From the ProcessResourceResult call, so the nested function's own failure-path release is not matched.
+            $Call = [regex]::new('(?m)^[ \t]*ProcessResourceResult[ \t]*\r?$').Match($script:ScriptText, $Fn.Extent.StartOffset)
+            if (-not $Call.Success -or $Call.Index -ge $Fn.Extent.EndOffset) { throw 'The ProcessResourceResult call was not found in ExecuteInventoryProcessing.' }
+            $Release = [regex]::new('(?m)^[ \t]*\$Global:Resources = \$null[ \t]*\r?$').Match($script:ScriptText, $Call.Index)
             if (-not $Release.Success -or $Release.Index -ge $Fn.Extent.EndOffset) { throw 'The release line ($Global:Resources = $null) was not found in ExecuteInventoryProcessing.' }
             $script:ReleaseStart = $Release.Index
             $script:ReleaseEnd = $Release.Index + $Release.Length

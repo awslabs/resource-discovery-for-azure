@@ -19,6 +19,9 @@ BeforeAll {
         if ($Fn.Count -ne 1) { throw "$Name was not found in ResourceInventory.ps1." }
         . ([scriptblock]::Create($Fn[0].Extent.Text))
     }
+    # The seeded dictionary build calls it; a missing one fails those tests only.
+    $ShapeFn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Test-ObfuscatedIdShape' }, $false))
+    if ($ShapeFn.Count -eq 1) { . ([scriptblock]::Create($ShapeFn[0].Extent.Text)) }
 
     $script:Sub = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
     $script:Base = "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers"
@@ -271,4 +274,62 @@ Describe 'A run seeded with an obfuscation dictionary' {
             @($D.Values | Where-Object { [string]::IsNullOrEmpty($_) }) | Should -BeNullOrEmpty
         }
     }
+
+    It 'masks again a seeded id of another shape: <Label>' -ForEach @(
+        @{ Label = 'an older dictionary''s child id that kept its parent''s real name'; Flat = $false }
+        @{ Label = 'a flat seeded token'; Flat = $true }
+    ) {
+        $Db = "$script:Base/microsoft.sql/servers/srv-a/databases/db-a"
+        $SubTok = 'prod_' + [guid]::NewGuid().ToString()
+        $RgTok = 'prod_' + [guid]::NewGuid().ToString()
+        $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Seeded = if ($Flat) { 'prod_' + [guid]::NewGuid().ToString() } else { "/subscriptions/$SubTok/resourcegroups/$RgTok/providers/microsoft.sql/servers/srv-a/databases/$NameTok" }
+        $Seed = Join-Path $script:SeedDir ('seed-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.json')
+        @{
+            ResourceIdMap       = @{ $Seeded = $Db }
+            SubscriptionNameMap = @{ $SubTok = 'Demo Subscription' }
+            ResourceGroupMap    = @{ $RgTok = $Db }
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+        Invoke-RunVariables3
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+        $Global:ObfuscationSubscriptionIndex = $null
+        $Global:Resources = @([pscustomobject]@{ id = $Db; name = 'db-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' })
+        Invoke-SeededBuild -Seed $Seed
+
+        $Masked = $Global:ResourceIdDictionary[$Db]
+        $Masked | Should -Not -BeExactly $Seeded
+        $Masked | Should -Not -Match 'srv-a'
+        Test-ObfuscatedIdShape -RealId $Db -MaskedId $Masked | Should -BeTrue
+        ($Masked -split '/')[2] | Should -BeExactly $SubTok -Because 'the seed''s subscription token is still used'
+        ($Masked -split '/')[4] | Should -BeExactly $RgTok
+        $Global:ResourceSubscriptionDictionary[$Db] | Should -BeExactly ($Masked -split '/')[2]
+        $Global:ResourceResourceGroupDictionary[$Db] | Should -BeExactly ($Masked -split '/')[4]
+    }
 }
+
+Describe 'Test-ObfuscatedIdShape' {
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Fn = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Test-ObfuscatedIdShape' }, $false)
+        if ($null -ne $Fn) { . ([scriptblock]::Create($Fn.Extent.Text)) }
+        $script:T = 'prod_0f0e0d0c-0b0a-4908-8706-050403020100'
+    }
+
+    It 'takes what Get-ObfuscatedResourceId writes, a $system name and a tenant-scope id' {
+        Reset-ObfuscationState
+        $Real = "$script:Base/microsoft.sql/servers/srv-a/databases/db-a"
+        Test-ObfuscatedIdShape -RealId $Real -MaskedId (Get-ObfuscatedResourceId -ResourceId $Real) | Should -BeTrue
+        Test-ObfuscatedIdShape -RealId "$script:Base/microsoft.servicebus/namespaces/`$system" -MaskedId "/subscriptions/$script:T/resourcegroups/$script:T/providers/microsoft.servicebus/namespaces/`$system" | Should -BeTrue
+        Test-ObfuscatedIdShape -RealId '/providers/Microsoft.Capacity/reservationOrders/ro-a' -MaskedId "/providers/Microsoft.Capacity/reservationOrders/$script:T" | Should -BeTrue
+    }
+
+    It 'refuses <Label>' -ForEach @(
+        @{ Label = 'a real parent name left'; Masked = '/subscriptions/{0}/resourcegroups/{0}/providers/microsoft.sql/servers/srv-a/databases/{0}' }
+        @{ Label = 'a flat token'; Masked = '{0}' }
+        @{ Label = 'another type'; Masked = '/subscriptions/{0}/resourcegroups/{0}/providers/microsoft.sql/servers/{0}/elasticpools/{0}' }
+        @{ Label = 'a real resource group'; Masked = '/subscriptions/{0}/resourcegroups/rg-demo/providers/microsoft.sql/servers/{0}/databases/{0}' }
+    ) {
+        Test-ObfuscatedIdShape -RealId "$script:Base/microsoft.sql/servers/srv-a/databases/db-a" -MaskedId ($Masked -f $script:T) | Should -BeFalse
+    }
+}
+

@@ -282,6 +282,43 @@ function Get-ObfuscatedResourceId
     return ($Masked -join '/')
 }
 
+# Whether $MaskedId is the masked form of $RealId that Get-ObfuscatedResourceId
+# writes: the same segments, with the subscription, the resource group and
+# every name segment a prod_/nonprod_ token (a '$system' name kept), and the
+# 'subscriptions', 'resourcegroups', 'providers', namespace and type segments
+# as in the real id (ignoring case). A seeded id from an older dictionary
+# (which masked only the last name, so a parent's real name was left) or a
+# flat seeded token fails, and the run masks the real id again.
+function Test-ObfuscatedIdShape
+{
+    param([string]$RealId, [string]$MaskedId)
+    if ([string]::IsNullOrEmpty($RealId) -or [string]::IsNullOrEmpty($MaskedId)) { return $false }
+    $R = $RealId.Split('/')
+    $M = $MaskedId.Split('/')
+    if ($R.Count -ne $M.Count -or $R.Count -lt 3 -or $R[0] -ne '' -or $M[0] -ne '') { return $false }
+    $Token = '^(prod|nonprod)_[a-z_]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if ($R[1] -ieq 'subscriptions')
+    {
+        if ($M[1] -ine 'subscriptions' -or $M[2] -notmatch $Token) { return $false }
+        $i = 3
+    }
+    elseif ($R[1] -ieq 'providers') { $i = 1 }
+    else { return $false }
+    while ($i -lt $R.Count)
+    {
+        if ($M[$i] -ine $R[$i]) { return $false }
+        if ($i + 1 -ge $R.Count) { break }
+        $Next = $R[$i + 1]
+        if ($R[$i] -ieq 'providers' -or [string]::IsNullOrEmpty($Next) -or $Next -eq '$system')
+        {
+            if ($M[$i + 1] -ine $Next) { return $false }
+        }
+        elseif ($M[$i + 1] -notmatch $Token) { return $false }
+        $i += 2
+    }
+    return $true
+}
+
 # A masked ARM path for a collector row with no resource id under -Obfuscate,
 # so the inventory never holds an empty or flat ID. The row gets a stand-in
 # real id, which goes through Get-ObfuscatedResourceId and into the run's
@@ -934,7 +971,7 @@ Function RunInventorySetup()
             }
             $ObfuscatedResourceGroup = $RgLookup[$RealRG]
 
-            if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
+            if ($ResourceIdDictionary.ContainsKey($resourceItem.ID) -and (Test-ObfuscatedIdShape -RealId $resourceItem.ID -MaskedId $ResourceIdDictionary[$resourceItem.ID]))
             {
                 # A seeded id (-ObfuscationDictionary): the seed gives its
                 # masked id but no subscription or resource group entry, so
@@ -947,12 +984,12 @@ Function RunInventorySetup()
                 if ($SeedParts.Count -ge 3 -and $SeedParts[1] -ieq 'subscriptions' -and -not [string]::IsNullOrEmpty($SeedParts[2])) { $ObfuscatedSubscription = $SeedParts[2] }
                 if ($SeedParts.Count -ge 5 -and $SeedParts[3] -ieq 'resourcegroups' -and -not [string]::IsNullOrEmpty($SeedParts[4])) { $ObfuscatedResourceGroup = $SeedParts[4] }
                 if ($SeedParts.Count -ge 2 -and -not [string]::IsNullOrEmpty($SeedParts[-1])) { $ObfuscatedName = $SeedParts[-1] }
-                # A seeded id that is not a path keeps the seed's name token.
-                $Known = $null
-                if ($SeedParts.Count -lt 3 -and $ResourceNameDictionary.TryGetValue($resourceItem.ID, [ref]$Known) -and -not [string]::IsNullOrEmpty($Known)) { $ObfuscatedName = $Known }
             }
             else
             {
+                # Not seeded, or seeded with an id of another shape (see
+                # Test-ObfuscatedIdShape): masked below like a new id, which
+                # still reuses the seed's subscription, group and parent tokens.
                 $ObfuscatedID = $null
                 [void]$IdsToMask.Add($resourceItem.ID)
             }

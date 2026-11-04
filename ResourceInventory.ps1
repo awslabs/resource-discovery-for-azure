@@ -939,7 +939,19 @@ Function RunInventorySetup()
 
             if ($null -ne $SeedDictionary.ResourceIdMap)
             {
-                foreach ($SeedProp in $SeedDictionary.ResourceIdMap.PSObject.Properties) { $ResourceIdDictionary[$SeedProp.Value] = $SeedProp.Name }
+                # Ids are looked up ignoring case, so two seeded entries for one
+                # real id in two casings (an older build's dictionary) become
+                # one: say so now, before a recovery merge meets it.
+                $SeedCaseTwice = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($SeedProp in $SeedDictionary.ResourceIdMap.PSObject.Properties)
+                {
+                    if ($ResourceIdDictionary.ContainsKey($SeedProp.Value) -and $ResourceIdDictionary[$SeedProp.Value] -cne $SeedProp.Name) { [void]$SeedCaseTwice.Add([string]$SeedProp.Value) }
+                    $ResourceIdDictionary[$SeedProp.Value] = $SeedProp.Name
+                }
+                if ($SeedCaseTwice.Count -gt 0)
+                {
+                    Write-Log -Message ("Obfuscation dictionary: it gives {0} resource(s) two masked ids by case (an older build's file); one is kept for each. A recovery merge (Merge-RecoveryData) of a later bundle with this run's could then give such a resource two ids: collect the gap bundle on this build, then run the recovery with that bundle's ObfuscationDictionary_*.json." -f $SeedCaseTwice.Count) -Severity 'Warning'
+                }
             }
             if ($null -ne $SeedDictionary.ResourceNameMap)
             {

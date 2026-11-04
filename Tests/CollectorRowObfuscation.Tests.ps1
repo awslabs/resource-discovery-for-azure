@@ -19,7 +19,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Helpers/ContractIdPattern.ps1')
     $Script = Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'
     $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
-    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Get-ObfuscatedResourceId', 'New-ObfuscatedRowIdWithoutId'))
+    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Get-ObfuscatedResourceId', 'Test-ObfuscatedIdShape', 'New-ObfuscatedRowIdWithoutId'))
     {
         $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $Name }, $false))
         # A missing helper fails the tests that need it, not the whole file.
@@ -51,6 +51,7 @@ BeforeAll {
         $Global:ObfuscationSubscriptionTokens = @{}
         $Global:ObfuscationResourceGroupTokens = @{}
         $Global:ObfuscationSubscriptionIndex = $null
+        $script:RdaNoIdRowsSeen = $null
     }
 
     function New-Row
@@ -150,6 +151,25 @@ Describe 'Masking the collector rows under -Obfuscate' {
     It 'gives two rows with no id two ids' {
         $Rows = @(Invoke-RowMasking -Result @((New-Row -Id ''), (New-Row -Id '')) -ModName 'AppServicePlan')
         $Rows[0].ID | Should -Not -Be $Rows[1].ID
+        @($Global:ResourceIdDictionary.Keys | Where-Object { $_ -match '~[0-9a-f]{8}-2$' }).Count | Should -Be 1 -Because 'the second row with the same four values adds -2'
+    }
+
+    It 'gives the same row with no id the same stand-in id in the next run' {
+        $null = Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan'
+        $First = @($Global:ResourceIdDictionary.Keys)
+        Reset-ObfuscationState
+        $null = Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan'
+        @($Global:ResourceIdDictionary.Keys) | Should -Be $First
+    }
+
+    It 'keeps a seeded run''s masked id for the same row with no id' {
+        $Row1 = @(Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan')[0]
+        $StandIn = @($Global:ResourceIdDictionary.Keys)[0]
+        Reset-ObfuscationState
+        $Global:ResourceIdDictionary[$StandIn] = $Row1.ID
+        $Row2 = @(Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan')[0]
+        $Row2.ID | Should -BeExactly $Row1.ID
+        Assert-FieldsMatchPath $Row2
     }
 
     It 'gives a row with no id, subscription or group still a full masked path' {

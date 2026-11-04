@@ -59,6 +59,8 @@ function Variables
     $Global:ObfuscationSubscriptionTokens = $null
     $Global:ObfuscationResourceGroupTokens = $null
     $Global:ObfuscationSubscriptionIndex = $null
+    # New-ObfuscatedRowIdWithoutId's count of no-id rows, per run.
+    $script:RdaNoIdRowsSeen = $null
 
     if ($Obfuscate.IsPresent)
     {
@@ -329,9 +331,11 @@ function Test-ObfuscatedIdShape
 # run's list, so the tokens are the ones the subscription's other rows get.
 # 'rda.noid' names no Azure provider: the row has no real id. A missing
 # subscription, group or name is written '~nosub', '~norg', '~noname' ('~' is
-# in no Azure name, so it never meets a real one); the 8 hex keep two such
-# rows apart. Returns the masked id and the three tokens, which are its own
-# segments.
+# in no Azure name, so it never meets a real one). The 8 hex are the start of
+# a SHA-256 of collector, subscription, group and name, so the same row gets
+# the same stand-in every run and a seeded run (-ObfuscationDictionary) reuses
+# its masked id; a second row with all four the same in one run adds -2, -3...
+# Returns the masked id and the three tokens, which are its own segments.
 function New-ObfuscatedRowIdWithoutId
 {
     param([string]$Subscription, [string]$ResourceGroup, [string]$Name, [string]$Collector)
@@ -345,10 +349,22 @@ function New-ObfuscatedRowIdWithoutId
     $RgSegment = if ([string]::IsNullOrEmpty($ResourceGroup)) { '~norg' } else { $ResourceGroup }
     $Type = ([string]$Collector).ToLowerInvariant() -replace '[^a-z0-9.]', ''
     if ($Type -notmatch '^[a-z]') { $Type = 'unknown' }
-    $NameSegment = $(if ([string]::IsNullOrEmpty($Name)) { '~noname' } else { $Name -replace '/', '_' }) + '~' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $StandIn = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}' -f ($SubSegment -replace '/', '_'), ($RgSegment -replace '/', '_'), $Type, $NameSegment
+    $NameBase = if ([string]::IsNullOrEmpty($Name)) { '~noname' } else { $Name -replace '/', '_' }
+    $SubSegment = $SubSegment -replace '/', '_'
+    $RgSegment = $RgSegment -replace '/', '_'
+    $Key = ('{0}|{1}|{2}|{3}' -f $Type, $SubSegment, $RgSegment, $NameBase).ToLowerInvariant()
+    $Hash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($Key))).Substring(0, 8).ToLowerInvariant()
+    if ($null -eq $script:RdaNoIdRowsSeen) { $script:RdaNoIdRowsSeen = @{} }
+    $script:RdaNoIdRowsSeen[$Key] = 1 + [int]$script:RdaNoIdRowsSeen[$Key]
+    $Suffix = if ($script:RdaNoIdRowsSeen[$Key] -gt 1) { '{0}-{1}' -f $Hash, $script:RdaNoIdRowsSeen[$Key] } else { $Hash }
+    $StandIn = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}~{4}' -f $SubSegment, $RgSegment, $Type, $NameBase, $Suffix
 
-    $Masked = Get-ObfuscatedResourceId -ResourceId $StandIn
+    # A seeded run already holds this stand-in's masked id: keep it.
+    $Masked = $null
+    if (-not ($ResourceIdDictionary.TryGetValue($StandIn, [ref]$Masked) -and (Test-ObfuscatedIdShape -RealId $StandIn -MaskedId $Masked)))
+    {
+        $Masked = Get-ObfuscatedResourceId -ResourceId $StandIn
+    }
     $ResourceIdDictionary[$StandIn] = $Masked
     $Parts = $Masked.Split('/')
     return [pscustomobject]@{

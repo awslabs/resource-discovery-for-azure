@@ -126,6 +126,21 @@ Describe 'Masking the collector rows under -Obfuscate' {
         }
     }
 
+    It 'records a row with no id in the id dictionary, so ResourceIdMap holds its id and reverses it to its subscription' {
+        $Row = @(Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan')[0]
+        $Keys = @($Global:ResourceIdDictionary.Keys | Where-Object { $Global:ResourceIdDictionary[$_] -ceq $Row.ID })
+        $Keys.Count | Should -Be 1 -Because 'the dictionary file writes one ResourceIdMap entry per id'
+        $Keys[0] | Should -Match ('^/subscriptions/' + [regex]::Escape($script:Sub) + '/resourcegroups/rg-demo/providers/rda\.noid/appserviceplan/plan-a~[0-9a-f]{8}$')
+        $Global:ResourceNameDictionary[$Keys[0]] | Should -BeExactly $Row.Name
+        $Global:ResourceSubscriptionDictionary[$Keys[0]] | Should -BeExactly $Row.Subscription
+        $Global:ResourceResourceGroupDictionary[$Keys[0]] | Should -BeExactly $Row.ResourceGroup
+    }
+
+    It 'gives two rows with no id two ids' {
+        $Rows = @(Invoke-RowMasking -Result @((New-Row -Id ''), (New-Row -Id '')) -ModName 'AppServicePlan')
+        $Rows[0].ID | Should -Not -Be $Rows[1].ID
+    }
+
     It 'gives a row with no id, subscription or group still a full masked path' {
         $Row = @(Invoke-RowMasking -Result @(@{ ID = ''; Name = ''; Subscription = ''; ResourceGroup = '' }) -ModName 'AppServicePlan')[0]
         $Row.ID | Should -Match $script:Contract

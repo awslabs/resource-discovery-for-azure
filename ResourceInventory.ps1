@@ -283,37 +283,42 @@ function Get-ObfuscatedResourceId
 }
 
 # A masked ARM path for a collector row with no resource id under -Obfuscate,
-# so the inventory never holds an empty or flat ID:
-#   /subscriptions/<sub token>/resourcegroups/<rg token>/providers/rda.noid/<collector>/<name token>
-# The subscription and resource group tokens are the run's own for the row's
-# Subscription (display name) and ResourceGroup values, so the row still sits
-# in its subscription and group; an empty value gets a new token of its own.
-# 'rda.noid' names no Azure provider: the row has no real id to keep. Returns
-# the id and the three field tokens, which are the id's own segments.
+# so the inventory never holds an empty or flat ID. The row gets a stand-in
+# real id, which goes through Get-ObfuscatedResourceId and into the run's
+# dictionaries like any other id, so its ResourceIdMap entry reverses it:
+#   real:   /subscriptions/<sub id>/resourcegroups/<group>/providers/rda.noid/<collector>/<name>~<8 hex>
+#   masked: /subscriptions/<sub tok>/resourcegroups/<rg tok>/providers/rda.noid/<collector>/<name tok>
+# The subscription is the row's Subscription (display name) looked up in the
+# run's list, so the tokens are the ones the subscription's other rows get.
+# 'rda.noid' names no Azure provider: the row has no real id. A missing
+# subscription, group or name is written '~nosub', '~norg', '~noname' ('~' is
+# in no Azure name, so it never meets a real one); the 8 hex keep two such
+# rows apart. Returns the masked id and the three tokens, which are its own
+# segments.
 function New-ObfuscatedRowIdWithoutId
 {
     param([string]$Subscription, [string]$ResourceGroup, [string]$Name, [string]$Collector)
 
-    if ([string]::IsNullOrEmpty($Subscription)) { $SubToken = 'prod_' + [guid]::NewGuid().ToString() }
-    else
+    $SubSegment = '~nosub'
+    if (-not [string]::IsNullOrEmpty($Subscription))
     {
-        if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($Subscription)) { $Global:ObfuscationSubscriptionTokens[$Subscription] = (Get-ObfuscationPrefix $Subscription) + [guid]::NewGuid().ToString() }
-        $SubToken = $Global:ObfuscationSubscriptionTokens[$Subscription]
+        $SubSegment = $Subscription
+        foreach ($Sub in @($Global:Subscriptions)) { if ($null -ne $Sub -and [string]$Sub.name -eq $Subscription -and -not [string]::IsNullOrEmpty([string]$Sub.id)) { $SubSegment = [string]$Sub.id; break } }
     }
-    if ([string]::IsNullOrEmpty($ResourceGroup)) { $RgToken = (Get-ObfuscationPrefix $Name) + [guid]::NewGuid().ToString() }
-    else
-    {
-        if (-not $Global:ObfuscationResourceGroupTokens.ContainsKey($ResourceGroup)) { $Global:ObfuscationResourceGroupTokens[$ResourceGroup] = (Get-ObfuscationPrefix $ResourceGroup) + [guid]::NewGuid().ToString() }
-        $RgToken = $Global:ObfuscationResourceGroupTokens[$ResourceGroup]
-    }
+    $RgSegment = if ([string]::IsNullOrEmpty($ResourceGroup)) { '~norg' } else { $ResourceGroup }
     $Type = ([string]$Collector).ToLowerInvariant() -replace '[^a-z0-9.]', ''
     if ($Type -notmatch '^[a-z]') { $Type = 'unknown' }
-    $NameToken = (Get-ObfuscationPrefix $Name) + [guid]::NewGuid().ToString()
+    $NameSegment = $(if ([string]::IsNullOrEmpty($Name)) { '~noname' } else { $Name -replace '/', '_' }) + '~' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $StandIn = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}' -f ($SubSegment -replace '/', '_'), ($RgSegment -replace '/', '_'), $Type, $NameSegment
+
+    $Masked = Get-ObfuscatedResourceId -ResourceId $StandIn
+    $ResourceIdDictionary[$StandIn] = $Masked
+    $Parts = $Masked.Split('/')
     return [pscustomobject]@{
-        Id            = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}' -f $SubToken, $RgToken, $Type, $NameToken
-        Name          = $NameToken
-        Subscription  = $SubToken
-        ResourceGroup = $RgToken
+        Id            = $Masked
+        Name          = $Parts[-1]
+        Subscription  = $Parts[2]
+        ResourceGroup = $Parts[4]
     }
 }
 

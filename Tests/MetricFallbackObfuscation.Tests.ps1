@@ -39,13 +39,15 @@ BeforeAll {
     $script:SubName = 'Demo Subscription'
     $script:Contract = Get-RdaContractIdPattern
 
+    # The run's dictionaries as Variables (ResourceInventory.ps1) builds them:
+    # keyed by real id, ignoring case.
     function Reset-ObfuscationState
     {
         $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = $script:SubName })
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:ObfuscationSubscriptionTokens = @{}
         $Global:ObfuscationResourceGroupTokens = @{}
         $Global:ObfuscationSubscriptionIndex = $null
@@ -103,6 +105,14 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Rows = @((Invoke-MetricMasking -Tmp (New-MetricSet -Id @($Id, $Id))).Metrics)
         $Rows[0].ID | Should -BeExactly $Rows[1].ID
         $Global:ResourceIdDictionary[$Id] | Should -BeExactly $Rows[0].ID
+    }
+
+    It 'keeps the inventory''s masked id for a metric that gives the id in other casing' {
+        $Id = "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.compute/virtualmachines/vm-a"
+        $Global:ResourceIdDictionary[$Id] = Get-ObfuscatedResourceId -ResourceId $Id
+        $Row = @((Invoke-MetricMasking -Tmp (New-MetricSet -Id "/subscriptions/$script:Sub/resourceGroups/RG-Demo/providers/Microsoft.Compute/virtualMachines/VM-A")).Metrics)[0]
+        $Row.ID | Should -BeExactly $Global:ResourceIdDictionary[$Id]
+        @($Global:ResourceIdDictionary.Keys).Count | Should -Be 1
     }
 
     It 'keeps the inventory''s masked id for a resource the inventory holds (control)' {

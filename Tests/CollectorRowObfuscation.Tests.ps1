@@ -39,13 +39,15 @@ BeforeAll {
     $script:Contract = Get-RdaContractIdPattern
     $script:Token = '^(prod|nonprod)_(databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
+    # The run's dictionaries as Variables (ResourceInventory.ps1) builds them:
+    # keyed by real id, ignoring case.
     function Reset-ObfuscationState
     {
         $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = $script:SubName })
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:ObfuscationSubscriptionTokens = @{}
         $Global:ObfuscationResourceGroupTokens = @{}
         $Global:ObfuscationSubscriptionIndex = $null
@@ -83,6 +85,15 @@ Describe 'Masking the collector rows under -Obfuscate' {
         $Masked = Get-ObfuscatedResourceId -ResourceId $Id
         $Global:ResourceIdDictionary[$Id] = $Masked
         $Row = @(Invoke-RowMasking -Result @(New-Row -Id $Id) -ModName 'AppServicePlan')[0]
+        $Row.ID | Should -BeExactly $Masked
+        Assert-FieldsMatchPath $Row
+    }
+
+    It 'keeps the token loop''s masked id for a row whose collector gives the id in other casing' {
+        $Id = "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.web/serverfarms/plan-a"
+        $Masked = Get-ObfuscatedResourceId -ResourceId $Id
+        $Global:ResourceIdDictionary[$Id] = $Masked
+        $Row = @(Invoke-RowMasking -Result @(New-Row -Id "/subscriptions/$script:Sub/resourceGroups/RG-Demo/providers/Microsoft.Web/serverFarms/Plan-A") -ModName 'AppServicePlan')[0]
         $Row.ID | Should -BeExactly $Masked
         Assert-FieldsMatchPath $Row
     }

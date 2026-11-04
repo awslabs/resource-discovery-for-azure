@@ -1219,13 +1219,13 @@ function ExecuteInventoryProcessing()
         }
         catch
         {
-            Write-Log -Message ("Inventory write FAILED: {0} was not written: {1}" -f $Global:JsonFile, $_.Exception.Message) -Severity 'Error' -ToDebugLog
-            # The throw skips the release below, so free the collector data here: the report step,
-            # and under the wrappers the next subscription, must not share memory with it. As in the
-            # release, the Azure context read and the handler removal let go of the rows the Azure
-            # session still holds.
+            # The throw skips the release below, so free the collector data here, first, so the log
+            # line below has the memory it needs: the report step, and under the wrappers the next
+            # subscription, must not share memory with it. As in the release, the Azure context read
+            # and the handler removal let go of the rows the Azure session still holds.
             $Global:SmaResources = $null
             $Global:Resources = $null
+            Write-Log -Message ("Inventory write FAILED: {0} was not written: {1}" -f $Global:JsonFile, $_.Exception.Message) -Severity 'Error' -ToDebugLog
             try
             {
                 $null = Get-AzContext -ErrorAction Stop

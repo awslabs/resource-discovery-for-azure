@@ -645,6 +645,15 @@ function CreateResourceJobs
         $R[0].ErrorLog | Should -Not -BeLike '*HTML report generation FAILED*' -Because 'the run stops at the write, so the report step never runs'
     }
 
+    It 'keeps the real cause when the Azure session read after the failed write fails too' {
+        $Failure = $script:WriteFailures['out of memory (stand-in writer)']
+        $Stub = $Failure.Stub + [Environment]::NewLine + 'function Get-AzContext { [CmdletBinding()] param() throw ''stand-in: context store unreadable'' }'
+        $R = @(Invoke-InventoryRun -Name 'write-fail-read-fail' -Runs @($Stub))
+
+        $R[0].Escaped | Should -BeLike $Failure.Expect -Because 'the wrapper must see the write error, not the read error'
+        $R[0].SmaResourcesReleased | Should -BeTrue
+    }
+
     It 'leaves nothing behind that changes the next two runs in the same process' {
         $Failure = $script:WriteFailures['out of memory (stand-in writer)']
         $R = @(Invoke-InventoryRun -Name 'write-fail-then-ok' -Runs @($Failure.Stub, '', ''))

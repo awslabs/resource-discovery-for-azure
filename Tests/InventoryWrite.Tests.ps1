@@ -593,6 +593,41 @@ Describe 'Write-InventoryJson' {
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
     }
 
+    # A serialiser error the caller's preference lets pass returns nothing instead of
+    # throwing. The mock stands in for that on one collector's value only.
+    It 'stops and writes nothing when ConvertTo-Json returns nothing for a value (ErrorActionPreference <Preference>)' -ForEach @(
+        @{ Preference = 'Continue' }
+        @{ Preference = 'SilentlyContinue' }
+    ) {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        $ExistingDir = New-WriterCaseDir
+        $ExistingPath = Join-Path $ExistingDir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($ExistingPath, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($ExistingPath)
+        $Inventory = [pscustomobject][ordered]@{ Disks = @([ordered]@{ Name = 'disk-01' }); Broken = 'serialiser-returns-nothing'; Version = '1.2.3' }
+        Mock -CommandName ConvertTo-Json -MockWith { } -ParameterFilter { $InputObject -is [string] -and $InputObject -eq 'serialiser-returns-nothing' }
+        $ErrorActionPreference = $Preference
+
+        { Write-InventoryJson -InputObject $Inventory -Path $Path 3>$null } | Should -Throw "*returned nothing for the 'Broken' property*"
+        { Write-InventoryJson -InputObject $Inventory -Path $ExistingPath 3>$null } | Should -Throw "*returned nothing for the 'Broken' property*"
+
+        $ErrorActionPreference = 'Continue'
+        Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'an inventory with a property and no value must not be written'
+        Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
+    }
+
+    It 'still writes null and empty collectors, which ConvertTo-Json returns as text' {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        $Inventory = [pscustomobject][ordered]@{ Empty = @(); Nothing = $null; Text = ''; Version = '1.2.3' }
+
+        Write-InventoryJson -InputObject $Inventory -Path $Path 3>$null
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Inventory)))
+    }
+
     It 'still writes a [pscustomobject] built from an ordered dictionary' {
         $Dir = New-WriterCaseDir
         $Path = Join-Path $Dir 'Inventory_test.json'

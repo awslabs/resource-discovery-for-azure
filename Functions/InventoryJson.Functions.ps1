@@ -52,9 +52,18 @@ function Write-InventoryJson
             {
                 if (-not $FirstProperty) { $Writer.Write(',') }
                 $FirstProperty = $false
-                $Writer.Write((ConvertTo-Json -InputObject $Prop.Name -Compress))
+                $NameJson = ConvertTo-Json -InputObject $Prop.Name -Compress
+                $ValueJson = ConvertTo-Json -InputObject $Prop.Value -Depth 99 -Compress
+                # ConvertTo-Json writes 'null' for $null and '[]' for an empty list, so an empty
+                # result only comes from a serialiser error the caller's preference let pass.
+                # Writing on would leave '"Name":' with no value, which no reader can parse.
+                if ([string]::IsNullOrEmpty($NameJson) -or [string]::IsNullOrEmpty($ValueJson))
+                {
+                    throw ("Write-InventoryJson: ConvertTo-Json returned nothing for the '{0}' property, so the inventory is not written." -f $Prop.Name)
+                }
+                $Writer.Write($NameJson)
                 $Writer.Write(':')
-                $Writer.Write((ConvertTo-Json -InputObject $Prop.Value -Depth 99 -Compress))
+                $Writer.Write($ValueJson)
             }
             $Writer.Write('}')
             $Writer.Write([Environment]::NewLine)

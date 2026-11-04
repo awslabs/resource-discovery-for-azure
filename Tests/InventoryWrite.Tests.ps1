@@ -193,9 +193,11 @@ BeforeAll {
     # Extension/Summary.ps1 stand-ins, placed beside the harness where FinalizeOutputs looks.
     $script:SummaryParams = 'param($JsonFile, $HtmlFile, $Title, $TenantId, $Version, $ExtractionRunTime, $ReportingRunTime, $PhaseTimings, $PlatOS, $ConsumptionFile)'
     # Like the real one, it stops when the inventory is not there, so it writes no HTML then.
-    $script:SummaryWrites = $script:SummaryParams + [Environment]::NewLine +
-        'if (-not (Test-Path -LiteralPath $JsonFile -PathType Leaf)) { throw "Summary.ps1: Inventory JSON not found at ''$JsonFile''." }' + [Environment]::NewLine +
+    $script:SummaryWrites = @(
+        $script:SummaryParams
+        'if (-not (Test-Path -LiteralPath $JsonFile -PathType Leaf)) { throw "Summary.ps1: Inventory JSON not found at ''$JsonFile''." }'
         'Set-Content -LiteralPath $HtmlFile -Value ''<html></html>'''
+    ) -join [Environment]::NewLine
 
     # Stand-ins for the Azure-facing steps of a full run: discovery returns two disks and
     # one AVD host pool, and the collector step turns the disks into one collector.
@@ -623,6 +625,7 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Please zip the output files manually' -Because 'without the inventory there is nothing worth zipping by hand'
         $Output | Should -Match 'There is no report to zip'
         $Output | Should -Not -Match 'Compressing Resources Output' -Because 'there is nothing to compress'
+        $Output | Should -Not -Match 'excluded from zip' -Because 'no zip is made'
         $Output | Should -Match 'Reporting Time: not measured' -Because 'the processing step stopped before its time was taken'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'
@@ -718,16 +721,41 @@ function Remove-Item
         $Output | Should -Match ('\[{0}\] Reporting Time: ' -f $Expect)
     }
 
+    It 'does not report a zip the zip step made with a hidden error (<Case>)' -ForEach @(
+        @{ Case = 'zip left behind'; Write = $true }
+        @{ Case = 'no zip'; Write = $false }
+    ) {
+        # Compress-Archive reports an input it cannot read with a non-terminating error and goes on.
+        $Stub = @(
+            'function Compress-Archive'
+            '{'
+            '    [CmdletBinding()]'
+            '    param($Path, $CompressionLevel, $DestinationPath)'
+            $(if ($Write) { '    [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4))' } else { '' })
+            '    Write-Error ''stand-in: cannot read Consumption_ResourcesReport_test.csv'''
+            '}'
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name ('zip-hidden-error-{0}' -f $Case.Split(' ')[0]) -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'Error Compressing Output File: .*stand-in: cannot read' -Because "the error is not hidden. Output:`n$Output"
+        $Output | Should -Not -Match 'Reporting Data File'
+        $Output | Should -Match 'No report was written'
+        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a zip made without one of its files is removed'
+    }
+
     It 'says the zip is safe to share under -Obfuscate only when the zip was written (<Case>)' -ForEach @(
         @{ Case = 'zip written'; Stub = '$Obfuscate = [switch]$true'; Expect = $true }
         @{ Case = 'zip step failed'; Stub = '$Obfuscate = [switch]$true' + [Environment]::NewLine + 'function Compress-Archive { throw ''stand-in: no space left on device'' }'; Expect = $false }
+        @{ Case = 'inventory write failed'; Stub = '$Obfuscate = [switch]$true' + [Environment]::NewLine + 'function Write-InventoryJson { param($InputObject, $Path) throw ''stand-in: out of memory while writing'' }'; Expect = $false }
     ) {
-        $R = @(Invoke-InventoryRun -Name ('obfuscate-notice-{0}' -f $Case.Split(' ')[1]) -Runs @($Stub) -Direct)
+        $R = @(Invoke-InventoryRun -Name ('obfuscate-notice-{0}' -f ($Case -replace ' ', '-')) -Runs @($Stub) -Direct)
 
         $Output = [string]$R[0].Output
         $Output | Should -Match 'OBFUSCATION NOTICE' -Because "the run took the -Obfuscate path. Output:`n$Output"
         ($Output -match 'The ZIP file is safe to share') | Should -Be $Expect -Because "Output:`n$Output"
         ($R[0].Files -contains 'ResourcesReport_test.zip') | Should -Be $Expect
+        ($Output -match 'transcript log excluded from zip') | Should -Be $Expect
     }
 
     It 'reports the zip on a direct run that wrote it' {

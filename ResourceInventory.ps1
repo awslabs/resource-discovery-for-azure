@@ -1849,7 +1849,6 @@ if ($Obfuscate.IsPresent)
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
-    Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 else
 {
@@ -1862,22 +1861,21 @@ else
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
-    Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
 # Only this call finishing makes the zip this run's report: a file at the path can be a
 # zip cut off part-way, or one that was there before (Compress-Archive then refuses to
-# overwrite it). The catch clears the flag.
+# overwrite it). -ErrorAction Stop: under 'silentlycontinue' an input Compress-Archive
+# cannot read is only a hidden error, and the zip would be made without it.
 $ZipWritten = $true
 $ZipExistedBefore = Test-Path -LiteralPath $Global:ZipOutputFile
 try
 {
-    Compress-Archive @CompressionOutput
+    Compress-Archive @CompressionOutput -ErrorAction Stop
 }
 catch
 {
     $ZipWritten = $false
-    $_ | Format-List -Force
     # Write-Log, not Write-Error: the script's 'silentlycontinue' preference hides Write-Error.
     Write-Log -Message ("Error Compressing Output File: {0}: {1}" -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
     if ((Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile))
@@ -1903,9 +1901,19 @@ catch
     }
 }
 
-if ($Obfuscate.IsPresent -and $ZipWritten)
+$ZipWritten = $ZipWritten -and (Test-Path -LiteralPath $Global:ZipOutputFile)
+
+if ($ZipWritten)
 {
-    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    if ($Obfuscate.IsPresent)
+    {
+        Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
+        Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    }
+    else
+    {
+        Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
+    }
 }
 # The times are shown as a success only when the run wrote its report.
 $TimeSeverity = if ($ZipWritten) { 'Success' } else { 'Info' }
@@ -1914,7 +1922,7 @@ Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity $TimeSeverity
 Write-Log -Message ("Reporting Time: {0}" -f $(if ($null -ne $ReportingRunTime) { $ReportingRunTime } else { 'not measured, the processing step stopped' })) -Severity $TimeSeverity
 # A run can reach this line with no zip: when a step above failed, its throw does not stop
 # the script under 'silentlycontinue'. So name the zip only when this run wrote it.
-if ($ZipWritten -and (Test-Path -LiteralPath $Global:ZipOutputFile))
+if ($ZipWritten)
 {
     Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
 }

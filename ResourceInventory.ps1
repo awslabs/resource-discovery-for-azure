@@ -1054,9 +1054,10 @@ Function RunInventorySetup()
         #   then consistent, so the next seeded run keeps every id: no repeat.
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
-            # The seed's maps first: a subscription, group or name token
-            # that is not of its slot's form (the metric step's old sub_/rg_
-            # tokens, say) is not kept, so no id is built from it again.
+            # The seed's maps first: a group or name token that is not of its
+            # slot's form (the metric step's old rg_ tokens, say) is not kept,
+            # so no id is built from it again. (Subscription tokens come only
+            # from good seeded ids, checked below.)
             $SeedGuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
             foreach ($K in @($RgLookup.Keys)) { if ([string]$RgLookup[$K] -cnotmatch ('^(prod|nonprod)_(mc_)?' + $SeedGuid + '$')) { [void]$RgLookup.Remove($K) } }
             foreach ($K in @($ResourceNameDictionary.Keys)) { if ([string]$ResourceNameDictionary[$K] -cnotmatch ('^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $SeedGuid + '$')) { [void]$ResourceNameDictionary.Remove($K) } }

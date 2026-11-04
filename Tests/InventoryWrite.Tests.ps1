@@ -594,8 +594,9 @@ Describe 'Write-InventoryJson' {
     }
 
     # A serialiser error the caller's preference lets pass returns nothing instead of
-    # throwing. The mock stands in for that on one collector's value only.
-    It 'stops and writes nothing when ConvertTo-Json returns nothing for a value (ErrorActionPreference <Preference>)' -ForEach @(
+    # throwing. The mock stands in for that on one collector's value only. Pester runs
+    # this inside its own try; the next test covers a caller with no try.
+    It 'stops and writes nothing when ConvertTo-Json returns nothing for a value (ErrorActionPreference <Preference>, inside a try)' -ForEach @(
         @{ Preference = 'Continue' }
         @{ Preference = 'SilentlyContinue' }
     ) {
@@ -614,6 +615,36 @@ Describe 'Write-InventoryJson' {
 
         $ErrorActionPreference = 'Continue'
         Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'an inventory with a property and no value must not be written'
+        Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
+    }
+
+    # The same case from a child pwsh with no try at all, as a script run on its own would
+    # be. A ConvertTo-Json function in the child stands in for the serialiser error.
+    It 'stops and writes nothing when ConvertTo-Json returns nothing for a value under ErrorActionPreference SilentlyContinue with no enclosing try' {
+        $EmptyDir = New-WriterCaseDir
+        $EmptyPath = Join-Path $EmptyDir 'Inventory_test.json'
+        $ExistingDir = New-WriterCaseDir
+        $ExistingPath = Join-Path $ExistingDir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($ExistingPath, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($ExistingPath)
+
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('silent_empty_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            '$ErrorActionPreference = ''SilentlyContinue'''
+            ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
+            'function ConvertTo-Json { param($InputObject, $Depth, [switch]$Compress) if ($InputObject -is [string] -and $InputObject -eq ''serialiser-returns-nothing'') { return }; Microsoft.PowerShell.Utility\ConvertTo-Json @PSBoundParameters }'
+            '$Inventory = [pscustomobject][ordered]@{ Disks = @([ordered]@{ Name = ''disk-01'' }); Broken = ''serialiser-returns-nothing''; Version = ''1.2.3'' }'
+            ('Write-InventoryJson -InputObject $Inventory -Path {0}' -f (& $Q $EmptyPath))
+            'Write-Output ''AFTER_FIRST'''
+            ('Write-InventoryJson -InputObject $Inventory -Path {0}' -f (& $Q $ExistingPath))
+            'Write-Output ''AFTER_SECOND'''
+        )
+        $Output = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        $Output | Should -Contain 'AFTER_SECOND' -Because ($Output -join [Environment]::NewLine)
+        Get-WriterCaseFiles $EmptyDir | Should -BeNullOrEmpty -Because 'an inventory with a property and no value must not be written'
         Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
     }

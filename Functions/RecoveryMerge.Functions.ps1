@@ -370,12 +370,13 @@ function Merge-RecoveryData
     #    bundle's CSV instead (used when the gap run's consumption is missing or
     #    incomplete - e.g. truncated by a transient "copying content to a stream"
     #    error). Consumption ResourceUris keep the ARM path structure for
-    #    categorisation. Build-ObfuscatedResourceUri takes the subscription,
-    #    resource group and name tokens from the run's shared dictionaries for a
-    #    resource that run's inventory already masked, and mints new tokens only
-    #    for the rest. So a replaced consumption file matches the RECOVERY run's
-    #    tokens, is internally consistent and categorises correctly, but its
-    #    tokens can differ from the gap run's. If the chosen
+    #    categorisation. A ResourceUri that matches an inventory id exactly
+    #    takes that resource's whole masked path from the run's ResourceIdMap;
+    #    any other ResourceUri gets subscription, resource group and name
+    #    tokens minted for that run's consumption file. So a replaced
+    #    consumption file matches the RECOVERY run's tokens, is internally
+    #    consistent and categorises correctly, but its tokens can differ from
+    #    the gap run's. If the chosen
     #    source has none, write a canonical empty file so the bundle is
     #    structurally complete. --------------------------------------------------
     $ConsumptionSource = 'gap'

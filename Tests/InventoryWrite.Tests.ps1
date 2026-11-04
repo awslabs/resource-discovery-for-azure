@@ -622,6 +622,8 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Inventory/Metrics/Consumption data files were still written' -Because 'the inventory was not written, so the run must not say it was'
         $Output | Should -Not -Match 'Please zip the output files manually' -Because 'without the inventory there is nothing worth zipping by hand'
         $Output | Should -Match 'There is no report to zip'
+        $Output | Should -Not -Match 'Compressing Resources Output' -Because 'there is nothing to compress'
+        $Output | Should -Match 'Reporting Time: not measured' -Because 'the processing step stopped before its time was taken'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'
         @($R[0].Files | Where-Object { $_ -like 'Inventory_*' -or $_ -like '*.tmp' -or $_ -like '*.zip' }) | Should -BeNullOrEmpty -Because 'a failed write leaves no inventory, no cut-off or temporary file and no zip'
@@ -735,6 +737,7 @@ function Remove-Item
         $R[0].ExitCode | Should -Be 0
         $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
         $Output | Should -Match 'Reporting Data File: .*ResourcesReport_test\.zip' -Because "Output:`n$Output"
+        $Output | Should -Match 'Compressing Resources Output: .*ResourcesReport_test\.zip'
         $Output | Should -Not -Match 'No report was written'
     }
 }

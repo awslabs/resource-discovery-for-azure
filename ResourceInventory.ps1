@@ -1711,7 +1711,12 @@ finally
 
 FinalizeOutputs
 
-Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
+# Without the inventory or the HTML report there is nothing to compress (the zip step
+# below then says so), so the run does not announce it.
+if ((Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile))
+{
+    Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
+}
 
 if ($Obfuscate.IsPresent)
 {
@@ -1883,8 +1888,8 @@ catch
     {
         Write-Log -Message ("There is no report to zip: the inventory or the HTML report was not written. See the errors above.") -Severity 'Error'
     }
-    # A zip cut off part-way must not be left to be shared. One that was there before this
-    # step is not this step's to remove.
+    # Compress-Archive removes its own unfinished zip; this is a backstop so a cut-off zip is
+    # never left to be shared. One that was there before this step is not this step's to remove.
     if (-not $ZipExistedBefore -and (Test-Path -LiteralPath $Global:ZipOutputFile))
     {
         try
@@ -1906,7 +1911,7 @@ if ($Obfuscate.IsPresent -and $ZipWritten)
 $TimeSeverity = if ($ZipWritten) { 'Success' } else { 'Info' }
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity $TimeSeverity
-Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity $TimeSeverity
+Write-Log -Message ("Reporting Time: {0}" -f $(if ($null -ne $ReportingRunTime) { $ReportingRunTime } else { 'not measured, the processing step stopped' })) -Severity $TimeSeverity
 # A run can reach this line with no zip: when a step above failed, its throw does not stop
 # the script under 'silentlycontinue'. So name the zip only when this run wrote it.
 if ($ZipWritten -and (Test-Path -LiteralPath $Global:ZipOutputFile))

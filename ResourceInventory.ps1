@@ -980,19 +980,18 @@ Function RunInventorySetup()
         #   dictionary's child id with a real parent name, a flat token, the
         #   metric step's old sub_/rg_ tokens) is dropped, and masked again
         #   wherever this run meets its resource;
-        # - the subscription and group tokens of the good ids win over the
-        #   seed's SubscriptionNameMap and ResourceGroupMap, so seeded and new
-        #   rows of one subscription or group share one token, and a group's
-        #   name token entry follows its id;
-        # - a subscription or group whose good ids hold two tokens (a seed
-        #   written before this check) has all those ids dropped, so it gets
-        #   one token again. The dictionary this run writes is then
-        #   consistent, so the next seeded run keeps every id: no repeat.
+        # - every token slot of the good ids (the subscription, the resource
+        #   group, each parent and the resource's own name) wins over the
+        #   seed's maps, so seeded and new rows share one token per
+        #   subscription, group and parent;
+        # - a subscription, group or parent that the good ids give two tokens
+        #   (a seed written before this check) has every id that holds it
+        #   dropped, and gets one new token. The dictionary this run writes is
+        #   then consistent, so the next seeded run keeps every id: no repeat.
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
-            $SeedSubTokens = @{}
-            $SeedRgTokens = @{}
-            $SeedSubOf = @{}
+            $SeedSlotTokens = @{}
+            $SeedSlotsOf = @{}
             $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
@@ -1003,42 +1002,71 @@ Function RunInventorySetup()
                     $SeedDropped++
                     continue
                 }
+                # The id's token slots: kind, the real value the token stands
+                # for (subscription name, group name, or the real id up to
+                # that name, as Get-ObfuscatedResourceId keys it) and token.
                 $RealParts = $SeedRealId.Split('/')
-                if ($RealParts[1] -ine 'subscriptions') { continue }
                 $MaskedParts = $SeedMasked.Split('/')
-                $SeedSubName = ''
-                foreach ($SubEntry in @($SubIndex.ById[$RealParts[2]])) { if ($null -ne $SubEntry) { $SeedSubName = [string]$SubEntry.Name; break } }
-                if ([string]::IsNullOrEmpty($SeedSubName)) { $SeedSubName = $RealParts[2] }
-                $SeedSubOf[$SeedRealId] = $SeedSubName
-                if (-not $SeedSubTokens.ContainsKey($SeedSubName)) { $SeedSubTokens[$SeedSubName] = @{} }
-                $SeedSubTokens[$SeedSubName][$MaskedParts[2]] = $true
-                if ($RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups')
+                $Slots = [System.Collections.Generic.List[object]]::new()
+                if ($RealParts[1] -ieq 'subscriptions')
                 {
-                    if (-not $SeedRgTokens.ContainsKey($RealParts[4])) { $SeedRgTokens[$RealParts[4]] = @{} }
-                    $SeedRgTokens[$RealParts[4]][$MaskedParts[4]] = $true
+                    $SeedSubName = ''
+                    foreach ($SubEntry in @($SubIndex.ById[$RealParts[2]])) { if ($null -ne $SubEntry) { $SeedSubName = [string]$SubEntry.Name; break } }
+                    if ([string]::IsNullOrEmpty($SeedSubName)) { $SeedSubName = $RealParts[2] }
+                    $Slots.Add([pscustomobject]@{ Kind = 'sub'; Real = $SeedSubName; Token = $MaskedParts[2] })
+                    $i = 3
+                }
+                else { $i = 1 }
+                while ($i + 1 -lt $RealParts.Count)
+                {
+                    $Next = $RealParts[$i + 1]
+                    if ($i -eq 3 -and $RealParts[1] -ieq 'subscriptions' -and $RealParts[$i] -ieq 'resourcegroups') { $Slots.Add([pscustomobject]@{ Kind = 'rg'; Real = $Next; Token = $MaskedParts[$i + 1] }) }
+                    elseif (-not ($RealParts[$i] -ieq 'providers' -or [string]::IsNullOrEmpty($Next) -or $Next -eq '$system')) { $Slots.Add([pscustomobject]@{ Kind = 'name'; Real = ($RealParts[0..($i + 1)] -join '/'); Token = $MaskedParts[$i + 1] }) }
+                    $i += 2
+                }
+                $SeedSlotsOf[$SeedRealId] = $Slots
+                foreach ($Slot in $Slots)
+                {
+                    $SlotKey = $Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()
+                    if (-not $SeedSlotTokens.ContainsKey($SlotKey)) { $SeedSlotTokens[$SlotKey] = @{} }
+                    $SeedSlotTokens[$SlotKey][$Slot.Token] = $true
                 }
             }
-            foreach ($SeedRealId in @($SeedSubOf.Keys))
+            foreach ($SeedRealId in @($SeedSlotsOf.Keys))
             {
-                $RealParts = $SeedRealId.Split('/')
-                $TwoSub = $SeedSubTokens[$SeedSubOf[$SeedRealId]].Count -gt 1
-                $TwoRg = $RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups' -and $SeedRgTokens[$RealParts[4]].Count -gt 1
-                if ($TwoSub -or $TwoRg)
+                $Conflict = $false
+                foreach ($Slot in $SeedSlotsOf[$SeedRealId]) { if ($SeedSlotTokens[$Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()].Count -gt 1) { $Conflict = $true; break } }
+                if ($Conflict)
                 {
                     [void]$ResourceIdDictionary.Remove($SeedRealId)
                     $SeedDropped++
                     continue
                 }
-                $MaskedParts = $ResourceIdDictionary[$SeedRealId].Split('/')
-                $SubLookup[$SeedSubOf[$SeedRealId]] = $MaskedParts[2]
-                if ($RealParts.Count -ge 5 -and $RealParts[3] -ieq 'resourcegroups') { $RgLookup[$RealParts[4]] = $MaskedParts[4] }
-                $ResourceNameDictionary[$SeedRealId] = $MaskedParts[-1]
+                foreach ($Slot in $SeedSlotsOf[$SeedRealId])
+                {
+                    switch ($Slot.Kind)
+                    {
+                        'sub' { $SubLookup[$Slot.Real] = $Slot.Token }
+                        'rg' { $RgLookup[$Slot.Real] = $Slot.Token }
+                        'name' { $ResourceNameDictionary[$Slot.Real] = $Slot.Token }
+                    }
+                }
             }
-            foreach ($SeedName in @($SeedSubTokens.Keys)) { if ($SeedSubTokens[$SeedName].Count -gt 1) { [void]$SubLookup.Remove($SeedName) } }
-            foreach ($SeedName in @($SeedRgTokens.Keys)) { if ($SeedRgTokens[$SeedName].Count -gt 1) { [void]$RgLookup.Remove($SeedName) } }
+            # A slot with two tokens starts again with no token at all.
+            foreach ($SlotKey in @($SeedSlotTokens.Keys))
+            {
+                if ($SeedSlotTokens[$SlotKey].Count -le 1) { continue }
+                $Kind, $Real = $SlotKey.Split('|', 2)
+                switch ($Kind)
+                {
+                    'sub' { foreach ($K in @($SubLookup.Keys)) { if ($K -ieq $Real) { [void]$SubLookup.Remove($K) } } }
+                    'rg' { foreach ($K in @($RgLookup.Keys)) { if ($K -ieq $Real) { [void]$RgLookup.Remove($K) } } }
+                    'name' { [void]$ResourceNameDictionary.Remove($Real) }
+                }
+            }
             if ($SeedDropped -gt 0)
             {
-                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or of a subscription or resource group with two tokens, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
+                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
             }
         }
 

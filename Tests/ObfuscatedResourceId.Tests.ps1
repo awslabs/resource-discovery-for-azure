@@ -420,6 +420,77 @@ Describe 'The seed is checked when it is read' {
     }
 }
 
+Describe 'The seed''s parent tokens' {
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Vars = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Variables' }, $false)
+        . ([scriptblock]::Create("function Invoke-RunVariables5 { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
+        $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
+        $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
+        . ([scriptblock]::Create("function Invoke-SeededBuild5 { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { }; $($Build[0].Extent.Text) }"))
+        function GetLocalVersion { '0.0.0-test' }
+        $script:SeedDir5 = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-seed5-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:SeedDir5 -Force | Out-Null
+        function New-Tok5 { 'prod_' + [guid]::NewGuid().ToString() }
+        function Invoke-SeededRun5
+        {
+            param([hashtable]$SeedMaps, [object[]]$Rows)
+            $Path = Join-Path $script:SeedDir5 ('seed-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.json')
+            $SeedMaps | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding utf8
+            Invoke-RunVariables5
+            $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+            $Global:ObfuscationSubscriptionIndex = $null
+            $Global:Resources = @($Rows)
+            Invoke-SeededBuild5 -Seed $Path
+        }
+        function Get-RunMaps5
+        {
+            $Ids = @{}; foreach ($K in @($Global:ResourceIdDictionary.Keys)) { $Ids[$Global:ResourceIdDictionary[$K]] = $K }
+            $Names = @{}; foreach ($K in @($Global:ResourceNameDictionary.Keys)) { $Names[$Global:ResourceNameDictionary[$K]] = $K }
+            $SubNames = @{}; foreach ($K in @($Global:ObfuscationSubscriptionTokens.Keys)) { $SubNames[$Global:ObfuscationSubscriptionTokens[$K]] = $K }
+            @{ ResourceIdMap = $Ids; ResourceNameMap = $Names; SubscriptionNameMap = $SubNames }
+        }
+        function New-Res5 { param([string]$Id) [pscustomobject]@{ id = $Id; name = ($Id -split '/')[-1]; subscriptionId = $script:Sub; resourceGroup = ($Id -split '/')[4] } }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:SeedDir5 -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Scope Global -Name TagValueDictionary, FreeTextDictionary, ResourceCount, ResourceContainers, ReportName, Version, RawRepo, TableStyle -ErrorAction SilentlyContinue
+    }
+
+    It 'gives a parent that the seeded ids give two tokens one token, and keeps it for the next two seeded runs' {
+        $Srv = "$script:Base/microsoft.sql/servers/srv-a"
+        $Db1 = "$Srv/databases/db-1"; $Db2 = "$Srv/databases/db-2"; $Db3 = "$Srv/databases/db-3"
+        $Sub = New-Tok5; $Rg = New-Tok5; $SrvTok = New-Tok5
+        $P = "/subscriptions/$Sub/resourcegroups/$Rg/providers/microsoft.sql/servers"
+        $Seed = @{
+            ResourceIdMap   = @{ "$P/$SrvTok" = $Srv; "$P/$SrvTok/databases/$(New-Tok5)" = $Db1; "$P/$(New-Tok5)/databases/$(New-Tok5)" = $Db2 }
+            ResourceNameMap = @{ (New-Tok5) = $Srv }
+        }
+        $Rows = @((New-Res5 $Srv), (New-Res5 $Db1), (New-Res5 $Db2), (New-Res5 $Db3))
+        $Parent = $null
+        foreach ($Run in 1, 2, 3)
+        {
+            Invoke-SeededRun5 -SeedMaps $Seed -Rows $Rows
+            $Tokens = @($Srv, $Db1, $Db2, $Db3 | ForEach-Object { ($Global:ResourceIdDictionary[$_] -split '/')[8] } | Select-Object -Unique)
+            $Tokens.Count | Should -Be 1 -Because "run $Run gives the server one token in every id"
+            ($Global:ResourceIdDictionary[$Srv] -split '/')[-1] | Should -BeExactly $Tokens[0]
+            if ($Run -eq 1) { $Parent = $Tokens[0] } else { $Tokens[0] | Should -BeExactly $Parent -Because "run $Run keeps run 1's server token" }
+            $Seed = Get-RunMaps5
+        }
+    }
+
+    It 'gives a new child the parent token of the seeded ids, over a name map entry that disagrees' {
+        $Srv = "$script:Base/microsoft.sql/servers/srv-b"
+        $Sub = New-Tok5; $Rg = New-Tok5; $SrvTok = New-Tok5
+        Invoke-SeededRun5 -SeedMaps @{
+            ResourceIdMap   = @{ "/subscriptions/$Sub/resourcegroups/$Rg/providers/microsoft.sql/servers/$SrvTok" = $Srv }
+            ResourceNameMap = @{ (New-Tok5) = $Srv }
+        } -Rows @((New-Res5 $Srv), (New-Res5 "$Srv/databases/db-new"))
+        ($Global:ResourceIdDictionary["$Srv/databases/db-new"] -split '/')[8] | Should -BeExactly $SrvTok
+    }
+}
+
 Describe 'Test-ObfuscatedIdShape' {
     BeforeAll {
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)

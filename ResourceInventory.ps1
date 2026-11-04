@@ -1015,27 +1015,11 @@ Function RunInventorySetup()
             {
                 foreach ($SeedProp in $SeedDictionary.FreeTextMap.PSObject.Properties) { $Global:FreeTextDictionary[$SeedProp.Value] = $SeedProp.Name }
             }
-            if ($null -ne $SeedDictionary.SubscriptionNameMap)
-            {
-                # The map holds token -> display name; the run keys tokens by
-                # subscription id. A name that one listed subscription has
-                # gives that id its token; a name two subscriptions share, or
-                # one no listed subscription has, is left to the seeded ids,
-                # which hold each one's own token. (One name -> ids index.)
-                $SeedSubIdsByName = @{}
-                foreach ($Sub in @($Global:Subscriptions))
-                {
-                    if ($null -eq $Sub -or [string]::IsNullOrEmpty([string]$Sub.id) -or [string]::IsNullOrEmpty([string]$Sub.name)) { continue }
-                    if (-not $SeedSubIdsByName.ContainsKey([string]$Sub.name)) { $SeedSubIdsByName[[string]$Sub.name] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
-                    [void]$SeedSubIdsByName[[string]$Sub.name].Add([string]$Sub.id)
-                }
-                foreach ($SeedProp in $SeedDictionary.SubscriptionNameMap.PSObject.Properties)
-                {
-                    if ([string]::IsNullOrEmpty($SeedProp.Value) -or -not $SeedSubIdsByName.ContainsKey([string]$SeedProp.Value)) { continue }
-                    $SeedSubIds = $SeedSubIdsByName[[string]$SeedProp.Value]
-                    if ($SeedSubIds.Count -eq 1) { $SubLookup[@($SeedSubIds)[0]] = $SeedProp.Name }
-                }
-            }
+            # The seed's SubscriptionNameMap (token -> display name) is not read
+            # for tokens: a display name can belong to two subscriptions, or to
+            # another one after a rename. A subscription's token comes from the
+            # seeded ids of that subscription id (the seed check below); one
+            # with no seeded id gets a new token, and has no seeded id to join.
             if ($null -ne $SeedDictionary.ResourceGroupMap)
             {
                 foreach ($SeedProp in $SeedDictionary.ResourceGroupMap.PSObject.Properties)
@@ -1080,7 +1064,6 @@ Function RunInventorySetup()
             $SeedSlotTokens = @{}
             $SeedSlotsOf = @{}
             $SeedSubTokenIds = @{}
-            $SeedSubTokenOwners = @{}
             $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
@@ -1100,15 +1083,6 @@ Function RunInventorySetup()
                 }
                 if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked))
                 {
-                    # Still note whose subscription token it held, for the
-                    # name-map guard below (not for the conflict check).
-                    if ($SeedRealId -match '(?i)^/subscriptions/([^/]+)/' -and ([string]$SeedMasked) -match '^/subscriptions/([^/]+)/')
-                    {
-                        $DroppedSubId = ([regex]::Match($SeedRealId, '(?i)^/subscriptions/([^/]+)/')).Groups[1].Value
-                        $DroppedTok = $Matches[1]
-                        if (-not $SeedSubTokenOwners.ContainsKey($DroppedTok)) { $SeedSubTokenOwners[$DroppedTok] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
-                        [void]$SeedSubTokenOwners[$DroppedTok].Add($DroppedSubId)
-                    }
                     [void]$ResourceIdDictionary.Remove($SeedRealId)
                     $SeedDropped++
                     continue
@@ -1176,20 +1150,6 @@ Function RunInventorySetup()
                     }
                 }
             }
-            # A name-map token that the seeded ids give to another subscription
-            # (a renamed subscription whose old name another one has now) is
-            # not given by name: the ids say whose token it is.
-            # Ids dropped for their shape still say whose token it was.
-            foreach ($T in @($SeedSubTokenIds.Keys))
-            {
-                if (-not $SeedSubTokenOwners.ContainsKey($T)) { $SeedSubTokenOwners[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
-                $SeedSubTokenOwners[$T].UnionWith($SeedSubTokenIds[$T])
-            }
-            foreach ($K in @($SubLookup.Keys))
-            {
-                $T = [string]$SubLookup[$K]
-                if ($SeedSubTokenOwners.ContainsKey($T) -and -not $SeedSubTokenOwners[$T].Contains([string]$K)) { [void]$SubLookup.Remove($K) }
-            }
             # A subscription token two subscriptions shared is given to neither.
             foreach ($SharedToken in @($SeedSubTokenIds.Keys))
             {
@@ -1216,7 +1176,6 @@ Function RunInventorySetup()
             $SeedSlotsOf = $null
             $SeedSlotTokens = $null
             $SeedSubTokenIds = $null
-            $SeedSubTokenOwners = $null
         }
 
         foreach ($resourceItem in $Global:Resources)

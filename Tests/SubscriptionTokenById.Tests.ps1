@@ -218,11 +218,63 @@ Describe 'A seed whose renamed subscription''s ids are all of an older shape' {
             Invoke-RunVariables
             $Global:Subscriptions = @([pscustomobject]@{ id = $script:SubA; name = 'Bar' }, [pscustomobject]@{ id = $SubC; name = 'Foo' })
             $Global:ObfuscationSubscriptionIndex = $null
-            $Global:Resources = @([pscustomobject]@{ id = $VmC; name = 'vm-c'; subscriptionId = $SubC; resourceGroup = 'rg-shared' })
+            $DbA = Get-Id $script:SubA 'microsoft.compute/virtualmachines' 'vm-a2'
+            $Global:Resources = @(
+                [pscustomobject]@{ id = $VmC; name = 'vm-c'; subscriptionId = $SubC; resourceGroup = 'rg-shared' }
+                [pscustomobject]@{ id = $DbA; name = 'vm-a2'; subscriptionId = $script:SubA; resourceGroup = 'rg-shared' }
+            )
+            $script:BuildWarnings.Clear()
             Invoke-DictionaryBuild -Seed $Seed
         }
         finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
+        @($script:BuildWarnings | Where-Object { $_ -match '^Obfuscation dictionary: 1 seeded id\(s\)' }).Count | Should -Be 1 -Because 'the older-shape id is dropped'
         ($Global:ResourceIdDictionary[$VmC] -split '/')[2] | Should -Not -BeExactly $TokA
+        ($Global:ResourceIdDictionary[$DbA] -split '/')[2] | Should -Not -BeExactly ($Global:ResourceIdDictionary[$VmC] -split '/')[2] -Because 'A and C keep two tokens'
+    }
+}
+
+Describe 'An older seed whose shared-name subscriptions have one good and one older-shape id' {
+    It 'gives the two subscriptions two tokens in the first seeded run, and the next two keep them (good id in the <Good> subscription)' -ForEach @(@{ Good = 'kept-name' }, @{ Good = 'renamed' }) {
+        $Shared = 'prod_' + [guid]::NewGuid().ToString(); $Rg = 'prod_' + [guid]::NewGuid().ToString()
+        $VmA = Get-Id $script:SubA 'microsoft.compute/virtualmachines' 'vm-a'
+        $DbB = (Get-Id $script:SubB 'microsoft.sql/servers' 'srv-b') + '/databases/db-b'
+        $VmB = Get-Id $script:SubB 'microsoft.compute/virtualmachines' 'vm-b'
+        $DbA = (Get-Id $script:SubA 'microsoft.sql/servers' 'srv-a') + '/databases/db-a'
+        $Ids = @{}
+        if ($Good -eq 'kept-name')
+        {
+            $Ids["/subscriptions/$Shared/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/prod_$([guid]::NewGuid())"] = $VmA
+            $Ids["/subscriptions/$Shared/resourcegroups/$Rg/providers/microsoft.sql/servers/srv-b/databases/prod_$([guid]::NewGuid())"] = $DbB
+        }
+        else
+        {
+            $Ids["/subscriptions/$Shared/resourcegroups/$Rg/providers/microsoft.sql/servers/srv-a/databases/prod_$([guid]::NewGuid())"] = $DbA
+            $Ids["/subscriptions/$Shared/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/prod_$([guid]::NewGuid())"] = $VmB
+        }
+        $SeedMaps = @{ ResourceIdMap = $Ids; SubscriptionNameMap = @{ $Shared = 'Pay-As-You-Go' } }
+        $First = $null
+        foreach ($Run in 1, 2, 3)
+        {
+            $Seed = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-subseed-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
+            $SeedMaps | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+            try
+            {
+                Invoke-RunVariables
+                $Global:Subscriptions = @([pscustomobject]@{ id = $script:SubA; name = 'Pay-As-You-Go' }, [pscustomobject]@{ id = $script:SubB; name = 'Renamed' })
+                $Global:ObfuscationSubscriptionIndex = $null
+                $Global:Resources = @(
+                    [pscustomobject]@{ id = $VmA; name = 'vm-a'; subscriptionId = $script:SubA; resourceGroup = 'rg-shared' }
+                    [pscustomobject]@{ id = $VmB; name = 'vm-b'; subscriptionId = $script:SubB; resourceGroup = 'rg-shared' }
+                )
+                Invoke-DictionaryBuild -Seed $Seed
+            }
+            finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
+            $A = ($Global:ResourceIdDictionary[$VmA] -split '/')[2]; $B = ($Global:ResourceIdDictionary[$VmB] -split '/')[2]
+            $A | Should -Not -BeExactly $B -Because "run $Run"
+            if ($Run -eq 1) { $First = @($A, $B) } else { @($A, $B) | Should -Be $First }
+            $NextIds = @{}; foreach ($K in @($Global:ResourceIdDictionary.Keys)) { $NextIds[$Global:ResourceIdDictionary[$K]] = $K }
+            $SeedMaps = @{ ResourceIdMap = $NextIds; SubscriptionNameMap = @{ $A = 'Pay-As-You-Go'; $B = 'Renamed' } }
+        }
     }
 }
 

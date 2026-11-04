@@ -1080,6 +1080,7 @@ Function RunInventorySetup()
             $SeedSlotTokens = @{}
             $SeedSlotsOf = @{}
             $SeedSubTokenIds = @{}
+            $SeedSubTokenOwners = @{}
             $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
@@ -1099,6 +1100,15 @@ Function RunInventorySetup()
                 }
                 if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked))
                 {
+                    # Still note whose subscription token it held, for the
+                    # name-map guard below (not for the conflict check).
+                    if ($SeedRealId -match '(?i)^/subscriptions/([^/]+)/' -and ([string]$SeedMasked) -match '^/subscriptions/([^/]+)/')
+                    {
+                        $DroppedSubId = ([regex]::Match($SeedRealId, '(?i)^/subscriptions/([^/]+)/')).Groups[1].Value
+                        $DroppedTok = $Matches[1]
+                        if (-not $SeedSubTokenOwners.ContainsKey($DroppedTok)) { $SeedSubTokenOwners[$DroppedTok] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                        [void]$SeedSubTokenOwners[$DroppedTok].Add($DroppedSubId)
+                    }
                     [void]$ResourceIdDictionary.Remove($SeedRealId)
                     $SeedDropped++
                     continue
@@ -1169,10 +1179,16 @@ Function RunInventorySetup()
             # A name-map token that the seeded ids give to another subscription
             # (a renamed subscription whose old name another one has now) is
             # not given by name: the ids say whose token it is.
+            # Ids dropped for their shape still say whose token it was.
+            foreach ($T in @($SeedSubTokenIds.Keys))
+            {
+                if (-not $SeedSubTokenOwners.ContainsKey($T)) { $SeedSubTokenOwners[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                $SeedSubTokenOwners[$T].UnionWith($SeedSubTokenIds[$T])
+            }
             foreach ($K in @($SubLookup.Keys))
             {
                 $T = [string]$SubLookup[$K]
-                if ($SeedSubTokenIds.ContainsKey($T) -and -not $SeedSubTokenIds[$T].Contains([string]$K)) { [void]$SubLookup.Remove($K) }
+                if ($SeedSubTokenOwners.ContainsKey($T) -and -not $SeedSubTokenOwners[$T].Contains([string]$K)) { [void]$SubLookup.Remove($K) }
             }
             # A subscription token two subscriptions shared is given to neither.
             foreach ($SharedToken in @($SeedSubTokenIds.Keys))
@@ -1200,6 +1216,7 @@ Function RunInventorySetup()
             $SeedSlotsOf = $null
             $SeedSlotTokens = $null
             $SeedSubTokenIds = $null
+            $SeedSubTokenOwners = $null
         }
 
         foreach ($resourceItem in $Global:Resources)

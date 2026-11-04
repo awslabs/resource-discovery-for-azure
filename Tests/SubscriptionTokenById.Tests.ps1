@@ -137,6 +137,7 @@ Describe 'An older seed that gave two subscriptions with one display name one to
         $First = $null
         foreach ($Run in 1, 2, 3)
         {
+            $script:BuildWarnings.Clear()
             $Seed = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-subseed-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
             $SeedMaps | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
             try
@@ -152,7 +153,9 @@ Describe 'An older seed that gave two subscriptions with one display name one to
             }
             finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
             $A = ($Global:ResourceIdDictionary[$VmA] -split '/')[2]; $B = ($Global:ResourceIdDictionary[$VmB] -split '/')[2]
-            if ($Run -eq 1) { ($script:BuildWarnings -join "`n") | Should -Match 'a subscription token two subscriptions share' }
+            $Drop = @($script:BuildWarnings | Where-Object { $_ -match 'seeded id\(s\)' })
+            if ($Run -eq 1) { $Drop | Should -Match '^Obfuscation dictionary: 2 seeded id\(s\)' -Because 'both ids holding the shared token are dropped' }
+            else { $Drop | Should -BeNullOrEmpty -Because "run $Run keeps every id: the loop has ended" }
             $A | Should -Not -BeExactly $B -Because "run $Run"
             $A | Should -Not -BeExactly $Shared
             if ($Run -eq 1) { $First = @($A, $B) } else { @($A, $B) | Should -Be $First -Because "run $Run keeps run 1's tokens" }
@@ -196,6 +199,29 @@ Describe 'A seed whose name map gives a renamed subscription''s old name' {
         }
         finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
         ($Global:ResourceIdDictionary[$VmA] -split '/')[2] | Should -BeExactly $TokA
+        ($Global:ResourceIdDictionary[$VmC] -split '/')[2] | Should -Not -BeExactly $TokA
+    }
+}
+
+Describe 'A seed whose renamed subscription''s ids are all of an older shape' {
+    It 'still does not give its token by name to the subscription that has the old name now' {
+        $SubC = '33333333-3333-3333-3333-333333333333'
+        $TokA = 'prod_' + [guid]::NewGuid().ToString()
+        $VmA = Get-Id $script:SubA 'microsoft.sql/servers' 'srv-a'
+        $VmC = Get-Id $SubC 'microsoft.compute/virtualmachines' 'vm-c'
+        # Older shape: the server's real name left in the id (dropped by the shape check).
+        $Old = "/subscriptions/$TokA/resourcegroups/prod_$([guid]::NewGuid())/providers/microsoft.sql/servers/srv-a/databases/prod_$([guid]::NewGuid())"
+        $Seed = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-subseed-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
+        @{ ResourceIdMap = @{ $Old = "$VmA/databases/db-a" }; SubscriptionNameMap = @{ $TokA = 'Foo' } } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+        try
+        {
+            Invoke-RunVariables
+            $Global:Subscriptions = @([pscustomobject]@{ id = $script:SubA; name = 'Bar' }, [pscustomobject]@{ id = $SubC; name = 'Foo' })
+            $Global:ObfuscationSubscriptionIndex = $null
+            $Global:Resources = @([pscustomobject]@{ id = $VmC; name = 'vm-c'; subscriptionId = $SubC; resourceGroup = 'rg-shared' })
+            Invoke-DictionaryBuild -Seed $Seed
+        }
+        finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
         ($Global:ResourceIdDictionary[$VmC] -split '/')[2] | Should -Not -BeExactly $TokA
     }
 }

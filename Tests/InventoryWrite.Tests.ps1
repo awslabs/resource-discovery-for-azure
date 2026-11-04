@@ -620,6 +620,8 @@ function CreateResourceJobs
         $R[0].ErrorLog | Should -BeLike ('*Inventory write FAILED*' + $Failure.Expect.Trim('*') + '*') -Because 'the error log the run keeps gets the same line'
         $Output | Should -Not -Match 'Resource Reporting Phase Done' -Because 'the reporting phase did not finish'
         $Output | Should -Not -Match 'Inventory/Metrics/Consumption data files were still written' -Because 'the inventory was not written, so the run must not say it was'
+        $Output | Should -Not -Match 'Please zip the output files manually' -Because 'without the inventory there is nothing worth zipping by hand'
+        $Output | Should -Match 'There is no report to zip'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'
         @($R[0].Files | Where-Object { $_ -like 'Inventory_*' -or $_ -like '*.tmp' -or $_ -like '*.zip' }) | Should -BeNullOrEmpty -Because 'a failed write leaves no inventory, no cut-off or temporary file and no zip'
@@ -658,6 +660,7 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Reporting Data File'
         $Output | Should -Match 'No report was written'
         $R[0].Files | Should -Contain 'Inventory_ResourcesReport_test.json' -Because 'only the zip step failed'
+        $Output | Should -Match 'Please zip the output files manually' -Because 'the inventory and the HTML report are there to zip by hand'
     }
 
     It 'removes a zip the failed zip step left cut off and does not report it' {
@@ -668,6 +671,49 @@ function CreateResourceJobs
         $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a cut-off zip must not be left to be shared'
         $Output | Should -Not -Match 'Reporting Data File' -Because "Output:`n$Output"
         $Output | Should -Match 'No report was written'
+    }
+
+    It 'does not name a zip that was already at the path as the report of this run' {
+        # Compress-Archive refuses to overwrite it, so it is not this run's report.
+        $R = @(Invoke-InventoryRun -Name 'zip-exists-direct' -Runs @('Set-Content -LiteralPath ($Global:DefaultPath + ''ResourcesReport_test.zip'') -Value ''older file''') -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'Error Compressing Output File' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'Reporting Data File'
+        $Output | Should -Match 'No report was written'
+        $R[0].Files | Should -Contain 'ResourcesReport_test.zip' -Because 'a zip that was there before is not removed'
+    }
+
+    It 'says so when the unfinished zip cannot be removed' {
+        $Stub = @'
+function Compress-Archive { param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw 'stand-in: stopped part-way' }
+function Remove-Item
+{
+    [CmdletBinding()]
+    param([string[]]$LiteralPath, [switch]$Force, [string[]]$Path, [switch]$Recurse)
+    if (@($LiteralPath) -like '*.zip') { throw 'stand-in: file is locked' }
+    Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+}
+'@
+        $R = @(Invoke-InventoryRun -Name 'zip-locked-direct' -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'Could not remove the unfinished zip .*ResourcesReport_test\.zip: stand-in: file is locked' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'Reporting Data File'
+        $Output | Should -Match 'No report was written'
+    }
+
+    It 'shows the run times as a success only when the zip was written (<Case>)' -ForEach @(
+        @{ Case = 'zip written'; Stub = ''; Expect = 'Success' }
+        @{ Case = 'inventory write failed'; Stub = 'function Write-InventoryJson { param($InputObject, $Path) throw ''stand-in: out of memory while writing'' }'; Expect = 'Info' }
+    ) {
+        # Write-Log stand-in that prints the severity, so the console shows which one each line used.
+        $Show = 'function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsole, [switch]$ToDebugLog) { if (-not $NoConsole) { Write-Host (''[{0}] {1}'' -f $Severity, $Message) } }'
+        $R = @(Invoke-InventoryRun -Name ('times-{0}' -f $Case.Split(' ')[1]) -Runs @(($Show + [Environment]::NewLine + $Stub)) -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match ('\[{0}\] Execution Time: ' -f $Expect) -Because "Output:`n$Output"
+        $Output | Should -Match ('\[{0}\] Reporting Time: ' -f $Expect)
     }
 
     It 'says the zip is safe to share under -Obfuscate only when the zip was written (<Case>)' -ForEach @(
@@ -686,6 +732,7 @@ function CreateResourceJobs
         $R = @(Invoke-InventoryRun -Name 'write-ok-direct' -Runs @('') -Direct)
 
         $Output = [string]$R[0].Output
+        $R[0].ExitCode | Should -Be 0
         $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
         $Output | Should -Match 'Reporting Data File: .*ResourcesReport_test\.zip' -Because "Output:`n$Output"
         $Output | Should -Not -Match 'No report was written'

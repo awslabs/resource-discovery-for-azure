@@ -1860,6 +1860,10 @@ else
     Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
+# Only this call finishing makes the zip this run's report: a file at the path can be a
+# zip cut off part-way, or one that was there before (Compress-Archive then refuses to
+# overwrite it). The catch clears the flag.
+$ZipWritten = $true
 $ZipExistedBefore = Test-Path -LiteralPath $Global:ZipOutputFile
 try
 {
@@ -1867,28 +1871,45 @@ try
 }
 catch
 {
+    $ZipWritten = $false
     $_ | Format-List -Force
     # Write-Log, not Write-Error: the script's 'silentlycontinue' preference hides Write-Error.
     Write-Log -Message ("Error Compressing Output File: {0}: {1}" -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
-    Write-Log -Message ("Please zip the output files manually.") -Severity 'Error'
-    # A zip cut off part-way must not be named as the report below. One that was there
-    # before this step is not this step's to remove.
+    if ((Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile))
+    {
+        Write-Log -Message ("Please zip the output files manually.") -Severity 'Error'
+    }
+    else
+    {
+        Write-Log -Message ("There is no report to zip: the inventory or the HTML report was not written. See the errors above.") -Severity 'Error'
+    }
+    # A zip cut off part-way must not be left to be shared. One that was there before this
+    # step is not this step's to remove.
     if (-not $ZipExistedBefore -and (Test-Path -LiteralPath $Global:ZipOutputFile))
     {
-        Remove-Item -LiteralPath $Global:ZipOutputFile -Force -ErrorAction SilentlyContinue
+        try
+        {
+            Remove-Item -LiteralPath $Global:ZipOutputFile -Force -ErrorAction Stop
+        }
+        catch
+        {
+            Write-Log -Message ("Could not remove the unfinished zip {0}: {1}. Delete it by hand and do not share it." -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
+        }
     }
 }
 
-if ($Obfuscate.IsPresent -and (Test-Path -LiteralPath $Global:ZipOutputFile))
+if ($Obfuscate.IsPresent -and $ZipWritten)
 {
     Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
 }
+# The times are shown as a success only when the run wrote its report.
+$TimeSeverity = if ($ZipWritten) { 'Success' } else { 'Info' }
 
-Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
-Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
+Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity $TimeSeverity
+Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity $TimeSeverity
 # A run can reach this line with no zip: when a step above failed, its throw does not stop
-# the script under 'silentlycontinue'. So name the zip only when it is there.
-if (-not [string]::IsNullOrEmpty($Global:ZipOutputFile) -and (Test-Path -LiteralPath $Global:ZipOutputFile))
+# the script under 'silentlycontinue'. So name the zip only when this run wrote it.
+if ($ZipWritten -and (Test-Path -LiteralPath $Global:ZipOutputFile))
 {
     Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
 }

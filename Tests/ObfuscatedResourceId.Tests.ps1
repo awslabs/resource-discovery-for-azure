@@ -335,7 +335,8 @@ Describe 'The seed is checked when it is read' {
         . ([scriptblock]::Create("function Invoke-RunVariables4 { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
         $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
         $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
-        . ([scriptblock]::Create("function Invoke-SeededBuild4 { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { }; $($Build[0].Extent.Text) }"))
+        . ([scriptblock]::Create("function Invoke-SeededBuild4 { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { param(`$Message, `$Severity) if (`$Severity -eq 'Warning') { `$script:SeedWarnings.Add([string]`$Message) } }; $($Build[0].Extent.Text) }"))
+        $script:SeedWarnings = [System.Collections.Generic.List[string]]::new()
         function GetLocalVersion { '0.0.0-test' }
         $script:SeedDir4 = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-seed4-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $script:SeedDir4 -Force | Out-Null
@@ -382,6 +383,14 @@ Describe 'The seed is checked when it is read' {
         $Gone = "$script:Base/microsoft.sql/servers/srv-gone/databases/db-gone"
         Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ ($Masked -f [guid]::NewGuid().ToString()) = $Gone } } -Rows @()
         $Global:ResourceIdDictionary.ContainsKey($Gone) | Should -BeFalse -Because 'consumption or metrics that meet it mask it again'
+    }
+
+    It 'warns when the seed gives one resource two masked ids by case, before the token loop' {
+        $script:SeedWarnings.Clear()
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $M = { "/subscriptions/$(New-Tok)/resourcegroups/$(New-Tok)/providers/microsoft.compute/virtualmachines/$(New-Tok)" }
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ (& $M) = $Vm; (& $M) = $Vm.ToUpperInvariant() } } -Rows @()
+        ($script:SeedWarnings -join "`n") | Should -Match 'gives 1 resource\(s\) two masked ids by case.*collect the gap bundle on this build'
     }
 
     It 'keeps a good seeded id for a resource this run does not see' {

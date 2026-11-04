@@ -192,7 +192,10 @@ BeforeAll {
 
     # Extension/Summary.ps1 stand-ins, placed beside the harness where FinalizeOutputs looks.
     $script:SummaryParams = 'param($JsonFile, $HtmlFile, $Title, $TenantId, $Version, $ExtractionRunTime, $ReportingRunTime, $PhaseTimings, $PlatOS, $ConsumptionFile)'
-    $script:SummaryWrites = $script:SummaryParams + [Environment]::NewLine + 'Set-Content -LiteralPath $HtmlFile -Value ''<html></html>'''
+    # Like the real one, it stops when the inventory is not there, so it writes no HTML then.
+    $script:SummaryWrites = $script:SummaryParams + [Environment]::NewLine +
+        'if (-not (Test-Path -LiteralPath $JsonFile -PathType Leaf)) { throw "Summary.ps1: Inventory JSON not found at ''$JsonFile''." }' + [Environment]::NewLine +
+        'Set-Content -LiteralPath $HtmlFile -Value ''<html></html>'''
 
     # Stand-ins for the Azure-facing steps of a full run: discovery returns two disks and
     # one AVD host pool, and the collector step turns the disks into one collector.
@@ -237,9 +240,13 @@ function Get-AzContext { }
     # all in ONE child pwsh process and in-process (`&`), as the wrappers call
     # ResourceInventory.ps1. Each entry is script text that may override the stubs above.
     # Returns, per run, the exit code, any error that escaped, and the globals left behind.
+    # With -Direct each run is instead its own `pwsh -File` process, as an operator starts the
+    # script: no caller holds a try block, so a throw under the script's 'silentlycontinue'
+    # preference does not stop the script. Each run then also returns its console output and
+    # the names of the files left in its output folder; the globals are not readable.
     function Invoke-InventoryRun
     {
-        param([string]$Name, [string[]]$Runs)
+        param([string]$Name, [string[]]$Runs, [switch]$Direct)
 
         $CaseDir = Join-Path $script:TmpRoot $Name
         $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
@@ -286,7 +293,15 @@ function Get-AzContext { }
             '{'
             '    $global:LASTEXITCODE = 0'
             '    $Escaped = $null'
-            '    try { & $RunFile *> $null } catch { $Escaped = $_.Exception.Message }'
+            '    $Output = $null'
+            $(if ($Direct)
+                {
+                    '    $Output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $RunFile *>&1 | Out-String'
+                }
+                else
+                {
+                    '    try { & $RunFile *> $null } catch { $Escaped = $_.Exception.Message }'
+                })
             '    $RunDir = Split-Path -Parent $RunFile'
             '    $Inventory = Join-Path $RunDir ''Inventory_ResourcesReport_test.json'''
             '    $ReportState = Join-Path $RunDir ''report-state.json'''
@@ -299,6 +314,9 @@ function Get-AzContext { }
             '        SmaResourcesReleased = ($null -eq $Global:SmaResources)'
             '        Inventory            = if (Test-Path -LiteralPath $Inventory) { Get-Content -LiteralPath $Inventory -Raw | ConvertFrom-Json } else { $null }'
             '        ReportState          = if (Test-Path -LiteralPath $ReportState) { Get-Content -LiteralPath $ReportState -Raw | ConvertFrom-Json } else { $null }'
+            '        Output               = $Output'
+            '        ErrorLog             = if (Test-Path -LiteralPath (Join-Path $RunDir ''ErrorLog_ResourcesReport_test.log'')) { Get-Content -LiteralPath (Join-Path $RunDir ''ErrorLog_ResourcesReport_test.log'') -Raw } else { $null }'
+            '        Files                = @(Get-ChildItem -LiteralPath $RunDir -Force | ForEach-Object { $_.Name } | Sort-Object)'
             '    }'
             '}'
             ('ConvertTo-Json -InputObject @($Results) -Depth 6 | Set-Content -LiteralPath {0}' -f (& $Q $ResultsFile))
@@ -559,6 +577,69 @@ Describe 'ProcessResourceResult' {
         $Global:SmaResources | & $script:RealConvertToJson -Depth 100 -Compress 3>$null | Out-File $ReferenceFile
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Global:JsonFile)) | Should -BeExactly ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ReferenceFile)))
         $Global:SmaResources.Version | Should -Be '1.2.3'
+    }
+}
+
+Describe 'A failed inventory write' {
+
+    BeforeAll {
+        # Two ways the write can fail: the real writer meets a collector ConvertTo-Json rejects
+        # (a dictionary key that is not a string) part-way through the file, and a stand-in
+        # writer throws the out-of-memory error a large estate can hit.
+        $script:WriteFailures = @{
+            'collector ConvertTo-Json rejects' = @{
+                Stub   = @'
+function CreateResourceJobs
+{
+    $Global:SmaResources = New-Object PSObject
+    $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Disks' -Value @([ordered]@{ Name = 'disk-01' })
+    $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Broken' -Value @(@{ 1 = 'not a string key' })
+}
+'@
+                Expect = '*Keys must be strings*'
+            }
+            'out of memory (stand-in writer)'  = @{
+                Stub   = 'function Write-InventoryJson { param($InputObject, $Path) throw [System.OutOfMemoryException]::new(''stand-in: out of memory while writing'') }'
+                Expect = '*stand-in: out of memory while writing*'
+            }
+        }
+    }
+
+    It 'logs the real cause and does not report a zip it did not write on a direct run (<Case>)' -ForEach @(
+        @{ Case = 'collector ConvertTo-Json rejects' }
+        @{ Case = 'out of memory (stand-in writer)' }
+    ) {
+        $Failure = $script:WriteFailures[$Case]
+        $R = @(Invoke-InventoryRun -Name ('write-fail-direct-{0}' -f $Case.Split(' ')[0]) -Runs @($Failure.Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $ErrorLine = @($Output -split '\r?\n' | Where-Object { $_ -like 'Inventory write FAILED*' })
+        $ErrorLine.Count | Should -Be 1 -Because "the real cause is shown once on the console. Output:`n$Output"
+        $ErrorLine[0] | Should -BeLike '*Inventory_ResourcesReport_test.json*' -Because 'the line names the inventory file'
+        $ErrorLine[0] | Should -BeLike $Failure.Expect -Because 'the line carries the exception the write failed with'
+        $R[0].ErrorLog | Should -BeLike ('*Inventory write FAILED*' + $Failure.Expect.Trim('*') + '*') -Because 'the error log the run keeps gets the same line'
+        $Output | Should -Not -Match 'Resource Reporting Phase Done' -Because 'the reporting phase did not finish'
+        $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
+        $Output | Should -Match 'No report zip was written' -Because 'the run says plainly that there is no zip'
+        @($R[0].Files | Where-Object { $_ -like 'Inventory_*' -or $_ -like '*.tmp' -or $_ -like '*.zip' }) | Should -BeNullOrEmpty -Because 'a failed write leaves no inventory, no cut-off or temporary file and no zip'
+    }
+
+    It 'stops a wrapper run with the real cause, not with the missing-file error of the report step' {
+        $Failure = $script:WriteFailures['out of memory (stand-in writer)']
+        $R = @(Invoke-InventoryRun -Name 'write-fail-wrapper' -Runs @($Failure.Stub))
+
+        $R[0].Escaped | Should -BeLike $Failure.Expect -Because 'the wrapper records the subscription as failed with this message'
+        $R[0].ErrorLog | Should -BeLike '*Inventory write FAILED*Inventory_ResourcesReport_test.json*'
+        $R[0].ErrorLog | Should -Not -BeLike '*HTML report generation FAILED*' -Because 'the run stops at the write, so the report step never runs'
+    }
+
+    It 'reports the zip on a direct run that wrote it' {
+        $R = @(Invoke-InventoryRun -Name 'write-ok-direct' -Runs @('') -Direct)
+
+        $Output = [string]$R[0].Output
+        $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
+        $Output | Should -Match 'Reporting Data File: .*ResourcesReport_test\.zip' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'No report zip was written'
     }
 }
 

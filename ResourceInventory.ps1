@@ -1209,7 +1209,19 @@ function ExecuteInventoryProcessing()
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
-        Write-InventoryJson -InputObject $Global:SmaResources -Path $Global:JsonFile
+        # Write-InventoryJson removes its temporary file and throws when the write fails (out of
+        # memory on a large estate, a full disk, a value ConvertTo-Json rejects). The script runs
+        # with ErrorActionPreference 'silentlycontinue', and on a direct run no caller catches
+        # the throw, so nothing would show it: log the real cause here first, then throw it on.
+        try
+        {
+            Write-InventoryJson -InputObject $Global:SmaResources -Path $Global:JsonFile
+        }
+        catch
+        {
+            Write-Log -Message ("Inventory write FAILED: {0} was not written: {1}" -f $Global:JsonFile, $_.Exception.Message) -Severity 'Error' -ToDebugLog
+            throw
+        }
 
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
     }
@@ -1862,4 +1874,13 @@ catch
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
-Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
+# A direct run reaches this line even when a step above failed and no zip was made (a throw
+# does not stop the script under 'silentlycontinue'), so name the zip only when it is there.
+if (-not [string]::IsNullOrEmpty($Global:ZipOutputFile) -and (Test-Path -LiteralPath $Global:ZipOutputFile))
+{
+    Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
+}
+else
+{
+    Write-Log -Message ("No report zip was written: {0} was not created. See the errors above." -f $Global:ZipOutputFile) -Severity 'Error'
+}

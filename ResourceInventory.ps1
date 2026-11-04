@@ -996,6 +996,10 @@ Function RunInventorySetup()
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
                 $SeedMasked = $ResourceIdDictionary[$SeedRealId]
+                # A real id that is not an ARM path has one flat token (parked
+                # with the owner); its seeded token is kept as it is, so it
+                # stays the same across seeded runs.
+                if ($SeedRealId -notmatch '(?i)^/(subscriptions|providers)/[^/]') { continue }
                 if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked))
                 {
                     [void]$ResourceIdDictionary.Remove($SeedRealId)
@@ -1046,8 +1050,11 @@ Function RunInventorySetup()
                 {
                     switch ($Slot.Kind)
                     {
-                        'sub' { $SubLookup[$Slot.Real] = $Slot.Token }
-                        'rg' { $RgLookup[$Slot.Real] = $Slot.Token }
+                        # The id's own subscription and group entries too, so a
+                        # row or metric that reuses this seeded id outside the
+                        # token loop gets the fields of its own path.
+                        'sub' { $SubLookup[$Slot.Real] = $Slot.Token; $ResourceSubscriptionDictionary[$SeedRealId] = $Slot.Token }
+                        'rg' { $RgLookup[$Slot.Real] = $Slot.Token; $ResourceResourceGroupDictionary[$SeedRealId] = $Slot.Token }
                         'name' { $ResourceNameDictionary[$Slot.Real] = $Slot.Token }
                     }
                 }

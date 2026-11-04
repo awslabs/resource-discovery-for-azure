@@ -385,6 +385,28 @@ Describe 'The seed is checked when it is read' {
         $Global:ResourceIdDictionary[$Gone] | Should -BeExactly $Masked
     }
 
+    It 'records the subscription and group tokens of a kept seeded id that the token loop does not see, for the rows and metrics that reuse it' {
+        $Gone = "$script:Base/microsoft.compute/virtualmachines/vm-gone"
+        $Masked = "/subscriptions/$(New-Tok)/resourcegroups/$(New-Tok)/providers/microsoft.compute/virtualmachines/$(New-Tok)"
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Masked = $Gone } } -Rows @()
+        $Global:ResourceSubscriptionDictionary[$Gone] | Should -BeExactly ($Masked -split '/')[2]
+        $Global:ResourceResourceGroupDictionary[$Gone] | Should -BeExactly ($Masked -split '/')[4]
+        $Global:ResourceNameDictionary[$Gone] | Should -BeExactly ($Masked -split '/')[-1]
+    }
+
+    It 'keeps the seeded flat token of a real id that is not an ARM path (parked), so it stays the same across seeded runs' {
+        $Flat = New-Tok
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Flat = 'not-an-arm-id' } } -Rows @()
+        $Global:ResourceIdDictionary['not-an-arm-id'] | Should -BeExactly $Flat
+    }
+
+    It 'records no ''$system'' name token for a seeded Service Bus id that keeps it' {
+        $Sys = "$script:Base/microsoft.servicebus/namespaces/`$system"
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ "/subscriptions/$(New-Tok)/resourcegroups/$(New-Tok)/providers/microsoft.servicebus/namespaces/`$system" = $Sys } } -Rows @()
+        $Global:ResourceIdDictionary.ContainsKey($Sys) | Should -BeTrue
+        @($Global:ResourceNameDictionary.Values | Where-Object { $_ -eq '$system' }) | Should -BeNullOrEmpty
+    }
+
     It 'takes the subscription and group tokens of the seeded ids over a map entry that disagrees' {
         $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
         $Sub = New-Tok; $Rg = New-Tok

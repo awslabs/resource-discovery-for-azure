@@ -969,6 +969,10 @@ Function RunInventorySetup()
             }
 
             Write-Log -Message ("Obfuscation dictionary seeded from '{0}': {1} id, {2} name, {3} subscription, {4} resource-group, {5} tag, {6} free-text mappings preloaded; matching real values will reuse their existing tokens." -f $ObfuscationDictionary, @($ResourceIdDictionary.Keys).Count, @($ResourceNameDictionary.Keys).Count, @($SubLookup.Keys).Count, @($RgLookup.Keys).Count, @($Global:TagValueDictionary.Keys).Count, @($Global:FreeTextDictionary.Keys).Count) -Severity 'Info'
+            # The parsed seed file is not needed past here: free it before the
+            # token loop (a recovery run's seed can hold every id of a tenant).
+            $SeedDictionary = $null
+            $SeedProp = $null
         }
 
         $SubIndex = Get-ObfuscationSubscriptionIndex

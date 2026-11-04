@@ -551,14 +551,21 @@ Describe 'The seed''s parent tokens' {
 }
 
 Describe 'The seed check frees what it built' {
-    It 'sets its slot index to null once the check is done, before the token loop' {
-        $Text = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1')
-        $Start = $Text.IndexOf('$SeedSlotTokens = @{}')
-        $Loop = $Text.IndexOf('foreach ($resourceItem in $Global:Resources)', $Start)
-        $Start | Should -BeGreaterThan 0
-        $Between = $Text.Substring($Start, $Loop - $Start)
-        $Between | Should -Match '\$SeedSlotsOf = \$null'
-        $Between | Should -Match '\$SeedSlotTokens = \$null'
+    It 'sets <_> to null in the seeded branch, after it is last read and before the token loop' -ForEach @('SeedSlotsOf', 'SeedSlotTokens', 'SeedDictionary') {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
+        $Loop = $Setup.Find({ param($N) $N -is [System.Management.Automation.Language.ForEachStatementAst] -and $N.Condition.Extent.Text -match '^\$(TokenLoopRows|Global:Resources)$' -and $N.Body.Extent.Text -match 'IdsToMask\.Contains\(\$resourceItem\.ID\)' }, $true)
+        $Name = $_
+        $Nulls = @($Setup.FindAll({ param($N) $N -is [System.Management.Automation.Language.AssignmentStatementAst] -and $N.Left.Extent.Text -eq ('$' + $Name) -and $N.Right.Extent.Text -eq '$null' }, $true))
+        $Nulls.Count | Should -Be 1
+        $Null0 = $Nulls[0]
+        # Inside an 'if' on the seed, as a statement that runs (not a comment).
+        $If = $Null0.Parent
+        while ($null -ne $If -and -not ($If -is [System.Management.Automation.Language.IfStatementAst] -and $If.Clauses[0].Item1.Extent.Text -match 'ObfuscationDictionary')) { $If = $If.Parent }
+        $If | Should -Not -BeNullOrEmpty
+        $Null0.Extent.StartOffset | Should -BeLessThan $Loop.Extent.StartOffset
+        $Reads = @($Setup.FindAll({ param($N) $N -is [System.Management.Automation.Language.VariableExpressionAst] -and $N.VariablePath.UserPath -eq $Name -and $N.Extent.StartOffset -gt $Null0.Extent.EndOffset }, $true))
+        $Reads | Should -BeNullOrEmpty -Because "$Name is not read after it is freed"
     }
 }
 

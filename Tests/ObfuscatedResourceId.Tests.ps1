@@ -192,6 +192,20 @@ Describe 'The run''s resource dictionaries ignore the case of an id' {
         $Global:ResourceIdDictionary[$Mixed] | Should -BeExactly $Global:ResourceIdDictionary[$Lower]
     }
 
+    It 'gives the subscription one token when it is listed twice, the one its ids hold' {
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' }, [pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+        $Global:ObfuscationSubscriptionIndex = $null
+        $Global:Resources = @(
+            [pscustomobject]@{ id = "$script:Base/microsoft.compute/virtualmachines/vm-a"; name = 'vm-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+            [pscustomobject]@{ id = "$script:Base/microsoft.compute/virtualmachines/vm-b"; name = 'vm-b'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+        )
+        Invoke-DictionaryBuild2
+        foreach ($Id in @($Global:ResourceIdDictionary.Keys))
+        {
+            $Global:ResourceSubscriptionDictionary[$Id] | Should -BeExactly ($Global:ResourceIdDictionary[$Id] -split '/')[2]
+        }
+    }
+
     It 'masks a resource listed twice in different casing once, with one id' {
         $Global:Resources = @(
             [pscustomobject]@{ id = "$script:Base/microsoft.compute/virtualmachines/vm-a"; name = 'vm-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }

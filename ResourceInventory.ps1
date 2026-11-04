@@ -907,7 +907,11 @@ Function RunInventorySetup()
             $ObfuscatedName = $Prefix + $Hint + [guid]::NewGuid().ToString()
 
             $SubEntries = if ($null -eq $resourceItem.subscriptionId) { $SubIndex.NoId } else { $SubIndex.ById[[string]$resourceItem.subscriptionId] }
-            $RealSub = $SubEntries.Name
+            # The first entry's name, as Get-ObfuscatedResourceId reads it: a
+            # subscription listed twice would give an array here otherwise.
+            # (A plain loop: this runs once per resource.)
+            $RealSub = ''
+            foreach ($SubEntry in @($SubEntries)) { if ($null -ne $SubEntry) { $RealSub = [string]$SubEntry.Name; break } }
             if ([string]::IsNullOrEmpty($RealSub)) { $RealSub = $resourceItem.subscriptionId }
             if (-not $SubLookup.ContainsKey($RealSub))
             {

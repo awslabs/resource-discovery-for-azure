@@ -1551,7 +1551,7 @@ function FinalizeOutputs
         catch
         {
             Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
-            Write-Log -Message ("The Inventory/Metrics/Consumption data files were still written to {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
+            Write-Log -Message ("The data files this run did write are still in {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
             throw
         }
     }
@@ -1868,8 +1868,9 @@ try
 catch
 {
     $_ | Format-List -Force
-    Write-Error ("Error Compressing Output File: {0}." -f $Global:ZipOutputFile)
-    Write-Error ("Please zip the output files manually.")
+    # Write-Log, not Write-Error: the script's 'silentlycontinue' preference hides Write-Error.
+    Write-Log -Message ("Error Compressing Output File: {0}: {1}" -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
+    Write-Log -Message ("Please zip the output files manually.") -Severity 'Error'
 }
 
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'

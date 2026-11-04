@@ -619,6 +619,7 @@ function CreateResourceJobs
         $ErrorLine[0] | Should -BeLike $Failure.Expect -Because 'the line carries the exception the write failed with'
         $R[0].ErrorLog | Should -BeLike ('*Inventory write FAILED*' + $Failure.Expect.Trim('*') + '*') -Because 'the error log the run keeps gets the same line'
         $Output | Should -Not -Match 'Resource Reporting Phase Done' -Because 'the reporting phase did not finish'
+        $Output | Should -Not -Match 'Inventory/Metrics/Consumption data files were still written' -Because 'the inventory was not written, so the run must not say it was'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         # 'No report zip was written' from this script's last line, or 'No report was written'
         # from the exit-code check a direct run may make just before it.
@@ -648,6 +649,17 @@ function CreateResourceJobs
             $R[$i].ErrorLog | Should -BeNullOrEmpty -Because "run $i logs no error"
             $R[$i].ResourceCount | Should -Be 3
         }
+    }
+
+    It 'shows why the zip failed and does not report it on a direct run' {
+        $R = @(Invoke-InventoryRun -Name 'zip-fail-direct' -Runs @('function Compress-Archive { throw ''stand-in: no space left on device'' }') -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'Error Compressing Output File: .*ResourcesReport_test\.zip: stand-in: no space left on device' -Because "the cause is shown, not hidden by 'silentlycontinue'. Output:`n$Output"
+        $R[0].ErrorLog | Should -BeLike '*Error Compressing Output File*stand-in: no space left on device*'
+        $Output | Should -Not -Match 'Reporting Data File'
+        $Output | Should -Match 'No report (zip )?was written'
+        $R[0].Files | Should -Contain 'Inventory_ResourcesReport_test.json' -Because 'only the zip step failed'
     }
 
     It 'reports the zip on a direct run that wrote it' {

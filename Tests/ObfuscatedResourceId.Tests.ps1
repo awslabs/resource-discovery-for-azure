@@ -87,13 +87,13 @@ Describe 'Get-ObfuscatedResourceId' {
     }
 
     It 'uses the inventory''s subscription and resource group tokens, and records them for an id outside the inventory' {
-        $Global:ObfuscationSubscriptionTokens['Demo Subscription'] = 'prod_' + [guid]::NewGuid().ToString()
+        $Global:ObfuscationSubscriptionTokens[$script:Sub] = 'prod_' + [guid]::NewGuid().ToString()
         $Global:ObfuscationResourceGroupTokens['rg-demo'] = 'prod_' + [guid]::NewGuid().ToString()
         $Id = "$script:Base/microsoft.compute/disks/disk-gone"
         $Masked = Get-ObfuscatedResourceId -ResourceId $Id
-        ($Masked -split '/')[2] | Should -BeExactly $Global:ObfuscationSubscriptionTokens['Demo Subscription']
+        ($Masked -split '/')[2] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$script:Sub]
         ($Masked -split '/')[4] | Should -BeExactly $Global:ObfuscationResourceGroupTokens['rg-demo']
-        $Global:ResourceSubscriptionDictionary[$Id] | Should -BeExactly $Global:ObfuscationSubscriptionTokens['Demo Subscription']
+        $Global:ResourceSubscriptionDictionary[$Id] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$script:Sub]
         $Global:ResourceResourceGroupDictionary[$Id] | Should -BeExactly $Global:ObfuscationResourceGroupTokens['rg-demo']
     }
 

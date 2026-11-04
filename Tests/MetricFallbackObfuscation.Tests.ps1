@@ -92,7 +92,7 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Row = @((Invoke-MetricMasking -Tmp (New-MetricSet -Id "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.web/sites/app-a")).Metrics)[0]
         ($Row.ID -split '/')[2] | Should -BeExactly ($Inventory -split '/')[2]
         ($Row.ID -split '/')[4] | Should -BeExactly ($Inventory -split '/')[4]
-        $Row.Subscription | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$script:SubName]
+        $Row.Subscription | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$script:Sub]
     }
 
     It 'gives a group named with the short d- rule the nonprod_ prefix, as the inventory does' {

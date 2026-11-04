@@ -156,3 +156,48 @@ Describe 'The dictionary build writes the name token New-ObfuscatedNameToken wri
         ($Written -replace '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', '<guid>') | Should -BeExactly $Expected
     }
 }
+
+Describe 'The run''s resource dictionaries ignore the case of an id' {
+    BeforeAll {
+        # Variables (ResourceInventory.ps1) builds the run's dictionaries; the
+        # -Obfuscate dictionary build of RunInventorySetup fills them.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Vars = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Variables' }, $false)
+        . ([scriptblock]::Create("function Invoke-RunVariables { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
+        $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
+        $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
+        . ([scriptblock]::Create("function Invoke-DictionaryBuild2 { `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$null; $($Build[0].Extent.Text) }"))
+        function GetLocalVersion { '0.0.0-test' }
+    }
+
+    AfterAll {
+        Remove-Variable -Scope Global -Name TagValueDictionary, FreeTextDictionary, ResourceCount, ResourceContainers, ReportName, Version, RawRepo, TableStyle -ErrorAction SilentlyContinue
+    }
+
+    BeforeEach {
+        Invoke-RunVariables
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
+        $Global:ObfuscationSubscriptionIndex = $null
+    }
+
+    It 'finds the id Resource Graph gave in lower case when consumption gives it in other casing' {
+        $Lower = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $Global:Resources = @([pscustomobject]@{ id = $Lower; name = 'vm-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' })
+        Invoke-DictionaryBuild2
+        $Mixed = "/subscriptions/$script:Sub/resourceGroups/RG-Demo/providers/Microsoft.Compute/virtualMachines/VM-A"
+        foreach ($D in @($Global:ResourceIdDictionary, $Global:ResourceNameDictionary, $Global:ResourceSubscriptionDictionary, $Global:ResourceResourceGroupDictionary))
+        {
+            $D.ContainsKey($Mixed) | Should -BeTrue
+        }
+        $Global:ResourceIdDictionary[$Mixed] | Should -BeExactly $Global:ResourceIdDictionary[$Lower]
+    }
+
+    It 'masks a resource listed twice in different casing once, with one id' {
+        $Global:Resources = @(
+            [pscustomobject]@{ id = "$script:Base/microsoft.compute/virtualmachines/vm-a"; name = 'vm-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+            [pscustomobject]@{ id = "$script:Base/Microsoft.Compute/virtualMachines/VM-A"; name = 'VM-A'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+        )
+        Invoke-DictionaryBuild2
+        @($Global:ResourceIdDictionary.Keys).Count | Should -Be 1
+    }
+}

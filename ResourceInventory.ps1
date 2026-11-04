@@ -62,10 +62,14 @@ function Variables
 
     if ($Obfuscate.IsPresent)
     {
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        # Keyed by real resource id, ignoring case: Azure ids are not case
+        # sensitive, Resource Graph gives them in lower case and consumption
+        # and metrics can give the same id in other casing. A case miss would
+        # give the same resource a second name token and break the join.
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         # Subscription display name -> token and resource group name -> token,
@@ -848,7 +852,7 @@ Function RunInventorySetup()
         $RgLookup = $Global:ObfuscationResourceGroupTokens
         # Ids are built once every resource has its name token, so a child's id
         # can use its parent's token (Get-ObfuscatedResourceId).
-        $IdsToMask = [System.Collections.Generic.HashSet[string]]::new()
+        $IdsToMask = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {

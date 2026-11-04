@@ -310,7 +310,9 @@ Describe 'A run seeded with an obfuscation dictionary' {
         $Masked | Should -Not -BeExactly $Seeded
         $Masked | Should -Not -Match 'srv-a'
         Test-ObfuscatedIdShape -RealId $Db -MaskedId $Masked | Should -BeTrue
-        ($Masked -split '/')[2] | Should -BeExactly $SubTok -Because 'the seed''s subscription token is still used'
+        # The subscription token comes from good seeded ids only (none here),
+        # never from the name map; the group token still comes from the map.
+        ($Masked -split '/')[2] | Should -Not -BeExactly $SubTok -Because 'the name map is not read for subscription tokens'
         ($Masked -split '/')[4] | Should -BeExactly $RgTok
         $Global:ResourceSubscriptionDictionary[$Db] | Should -BeExactly ($Masked -split '/')[2]
         $Global:ResourceResourceGroupDictionary[$Db] | Should -BeExactly ($Masked -split '/')[4]

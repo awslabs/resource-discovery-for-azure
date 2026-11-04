@@ -26,8 +26,9 @@ BeforeAll {
     . ([scriptblock]::Create("function Invoke-RunVariables { `$Obfuscate = [switch]`$true; $($Vars.Body.Extent.Text.Substring(1, $Vars.Body.Extent.Text.Length - 2)) }"))
     $Setup = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true)
     $Build = @($Setup.Body.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate.IsPresent' -and $N.Extent.Text -match 'foreach \(\$resourceItem in \$(Global:Resources|TokenLoopRows)\)' }, $true))
-    . ([scriptblock]::Create("function Invoke-DictionaryBuild { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { param(`$Message, `$Severity) if (`$Severity -eq 'Warning') { `$script:BuildWarnings.Add([string]`$Message) } }; $($Build[0].Extent.Text) }"))
+    . ([scriptblock]::Create("function Invoke-DictionaryBuild { param(`$Seed) `$Obfuscate = [switch]`$true; `$ObfuscationDictionary = `$Seed; function Write-Log { param(`$Message, `$Severity) `$script:BuildLog.Add([string]`$Message); if (`$Severity -eq 'Warning') { `$script:BuildWarnings.Add([string]`$Message) } }; $($Build[0].Extent.Text) }"))
     $script:BuildWarnings = [System.Collections.Generic.List[string]]::new()
+    $script:BuildLog = [System.Collections.Generic.List[string]]::new()
     $MetAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'Extension/Metrics.ps1'), [ref]$null, [ref]$null)
     $Step = @($MetAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item1.Extent.Text -eq '$Obfuscate' -and $N.Clauses[0].Item2.Extent.Text -match '^\{\s*foreach \(\$metric in \$Tmp\.Metrics\)' }, $true))
     . ([scriptblock]::Create("function Invoke-MetricMasking { param(`$Tmp) `$Obfuscate = `$true; `$ResourceIdDictionary = `$Global:ResourceIdDictionary; `$ResourceNameDictionary = `$Global:ResourceNameDictionary; `$ResourceSubDictionary = `$Global:ResourceSubscriptionDictionary; `$ResourceGroupDictionary = `$Global:ResourceResourceGroupDictionary; $($Step[0].Extent.Text); return `$Tmp }"))
@@ -119,7 +120,10 @@ Describe 'Two subscriptions with one display name, in a seeded run' {
                 [pscustomobject]@{ id = $DiskA; name = 'disk-a'; subscriptionId = $script:SubA; resourceGroup = 'rg-shared' }
                 [pscustomobject]@{ id = $DiskB; name = 'disk-b'; subscriptionId = $script:SubB; resourceGroup = 'rg-shared' }
             )
+            $script:BuildLog.Clear()
             Invoke-DictionaryBuild -Seed $Seed
+            ($script:BuildLog -join "`n") | Should -Match 'Obfuscation dictionary: 2 subscription token\(s\) kept from the seeded ids' -Because 'the log counts the tokens the seeded ids gave'
+            ($script:BuildLog -join "`n") | Should -Not -Match '\d+ subscription, ' -Because 'the preload line no longer counts subscriptions before the check'
             ($Global:ResourceIdDictionary[$DiskA] -split '/')[2] | Should -BeExactly $TokA
             ($Global:ResourceIdDictionary[$DiskB] -split '/')[2] | Should -BeExactly $TokB
         }

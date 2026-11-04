@@ -1028,7 +1028,7 @@ Function RunInventorySetup()
                 }
             }
 
-            Write-Log -Message ("Obfuscation dictionary seeded from '{0}': {1} id, {2} name, {3} subscription, {4} resource-group, {5} tag, {6} free-text mappings preloaded; matching real values will reuse their existing tokens." -f $ObfuscationDictionary, @($ResourceIdDictionary.Keys).Count, @($ResourceNameDictionary.Keys).Count, @($SubLookup.Keys).Count, @($RgLookup.Keys).Count, @($Global:TagValueDictionary.Keys).Count, @($Global:FreeTextDictionary.Keys).Count) -Severity 'Info'
+            Write-Log -Message ("Obfuscation dictionary seeded from '{0}': {1} id, {2} name, {3} resource-group, {4} tag, {5} free-text mappings preloaded; matching real values will reuse their existing tokens (subscription tokens come from the seeded ids, checked below)." -f $ObfuscationDictionary, @($ResourceIdDictionary.Keys).Count, @($ResourceNameDictionary.Keys).Count, @($RgLookup.Keys).Count, @($Global:TagValueDictionary.Keys).Count, @($Global:FreeTextDictionary.Keys).Count) -Severity 'Info'
             # The parsed seed file is not needed past here: free it before the
             # token loop (a recovery run's seed can hold every id of a tenant).
             $SeedDictionary = $null
@@ -1058,7 +1058,6 @@ Function RunInventorySetup()
             # that is not of its slot's form (the metric step's old sub_/rg_
             # tokens, say) is not kept, so no id is built from it again.
             $SeedGuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-            foreach ($K in @($SubLookup.Keys)) { if ([string]$SubLookup[$K] -cnotmatch ('^(prod|nonprod)_' + $SeedGuid + '$')) { [void]$SubLookup.Remove($K) } }
             foreach ($K in @($RgLookup.Keys)) { if ([string]$RgLookup[$K] -cnotmatch ('^(prod|nonprod)_(mc_)?' + $SeedGuid + '$')) { [void]$RgLookup.Remove($K) } }
             foreach ($K in @($ResourceNameDictionary.Keys)) { if ([string]$ResourceNameDictionary[$K] -cnotmatch ('^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $SeedGuid + '$')) { [void]$ResourceNameDictionary.Remove($K) } }
             $SeedSlotTokens = @{}
@@ -1150,12 +1149,6 @@ Function RunInventorySetup()
                     }
                 }
             }
-            # A subscription token two subscriptions shared is given to neither.
-            foreach ($SharedToken in @($SeedSubTokenIds.Keys))
-            {
-                if ($SeedSubTokenIds[$SharedToken].Count -le 1) { continue }
-                foreach ($K in @($SubLookup.Keys)) { if ([string]$SubLookup[$K] -ceq $SharedToken) { [void]$SubLookup.Remove($K) } }
-            }
             # A slot with two tokens starts again with no token at all.
             foreach ($SlotKey in @($SeedSlotTokens.Keys))
             {
@@ -1163,11 +1156,11 @@ Function RunInventorySetup()
                 $Kind, $Real = $SlotKey.Split('|', 2)
                 switch ($Kind)
                 {
-                    'sub' { foreach ($K in @($SubLookup.Keys)) { if ($K -ieq $Real) { [void]$SubLookup.Remove($K) } } }
                     'rg' { foreach ($K in @($RgLookup.Keys)) { if ($K -ieq $Real) { [void]$RgLookup.Remove($K) } } }
                     'name' { [void]$ResourceNameDictionary.Remove($Real) }
                 }
             }
+            Write-Log -Message ("Obfuscation dictionary: {0} subscription token(s) kept from the seeded ids." -f @($SubLookup.Keys).Count) -Severity 'Info'
             if ($SeedDropped -gt 0)
             {
                 Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, or a subscription token two subscriptions share, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'

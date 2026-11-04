@@ -178,6 +178,9 @@ Describe 'Masking the collector rows under -Obfuscate' {
         $Row2 = @(Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan')[0]
         $Row2.ID | Should -BeExactly $Row1.ID
         Assert-FieldsMatchPath $Row2
+        $Global:ResourceNameDictionary[$StandIn] | Should -BeExactly $Row2.Name -Because 'the dictionary file can reverse the reused id''s name'
+        $Global:ResourceSubscriptionDictionary[$StandIn] | Should -BeExactly $Row2.Subscription
+        $Global:ResourceResourceGroupDictionary[$StandIn] | Should -BeExactly $Row2.ResourceGroup
     }
 
     It 'gives a row with no id, subscription or group still a full masked path' {

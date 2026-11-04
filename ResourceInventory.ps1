@@ -372,6 +372,11 @@ function New-ObfuscatedRowIdWithoutId
     }
     $ResourceIdDictionary[$StandIn] = $Masked
     $Parts = $Masked.Split('/')
+    # The id's own tokens, recorded as Get-ObfuscatedResourceId records them,
+    # also when a seeded id was kept, so the dictionary file reverses them.
+    $ResourceNameDictionary[$StandIn] = $Parts[-1]
+    $ResourceSubscriptionDictionary[$StandIn] = $Parts[2]
+    $ResourceResourceGroupDictionary[$StandIn] = $Parts[4]
     return [pscustomobject]@{
         Id            = $Masked
         Name          = $Parts[-1]

@@ -1481,15 +1481,18 @@ function ExecuteInventoryProcessing()
     # handlers in the shared Azure session when they return, so the collector that made the last Azure
     # call piped into a filter (the VM or scale set size lookup) stays referenced, and with it the rows
     # it was given. The next Az cmdlet replaces those handlers; this read is that call, made from a
-    # scope that holds no rows. -ErrorAction Stop sends any failure to the catch, so it is logged and
-    # the run goes on.
+    # scope that holds no rows. The size lookup also adds a provider-registration handler to the shared
+    # client factory, which keeps the same cmdlet referenced, and the read does not always remove it, so
+    # it is removed by type; the next resource-manager cmdlet adds its own again. -ErrorAction Stop
+    # sends any failure to the catch, so it is logged and the run goes on.
     try
     {
         $null = Get-AzContext -ErrorAction Stop
+        [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.ClientFactory.RemoveHandler([Microsoft.Azure.Commands.Common.Authentication.Models.RPRegistrationDelegatingHandler])
     }
     catch
     {
-        Write-Log -Message ('Azure session read after the release failed: {0}. The collector data may stay in memory until the next Azure call.' -f $_.Exception.Message) -NoConsole -ToDebugLog
+        Write-Log -Message ('Azure session read or handler removal after the release failed: {0}. The collector data may stay in memory until the next Azure call.' -f $_.Exception.Message) -NoConsole -ToDebugLog
     }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()

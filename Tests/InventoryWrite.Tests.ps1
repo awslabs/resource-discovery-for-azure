@@ -799,6 +799,119 @@ $Rounds = foreach ($Round in 1..3)
                 $Round.HeldAfterBlock | Should -BeFalse -Because "round $($Round.Round): the session read after the release frees them"
             }
         }
+
+        It 'removes the provider-registration handler right after the read, in the same guarded block' {
+            $script:ReadTryBlocks.Count | Should -Be 1 -Because 'one guarded Azure session read follows the release'
+            $Body = $script:ReadTryBlocks[0].Body.Extent.Text
+            $Read = $script:ReadPattern.Match($Body)
+            $Remove = [regex]::new('ClientFactory\.RemoveHandler\(\[Microsoft\.Azure\.Commands\.Common\.Authentication\.Models\.RPRegistrationDelegatingHandler\]\)').Match($Body)
+
+            $Read.Success | Should -BeTrue
+            $Remove.Success | Should -BeTrue -Because 'the read does not always remove the handler the size lookup added, and that handler keeps the collector''s rows'
+            $Remove.Index | Should -BeGreaterThan $Read.Index -Because 'a failed read goes to the catch before the removal, so it is logged once'
+        }
+
+        It 'frees the rows a provider-registration handler kept when the read leaves that handler in place' -Skip:(-not $script:HasAzAccounts -or -not $script:CanIsolateAzProfile) {
+            $Tries = $script:ReadTryBlocks
+            $Tries.Count | Should -Be 1 -Because 'one guarded Azure session read follows the release'
+
+            $CaseDir = Join-Path $script:TmpRoot ('rp-handler_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $ChildHome = Join-Path $CaseDir 'home'
+            New-Item -ItemType Directory -Path (Join-Path $ChildHome '.Azure') -Force | Out-Null
+            # Az usage data collection off, so the child sends nothing.
+            Set-Content -LiteralPath (Join-Path $ChildHome '.Azure/AzurePSDataCollectionProfile.json') -Value '{"enableAzureDataCollection":false}' -Encoding ascii
+            $BlockFile = Join-Path $CaseDir 'block.ps1'
+            Set-Content -LiteralPath $BlockFile -Value $Tries[0].Extent.Text -Encoding utf8
+            $ResultFile = Join-Path $CaseDir 'result.json'
+
+            # Runs in its own process: a fresh Azure session with no context, autosave off.
+            # Get-AzContext is replaced by a function that does nothing, which is what the read did to
+            # this handler on some live runs. The handler is built with a closure over the rows, as the
+            # one the size lookup adds closes over that cmdlet and, through it, the collector's rows.
+            $Child = @'
+param([string]$BlockFile, [string]$ResultFile)
+$ErrorActionPreference = 'silentlycontinue'
+Import-Module -Name Az.Accounts -ErrorAction Stop -WarningAction SilentlyContinue
+$null = Disable-AzContextAutosave -Scope Process
+$script:Logged = 0
+function Write-Log { param($Message, [switch]$NoConsole, [switch]$ToDebugLog) $script:Logged++ }
+$Block = [scriptblock]::Create([System.IO.File]::ReadAllText($BlockFile))
+$Settle = { [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect() }
+$Factory = [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.ClientFactory
+$HandlerType = [Microsoft.Azure.Commands.Common.Authentication.Models.RPRegistrationDelegatingHandler]
+$FuncType = $HandlerType.GetConstructors()[0].GetParameters()[0].ParameterType
+function Get-AzContext { [CmdletBinding()] param() }
+function New-HandlerRound
+{
+    $List = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt 2000; $i++)
+    {
+        $List.Add([pscustomobject]@{ Id = $i; Blob = ('{0:d6}' -f $i).PadRight(20000, [char](65 + ($i % 26))) })
+    }
+    $Rows = $List.ToArray()
+    $List = $null
+    $Make = { $null = $Rows.Count; $null }.GetNewClosure()
+    $Factory.AddHandler($HandlerType::new(($Make -as $FuncType), [System.Action[string]] { param($Message) }))
+    [WeakReference]::new($Rows[0])
+}
+$Factory.RemoveHandler($HandlerType)
+$Rounds = foreach ($Round in 1..3)
+{
+    $Weak = New-HandlerRound
+    & $Settle
+    $HeldBefore = $Weak.IsAlive
+    $null = Get-Date
+    & $Settle
+    $HeldAfterNonAz = $Weak.IsAlive
+    & $Block
+    $Watch = [System.Diagnostics.Stopwatch]::StartNew()
+    & $Settle
+    while ($Weak.IsAlive -and $Watch.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 250; & $Settle }
+    [pscustomobject]@{ Round = $Round; HeldBefore = $HeldBefore; HeldAfterNonAz = $HeldAfterNonAz; HeldAfterBlock = $Weak.IsAlive; HandlersAfterBlock = @($Factory.GetCustomHandlers() | Where-Object { $_ -is $HandlerType }).Count }
+}
+[pscustomobject]@{ Logged = $script:Logged; Rounds = @($Rounds) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultFile
+'@
+            $ChildFile = Join-Path $CaseDir 'child.ps1'
+            Set-Content -LiteralPath $ChildFile -Value $Child -Encoding utf8
+
+            # A local port with nothing listening, so any web request the child makes fails at once.
+            $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $Listener.Start()
+            $ClosedPort = $Listener.LocalEndpoint.Port
+            $Listener.Stop()
+            $AzModule = Get-Module -ListAvailable -Name Az.Accounts | Sort-Object Version -Descending | Select-Object -First 1
+            $ModuleRoot = Split-Path (Split-Path $AzModule.ModuleBase -Parent) -Parent
+            $ChildEnv = @{
+                HOME         = $ChildHome
+                USERPROFILE  = $ChildHome
+                PSModulePath = ($ModuleRoot, (Join-Path $PSHOME 'Modules')) -join [System.IO.Path]::PathSeparator
+                HTTPS_PROXY  = ('http://127.0.0.1:{0}' -f $ClosedPort)
+                HTTP_PROXY   = ('http://127.0.0.1:{0}' -f $ClosedPort)
+            }
+            $SavedEnv = @{}
+            foreach ($Key in $ChildEnv.Keys) { $SavedEnv[$Key] = [Environment]::GetEnvironmentVariable($Key) }
+            try
+            {
+                foreach ($Key in $ChildEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $ChildEnv[$Key]) }
+                $Output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $ChildFile -BlockFile $BlockFile -ResultFile $ResultFile 2>&1 | Out-String
+            }
+            finally
+            {
+                foreach ($Key in $SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($Key, $SavedEnv[$Key]) }
+            }
+            Test-Path -LiteralPath $ResultFile | Should -BeTrue -Because "the child process writes its result. Output:`n$Output"
+            $Result = Get-Content -LiteralPath $ResultFile -Raw | ConvertFrom-Json
+
+            $Result.Logged | Should -Be 0 -Because 'the read and the removal both succeed, so nothing is logged'
+            @($Result.Rounds).Count | Should -Be 3
+            foreach ($Round in $Result.Rounds)
+            {
+                $Round.HeldBefore | Should -BeTrue -Because "round $($Round.Round): the handler keeps the rows, or this test proves nothing"
+                $Round.HeldAfterNonAz | Should -BeTrue -Because "round $($Round.Round): a statement that does not remove the handler does not free them"
+                $Round.HeldAfterBlock | Should -BeFalse -Because "round $($Round.Round): the block removes the handler even when the read leaves it in place"
+                $Round.HandlersAfterBlock | Should -Be 0 -Because "round $($Round.Round): no provider-registration handler is left in the client factory"
+            }
+        }
     }
 }
 

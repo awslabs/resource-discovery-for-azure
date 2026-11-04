@@ -990,6 +990,13 @@ Function RunInventorySetup()
         #   then consistent, so the next seeded run keeps every id: no repeat.
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
+            # The seed's maps first: a subscription, group or name token
+            # that is not of its slot's form (the metric step's old sub_/rg_
+            # tokens, say) is not kept, so no id is built from it again.
+            $SeedGuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+            foreach ($K in @($SubLookup.Keys)) { if ([string]$SubLookup[$K] -cnotmatch ('^(prod|nonprod)_' + $SeedGuid + '$')) { [void]$SubLookup.Remove($K) } }
+            foreach ($K in @($RgLookup.Keys)) { if ([string]$RgLookup[$K] -cnotmatch ('^(prod|nonprod)_(mc_)?' + $SeedGuid + '$')) { [void]$RgLookup.Remove($K) } }
+            foreach ($K in @($ResourceNameDictionary.Keys)) { if ([string]$ResourceNameDictionary[$K] -cnotmatch ('^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $SeedGuid + '$')) { [void]$ResourceNameDictionary.Remove($K) } }
             $SeedSlotTokens = @{}
             $SeedSlotsOf = @{}
             $SeedDropped = 0
@@ -997,9 +1004,18 @@ Function RunInventorySetup()
             {
                 $SeedMasked = $ResourceIdDictionary[$SeedRealId]
                 # A real id that is not an ARM path has one flat token (parked
-                # with the owner); its seeded token is kept as it is, so it
-                # stays the same across seeded runs.
-                if ($SeedRealId -notmatch '(?i)^/(subscriptions|providers)/[^/]') { continue }
+                # with the owner); a seeded flat token of that form is kept as
+                # it is, so it stays the same across seeded runs. Any other
+                # value (empty, plain text) is not kept.
+                if ($SeedRealId -notmatch '(?i)^/(subscriptions|providers)/[^/]')
+                {
+                    if ([string]$SeedMasked -cnotmatch ('^(prod|nonprod)_' + $SeedGuid + '$'))
+                    {
+                        [void]$ResourceIdDictionary.Remove($SeedRealId)
+                        $SeedDropped++
+                    }
+                    continue
+                }
                 if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked))
                 {
                     [void]$ResourceIdDictionary.Remove($SeedRealId)

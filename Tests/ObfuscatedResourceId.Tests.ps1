@@ -406,6 +406,34 @@ Describe 'The seed is checked when it is read' {
         $Global:ResourceIdDictionary['not-an-arm-id'] | Should -BeExactly $Flat
     }
 
+    It 'does not keep a seeded flat value that is not a flat token (plain text)' {
+        # (An empty key is not valid seed JSON: the pre-flight refuses the file.)
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ 'not-a-token' = 'not-an-arm-id' } } -Rows @()
+        $Global:ResourceIdDictionary.ContainsKey('not-an-arm-id') | Should -BeFalse
+    }
+
+    It 'masks a resource from an old metric-fallback dictionary to the contract shape, and the next two seeded runs keep it' {
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
+        $G = { [guid]::NewGuid().ToString() }
+        $OldSub = 'prod_sub_' + (& $G); $OldRg = 'prod_rg_' + (& $G); $OldName = 'prod_' + (& $G)
+        $Seed = @{
+            ResourceIdMap       = @{ "/subscriptions/$OldSub/resourcegroups/$OldRg/providers/microsoft.compute/virtualmachines/$OldName" = $Vm }
+            ResourceNameMap     = @{ $OldName = $Vm }
+            SubscriptionNameMap = @{ $OldSub = 'Demo Subscription' }
+            ResourceGroupMap    = @{ $OldRg = $Vm }
+        }
+        $First = $null
+        foreach ($Run in 1, 2, 3)
+        {
+            Invoke-SeededRun -SeedMaps $Seed -Rows @(New-Res $Vm)
+            $Id = $Global:ResourceIdDictionary[$Vm]
+            Test-ObfuscatedIdShape -RealId $Vm -MaskedId $Id | Should -BeTrue -Because "run $Run writes the contract shape"
+            $Id | Should -Not -Match '_sub_|_rg_'
+            if ($Run -eq 1) { $First = $Id } else { $Id | Should -BeExactly $First -Because "run $Run keeps run 1's id" }
+            $Seed = Get-RunDictionaryMaps
+        }
+    }
+
     It 'records no ''$system'' name token for a seeded Service Bus id that keeps it' {
         $Sys = "$script:Base/microsoft.servicebus/namespaces/`$system"
         Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ "/subscriptions/$(New-Tok)/resourcegroups/$(New-Tok)/providers/microsoft.servicebus/namespaces/`$system" = $Sys } } -Rows @()

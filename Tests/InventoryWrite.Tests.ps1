@@ -33,8 +33,11 @@
 # =============================================================================
 
 BeforeDiscovery {
-    # The behaviour test for the Azure session read needs the real Az.Accounts module.
+    # The behaviour test for the Azure session read needs the real Az.Accounts module. It keeps the
+    # child process away from the user's Azure profile by pointing HOME at a temporary folder, which
+    # Az.Accounts follows on Linux and macOS only, so the test is skipped on Windows.
     $script:HasAzAccounts = [bool](Get-Module -ListAvailable -Name Az.Accounts)
+    $script:CanIsolateAzProfile = -not $IsWindows
 }
 
 BeforeAll {
@@ -803,7 +806,13 @@ function CreateResourceJobs { throw 'collector step failed' }
             $script:BillingStart = $Billing.Index
 
             $script:FirstCollect = $script:ScriptText.IndexOf('[System.GC]::Collect()', $script:ReleaseEnd, [System.StringComparison]::Ordinal)
-            $script:ReadPattern = [regex]::new('(?m)^[ \t]*\$null = Get-AzContext -ErrorAction SilentlyContinue[ \t]*\r?$')
+            $script:ReadPattern = [regex]::new('(?m)^[ \t]*\$null = Get-AzContext -ErrorAction Stop[ \t]*\r?$')
+            # The shipped try block around the read, lifted out of ResourceInventory.ps1.
+            $script:ReadTryBlocks = @($script:ScriptAst.FindAll({
+                        param($Node)
+                        $Node -is [System.Management.Automation.Language.TryStatementAst] -and
+                        $Node.Extent.StartOffset -gt $script:ReleaseEnd -and $Node.Extent.EndOffset -lt $script:BillingStart
+                    }, $true))
         }
 
         It 'reads the Azure context after the release and before the release collects and before the billing step' {
@@ -821,13 +830,39 @@ function CreateResourceJobs { throw 'collector step failed' }
             $script:ReadPattern.Matches($Between).Count | Should -Be 1
         }
 
-        It 'frees the rows a piped Az call in a collector kept, where a call that is not an Az cmdlet does not' -Skip:(-not $script:HasAzAccounts) {
-            # The shipped try block, lifted out of ResourceInventory.ps1.
-            $Tries = @($script:ScriptAst.FindAll({
-                        param($Node)
-                        $Node -is [System.Management.Automation.Language.TryStatementAst] -and
-                        $Node.Extent.StartOffset -gt $script:ReleaseEnd -and $Node.Extent.EndOffset -lt $script:BillingStart
-                    }, $true))
+        # The run's own preference is 'silentlycontinue'; a failed read must still reach the
+        # debug log and must never stop the run.
+        It 'logs a <Kind> of the read to the debug log only and goes on' -ForEach @(
+            @{ Kind = 'non-terminating error'; Stub = 'function Get-AzContext { [CmdletBinding()] param() Write-Error ''context store unreadable'' }'; Expect = '*context store unreadable*' }
+            @{ Kind = 'terminating error'; Stub = 'function Get-AzContext { [CmdletBinding()] param() throw ''context store unreadable'' }'; Expect = '*context store unreadable*' }
+            @{ Kind = 'missing cmdlet'; Stub = ''; Expect = '*Get-AzContext*' }
+        ) {
+            $script:ReadTryBlocks.Count | Should -Be 1 -Because 'one guarded Azure session read follows the release'
+            $Block = $script:ReadTryBlocks[0].Extent.Text
+
+            $Result = & {
+                $ErrorActionPreference = 'silentlycontinue'
+                $Logged = [System.Collections.Generic.List[object]]::new()
+                # Stand-in for the script's Write-Log (Functions/Common.Functions.ps1), defined from text
+                # like the other stand-ins in this file.
+                . ([scriptblock]::Create('function Write-Log { param($Message, $Severity, [switch]$NoConsole, [switch]$ToDebugLog) $Logged.Add([pscustomobject]@{ Message = $Message; Severity = $Severity; NoConsole = [bool]$NoConsole; ToDebugLog = [bool]$ToDebugLog }) }'))
+                # The missing-cmdlet case is stood in by the error PowerShell raises for it, so a
+                # real Az.Accounts on the machine is never loaded.
+                if ($Stub) { . ([scriptblock]::Create($Stub)) } else { function Get-AzContext { throw [System.Management.Automation.CommandNotFoundException]::new("The term 'Get-AzContext' is not recognized as a name of a cmdlet.") } }
+                . ([scriptblock]::Create($Block))
+                [pscustomobject]@{ Logged = @($Logged); After = 'went on' }
+            }
+
+            $Result.After | Should -Be 'went on' -Because 'the read can never stop the run'
+            @($Result.Logged).Count | Should -Be 1 -Because 'one debug-log line per failed read'
+            $Result.Logged[0].Message | Should -BeLike $Expect
+            $Result.Logged[0].ToDebugLog | Should -BeTrue
+            $Result.Logged[0].NoConsole | Should -BeTrue -Because 'a failed read is not shown on the console'
+            $Result.Logged[0].Severity | Should -BeNullOrEmpty
+        }
+
+        It 'frees the rows a piped Az call in a collector kept, where a call that is not an Az cmdlet does not' -Skip:(-not $script:HasAzAccounts -or -not $script:CanIsolateAzProfile) {
+            $Tries = $script:ReadTryBlocks
             $Tries.Count | Should -Be 1 -Because 'one guarded Azure session read follows the release'
 
             $CaseDir = Join-Path $script:TmpRoot ('session-read_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -841,7 +876,10 @@ function CreateResourceJobs { throw 'collector step failed' }
 
             # Runs in its own process: a fresh Azure session with no context, autosave off.
             # The fake collector keeps the real four-parameter contract and pipes its Az call
-            # into a script-block filter, as the VM size lookup does.
+            # into a script-block filter, as the VM and scale set size lookups do. It pipes
+            # Get-AzContext rather than Get-AzComputeResourceSku: the hold comes from any Az
+            # cmdlet's handlers plus the downstream filter, and Get-AzContext needs no extra
+            # module and no sign-in.
             $Child = @'
 param([string]$BlockFile, [string]$ResultFile)
 $ErrorActionPreference = 'silentlycontinue'

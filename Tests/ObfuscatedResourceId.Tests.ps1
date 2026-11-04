@@ -385,12 +385,21 @@ Describe 'The seed is checked when it is read' {
         $Global:ResourceIdDictionary.ContainsKey($Gone) | Should -BeFalse -Because 'consumption or metrics that meet it mask it again'
     }
 
-    It 'warns when the seed gives one resource two masked ids by case, before the token loop' {
+    It 'warns when the seed gives one resource two masked ids by case, and keeps the one of the right shape' {
         $script:SeedWarnings.Clear()
         $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-a"
         $M = { "/subscriptions/$(New-Tok)/resourcegroups/$(New-Tok)/providers/microsoft.compute/virtualmachines/$(New-Tok)" }
         Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ (& $M) = $Vm; (& $M) = $Vm.ToUpperInvariant() } } -Rows @()
-        ($script:SeedWarnings -join "`n") | Should -Match 'gives 1 resource\(s\) two masked ids by case.*collect the gap bundle on this build'
+        ($script:SeedWarnings -join "`n") | Should -Match 'gives 1 resource\(s\) two masked ids by case.*only one can be kept.*collect the gap bundle on this build'
+        # One good and one flat variant, in both orders: the good one is kept.
+        foreach ($Order in 1, 2)
+        {
+            $Good = & $M; $Flat = New-Tok
+            $Map = [ordered]@{}
+            if ($Order -eq 1) { $Map[$Good] = $Vm; $Map[$Flat] = $Vm.ToUpperInvariant() } else { $Map[$Flat] = $Vm.ToUpperInvariant(); $Map[$Good] = $Vm }
+            Invoke-SeededRun -SeedMaps @{ ResourceIdMap = $Map } -Rows @()
+            $Global:ResourceIdDictionary[$Vm] | Should -BeExactly $Good -Because "order $Order"
+        }
     }
 
     It 'keeps a good seeded id for a resource this run does not see' {

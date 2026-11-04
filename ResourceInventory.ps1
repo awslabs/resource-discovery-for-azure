@@ -945,12 +945,17 @@ Function RunInventorySetup()
                 $SeedCaseTwice = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                 foreach ($SeedProp in $SeedDictionary.ResourceIdMap.PSObject.Properties)
                 {
-                    if ($ResourceIdDictionary.ContainsKey($SeedProp.Value) -and $ResourceIdDictionary[$SeedProp.Value] -cne $SeedProp.Name) { [void]$SeedCaseTwice.Add([string]$SeedProp.Value) }
+                    if ($ResourceIdDictionary.ContainsKey($SeedProp.Value) -and $ResourceIdDictionary[$SeedProp.Value] -cne $SeedProp.Name)
+                    {
+                        [void]$SeedCaseTwice.Add([string]$SeedProp.Value)
+                        # Of two casings, keep one of the right shape if there is one.
+                        if ((Test-ObfuscatedIdShape -RealId $SeedProp.Value -MaskedId $ResourceIdDictionary[$SeedProp.Value]) -and -not (Test-ObfuscatedIdShape -RealId $SeedProp.Value -MaskedId $SeedProp.Name)) { continue }
+                    }
                     $ResourceIdDictionary[$SeedProp.Value] = $SeedProp.Name
                 }
                 if ($SeedCaseTwice.Count -gt 0)
                 {
-                    Write-Log -Message ("Obfuscation dictionary: it gives {0} resource(s) two masked ids by case (an older build's file); one is kept for each. A recovery merge (Merge-RecoveryData) of a later bundle with this run's could then give such a resource two ids: collect the gap bundle on this build, then run the recovery with that bundle's ObfuscationDictionary_*.json." -f $SeedCaseTwice.Count) -Severity 'Warning'
+                    Write-Log -Message ("Obfuscation dictionary: it gives {0} resource(s) two masked ids by case (an older build's file); only one can be kept for each. A recovery merge (Merge-RecoveryData) of a later bundle with this run's could then give such a resource two ids: collect the gap bundle on this build, then run the recovery with that bundle's ObfuscationDictionary_*.json." -f $SeedCaseTwice.Count) -Severity 'Warning'
                 }
             }
             if ($null -ne $SeedDictionary.ResourceNameMap)

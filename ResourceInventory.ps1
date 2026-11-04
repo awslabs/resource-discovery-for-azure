@@ -59,8 +59,9 @@ function Variables
     $Global:ObfuscationSubscriptionTokens = $null
     $Global:ObfuscationResourceGroupTokens = $null
     $Global:ObfuscationSubscriptionIndex = $null
-    # New-ObfuscatedRowIdWithoutId's count of no-id rows, per run.
+    # New-ObfuscatedRowIdWithoutId's count of no-id rows and name index, per run.
     $script:RdaNoIdRowsSeen = $null
+    $script:RdaNoIdNameIndex = $null
 
     if ($Obfuscate.IsPresent)
     {
@@ -375,13 +376,30 @@ function New-ObfuscatedRowIdWithoutId
     if (-not [string]::IsNullOrEmpty($Subscription))
     {
         $SubSegment = $Subscription
-        $NameIds = @($Global:Subscriptions | Where-Object { $null -ne $_ -and [string]$_.name -eq $Subscription -and -not [string]::IsNullOrEmpty([string]$_.id) } | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+        # Display name -> ids in list order, built once per subscription list.
+        if ($null -eq $script:RdaNoIdNameIndex -or -not [object]::ReferenceEquals($script:RdaNoIdNameIndex.Source, $Global:Subscriptions))
+        {
+            $ByName = @{}
+            foreach ($Sub in @($Global:Subscriptions))
+            {
+                if ($null -eq $Sub -or [string]::IsNullOrEmpty([string]$Sub.id) -or [string]::IsNullOrEmpty([string]$Sub.name)) { continue }
+                if (-not $ByName.ContainsKey([string]$Sub.name)) { $ByName[[string]$Sub.name] = [System.Collections.Generic.List[string]]::new() }
+                if (-not $ByName[[string]$Sub.name].Contains([string]$Sub.id)) { $ByName[[string]$Sub.name].Add([string]$Sub.id) }
+            }
+            $script:RdaNoIdNameIndex = @{ Source = $Global:Subscriptions; ByName = $ByName; Warned = @{} }
+        }
+        $NameIds = @(if ($script:RdaNoIdNameIndex.ByName.ContainsKey($Subscription)) { $script:RdaNoIdNameIndex.ByName[$Subscription] })
         if ($NameIds.Count -ge 1) { $SubSegment = $NameIds[0] }
         # The row names its subscription only by display name: with two
-        # subscriptions of that name it is filed under the first one.
-        if ($NameIds.Count -gt 1 -and (Get-Command -Name Write-Log -ErrorAction SilentlyContinue))
+        # subscriptions of that name it is filed under the first one (said
+        # once per name).
+        if ($NameIds.Count -gt 1 -and -not $script:RdaNoIdNameIndex.Warned.ContainsKey($Subscription))
         {
-            Write-Log -Message ("A collector row with no id names subscription '{0}', which {1} subscriptions share; its masked id is filed under the first of them." -f $Subscription, $NameIds.Count) -Severity 'Warning'
+            $script:RdaNoIdNameIndex.Warned[$Subscription] = $true
+            if (Get-Command -Name Write-Log -ErrorAction SilentlyContinue)
+            {
+                Write-Log -Message ("A collector row with no id names subscription '{0}', which {1} subscriptions share; its masked id is filed under the first of them." -f $Subscription, $NameIds.Count) -Severity 'Warning'
+            }
         }
     }
     $RgSegment = if ([string]::IsNullOrEmpty($ResourceGroup)) { '~norg' } else { $ResourceGroup }
@@ -1148,6 +1166,14 @@ Function RunInventorySetup()
                     }
                 }
             }
+            # A name-map token that the seeded ids give to another subscription
+            # (a renamed subscription whose old name another one has now) is
+            # not given by name: the ids say whose token it is.
+            foreach ($K in @($SubLookup.Keys))
+            {
+                $T = [string]$SubLookup[$K]
+                if ($SeedSubTokenIds.ContainsKey($T) -and -not $SeedSubTokenIds[$T].Contains([string]$K)) { [void]$SubLookup.Remove($K) }
+            }
             # A subscription token two subscriptions shared is given to neither.
             foreach ($SharedToken in @($SeedSubTokenIds.Keys))
             {
@@ -1168,7 +1194,7 @@ Function RunInventorySetup()
             }
             if ($SeedDropped -gt 0)
             {
-                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
+                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, or a subscription token two subscriptions share, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
             }
             # The slot index is only for this check: free it before the token loop.
             $SeedSlotsOf = $null

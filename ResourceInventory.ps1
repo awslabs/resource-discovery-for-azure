@@ -270,12 +270,47 @@ function Get-ObfuscatedResourceId
         else
         {
             $UpToName = $Parts[0..($i + 1)] -join '/'
-            if (-not $ResourceNameDictionary.ContainsKey($UpToName)) { $ResourceNameDictionary[$UpToName] = New-ObfuscatedNameToken -ResourceId $UpToName -Name $Next }
+            if (-not $ResourceNameDictionary.ContainsKey($UpToName) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$UpToName])) { $ResourceNameDictionary[$UpToName] = New-ObfuscatedNameToken -ResourceId $UpToName -Name $Next }
             $Masked.Add($ResourceNameDictionary[$UpToName])
         }
         $i += 2
     }
     return ($Masked -join '/')
+}
+
+# A masked ARM path for a collector row with no resource id under -Obfuscate,
+# so the inventory never holds an empty or flat ID:
+#   /subscriptions/<sub token>/resourcegroups/<rg token>/providers/rda.noid/<collector>/<name token>
+# The subscription and resource group tokens are the run's own for the row's
+# Subscription (display name) and ResourceGroup values, so the row still sits
+# in its subscription and group; an empty value gets a new token of its own.
+# 'rda.noid' names no Azure provider: the row has no real id to keep. Returns
+# the id and the three field tokens, which are the id's own segments.
+function New-ObfuscatedRowIdWithoutId
+{
+    param([string]$Subscription, [string]$ResourceGroup, [string]$Name, [string]$Collector)
+
+    if ([string]::IsNullOrEmpty($Subscription)) { $SubToken = 'prod_' + [guid]::NewGuid().ToString() }
+    else
+    {
+        if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($Subscription)) { $Global:ObfuscationSubscriptionTokens[$Subscription] = (Get-ObfuscationPrefix $Subscription) + [guid]::NewGuid().ToString() }
+        $SubToken = $Global:ObfuscationSubscriptionTokens[$Subscription]
+    }
+    if ([string]::IsNullOrEmpty($ResourceGroup)) { $RgToken = (Get-ObfuscationPrefix $Name) + [guid]::NewGuid().ToString() }
+    else
+    {
+        if (-not $Global:ObfuscationResourceGroupTokens.ContainsKey($ResourceGroup)) { $Global:ObfuscationResourceGroupTokens[$ResourceGroup] = (Get-ObfuscationPrefix $ResourceGroup) + [guid]::NewGuid().ToString() }
+        $RgToken = $Global:ObfuscationResourceGroupTokens[$ResourceGroup]
+    }
+    $Type = ([string]$Collector).ToLowerInvariant() -replace '[^a-z0-9.]', ''
+    if ($Type -notmatch '^[a-z]') { $Type = 'unknown' }
+    $NameToken = (Get-ObfuscationPrefix $Name) + [guid]::NewGuid().ToString()
+    return [pscustomobject]@{
+        Id            = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}' -f $SubToken, $RgToken, $Type, $NameToken
+        Name          = $NameToken
+        Subscription  = $SubToken
+        ResourceGroup = $RgToken
+    }
 }
 
 Function RunInventorySetup()
@@ -1215,70 +1250,48 @@ function ExecuteInventoryProcessing()
 
                     if ([string]::IsNullOrEmpty($OrigID))
                     {
-                        $Fallback = 'obfuscated_' + [guid]::NewGuid().ToString()
-                        $resourceItem.ID = $Fallback
-                        $resourceItem.Name = $Fallback
-                        $resourceItem.Subscription = $Fallback
-                        $resourceItem.ResourceGroup = $Fallback
+                        # No id to mask: a masked ARM path from the row's own
+                        # subscription, resource group and name (never empty).
+                        $NoId = New-ObfuscatedRowIdWithoutId -Subscription ([string]$resourceItem.Subscription) -ResourceGroup ([string]$resourceItem.ResourceGroup) -Name ([string]$resourceItem.Name) -Collector $ModName
+                        $resourceItem.ID = $NoId.Id
+                        $resourceItem.Name = $NoId.Name
+                        $resourceItem.Subscription = $NoId.Subscription
+                        $resourceItem.ResourceGroup = $NoId.ResourceGroup
                         if ($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
                         if ($resourceItem.ContainsKey('Tags')) { $resourceItem.Tags = $null }
                         continue
                     }
 
-                    if ($ResourceIdDictionary.ContainsKey($OrigID))
+                    # An id the token loop did not mask (a collector row that is
+                    # not a discovered resource) gets the masked ARM path
+                    # Get-ObfuscatedResourceId gives it, which also records its
+                    # name, subscription and resource group tokens, so the row's
+                    # fields match its own id path.
+                    if (-not $ResourceIdDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceIdDictionary[$OrigID]))
                     {
-                        $ObfuscatedID = $ResourceIdDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedID)) { $ObfuscatedID = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.ID = $ObfuscatedID
+                        $ResourceIdDictionary[$OrigID] = Get-ObfuscatedResourceId -ResourceId $OrigID
                     }
-                    else
-                    {
-                        $Prefix = if ($OrigID -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $OrigID -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                        $Fallback = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceIdDictionary[$OrigID] = $Fallback
-                        $resourceItem.ID = $Fallback
-                    }
+                    $resourceItem.ID = $ResourceIdDictionary[$OrigID]
 
-                    $Prefix = $resourceItem.ID.Split('_')[0] + '_'
+                    $Prefix = Get-ObfuscationPrefix $OrigID
 
-                    if ($ResourceNameDictionary.ContainsKey($OrigID))
+                    if (-not $ResourceNameDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$OrigID]))
                     {
-                        $ObfuscatedName = $ResourceNameDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedName)) { $ObfuscatedName = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.Name = $ObfuscatedName
+                        $ResourceNameDictionary[$OrigID] = $Prefix + [guid]::NewGuid().ToString()
                     }
-                    else
-                    {
-                        $FbName = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceNameDictionary[$OrigID] = $FbName
-                        $resourceItem.Name = $FbName
-                    }
+                    $resourceItem.Name = $ResourceNameDictionary[$OrigID]
 
-                    if ($ResourceSubscriptionDictionary.ContainsKey($OrigID))
+                    if (-not $ResourceSubscriptionDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceSubscriptionDictionary[$OrigID]))
                     {
-                        $ObfuscatedSub = $ResourceSubscriptionDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedSub)) { $ObfuscatedSub = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.Subscription = $ObfuscatedSub
+                        $ResourceSubscriptionDictionary[$OrigID] = $Prefix + [guid]::NewGuid().ToString()
                     }
-                    else
-                    {
-                        $FbSub = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceSubscriptionDictionary[$OrigID] = $FbSub
-                        $resourceItem.Subscription = $FbSub
-                    }
+                    $resourceItem.Subscription = $ResourceSubscriptionDictionary[$OrigID]
 
-                    if ($ResourceResourceGroupDictionary.ContainsKey($OrigID))
+                    if (-not $ResourceResourceGroupDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceResourceGroupDictionary[$OrigID]))
                     {
-                        $ObfuscatedRG = $ResourceResourceGroupDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedRG)) { $ObfuscatedRG = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.ResourceGroup = $ObfuscatedRG
+                        $ResourceResourceGroupDictionary[$OrigID] = $Prefix + [guid]::NewGuid().ToString()
                     }
-                    else
-                    {
-                        $FbRG = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceResourceGroupDictionary[$OrigID] = $FbRG
-                        $resourceItem.ResourceGroup = $FbRG
-                    }
+                    $resourceItem.ResourceGroup = $ResourceResourceGroupDictionary[$OrigID]
 
                     if ($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
                     {

@@ -375,7 +375,14 @@ function New-ObfuscatedRowIdWithoutId
     if (-not [string]::IsNullOrEmpty($Subscription))
     {
         $SubSegment = $Subscription
-        foreach ($Sub in @($Global:Subscriptions)) { if ($null -ne $Sub -and [string]$Sub.name -eq $Subscription -and -not [string]::IsNullOrEmpty([string]$Sub.id)) { $SubSegment = [string]$Sub.id; break } }
+        $NameIds = @($Global:Subscriptions | Where-Object { $null -ne $_ -and [string]$_.name -eq $Subscription -and -not [string]::IsNullOrEmpty([string]$_.id) } | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+        if ($NameIds.Count -ge 1) { $SubSegment = $NameIds[0] }
+        # The row names its subscription only by display name: with two
+        # subscriptions of that name it is filed under the first one.
+        if ($NameIds.Count -gt 1 -and (Get-Command -Name Write-Log -ErrorAction SilentlyContinue))
+        {
+            Write-Log -Message ("A collector row with no id names subscription '{0}', which {1} subscriptions share; its masked id is filed under the first of them." -f $Subscription, $NameIds.Count) -Severity 'Warning'
+        }
     }
     $RgSegment = if ([string]::IsNullOrEmpty($ResourceGroup)) { '~norg' } else { $ResourceGroup }
     $Type = ([string]$Collector).ToLowerInvariant() -replace '[^a-z0-9.]', ''
@@ -994,14 +1001,21 @@ Function RunInventorySetup()
             {
                 # The map holds token -> display name; the run keys tokens by
                 # subscription id. A name that one listed subscription has
-                # gives that id its token; a name two subscriptions share is
-                # left to the seeded ids, which hold each one's own token.
+                # gives that id its token; a name two subscriptions share, or
+                # one no listed subscription has, is left to the seeded ids,
+                # which hold each one's own token. (One name -> ids index.)
+                $SeedSubIdsByName = @{}
+                foreach ($Sub in @($Global:Subscriptions))
+                {
+                    if ($null -eq $Sub -or [string]::IsNullOrEmpty([string]$Sub.id) -or [string]::IsNullOrEmpty([string]$Sub.name)) { continue }
+                    if (-not $SeedSubIdsByName.ContainsKey([string]$Sub.name)) { $SeedSubIdsByName[[string]$Sub.name] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                    [void]$SeedSubIdsByName[[string]$Sub.name].Add([string]$Sub.id)
+                }
                 foreach ($SeedProp in $SeedDictionary.SubscriptionNameMap.PSObject.Properties)
                 {
-                    if ([string]::IsNullOrEmpty($SeedProp.Value)) { continue }
-                    $SeedSubIds = @($Global:Subscriptions | Where-Object { $null -ne $_ -and [string]$_.name -eq [string]$SeedProp.Value -and -not [string]::IsNullOrEmpty([string]$_.id) } | ForEach-Object { [string]$_.id } | Select-Object -Unique)
-                    if ($SeedSubIds.Count -eq 1) { $SubLookup[$SeedSubIds[0]] = $SeedProp.Name }
-                    elseif ($SeedSubIds.Count -eq 0) { $SubLookup[$SeedProp.Value] = $SeedProp.Name }
+                    if ([string]::IsNullOrEmpty($SeedProp.Value) -or -not $SeedSubIdsByName.ContainsKey([string]$SeedProp.Value)) { continue }
+                    $SeedSubIds = $SeedSubIdsByName[[string]$SeedProp.Value]
+                    if ($SeedSubIds.Count -eq 1) { $SubLookup[@($SeedSubIds)[0]] = $SeedProp.Name }
                 }
             }
             if ($null -ne $SeedDictionary.ResourceGroupMap)
@@ -1047,6 +1061,7 @@ Function RunInventorySetup()
             foreach ($K in @($ResourceNameDictionary.Keys)) { if ([string]$ResourceNameDictionary[$K] -cnotmatch ('^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $SeedGuid + '$')) { [void]$ResourceNameDictionary.Remove($K) } }
             $SeedSlotTokens = @{}
             $SeedSlotsOf = @{}
+            $SeedSubTokenIds = @{}
             $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
@@ -1096,12 +1111,24 @@ Function RunInventorySetup()
                     $SlotKey = $Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()
                     if (-not $SeedSlotTokens.ContainsKey($SlotKey)) { $SeedSlotTokens[$SlotKey] = @{} }
                     $SeedSlotTokens[$SlotKey][$Slot.Token] = $true
+                    # A subscription token is one subscription's: a seed from
+                    # before tokens were keyed by id can give two subscriptions
+                    # with one display name the same token.
+                    if ($Slot.Kind -eq 'sub')
+                    {
+                        if (-not $SeedSubTokenIds.ContainsKey($Slot.Token)) { $SeedSubTokenIds[$Slot.Token] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                        [void]$SeedSubTokenIds[$Slot.Token].Add($Slot.Real)
+                    }
                 }
             }
             foreach ($SeedRealId in @($SeedSlotsOf.Keys))
             {
                 $Conflict = $false
-                foreach ($Slot in $SeedSlotsOf[$SeedRealId]) { if ($SeedSlotTokens[$Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()].Count -gt 1) { $Conflict = $true; break } }
+                foreach ($Slot in $SeedSlotsOf[$SeedRealId])
+                {
+                    if ($SeedSlotTokens[$Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()].Count -gt 1) { $Conflict = $true; break }
+                    if ($Slot.Kind -eq 'sub' -and $SeedSubTokenIds[$Slot.Token].Count -gt 1) { $Conflict = $true; break }
+                }
                 if ($Conflict)
                 {
                     [void]$ResourceIdDictionary.Remove($SeedRealId)
@@ -1120,6 +1147,12 @@ Function RunInventorySetup()
                         'name' { $ResourceNameDictionary[$Slot.Real] = $Slot.Token }
                     }
                 }
+            }
+            # A subscription token two subscriptions shared is given to neither.
+            foreach ($SharedToken in @($SeedSubTokenIds.Keys))
+            {
+                if ($SeedSubTokenIds[$SharedToken].Count -le 1) { continue }
+                foreach ($K in @($SubLookup.Keys)) { if ([string]$SubLookup[$K] -ceq $SharedToken) { [void]$SubLookup.Remove($K) } }
             }
             # A slot with two tokens starts again with no token at all.
             foreach ($SlotKey in @($SeedSlotTokens.Keys))
@@ -1140,6 +1173,7 @@ Function RunInventorySetup()
             # The slot index is only for this check: free it before the token loop.
             $SeedSlotsOf = $null
             $SeedSlotTokens = $null
+            $SeedSubTokenIds = $null
         }
 
         foreach ($resourceItem in $Global:Resources)
@@ -1154,16 +1188,20 @@ Function RunInventorySetup()
             $Prefix = if ($TokenName -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $TokenName -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
             $ObfuscatedName = $Prefix + $Hint + [guid]::NewGuid().ToString()
 
-            $SubEntries = if ($null -eq $resourceItem.subscriptionId) { $SubIndex.NoId } else { $SubIndex.ById[[string]$resourceItem.subscriptionId] }
+            # The subscription is read from the id's own /subscriptions/<id>/
+            # segment first, as Get-ObfuscatedResourceId reads it, so the row's
+            # field matches its id; then from subscriptionId.
+            $SubIdOfRow = if ([string]$resourceItem.id -match '(?i)^/subscriptions/([^/]+)') { $Matches[1] } elseif (-not [string]::IsNullOrEmpty([string]$resourceItem.subscriptionId)) { [string]$resourceItem.subscriptionId } else { $null }
+            $SubEntries = if ($null -eq $SubIdOfRow) { if ($null -eq $resourceItem.subscriptionId) { $SubIndex.NoId } else { $null } } else { $SubIndex.ById[$SubIdOfRow] }
             # The first entry's name, as Get-ObfuscatedResourceId reads it: a
             # subscription listed twice would give an array here otherwise.
             # (A plain loop: this runs once per resource.)
             $RealSub = ''
             foreach ($SubEntry in @($SubEntries)) { if ($null -ne $SubEntry) { $RealSub = [string]$SubEntry.Name; break } }
-            if ([string]::IsNullOrEmpty($RealSub)) { $RealSub = $resourceItem.subscriptionId }
+            if ([string]::IsNullOrEmpty($RealSub)) { $RealSub = if ($null -ne $SubIdOfRow) { $SubIdOfRow } else { [string]$resourceItem.subscriptionId } }
             # The token is keyed by subscription id, as Get-ObfuscatedResourceId
             # keys it; the prefix comes from the display name.
-            $SubKey = if ([string]::IsNullOrEmpty([string]$resourceItem.subscriptionId)) { $RealSub } else { [string]$resourceItem.subscriptionId }
+            $SubKey = if ($null -ne $SubIdOfRow) { $SubIdOfRow } elseif (-not [string]::IsNullOrEmpty($RealSub)) { $RealSub } else { '~nosub' }
             if (-not $SubLookup.ContainsKey($SubKey))
             {
                 $SubPrefix = if ($RealSub -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $RealSub -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }

@@ -125,3 +125,51 @@ Describe 'Two subscriptions with one display name, in a seeded run' {
         finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
     }
 }
+
+Describe 'An older seed that gave two subscriptions with one display name one token' {
+    It 'gives them two tokens again, and the next two seeded runs keep them' {
+        $Shared = 'prod_' + [guid]::NewGuid().ToString(); $Rg = 'prod_' + [guid]::NewGuid().ToString()
+        $VmA = Get-Id $script:SubA 'microsoft.compute/virtualmachines' 'vm-a'
+        $VmB = Get-Id $script:SubB 'microsoft.compute/virtualmachines' 'vm-b'
+        $Ids = @{ "/subscriptions/$Shared/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/prod_$([guid]::NewGuid())" = $VmA; "/subscriptions/$Shared/resourcegroups/$Rg/providers/microsoft.compute/virtualmachines/prod_$([guid]::NewGuid())" = $VmB }
+        $SeedMaps = @{ ResourceIdMap = $Ids; SubscriptionNameMap = @{ $Shared = 'Pay-As-You-Go' } }
+        $First = $null
+        foreach ($Run in 1, 2, 3)
+        {
+            $Seed = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-subseed-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
+            $SeedMaps | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Seed -Encoding utf8
+            try
+            {
+                Invoke-RunVariables
+                $Global:Subscriptions = @([pscustomobject]@{ id = $script:SubA; name = 'Pay-As-You-Go' }, [pscustomobject]@{ id = $script:SubB; name = 'Pay-As-You-Go' })
+                $Global:ObfuscationSubscriptionIndex = $null
+                $Global:Resources = @(
+                    [pscustomobject]@{ id = $VmA; name = 'vm-a'; subscriptionId = $script:SubA; resourceGroup = 'rg-shared' }
+                    [pscustomobject]@{ id = $VmB; name = 'vm-b'; subscriptionId = $script:SubB; resourceGroup = 'rg-shared' }
+                )
+                Invoke-DictionaryBuild -Seed $Seed
+            }
+            finally { Remove-Item -LiteralPath $Seed -ErrorAction SilentlyContinue }
+            $A = ($Global:ResourceIdDictionary[$VmA] -split '/')[2]; $B = ($Global:ResourceIdDictionary[$VmB] -split '/')[2]
+            $A | Should -Not -BeExactly $B -Because "run $Run"
+            $A | Should -Not -BeExactly $Shared
+            if ($Run -eq 1) { $First = @($A, $B) } else { @($A, $B) | Should -Be $First -Because "run $Run keeps run 1's tokens" }
+            # The next seed, as the run's dictionary file holds it.
+            $NextIds = @{}; foreach ($K in @($Global:ResourceIdDictionary.Keys)) { $NextIds[$Global:ResourceIdDictionary[$K]] = $K }
+            $SeedMaps = @{ ResourceIdMap = $NextIds; SubscriptionNameMap = @{ $A = 'Pay-As-You-Go'; $B = 'Pay-As-You-Go' } }
+        }
+    }
+}
+
+Describe 'A row whose subscriptionId is missing' {
+    It 'takes its subscription token from its own id' {
+        Invoke-RunVariables
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:SubA; name = 'Sub A' })
+        $Global:ObfuscationSubscriptionIndex = $null
+        $Vm = Get-Id $script:SubA 'microsoft.compute/virtualmachines' 'vm-a'
+        $Global:Resources = @([pscustomobject]@{ id = $Vm; name = 'vm-a'; subscriptionId = $null; resourceGroup = 'rg-shared' })
+        Invoke-DictionaryBuild
+        $Global:ResourceSubscriptionDictionary[$Vm] | Should -BeExactly ($Global:ResourceIdDictionary[$Vm] -split '/')[2]
+    }
+}
+

@@ -148,6 +148,16 @@ Describe 'Masking the collector rows under -Obfuscate' {
         $Global:ResourceResourceGroupDictionary[$Keys[0]] | Should -BeExactly $Row.ResourceGroup
     }
 
+    It 'warns when a row with no id names a display name two subscriptions share' {
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = $script:SubName }, [pscustomobject]@{ id = '22222222-2222-2222-2222-222222222222'; name = $script:SubName })
+        $Global:ObfuscationSubscriptionIndex = $null
+        $script:Warned = [System.Collections.Generic.List[string]]::new()
+        function global:Write-Log { param($Message, $Severity) if ($Severity -eq 'Warning') { $script:Warned.Add([string]$Message) } }
+        try { $null = Invoke-RowMasking -Result @(New-Row -Id '') -ModName 'AppServicePlan' }
+        finally { Remove-Item -Path function:global:Write-Log -ErrorAction SilentlyContinue }
+        ($script:Warned -join "`n") | Should -Match 'which 2 subscriptions share'
+    }
+
     It 'gives two rows with no id two ids' {
         $Rows = @(Invoke-RowMasking -Result @((New-Row -Id ''), (New-Row -Id '')) -ModName 'AppServicePlan')
         $Rows[0].ID | Should -Not -Be $Rows[1].ID

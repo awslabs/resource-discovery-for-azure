@@ -120,7 +120,8 @@ Describe 'The dictionary build picks the subscription the list scan picked' {
         Reset-ObfuscationState $script:List
         $Global:Resources = @(foreach ($C in $script:Cases)
             {
-                [pscustomobject]@{ id = "/subscriptions/demo-sub-a/resourcegroups/rg-demo/providers/microsoft.sql/servers/sqlsrv-demo/databases/$($C.Name)"; name = $C.Name; subscriptionId = $C.Sub; resourceGroup = 'rg-demo' }
+                # The id holds the row's own subscription, as Resource Graph gives it.
+                [pscustomobject]@{ id = "/subscriptions/$($C.Sub)/resourcegroups/rg-demo/providers/microsoft.sql/servers/sqlsrv-demo/databases/$($C.Name)"; name = $C.Name; subscriptionId = $C.Sub; resourceGroup = 'rg-demo' }
             })
         Invoke-DictionaryBuild
     }
@@ -131,7 +132,7 @@ Describe 'The dictionary build picks the subscription the list scan picked' {
         $Res = @($Global:Resources | Where-Object { $_.name -eq $Name })[0]
         # Keyed by the subscription id; a resource with none by the name the scan found.
         $Expect = if (-not [string]::IsNullOrEmpty($Res.subscriptionId)) { $Res.subscriptionId } else { Get-ScanRealSub $Res.subscriptionId }
-        if ($null -eq $Expect) { $Expect = [string]$Res.subscriptionId }
+        if ([string]::IsNullOrEmpty($Expect)) { $Expect = '~nosub' }
         $Global:ObfuscationSubscriptionTokens.ContainsKey($Expect) | Should -BeTrue
         $Global:ResourceSubscriptionDictionary[$Res.id] | Should -BeExactly $Global:ObfuscationSubscriptionTokens[$Expect]
     }

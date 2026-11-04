@@ -621,9 +621,7 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Resource Reporting Phase Done' -Because 'the reporting phase did not finish'
         $Output | Should -Not -Match 'Inventory/Metrics/Consumption data files were still written' -Because 'the inventory was not written, so the run must not say it was'
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
-        # 'No report zip was written' from this script's last line, or 'No report was written'
-        # from the exit-code check a direct run may make just before it.
-        $Output | Should -Match 'No report (zip )?was written' -Because 'the run says plainly that there is no zip'
+        $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'
         @($R[0].Files | Where-Object { $_ -like 'Inventory_*' -or $_ -like '*.tmp' -or $_ -like '*.zip' }) | Should -BeNullOrEmpty -Because 'a failed write leaves no inventory, no cut-off or temporary file and no zip'
     }
 
@@ -658,8 +656,30 @@ function CreateResourceJobs
         $Output | Should -Match 'Error Compressing Output File: .*ResourcesReport_test\.zip: stand-in: no space left on device' -Because "the cause is shown, not hidden by 'silentlycontinue'. Output:`n$Output"
         $R[0].ErrorLog | Should -BeLike '*Error Compressing Output File*stand-in: no space left on device*'
         $Output | Should -Not -Match 'Reporting Data File'
-        $Output | Should -Match 'No report (zip )?was written'
+        $Output | Should -Match 'No report was written'
         $R[0].Files | Should -Contain 'Inventory_ResourcesReport_test.json' -Because 'only the zip step failed'
+    }
+
+    It 'removes a zip the failed zip step left cut off and does not report it' {
+        $Stub = 'function Compress-Archive { param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw ''stand-in: stopped part-way'' }'
+        $R = @(Invoke-InventoryRun -Name 'zip-cut-direct' -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a cut-off zip must not be left to be shared'
+        $Output | Should -Not -Match 'Reporting Data File' -Because "Output:`n$Output"
+        $Output | Should -Match 'No report was written'
+    }
+
+    It 'says the zip is safe to share under -Obfuscate only when the zip was written (<Case>)' -ForEach @(
+        @{ Case = 'zip written'; Stub = '$Obfuscate = [switch]$true'; Expect = $true }
+        @{ Case = 'zip step failed'; Stub = '$Obfuscate = [switch]$true' + [Environment]::NewLine + 'function Compress-Archive { throw ''stand-in: no space left on device'' }'; Expect = $false }
+    ) {
+        $R = @(Invoke-InventoryRun -Name ('obfuscate-notice-{0}' -f $Case.Split(' ')[1]) -Runs @($Stub) -Direct)
+
+        $Output = [string]$R[0].Output
+        $Output | Should -Match 'OBFUSCATION NOTICE' -Because "the run took the -Obfuscate path. Output:`n$Output"
+        ($Output -match 'The ZIP file is safe to share') | Should -Be $Expect -Because "Output:`n$Output"
+        ($R[0].Files -contains 'ResourcesReport_test.zip') | Should -Be $Expect
     }
 
     It 'reports the zip on a direct run that wrote it' {
@@ -668,7 +688,7 @@ function CreateResourceJobs
         $Output = [string]$R[0].Output
         $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
         $Output | Should -Match 'Reporting Data File: .*ResourcesReport_test\.zip' -Because "Output:`n$Output"
-        $Output | Should -Not -Match 'No report (zip )?was written'
+        $Output | Should -Not -Match 'No report was written'
     }
 }
 

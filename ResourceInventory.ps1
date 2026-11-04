@@ -792,9 +792,14 @@ Function RunInventorySetup()
 
     function ResourceInventoryAvd()
     {
-        # Like the az CLI call it replaces, not limited to -SubscriptionID: every
-        # subscription of the run, named explicitly (in batches of 1000).
-        $RunSubscriptionIds = @($Global:Subscriptions | ForEach-Object { [string]$_.id })
+        # The subscriptions ResourceInventoryLoop reads: -SubscriptionID alone
+        # when it is given, else every subscription of the run, named explicitly
+        # (in batches of 1000). Session hosts of other subscriptions never match
+        # this run's host pools, and the wrapper runs one -SubscriptionID run per
+        # subscription, so reading them put their real ids in every run's
+        # dictionary, each run with its own tokens, and counted them as the
+        # run's own resources.
+        $RunSubscriptionIds = if (![string]::IsNullOrEmpty($SubscriptionID)) { @([string]$SubscriptionID) } else { @($Global:Subscriptions | ForEach-Object { [string]$_.id }) }
         $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()" -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
         $AVDSizeCount = Get-AzGraphCount -Result $AVDSize
 

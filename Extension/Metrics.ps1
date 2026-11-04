@@ -24,6 +24,16 @@ if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
 }
 
 
+# Under -Obfuscate a metric row whose resource the inventory does not hold is
+# masked with Get-ObfuscatedResourceId from ResourceInventory.ps1, so its id
+# and fields match the inventory and consumption rows. This script is run by
+# ResourceInventory.ps1, which defines it; run on its own, the rows could not
+# be masked that way, so it stops before any Azure call.
+if ($Obfuscate -and $Task -eq 'Processing' -and -not (Get-Command -Name 'Get-ObfuscatedResourceId' -CommandType Function -ErrorAction SilentlyContinue))
+{
+    throw 'Metrics.ps1 -Obfuscate needs Get-ObfuscatedResourceId from ResourceInventory.ps1. Run ResourceInventory.ps1 (or Run-AllSubscriptions.ps1) -Obfuscate, which runs this script.'
+}
+
 if (-not (Get-Command -Name 'Resolve-ObfuscationToken' -ErrorAction SilentlyContinue))
 {
     function Resolve-ObfuscationToken
@@ -678,10 +688,10 @@ if ($Task -eq 'Processing')
                     }
                     else
                     {
-                        if (![string]::IsNullOrEmpty($OriginalId) -and (Get-Command -Name 'Get-ObfuscatedResourceId' -CommandType Function -ErrorAction SilentlyContinue))
+                        if (![string]::IsNullOrEmpty($OriginalId))
                         {
-                            # In a run of ResourceInventory.ps1: the masked path the
-                            # inventory and consumption rows get, from the run's own
+                            # The masked path the inventory and consumption rows
+                            # get (Get-ObfuscatedResourceId), from the run's own
                             # subscription, resource group and name tokens and their
                             # prefix rule, and the row's fields are that path's
                             # segments (Get-ObfuscatedResourceId records them).
@@ -691,28 +701,6 @@ if ($Task -eq 'Processing')
                             if (-not $ResourceNameDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$OriginalId])) { $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
                             if (-not $ResourceSubDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceSubDictionary[$OriginalId])) { $ResourceSubDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
                             if (-not $ResourceGroupDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceGroupDictionary[$OriginalId])) { $ResourceGroupDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
-
-                            $metric.ID = $ObfuscatedId
-                            $metric.Name = $ResourceNameDictionary[$OriginalId]
-                            $metric.Subscription = $ResourceSubDictionary[$OriginalId]
-                            $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
-                        }
-                        elseif (![string]::IsNullOrEmpty($OriginalId))
-                        {
-                            # Metrics.ps1 run on its own, without the run's token
-                            # functions: its own token caches, as before.
-                            $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
-
-                            if (-not $script:MetricsFallbackSubCache) { $script:MetricsFallbackSubCache = @{} }
-                            if (-not $script:MetricsFallbackRgCache) { $script:MetricsFallbackRgCache = @{} }
-                            if (-not $script:MetricsFallbackNameCache) { $script:MetricsFallbackNameCache = @{} }
-
-                            $ObfuscatedId = Build-ObfuscatedResourceUri -RawUri $OriginalId -Prefix $FbPrefix -SubscriptionDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary -NameDictionary $ResourceNameDictionary -SubCache $script:MetricsFallbackSubCache -RgCache $script:MetricsFallbackRgCache -NameCache $script:MetricsFallbackNameCache
-
-                            $ResourceIdDictionary[$OriginalId] = $ObfuscatedId
-                            if (-not $ResourceNameDictionary.ContainsKey($OriginalId)) { $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
-                            if (-not $ResourceSubDictionary.ContainsKey($OriginalId)) { $ResourceSubDictionary[$OriginalId] = $FbPrefix + 'sub_' + [guid]::NewGuid().ToString() }
-                            if (-not $ResourceGroupDictionary.ContainsKey($OriginalId)) { $ResourceGroupDictionary[$OriginalId] = $FbPrefix + 'rg_' + [guid]::NewGuid().ToString() }
 
                             $metric.ID = $ObfuscatedId
                             $metric.Name = $ResourceNameDictionary[$OriginalId]

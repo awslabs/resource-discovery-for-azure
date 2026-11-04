@@ -19,7 +19,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'Helpers/ContractIdPattern.ps1')
     $Root = Split-Path $PSScriptRoot -Parent
     $InvAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
-    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Get-ObfuscatedResourceId', 'Resolve-ObfuscationToken', 'Build-ObfuscatedResourceUri'))
+    foreach ($Name in @('Get-ObfuscationPrefix', 'New-ObfuscatedNameToken', 'Get-ObfuscationSubscriptionIndex', 'Get-ObfuscatedResourceId'))
     {
         $Fn = @($InvAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq $Name }, $false))
         if ($Fn.Count -ne 1) { throw "$Name was not found in ResourceInventory.ps1." }
@@ -33,6 +33,7 @@ BeforeAll {
                 $N.Clauses[0].Item2.Extent.Text -match '^\{\s*foreach \(\$metric in \$Tmp\.Metrics\)'
             }, $true))
     if ($Step.Count -ne 1) { throw 'The -Obfuscate step over the metric rows was not found in Extension/Metrics.ps1.' }
+    $script:Step = $Step
     . ([scriptblock]::Create("function Invoke-MetricMasking { param(`$Tmp) `$Obfuscate = `$true; `$ResourceIdDictionary = `$Global:ResourceIdDictionary; `$ResourceNameDictionary = `$Global:ResourceNameDictionary; `$ResourceSubDictionary = `$Global:ResourceSubscriptionDictionary; `$ResourceGroupDictionary = `$Global:ResourceResourceGroupDictionary; $($Step[0].Extent.Text); return `$Tmp }"))
 
     $script:Sub = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
@@ -113,6 +114,20 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Row = @((Invoke-MetricMasking -Tmp (New-MetricSet -Id "/subscriptions/$script:Sub/resourceGroups/RG-Demo/providers/Microsoft.Compute/virtualMachines/VM-A")).Metrics)[0]
         $Row.ID | Should -BeExactly $Global:ResourceIdDictionary[$Id]
         @($Global:ResourceIdDictionary.Keys).Count | Should -Be 1
+    }
+
+    It 'has one way to mask a fallback row: the run''s Get-ObfuscatedResourceId, never private token caches' {
+        $script:Step[0].Extent.Text | Should -Match 'Get-ObfuscatedResourceId -ResourceId \$OriginalId'
+        $script:Step[0].Extent.Text | Should -Not -Match 'MetricsFallback(Sub|Rg|Name)Cache|Build-ObfuscatedResourceUri'
+    }
+
+    It 'stops before any Azure call when run on its own with -Obfuscate' {
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Script = Join-Path (Split-Path $PSScriptRoot -Parent) 'Extension/Metrics.ps1'
+        $Cmd = "function Get-AzContext { 'azure-called' }; function Invoke-AzRestMethod { 'azure-called' }; try { & '$Script' -Subscriptions @() -Resources @() -Task 'Processing' -ConcurrencyLimit 1 -FilePath 'x' -Obfuscate `$true; 'no-stop' } catch { 'STOP ' + `$_.Exception.Message }"
+        $Out = @(& $Pwsh -NoProfile -NonInteractive -Command $Cmd 2>&1 | ForEach-Object { [string]$_ })
+        ($Out -join "`n") | Should -Match 'STOP Metrics\.ps1 -Obfuscate needs Get-ObfuscatedResourceId'
+        ($Out -join "`n") | Should -Not -Match 'azure-called|no-stop'
     }
 
     It 'keeps the inventory''s masked id for a resource the inventory holds (control)' {

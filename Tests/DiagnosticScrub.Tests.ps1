@@ -204,4 +204,18 @@ Describe "The shareable diagnostics log masks the bare name of a collector row w
         $Text | Should -Not -Match 'hostpool-alpha'
         $Text | Should -Match ([regex]::Escape("Could not read $NameTok"))
     }
+
+    It 'replaces a no-id row''s real name that holds a / (written _ in its stand-in path)' {
+        $StandIn = "/subscriptions/$script:SubGuid/resourcegroups/rg-demo/providers/rda.noid/sqldb/srv-alpha_db-alpha~0a1b2c3d"
+        $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Global:ResourceIdDictionary = @{ $StandIn = '/subscriptions/' + $script:SubToken + '/resourcegroups/' + $script:RgToken + '/providers/rda.noid/sqldb/' + $NameTok }
+        $Global:ResourceNameDictionary = @{ $StandIn = $NameTok }
+        $Global:ResourceResourceGroupDictionary = @{ $StandIn = $script:RgToken }
+        $Global:ResourceSubscriptionDictionary = @{ $StandIn = $script:SubToken }
+        $Global:CollectorFailures = @([pscustomobject]@{ Id = $script:SubGuid; Module = 'SQLDB'; Message = 'Could not read srv-alpha/db-alpha' })
+        $File = Write-RdaShareableDiagnosticsLog -DefaultPath ($script:DiagDir + [System.IO.Path]::DirectorySeparatorChar) -ReportName 'ResourcesReport' -RunDateTime 'test2' -Version '0.0.0' -Obfuscated
+        $Text = Get-Content -LiteralPath $File -Raw
+        $Text | Should -Not -Match 'srv-alpha'
+        $Text | Should -Match ([regex]::Escape("Could not read $NameTok"))
+    }
 }

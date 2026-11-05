@@ -189,6 +189,21 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Row.Name | Should -BeExactly $Global:FreeTextDictionary['app-a']
     }
 
+    It 'gives a row with no id free-text subscription and name tokens when two subscriptions share its display name' {
+        # The row does not say which of the two it came from, so neither one's tokens are given.
+        $Global:FreeTextDictionary = @{}
+        $Sub2 = '00000000-0000-0000-0000-000000000002'
+        $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = $script:SubName }, [pscustomobject]@{ id = $Sub2; name = $script:SubName })
+        $A = Get-ObfuscatedResourceId -ResourceId "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.web/sites/app-a"
+        $B = Get-ObfuscatedResourceId -ResourceId "/subscriptions/$Sub2/resourcegroups/rg-demo/providers/microsoft.web/sites/app-a"
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        $Tmp.Metrics.Add(@{ ID = ''; Name = 'app-a'; Subscription = $script:SubName; ResourceGroup = 'rg-demo'; MetricValue = 1.5 })
+        $Row = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)[0]
+        $Row.Subscription | Should -BeExactly $Global:FreeTextDictionary[$script:SubName]
+        $Row.Name | Should -BeExactly $Global:FreeTextDictionary['app-a']
+        $Row.Name | Should -Not -BeIn @(($A -split '/')[-1], ($B -split '/')[-1])
+    }
+
     It 'keeps an mc_ group token the run already has for a row with no id' {
         $Global:FreeTextDictionary = @{}
         $Global:ObfuscationResourceGroupTokens['mc_rg-demo_aks-a_eastus'] = 'prod_mc_' + [guid]::NewGuid().ToString()

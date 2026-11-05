@@ -436,6 +436,13 @@ Describe 'The seed is checked when it is read' {
         $Global:ResourceIdDictionary['not-an-arm-id'] | Should -BeExactly $Flat
     }
 
+    It 'keeps the seeded flat token of a real id that is not an ARM path for a resource this run sees too' {
+        $Flat = New-Tok
+        $Odd = [pscustomobject]@{ id = 'not-an-arm-id'; name = 'odd-a'; subscriptionId = $script:Sub; resourceGroup = 'rg-demo' }
+        Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Flat = 'not-an-arm-id' } } -Rows @($Odd)
+        $Global:ResourceIdDictionary['not-an-arm-id'] | Should -BeExactly $Flat
+    }
+
     It 'keeps the seeded flat token of a /providers/ id this run writes flat too' {
         $Flat = New-Tok
         Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Flat = '/providers/Microsoft.Capacity/reservationOrders' } } -Rows @()

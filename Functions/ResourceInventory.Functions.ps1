@@ -271,6 +271,13 @@ function Write-RdaShareableDiagnosticsLog
                 {
                     $DiagScrubMap[$ShortName] = $Global:ResourceNameDictionary[$realId]
                 }
+                # The stand-in path writes a '/' in such a name as '_': map the
+                # name as the message would hold it too.
+                if ($realId -match '(?i)/providers/rda\.noid/' -and $ShortName.Contains('_') -and $null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($realId))
+                {
+                    $SlashName = $ShortName.Replace('_', '/')
+                    if (-not $DiagScrubMap.ContainsKey($SlashName)) { $DiagScrubMap[$SlashName] = $Global:ResourceNameDictionary[$realId] }
+                }
                 if ($realId -match '(?i)/resourceGroups/([^/]+)')
                 {
                     $RgName = $Matches[1]

@@ -373,6 +373,26 @@ Describe "Reveal-Obfuscation older / partial dictionaries" {
         $R.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
     }
 
+    It "reveals a no-id row's name whose stand-in carries a second-row count, and leaves a row with no name masked" {
+        $NoIdDir = Join-Path $script:TmpDir ("noid2_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $NoIdDir -Force | Out-Null
+        $NoIdDict = Join-Path $NoIdDir 'ObfuscationDictionary_NoId2.json'
+        [ordered]@{
+            GeneratedAt     = '2026-06-30 00:00:00'
+            ResourceNameMap = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/rg-app/providers/rda.noid/virtualmachines/vm01~0a1b2c3d-2" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $NoIdDict -Encoding utf8
+        $R = Invoke-Reveal -Fields @('ResourceName') -DictPath $NoIdDict
+        $R.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
+
+        $NoNameDict = Join-Path $NoIdDir 'ObfuscationDictionary_NoName.json'
+        [ordered]@{
+            GeneratedAt     = '2026-06-30 00:00:00'
+            ResourceNameMap = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/rg-app/providers/rda.noid/virtualmachines/~noname~0a1b2c3d" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $NoNameDict -Encoding utf8
+        $R = Invoke-Reveal -Fields @('ResourceName') -DictPath $NoNameDict
+        $R.Inventory.VirtualMachines[0].Name | Should -Be $script:TokName
+    }
+
     It "leaves tag values masked when -Fields Tag is requested but the dictionary has no TagMap" {
         $NoTagDir = Join-Path $script:TmpDir ("notag_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $NoTagDir -Force | Out-Null

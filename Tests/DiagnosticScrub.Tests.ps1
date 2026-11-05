@@ -173,7 +173,7 @@ Describe "The shareable diagnostics log masks the bare name of a collector row w
         # The log writer calls Write-Log, which ResourceInventory.ps1 defines.
         Set-Item -Path Function:\Write-Log -Value { param($Message, $Severity) }
         $script:Saved = @{}
-        foreach ($N in 'ResourceIdDictionary', 'ResourceNameDictionary', 'ResourceResourceGroupDictionary', 'ResourceSubscriptionDictionary', 'TagValueDictionary', 'FreeTextDictionary', 'CollectorFailures', 'MetricsFailedSubs', 'ConsumptionFailedSubs')
+        foreach ($N in 'ResourceIdDictionary', 'ResourceNameDictionary', 'ResourceResourceGroupDictionary', 'ResourceSubscriptionDictionary', 'TagValueDictionary', 'FreeTextDictionary', 'CollectorFailures', 'MetricsFailedSubs', 'ConsumptionFailedSubs', 'RdaNoIdRealNames')
         {
             $script:Saved[$N] = Get-Variable -Name $N -Scope Global -ValueOnly -ErrorAction SilentlyContinue
         }
@@ -205,17 +205,20 @@ Describe "The shareable diagnostics log masks the bare name of a collector row w
         $Text | Should -Match ([regex]::Escape("Could not read $NameTok"))
     }
 
-    It 'replaces a no-id row''s real name that holds a / (written _ in its stand-in path)' {
-        $StandIn = "/subscriptions/$script:SubGuid/resourcegroups/rg-demo/providers/rda.noid/sqldb/srv-alpha_db-alpha~0a1b2c3d"
+    It 'replaces a no-id row''s real name that holds a _ and a / (the / written _ in its stand-in path)' {
+        # The run records the real name of each stand-in as it builds it.
+        $StandIn = "/subscriptions/$script:SubGuid/resourcegroups/rg-demo/providers/rda.noid/sqldb/srv_alpha_db-alpha~0a1b2c3d"
         $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Global:RdaNoIdRealNames = @{ $StandIn = 'srv_alpha/db-alpha' }
         $Global:ResourceIdDictionary = @{ $StandIn = '/subscriptions/' + $script:SubToken + '/resourcegroups/' + $script:RgToken + '/providers/rda.noid/sqldb/' + $NameTok }
         $Global:ResourceNameDictionary = @{ $StandIn = $NameTok }
         $Global:ResourceResourceGroupDictionary = @{ $StandIn = $script:RgToken }
         $Global:ResourceSubscriptionDictionary = @{ $StandIn = $script:SubToken }
-        $Global:CollectorFailures = @([pscustomobject]@{ Id = $script:SubGuid; Module = 'SQLDB'; Message = 'Could not read srv-alpha/db-alpha' })
+        $Global:CollectorFailures = @([pscustomobject]@{ Id = $script:SubGuid; Module = 'SQLDB'; Message = 'Could not read srv_alpha/db-alpha' })
         $File = Write-RdaShareableDiagnosticsLog -DefaultPath ($script:DiagDir + [System.IO.Path]::DirectorySeparatorChar) -ReportName 'ResourcesReport' -RunDateTime 'test2' -Version '0.0.0' -Obfuscated
         $Text = Get-Content -LiteralPath $File -Raw
-        $Text | Should -Not -Match 'srv-alpha'
+        $Text | Should -Not -Match 'srv_alpha'
         $Text | Should -Match ([regex]::Escape("Could not read $NameTok"))
+        $Global:RdaNoIdRealNames = $null
     }
 }

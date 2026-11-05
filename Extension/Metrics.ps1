@@ -707,6 +707,22 @@ if ($Task -eq 'Processing')
                             $metric.Subscription = $ResourceSubDictionary[$OriginalId]
                             $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
                         }
+                        else
+                        {
+                            # A row with no id has nothing to look up: mask its
+                            # fields so no real name is left in the file, with
+                            # one token per real value, kept in the run's
+                            # free-text dictionary so the dictionary file can
+                            # reveal it.
+                            foreach ($Field in 'Name', 'Subscription', 'ResourceGroup')
+                            {
+                                $RealValue = [string]$metric.$Field
+                                if ([string]::IsNullOrEmpty($RealValue)) { continue }
+                                if ($null -eq $Global:FreeTextDictionary) { $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' }
+                                if (-not $Global:FreeTextDictionary.ContainsKey($RealValue)) { $Global:FreeTextDictionary[$RealValue] = (Get-ObfuscationPrefix $RealValue) + [guid]::NewGuid().ToString() }
+                                $metric.$Field = $Global:FreeTextDictionary[$RealValue]
+                            }
+                        }
                     }
                 }
             }

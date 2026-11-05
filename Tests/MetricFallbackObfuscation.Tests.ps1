@@ -144,6 +144,16 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Rows[0].MetricValue | Should -Be 1.5
     }
 
+    It 'gives a row with no id the group and subscription tokens the inventory rows of that group get' {
+        $Global:FreeTextDictionary = @{}
+        $Inventory = Get-ObfuscatedResourceId -ResourceId "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.compute/virtualmachines/vm-a"
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        $Tmp.Metrics.Add(@{ ID = ''; Name = 'app-a'; Subscription = $script:SubName; ResourceGroup = 'rg-demo'; MetricValue = 1.5 })
+        $Row = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)[0]
+        $Row.ResourceGroup | Should -BeExactly ($Inventory -split '/')[4]
+        $Row.Subscription | Should -BeExactly ($Inventory -split '/')[2]
+    }
+
     It 'keeps the inventory''s masked id for a resource the inventory holds (control)' {
         $Id = "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.compute/virtualmachines/vm-a"
         $Global:ResourceIdDictionary[$Id] = Get-ObfuscatedResourceId -ResourceId $Id

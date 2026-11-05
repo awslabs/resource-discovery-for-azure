@@ -165,6 +165,30 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Row.Subscription | Should -BeExactly ($Inventory -split '/')[2]
     }
 
+    It 'masks real values of a row with no id even when they look like tokens' {
+        $Global:FreeTextDictionary = @{}
+        $G = [guid]::NewGuid().ToString()
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        $Tmp.Metrics.Add(@{ ID = ''; Name = "prod_mc_$G"; Subscription = "prod_aks_$G"; ResourceGroup = "prod_$G"; MetricValue = 1.5 })
+        $Row = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)[0]
+        $Row.Name | Should -Not -BeExactly "prod_mc_$G"
+        $Row.Subscription | Should -Not -BeExactly "prod_aks_$G"
+        $Row.ResourceGroup | Should -Not -BeExactly "prod_$G"
+        $Global:FreeTextDictionary["prod_mc_$G"] | Should -BeExactly $Row.Name
+    }
+
+    It 'gives a row with no id a free-text name when <Case>' -ForEach @(
+        @{ Case = 'two resources of the group have that name'; Ids = @('microsoft.web/sites/app-a', 'microsoft.web/serverfarms/app-a'); Rg = 'rg-demo' }
+        @{ Case = 'the one resource of that name is in another group'; Ids = @('microsoft.web/sites/app-a'); Rg = 'rg-other' }
+    ) {
+        $Global:FreeTextDictionary = @{}
+        foreach ($I in $Ids) { $null = Get-ObfuscatedResourceId -ResourceId "/subscriptions/$script:Sub/resourcegroups/$Rg/providers/$I" }
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        $Tmp.Metrics.Add(@{ ID = ''; Name = 'app-a'; Subscription = $script:SubName; ResourceGroup = 'RG-Demo'; MetricValue = 1.5 })
+        $Row = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)[0]
+        $Row.Name | Should -BeExactly $Global:FreeTextDictionary['app-a']
+    }
+
     It 'keeps an mc_ group token the run already has for a row with no id' {
         $Global:FreeTextDictionary = @{}
         $Global:ObfuscationResourceGroupTokens['mc_rg-demo_aks-a_eastus'] = 'prod_mc_' + [guid]::NewGuid().ToString()

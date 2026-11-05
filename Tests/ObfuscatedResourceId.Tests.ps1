@@ -430,7 +430,7 @@ Describe 'The seed is checked when it is read' {
         $Global:ResourceNameDictionary[$Gone] | Should -BeExactly ($Masked -split '/')[-1]
     }
 
-    It 'keeps the seeded flat token of a real id that is not an ARM path (parked), so it stays the same across seeded runs' {
+    It 'keeps the seeded flat token of a real id that is not an ARM path, so it stays the same across seeded runs' {
         $Flat = New-Tok
         Invoke-SeededRun -SeedMaps @{ ResourceIdMap = @{ $Flat = 'not-an-arm-id' } } -Rows @()
         $Global:ResourceIdDictionary['not-an-arm-id'] | Should -BeExactly $Flat

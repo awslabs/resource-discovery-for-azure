@@ -251,7 +251,7 @@ function Get-ObfuscatedResourceId
     # its own path, every name segment masked as below, but only when every
     # name segment can be a token: each type has a name, and no segment is
     # empty or the fixed name '$system'. Any other '/providers/...' value
-    # gets one flat token, as before (parked with the owner, R2-3/R2-5).
+    # gets one flat token, as before (not changed here).
     $IsTenantScope = Test-RdaTenantScopeIdMaskable -ResourceId $ResourceId
     if ($IsTenantScope)
     {
@@ -409,7 +409,7 @@ function New-ObfuscatedRowIdWithoutId
     $SubSegment = $SubSegment -replace '/', '_'
     $RgSegment = $RgSegment -replace '/', '_'
     $Key = ('{0}|{1}|{2}|{3}' -f $Type, $SubSegment, $RgSegment, $NameBase).ToLowerInvariant()
-    # SHA256.Create() and ComputeHash, as Get-TenantFileKey: SHA256.HashData
+    # SHA256.Create() and ComputeHash: SHA256.HashData
     # and Convert.ToHexString need .NET 5, which PowerShell 7.0 does not have.
     $Sha = [System.Security.Cryptography.SHA256]::Create()
     try { $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Key)) }
@@ -1068,8 +1068,8 @@ Function RunInventorySetup()
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
                 $SeedMasked = $ResourceIdDictionary[$SeedRealId]
-                # A real id that is not an ARM path has one flat token (parked
-                # with the owner); a seeded flat token of that form is kept as
+                # A real id that is not an ARM path has one flat token (not
+                # changed here); a seeded flat token of that form is kept as
                 # it is, so it stays the same across seeded runs. Any other
                 # value (empty, plain text) is not kept.
                 if ($SeedRealId -notmatch '(?i)^/subscriptions/[^/]' -and -not (Test-RdaTenantScopeIdMaskable -ResourceId $SeedRealId))

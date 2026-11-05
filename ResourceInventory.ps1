@@ -968,8 +968,9 @@ Function RunInventorySetup()
         #   (a seed written before this check) has every id that holds it
         #   dropped, and gets one new token. The dictionary this run writes is
         #   then consistent, so the next seeded run keeps every id: no repeat;
-        # - a group or name token that the seed gives two real groups or
-        #   resources is the same: kept for none, every id holding it dropped.
+        # - a token that the seed gives two real subscriptions, groups or
+        #   resources (in any slots) is the same: kept for none, every id
+        #   holding it dropped. A SQL VM and its VM count as one resource.
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
             # The seed's maps first: a group or name token that is not of its
@@ -982,23 +983,26 @@ Function RunInventorySetup()
             $SeedSlotTokens = @{}
             $SeedSlotsOf = @{}
             $SeedSubTokenIds = @{}
-            # Each group or name token stands for one real group or resource:
-            # the reals each token is given, from the seed's maps and the
-            # good ids' slots. A token given to two (a hand-merged seed) would
-            # give two resources one masked id.
+            # Each token stands for one real subscription, group or resource:
+            # token -> the '<kind>|<real>' values it is given, from the seed's
+            # maps and the good ids' slots. A token given to two (a hand-merged
+            # seed, or one token in a subscription and a group slot) would give
+            # two resources one masked id. A SQL VM's id is its VM's id with
+            # the provider swapped, and the two share one name token on
+            # purpose, so a SQL VM path counts as its VM's path here.
             # (Inline, not a helper: this runs once per slot of every seeded id.)
             $SeedTokenReals = @{}
             foreach ($K in @($RgLookup.Keys))
             {
-                $TokenKey = 'rg|' + [string]$RgLookup[$K]
-                if (-not $SeedTokenReals.ContainsKey($TokenKey)) { $SeedTokenReals[$TokenKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
-                [void]$SeedTokenReals[$TokenKey].Add([string]$K)
+                $T = [string]$RgLookup[$K]
+                if (-not $SeedTokenReals.ContainsKey($T)) { $SeedTokenReals[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                [void]$SeedTokenReals[$T].Add('rg|' + [string]$K)
             }
             foreach ($K in @($ResourceNameDictionary.Keys))
             {
-                $TokenKey = 'name|' + [string]$ResourceNameDictionary[$K]
-                if (-not $SeedTokenReals.ContainsKey($TokenKey)) { $SeedTokenReals[$TokenKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
-                [void]$SeedTokenReals[$TokenKey].Add([string]$K)
+                $T = [string]$ResourceNameDictionary[$K]
+                if (-not $SeedTokenReals.ContainsKey($T)) { $SeedTokenReals[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                [void]$SeedTokenReals[$T].Add('name|' + ([string]$K -replace '(?i)/providers/microsoft\.sqlvirtualmachine/sqlvirtualmachines/', '/providers/microsoft.compute/virtualmachines/'))
             }
             $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
@@ -1049,12 +1053,10 @@ Function RunInventorySetup()
                     $SlotKey = $Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()
                     if (-not $SeedSlotTokens.ContainsKey($SlotKey)) { $SeedSlotTokens[$SlotKey] = @{} }
                     $SeedSlotTokens[$SlotKey][$Slot.Token] = $true
-                    if ($Slot.Kind -ne 'sub')
-                    {
-                        $TokenKey = $Slot.Kind + '|' + [string]$Slot.Token
-                        if (-not $SeedTokenReals.ContainsKey($TokenKey)) { $SeedTokenReals[$TokenKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
-                        [void]$SeedTokenReals[$TokenKey].Add([string]$Slot.Real)
-                    }
+                    $T = [string]$Slot.Token
+                    if (-not $SeedTokenReals.ContainsKey($T)) { $SeedTokenReals[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                    $SlotReal = if ($Slot.Kind -eq 'name') { [string]$Slot.Real -replace '(?i)/providers/microsoft\.sqlvirtualmachine/sqlvirtualmachines/', '/providers/microsoft.compute/virtualmachines/' } else { [string]$Slot.Real }
+                    [void]$SeedTokenReals[$T].Add($Slot.Kind + '|' + $SlotReal)
                     # A subscription token is one subscription's: a seed from
                     # before tokens were keyed by id can give two subscriptions
                     # with one display name the same token.
@@ -1072,7 +1074,7 @@ Function RunInventorySetup()
                 {
                     if ($SeedSlotTokens[$Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()].Count -gt 1) { $Conflict = $true; break }
                     if ($Slot.Kind -eq 'sub' -and $SeedSubTokenIds[$Slot.Token].Count -gt 1) { $Conflict = $true; break }
-                    if ($Slot.Kind -ne 'sub' -and $SeedTokenReals[$Slot.Kind + '|' + $Slot.Token].Count -gt 1) { $Conflict = $true; break }
+                    if ($SeedTokenReals[[string]$Slot.Token].Count -gt 1) { $Conflict = $true; break }
                 }
                 if ($Conflict)
                 {
@@ -1104,13 +1106,13 @@ Function RunInventorySetup()
                     'name' { [void]$ResourceNameDictionary.Remove($Real) }
                 }
             }
-            # A group or name token given to two reals is kept for none of them.
+            # A token given to two reals is kept for none of them.
             $SharedTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-            foreach ($TokenKey in @($SeedTokenReals.Keys)) { if ($SeedTokenReals[$TokenKey].Count -gt 1) { [void]$SharedTokens.Add($TokenKey) } }
+            foreach ($T in @($SeedTokenReals.Keys)) { if ($SeedTokenReals[$T].Count -gt 1) { [void]$SharedTokens.Add($T) } }
             if ($SharedTokens.Count -gt 0)
             {
-                foreach ($K in @($RgLookup.Keys)) { if ($SharedTokens.Contains('rg|' + [string]$RgLookup[$K])) { [void]$RgLookup.Remove($K) } }
-                foreach ($K in @($ResourceNameDictionary.Keys)) { if ($SharedTokens.Contains('name|' + [string]$ResourceNameDictionary[$K])) { [void]$ResourceNameDictionary.Remove($K) } }
+                foreach ($K in @($RgLookup.Keys)) { if ($SharedTokens.Contains([string]$RgLookup[$K])) { [void]$RgLookup.Remove($K) } }
+                foreach ($K in @($ResourceNameDictionary.Keys)) { if ($SharedTokens.Contains([string]$ResourceNameDictionary[$K])) { [void]$ResourceNameDictionary.Remove($K) } }
             }
             Write-Log -Message ("Obfuscation dictionary: {0} subscription token(s) kept from the seeded ids." -f @($SubLookup.Keys).Count) -Severity 'Info'
             if ($SeedDropped -gt 0)

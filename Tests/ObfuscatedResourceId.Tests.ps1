@@ -634,6 +634,29 @@ Describe 'The seed''s parent tokens' {
         $Global:ResourceNameDictionary[$SrvA] | Should -Not -BeExactly $Global:ResourceNameDictionary[$SrvB]
     }
 
+    It 'does not keep a token the seed gives both a subscription and a resource group, for the next two seeded runs' {
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-t"
+        $T = New-Tok5
+        $Seed = @{ ResourceIdMap = @{ "/subscriptions/$T/resourcegroups/$T/providers/microsoft.compute/virtualmachines/$(New-Tok5)" = $Vm } }
+        foreach ($Run in 1, 2, 3)
+        {
+            Invoke-SeededRun5 -SeedMaps $Seed -Rows @((New-Res5 $Vm))
+            $Parts = $Global:ResourceIdDictionary[$Vm] -split '/'
+            $Parts[2] | Should -Not -BeExactly $Parts[4] -Because "run $Run gives the subscription and the group their own tokens"
+            $Seed = Get-RunMaps5
+        }
+    }
+
+    It 'keeps the one name token a SQL VM and its VM share (their ids differ only in the provider)' {
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-sql"
+        $SqlVm = "$script:Base/microsoft.sqlvirtualmachine/sqlvirtualmachines/vm-sql"
+        $Sub = New-Tok5; $Rg = New-Tok5; $Name = New-Tok5
+        $P = "/subscriptions/$Sub/resourcegroups/$Rg/providers"
+        Invoke-SeededRun5 -SeedMaps @{ ResourceIdMap = @{ "$P/microsoft.compute/virtualmachines/$Name" = $Vm; "$P/microsoft.sqlvirtualmachine/sqlvirtualmachines/$Name" = $SqlVm } } -Rows @((New-Res5 $Vm), (New-Res5 $SqlVm))
+        $Global:ResourceIdDictionary[$Vm] | Should -BeExactly "$P/microsoft.compute/virtualmachines/$Name"
+        $Global:ResourceIdDictionary[$SqlVm] | Should -BeExactly "$P/microsoft.sqlvirtualmachine/sqlvirtualmachines/$Name"
+    }
+
     It 'keeps a seeded name map token for a resource whose seeded id is not kept' {
         $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-n"
         $NameTok = New-Tok5

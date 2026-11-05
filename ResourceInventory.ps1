@@ -325,8 +325,8 @@ function New-ObfuscatedRowIdWithoutId
     $SubSegment = $SubSegment -replace '/', '_'
     $RgSegment = $RgSegment -replace '/', '_'
     $Key = ('{0}|{1}|{2}|{3}' -f $Type, $SubSegment, $RgSegment, $NameBase).ToLowerInvariant()
-    # SHA256.Create() and ComputeHash: SHA256.HashData
-    # and Convert.ToHexString need .NET 5, which PowerShell 7.0 does not have.
+    # SHA256.Create() and ComputeHash, because SHA256.HashData and
+    # Convert.ToHexString need .NET 5, which PowerShell 7.0 does not have.
     $Sha = [System.Security.Cryptography.SHA256]::Create()
     try { $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Key)) }
     finally { $Sha.Dispose() }

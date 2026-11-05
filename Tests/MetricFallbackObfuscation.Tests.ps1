@@ -154,6 +154,26 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Row.Subscription | Should -BeExactly ($Inventory -split '/')[2]
     }
 
+    It 'gives a row with no id the name token of the one resource of that name, group and subscription' {
+        $Global:FreeTextDictionary = @{}
+        $Inventory = Get-ObfuscatedResourceId -ResourceId "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.web/sites/app-a"
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        $Tmp.Metrics.Add(@{ ID = ''; Name = 'app-a'; Subscription = $script:SubName; ResourceGroup = 'rg-demo'; MetricValue = 1.5 })
+        $Row = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)[0]
+        $Row.Name | Should -BeExactly ($Inventory -split '/')[-1]
+        $Row.ResourceGroup | Should -BeExactly ($Inventory -split '/')[4]
+        $Row.Subscription | Should -BeExactly ($Inventory -split '/')[2]
+    }
+
+    It 'keeps an mc_ group token the run already has for a row with no id' {
+        $Global:FreeTextDictionary = @{}
+        $Global:ObfuscationResourceGroupTokens['mc_rg-demo_aks-a_eastus'] = 'prod_mc_' + [guid]::NewGuid().ToString()
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        $Tmp.Metrics.Add(@{ ID = ''; Name = 'node-a'; Subscription = $script:SubName; ResourceGroup = 'mc_rg-demo_aks-a_eastus'; MetricValue = 1.5 })
+        $Row = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)[0]
+        $Row.ResourceGroup | Should -BeExactly $Global:ObfuscationResourceGroupTokens['mc_rg-demo_aks-a_eastus']
+    }
+
     It 'keeps the inventory''s masked id for a resource the inventory holds (control)' {
         $Id = "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers/microsoft.compute/virtualmachines/vm-a"
         $Global:ResourceIdDictionary[$Id] = Get-ObfuscatedResourceId -ResourceId $Id

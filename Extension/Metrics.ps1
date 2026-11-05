@@ -638,10 +638,29 @@ if ($Task -eq 'Processing')
                             {
                                 $metric.Subscription = $Global:ObfuscationSubscriptionTokens[$SubIdsOfName[0]]
                             }
+                            # The name takes the name token of the one resource
+                            # the run holds with that name, group and
+                            # subscription (a collector row with no id
+                            # included), so the row matches it by name and group.
+                            # (Rows with no id are rare; this scans the names.)
+                            $RealNameValue = [string]$metric.Name
+                            if (-not [string]::IsNullOrEmpty($RealNameValue) -and -not [string]::IsNullOrEmpty($RealRgValue) -and $SubIdsOfName.Count -eq 1 -and $null -ne $ResourceNameDictionary)
+                            {
+                                $NameHits = [System.Collections.Generic.List[string]]::new()
+                                foreach ($NameKey in @($ResourceNameDictionary.Keys))
+                                {
+                                    $KeyParts = ([string]$NameKey).Split('/')
+                                    if ($KeyParts.Count -lt 9 -or $KeyParts[1] -ine 'subscriptions' -or $KeyParts[2] -ine $SubIdsOfName[0] -or $KeyParts[3] -ine 'resourcegroups' -or $KeyParts[4] -ine $RealRgValue) { continue }
+                                    $KeyName = $KeyParts[-1]
+                                    if ($null -ne $Global:RdaNoIdRealNames -and $Global:RdaNoIdRealNames.ContainsKey($NameKey)) { $KeyName = [string]$Global:RdaNoIdRealNames[$NameKey] }
+                                    if ($KeyName -ieq $RealNameValue -and -not [string]::IsNullOrEmpty($ResourceNameDictionary[$NameKey])) { $NameHits.Add([string]$ResourceNameDictionary[$NameKey]) }
+                                }
+                                if (@($NameHits | Select-Object -Unique).Count -eq 1) { $metric.Name = $NameHits[0] }
+                            }
                             foreach ($Field in 'Name', 'Subscription', 'ResourceGroup')
                             {
                                 $RealValue = [string]$metric.$Field
-                                if ([string]::IsNullOrEmpty($RealValue) -or $RealValue -cmatch '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { continue }
+                                if ([string]::IsNullOrEmpty($RealValue) -or $RealValue -cmatch '^(prod|nonprod)_(mc_|databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { continue }
                                 if ($null -eq $Global:FreeTextDictionary) { $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' }
                                 if (-not $Global:FreeTextDictionary.ContainsKey($RealValue)) { $Global:FreeTextDictionary[$RealValue] = (Get-ObfuscationPrefix $RealValue) + [guid]::NewGuid().ToString() }
                                 $metric.$Field = $Global:FreeTextDictionary[$RealValue]

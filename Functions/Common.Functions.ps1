@@ -507,7 +507,8 @@ function Invoke-RoleCheckGet
         {
             $Items += @(@($Body.value) | Where-Object { $null -ne $_ })
         }
-        $Next = if ($null -ne $Body) { [string]$Body.nextLink } else { '' }
+        # A last page has no nextLink at all; read it so Set-StrictMode allows that.
+        $Next = if ($null -ne $Body -and $null -ne $Body.PSObject.Properties['nextLink']) { [string]$Body.nextLink } else { '' }
         $Target = $null
         if (-not [string]::IsNullOrEmpty($Next))
         {
@@ -1531,7 +1532,9 @@ function Get-UsageAggregatesPage
     # The next page is asked for with the token alone, as the cmdlet does, so
     # the request never goes to a host named in the answer.
     $Token = $null
-    $NextLink = [string]$Body.nextLink
+    # A last page has no nextLink (and an empty one may have no value); read
+    # both so Set-StrictMode allows that.
+    $NextLink = if ($null -ne $Body -and $null -ne $Body.PSObject.Properties['nextLink']) { [string]$Body.nextLink } else { '' }
     if (-not [string]::IsNullOrEmpty($NextLink))
     {
         $NextUri = $null
@@ -1539,7 +1542,7 @@ function Get-UsageAggregatesPage
         if ([string]::IsNullOrEmpty($Token)) { throw 'The usage answer''s nextLink has no continuationToken, so the next page cannot be read.' }
     }
     return [pscustomobject]@{
-        UsageAggregations = @(@($Body.value) | Where-Object { $null -ne $_ } | ForEach-Object { [pscustomobject]@{ Properties = $_.properties } })
+        UsageAggregations = @(@(if ($null -ne $Body -and $null -ne $Body.PSObject.Properties['value']) { $Body.value }) | Where-Object { $null -ne $_ } | ForEach-Object { [pscustomobject]@{ Properties = $_.properties } })
         ContinuationToken = $Token
     }
 }

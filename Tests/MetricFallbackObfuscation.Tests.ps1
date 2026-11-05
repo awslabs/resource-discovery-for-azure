@@ -67,7 +67,7 @@ BeforeAll {
 }
 
 AfterAll {
-    foreach ($Name in @('Subscriptions', 'ResourceIdDictionary', 'ResourceNameDictionary', 'ResourceSubscriptionDictionary', 'ResourceResourceGroupDictionary', 'ObfuscationSubscriptionTokens', 'ObfuscationResourceGroupTokens', 'ObfuscationSubscriptionIndex'))
+    foreach ($Name in @('Subscriptions', 'FreeTextDictionary', 'ResourceIdDictionary', 'ResourceNameDictionary', 'ResourceSubscriptionDictionary', 'ResourceResourceGroupDictionary', 'ObfuscationSubscriptionTokens', 'ObfuscationResourceGroupTokens', 'ObfuscationSubscriptionIndex'))
     {
         Remove-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
     }
@@ -128,6 +128,20 @@ Describe 'Masking a metric row whose resource the inventory does not hold' {
         $Out = @(& $Pwsh -NoProfile -NonInteractive -Command $Cmd 2>&1 | ForEach-Object { [string]$_ })
         ($Out -join "`n") | Should -Match 'STOP Metrics\.ps1 -Obfuscate needs Get-ObfuscatedResourceId'
         ($Out -join "`n") | Should -Not -Match 'azure-called|no-stop'
+    }
+
+    It 'leaves no real name, subscription or group in a row that has no id, with tokens the dictionary file holds' {
+        # Built as a hashtable, as the metric step builds each row.
+        $Global:FreeTextDictionary = @{}
+        $Tmp = [pscustomobject]@{ Metrics = [System.Collections.Generic.List[object]]::new() }
+        foreach ($I in 1, 2) { $Tmp.Metrics.Add(@{ ID = ''; Name = 'app-dev-a'; Subscription = $script:SubName; ResourceGroup = 'rg-demo'; MetricValue = 1.5 }) }
+        $Rows = @((Invoke-MetricMasking -Tmp $Tmp).Metrics)
+        foreach ($F in 'Name', 'Subscription', 'ResourceGroup') { $Rows[0].$F | Should -Match '^(prod|nonprod)_[0-9a-f]{8}-' -Because "$F is masked" }
+        $Rows[0].Name | Should -Match '^nonprod_' -Because 'the prefix follows the real value'
+        $Rows[0].Name | Should -BeExactly $Rows[1].Name -Because 'one real value gets one token'
+        $Global:FreeTextDictionary['app-dev-a'] | Should -BeExactly $Rows[0].Name -Because 'the dictionary file can reveal it'
+        $Global:FreeTextDictionary['rg-demo'] | Should -BeExactly $Rows[0].ResourceGroup
+        $Rows[0].MetricValue | Should -Be 1.5
     }
 
     It 'keeps the inventory''s masked id for a resource the inventory holds (control)' {

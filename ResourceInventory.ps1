@@ -62,6 +62,9 @@ function Variables
     # New-ObfuscatedRowIdWithoutId's count of no-id rows and name index, per run.
     $script:RdaNoIdRowsSeen = $null
     $script:RdaNoIdNameIndex = $null
+    # Stand-in path -> the row's real name (the path writes a '/' as '_'),
+    # for the shareable diagnostics log's scrub.
+    $Global:RdaNoIdRealNames = $null
 
     if ($Obfuscate.IsPresent)
     {
@@ -335,6 +338,11 @@ function New-ObfuscatedRowIdWithoutId
     $script:RdaNoIdRowsSeen[$Key] = 1 + [int]$script:RdaNoIdRowsSeen[$Key]
     $Suffix = if ($script:RdaNoIdRowsSeen[$Key] -gt 1) { '{0}-{1}' -f $Hash, $script:RdaNoIdRowsSeen[$Key] } else { $Hash }
     $StandIn = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}~{4}' -f $SubSegment, $RgSegment, $Type, $NameBase, $Suffix
+    if (-not [string]::IsNullOrEmpty($Name))
+    {
+        if ($null -eq $Global:RdaNoIdRealNames) { $Global:RdaNoIdRealNames = @{} }
+        $Global:RdaNoIdRealNames[$StandIn] = $Name
+    }
 
     # A seeded run already holds this stand-in's masked id: keep it.
     $Masked = $null

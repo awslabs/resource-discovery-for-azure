@@ -605,6 +605,35 @@ Describe 'The seed''s parent tokens' {
         ($Global:ResourceIdDictionary[$Pool] -split '/')[8] | Should -BeExactly $SrvTok -Because 'one server path has one masked form'
     }
 
+    It 'gives two parents that the seed gives one token two tokens, and keeps them apart for the next two seeded runs' {
+        $SrvA = "$script:Base/microsoft.sql/servers/srv-x"; $SrvB = "$script:Base/microsoft.sql/servers/srv-y"
+        $DbA = "$SrvA/databases/db-1"; $DbB = "$SrvB/databases/db-1"
+        $Sub = New-Tok5; $Rg = New-Tok5; $Shared = New-Tok5
+        $P = "/subscriptions/$Sub/resourcegroups/$Rg/providers/microsoft.sql/servers/$Shared/databases"
+        $Seed = @{ ResourceIdMap = @{ "$P/$(New-Tok5)" = $DbA; "$P/$(New-Tok5)" = $DbB } }
+        $Rows = @((New-Res5 $SrvA), (New-Res5 $SrvB), (New-Res5 $DbA), (New-Res5 $DbB))
+        foreach ($Run in 1, 2, 3)
+        {
+            Invoke-SeededRun5 -SeedMaps $Seed -Rows $Rows
+            $Global:ResourceIdDictionary[$SrvA] | Should -Not -BeExactly $Global:ResourceIdDictionary[$SrvB] -Because "run $Run keeps the two servers apart"
+            ($Global:ResourceIdDictionary[$DbA] -split '/')[8] | Should -BeExactly ($Global:ResourceIdDictionary[$SrvA] -split '/')[-1]
+            ($Global:ResourceIdDictionary[$DbB] -split '/')[8] | Should -BeExactly ($Global:ResourceIdDictionary[$SrvB] -split '/')[-1]
+            @($Global:ResourceIdDictionary.Values | Select-Object -Unique).Count | Should -Be @($Global:ResourceIdDictionary.Keys).Count -Because "run $Run gives no two resources one masked id"
+            $Seed = Get-RunMaps5
+        }
+    }
+
+    It 'does not give a name map token to a resource when a seeded id holds that token for another parent' {
+        $SrvA = "$script:Base/microsoft.sql/servers/srv-p"; $SrvB = "$script:Base/microsoft.sql/servers/srv-q"
+        $Sub = New-Tok5; $Rg = New-Tok5; $Shared = New-Tok5
+        Invoke-SeededRun5 -SeedMaps @{
+            ResourceIdMap   = @{ "/subscriptions/$Sub/resourcegroups/$Rg/providers/microsoft.sql/servers/$Shared/databases/$(New-Tok5)" = "$SrvA/databases/db-1" }
+            ResourceNameMap = @{ $Shared = $SrvB }
+        } -Rows @((New-Res5 $SrvA), (New-Res5 $SrvB), (New-Res5 "$SrvA/databases/db-1"))
+        $Global:ResourceIdDictionary[$SrvA] | Should -Not -BeExactly $Global:ResourceIdDictionary[$SrvB]
+        $Global:ResourceNameDictionary[$SrvA] | Should -Not -BeExactly $Global:ResourceNameDictionary[$SrvB]
+    }
+
     It 'keeps a seeded name map token for a resource whose seeded id is not kept' {
         $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-n"
         $NameTok = New-Tok5

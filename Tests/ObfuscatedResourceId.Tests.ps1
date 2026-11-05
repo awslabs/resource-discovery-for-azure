@@ -584,6 +584,27 @@ Describe 'The seed''s parent tokens' {
         } -Rows @((New-Res5 $Srv), (New-Res5 "$Srv/databases/db-new"))
         ($Global:ResourceIdDictionary["$Srv/databases/db-new"] -split '/')[8] | Should -BeExactly $SrvTok
     }
+
+    It 'gives a parent with no seeded id of its own the token its kept child holds, in its own id and every id under it' {
+        $Srv = "$script:Base/microsoft.sql/servers/srv-c"
+        $Db = "$Srv/databases/db-a"; $Pool = "$Srv/elasticpools/pool-a"
+        $Sub = New-Tok5; $Rg = New-Tok5; $SrvTok = New-Tok5
+        Invoke-SeededRun5 -SeedMaps @{
+            ResourceIdMap = @{ "/subscriptions/$Sub/resourcegroups/$Rg/providers/microsoft.sql/servers/$SrvTok/databases/$(New-Tok5)" = $Db }
+        } -Rows @((New-Res5 $Srv), (New-Res5 $Db), (New-Res5 $Pool))
+        ($Global:ResourceIdDictionary[$Db] -split '/')[8] | Should -BeExactly $SrvTok -Because 'the seeded child id is kept'
+        ($Global:ResourceIdDictionary[$Srv] -split '/')[-1] | Should -BeExactly $SrvTok -Because 'the server takes the token its child already holds'
+        $Global:ResourceNameDictionary[$Srv] | Should -BeExactly $SrvTok
+        ($Global:ResourceIdDictionary[$Pool] -split '/')[8] | Should -BeExactly $SrvTok -Because 'one server path has one masked form'
+    }
+
+    It 'keeps a seeded name map token for a resource whose seeded id is not kept' {
+        $Vm = "$script:Base/microsoft.compute/virtualmachines/vm-n"
+        $NameTok = New-Tok5
+        Invoke-SeededRun5 -SeedMaps @{ ResourceIdMap = @{ (New-Tok5) = $Vm }; ResourceNameMap = @{ $NameTok = $Vm } } -Rows @((New-Res5 $Vm))
+        $Global:ResourceNameDictionary[$Vm] | Should -BeExactly $NameTok
+        ($Global:ResourceIdDictionary[$Vm] -split '/')[-1] | Should -BeExactly $NameTok
+    }
 }
 
 Describe 'The seed check frees what it built' {

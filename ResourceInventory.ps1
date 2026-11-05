@@ -967,7 +967,9 @@ Function RunInventorySetup()
         # - a subscription, group or parent that the good ids give two tokens
         #   (a seed written before this check) has every id that holds it
         #   dropped, and gets one new token. The dictionary this run writes is
-        #   then consistent, so the next seeded run keeps every id: no repeat.
+        #   then consistent, so the next seeded run keeps every id: no repeat;
+        # - a group or name token that the seed gives two real groups or
+        #   resources is the same: kept for none, every id holding it dropped.
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
             # The seed's maps first: a group or name token that is not of its
@@ -980,6 +982,24 @@ Function RunInventorySetup()
             $SeedSlotTokens = @{}
             $SeedSlotsOf = @{}
             $SeedSubTokenIds = @{}
+            # Each group or name token stands for one real group or resource:
+            # the reals each token is given, from the seed's maps and the
+            # good ids' slots. A token given to two (a hand-merged seed) would
+            # give two resources one masked id.
+            # (Inline, not a helper: this runs once per slot of every seeded id.)
+            $SeedTokenReals = @{}
+            foreach ($K in @($RgLookup.Keys))
+            {
+                $TokenKey = 'rg|' + [string]$RgLookup[$K]
+                if (-not $SeedTokenReals.ContainsKey($TokenKey)) { $SeedTokenReals[$TokenKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                [void]$SeedTokenReals[$TokenKey].Add([string]$K)
+            }
+            foreach ($K in @($ResourceNameDictionary.Keys))
+            {
+                $TokenKey = 'name|' + [string]$ResourceNameDictionary[$K]
+                if (-not $SeedTokenReals.ContainsKey($TokenKey)) { $SeedTokenReals[$TokenKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                [void]$SeedTokenReals[$TokenKey].Add([string]$K)
+            }
             $SeedDropped = 0
             foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
             {
@@ -1029,6 +1049,12 @@ Function RunInventorySetup()
                     $SlotKey = $Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()
                     if (-not $SeedSlotTokens.ContainsKey($SlotKey)) { $SeedSlotTokens[$SlotKey] = @{} }
                     $SeedSlotTokens[$SlotKey][$Slot.Token] = $true
+                    if ($Slot.Kind -ne 'sub')
+                    {
+                        $TokenKey = $Slot.Kind + '|' + [string]$Slot.Token
+                        if (-not $SeedTokenReals.ContainsKey($TokenKey)) { $SeedTokenReals[$TokenKey] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                        [void]$SeedTokenReals[$TokenKey].Add([string]$Slot.Real)
+                    }
                     # A subscription token is one subscription's: a seed from
                     # before tokens were keyed by id can give two subscriptions
                     # with one display name the same token.
@@ -1046,6 +1072,7 @@ Function RunInventorySetup()
                 {
                     if ($SeedSlotTokens[$Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()].Count -gt 1) { $Conflict = $true; break }
                     if ($Slot.Kind -eq 'sub' -and $SeedSubTokenIds[$Slot.Token].Count -gt 1) { $Conflict = $true; break }
+                    if ($Slot.Kind -ne 'sub' -and $SeedTokenReals[$Slot.Kind + '|' + $Slot.Token].Count -gt 1) { $Conflict = $true; break }
                 }
                 if ($Conflict)
                 {
@@ -1077,15 +1104,25 @@ Function RunInventorySetup()
                     'name' { [void]$ResourceNameDictionary.Remove($Real) }
                 }
             }
+            # A group or name token given to two reals is kept for none of them.
+            $SharedTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($TokenKey in @($SeedTokenReals.Keys)) { if ($SeedTokenReals[$TokenKey].Count -gt 1) { [void]$SharedTokens.Add($TokenKey) } }
+            if ($SharedTokens.Count -gt 0)
+            {
+                foreach ($K in @($RgLookup.Keys)) { if ($SharedTokens.Contains('rg|' + [string]$RgLookup[$K])) { [void]$RgLookup.Remove($K) } }
+                foreach ($K in @($ResourceNameDictionary.Keys)) { if ($SharedTokens.Contains('name|' + [string]$ResourceNameDictionary[$K])) { [void]$ResourceNameDictionary.Remove($K) } }
+            }
             Write-Log -Message ("Obfuscation dictionary: {0} subscription token(s) kept from the seeded ids." -f @($SubLookup.Keys).Count) -Severity 'Info'
             if ($SeedDropped -gt 0)
             {
-                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, or a subscription token two subscriptions share, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
+                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, or a token two subscriptions, groups or resources share, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
             }
             # The slot index is only for this check: free it before the token loop.
             $SeedSlotsOf = $null
             $SeedSlotTokens = $null
             $SeedSubTokenIds = $null
+            $SeedTokenReals = $null
+            $SharedTokens = $null
         }
 
         foreach ($resourceItem in $Global:Resources)

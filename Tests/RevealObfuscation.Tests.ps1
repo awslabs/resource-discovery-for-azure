@@ -359,6 +359,20 @@ Describe "Reveal-Obfuscation older / partial dictionaries" {
         $R.Inventory.VirtualMachines[0].Subscription | Should -Be '12345678-1234-1234-1234-123456789012'
     }
 
+    It "reveals the name of a collector row with no id without its stand-in suffix" {
+        # A row with no id is filed under a stand-in path whose last segment is <name>~<hash>.
+        $NoIdDir = Join-Path $script:TmpDir ("noid_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $NoIdDir -Force | Out-Null
+        $NoIdDict = Join-Path $NoIdDir 'ObfuscationDictionary_NoId.json'
+        [ordered]@{
+            GeneratedAt     = '2026-06-30 00:00:00'
+            ResourceNameMap = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/rg-app/providers/rda.noid/virtualmachines/vm01~0a1b2c3d" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $NoIdDict -Encoding utf8
+
+        $R = Invoke-Reveal -Fields @('ResourceName') -DictPath $NoIdDict
+        $R.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
+    }
+
     It "leaves tag values masked when -Fields Tag is requested but the dictionary has no TagMap" {
         $NoTagDir = Join-Path $script:TmpDir ("notag_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $NoTagDir -Force | Out-Null

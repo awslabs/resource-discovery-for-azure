@@ -256,6 +256,13 @@ function Invoke-RdaReveal
         foreach ($token in $NameMap.Keys)
         {
             $Name = ($NameMap[$token] -split '/')[-1]
+            # A collector row with no id is filed under a stand-in path whose
+            # last segment is <name>~<hash> (a '/' in the name is written '_'):
+            # its name is the part before '~', and a row with no name has none.
+            if ($NameMap[$token] -match '(?i)/providers/rda\.noid/' -and $Name -match '^(.+)~[0-9a-f]{8}(-\d+)?$')
+            {
+                $Name = if ($Matches[1] -eq '~noname') { '' } else { $Matches[1] }
+            }
             if (-not [string]::IsNullOrEmpty($Name)) { $Replacements[$token] = $Name }
         }
     }

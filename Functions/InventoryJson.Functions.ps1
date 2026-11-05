@@ -16,7 +16,8 @@
 # UTF-8 with no BOM and a trailing newline; a relative path resolves against the PowerShell
 # location, as Out-File does. The file is written under a temporary name in the same folder and
 # moved to $Path only once it is complete, so a failed write never leaves a cut-off file: on any
-# failure the temporary file is closed and removed, and the error is re-thrown.
+# failure the temporary file is closed, its removal is tried (a warning says when it cannot be
+# removed), and the error is re-thrown.
 # A dictionary (hashtable, [ordered]) is refused before anything is written: its PSObject
 # properties are Keys, Count, IsReadOnly and so on, not its entries, so it would be written as
 # the wrong shape.
@@ -31,10 +32,18 @@ function Write-InventoryJson
     )
 
     $FullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
-    $TempPath = '{0}.{1}.tmp' -f $FullPath, [guid]::NewGuid().ToString('N')
     $Moved = $false
+    # Only a temporary file this call created is removed on failure.
+    $Created = $false
+    $TempPath = $null
     try
     {
+        # The temporary file sits beside the final one under a short ASCII name
+        # of its own, 'rda-write-<32 hex>.tmp' (a new GUID for every write): it
+        # never ends in .json, it is 46 characters long (so it fits as a file
+        # name wherever a longer final name does), and no two writes share it. A file a killed write left stays in that run's
+        # folder with the other files the run had written.
+        $TempPath = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($FullPath), ('rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')))
         # Inside the try: a throw outside any try is skipped when the caller runs with
         # $ErrorActionPreference = 'SilentlyContinue', as ResourceInventory.ps1 does.
         # Here it always stops the function, before the temporary file is created.
@@ -43,7 +52,12 @@ function Write-InventoryJson
             throw ("Write-InventoryJson: -InputObject is a dictionary ({0}). Pass a [pscustomobject] with one property per collector, for example [pscustomobject]`$Table." -f $InputObject.GetType().FullName)
         }
 
-        $Writer = [System.IO.StreamWriter]::new($TempPath, $false, [System.Text.UTF8Encoding]::new($false))
+        # The file is this call's from the moment it exists, so a failure in
+        # building the writer still closes and removes it.
+        $TempStream = [System.IO.FileStream]::new($TempPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $Created = $true
+        try { $Writer = [System.IO.StreamWriter]::new($TempStream, [System.Text.UTF8Encoding]::new($false)) }
+        catch { $TempStream.Dispose(); throw }
         try
         {
             $Writer.Write('{')
@@ -78,6 +92,10 @@ function Write-InventoryJson
     }
     finally
     {
-        if (-not $Moved -and (Test-Path -LiteralPath $TempPath)) { Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue }
+        if (-not $Moved -and $Created -and $null -ne $TempPath -and (Test-Path -LiteralPath $TempPath))
+        {
+            Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $TempPath) { Write-Warning ("Write-InventoryJson: could not remove the temporary file '{0}'; delete it by hand." -f $TempPath) }
+        }
     }
 }

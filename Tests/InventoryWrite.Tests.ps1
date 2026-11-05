@@ -438,6 +438,84 @@ Describe 'Write-InventoryJson' {
         $Parsed.Version | Should -Be '1.2.3'
     }
 
+    It 'writes a file whose name is as long as the file system allows, and leaves only that file' {
+        # The temporary file name the writer uses first must fit as a file name
+        # wherever the final file name fits. 255 characters is the usual limit for one file name; on a
+        # file system with a lower one the case cannot be made, so it is skipped.
+        $Dir = New-WriterCaseDir
+        $Name = 'Inventory_' + ('x' * (255 - 10 - 5)) + '.json'
+        $Path = Join-Path $Dir $Name
+        try { [System.IO.File]::WriteAllText($Path, ''); Remove-Item -LiteralPath $Path -Force }
+        catch { Set-ItResult -Skipped -Because 'this file system does not take a 255-character file name'; return }
+        Write-InventoryJson -InputObject (New-InventoryFixture) -Path $Path 3>$null
+        Test-Path -LiteralPath $Path | Should -BeTrue
+        Get-WriterCaseFiles $Dir | Should -Be @($Name) -Because 'no temporary file is left behind'
+    }
+
+    It 'writes a name of 255 bytes that holds non-ASCII letters, and leaves only that file' {
+        $Dir = New-WriterCaseDir
+        $Name = 'Inventory_' + ([string][char]0x00E9 * 120) + '.json'
+        $Path = Join-Path $Dir $Name
+        try { [System.IO.File]::WriteAllText($Path, ''); Remove-Item -LiteralPath $Path -Force }
+        catch { Set-ItResult -Skipped -Because 'this file system does not take a 255-byte file name'; return }
+        Write-InventoryJson -InputObject (New-InventoryFixture) -Path $Path 3>$null
+        Get-WriterCaseFiles $Dir | Should -Be @($Name)
+    }
+
+    It 'uses a short ASCII temporary name of its own for each write, never ending in .json' {
+        # Remove-Item stands in as a no-op so the failed writes leave their
+        # temporary files to look at.
+        Mock Remove-Item { }
+        $Dir = New-WriterCaseDir
+        $Long = 'Inventory_' + ('y' * 237)
+        foreach ($Final in @(($Long + '_a.json'), ($Long + '_b.json')))
+        {
+            { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir $Final) 3>$null } | Should -Throw
+        }
+        $Left = @(Get-WriterCaseFiles $Dir)
+        $Left.Count | Should -Be 2 -Because 'these two final paths get two temporary files'
+        foreach ($L in $Left) { $L | Should -Match '^rda-write-[0-9a-f]{32}\.tmp$'; $L.Length | Should -Be 46 }
+    }
+
+    It 'says when it cannot remove the temporary file of a failed write' {
+        Mock Remove-Item { }
+        $Dir = New-WriterCaseDir
+        $Out = @(& { try { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_W.json') } catch { } } 3>&1)
+        ($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) -join "`n" | Should -Match 'could not remove the temporary file .*rda-write-[0-9a-f]{32}\.tmp'
+    }
+
+    It 'leaves an earlier write''s leftover and other files alone when a write fails' {
+        # A failed write removes only the file it created itself.
+        $Dir = New-WriterCaseDir
+        $Earlier = Join-Path $Dir ('rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        $Other = Join-Path $Dir 'notes.tmp'
+        foreach ($F in $Earlier, $Other) { [System.IO.File]::WriteAllText($F, 'keep') }
+        { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_F.json') 3>$null } | Should -Throw
+        @(Get-WriterCaseFiles $Dir) | Should -Be @((Split-Path $Other -Leaf), (Split-Path $Earlier -Leaf) | Sort-Object)
+    }
+
+    It 'leaves no temporary file when the write cannot be opened' {
+        $Dir = New-WriterCaseDir
+        $Missing = Join-Path $Dir 'no-such-folder'
+        { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Missing 'Inventory_X.json') 3>$null } | Should -Throw
+        @(Get-WriterCaseFiles $Dir) | Should -BeNullOrEmpty
+    }
+
+    It 'leaves no temporary file when the move into place fails' {
+        # The final path is a folder, so the move fails after the file is written.
+        $Dir = New-WriterCaseDir
+        $Final = Join-Path $Dir 'Inventory_Folder.json'
+        New-Item -ItemType Directory -Path $Final | Out-Null
+        { Write-InventoryJson -InputObject (New-InventoryFixture) -Path $Final 3>$null } | Should -Throw
+        @(Get-WriterCaseFiles $Dir) | Should -Be @('Inventory_Folder.json')
+    }
+
+    It 'writes no warning when the write works' {
+        $Dir = New-WriterCaseDir
+        $Out = @(& { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_Ok.json') } 3>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] -and $_.Message -match 'temporary file' }).Count | Should -Be 0
+    }
+
     It 'keeps a one-element collector as a JSON array and writes no BOM' {
         $Path = Join-Path $script:TmpRoot 'writer-shape.json'
         Write-InventoryJson -InputObject (New-InventoryFixture) -Path $Path 3>$null

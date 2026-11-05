@@ -622,10 +622,12 @@ if ($Task -eq 'Processing')
                             # A row with no id has nothing to look up by id: mask
                             # its fields so no real name is left in the file.
                             # The group, the subscription (when one subscription
-                            # has that display name) and the name (when the run
-                            # holds one resource of that name, group and
-                            # subscription) take the tokens the inventory rows
-                            # carry, so the row matches them by name and group.
+                            # has that display name; with two, the row does not
+                            # say which, so neither one's token is given) and the
+                            # name (when the run holds one resource of that name,
+                            # group and subscription) take the tokens the
+                            # inventory rows carry, so the row matches them by
+                            # name and group.
                             # Any other field gets one token per real value, kept
                             # in the run's free-text dictionary so the dictionary
                             # file can reveal it.

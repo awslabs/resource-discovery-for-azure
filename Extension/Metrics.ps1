@@ -620,14 +620,28 @@ if ($Task -eq 'Processing')
                         else
                         {
                             # A row with no id has nothing to look up: mask its
-                            # fields so no real name is left in the file, with
-                            # one token per real value, kept in the run's
-                            # free-text dictionary so the dictionary file can
-                            # reveal it.
+                            # fields so no real name is left in the file. Any
+                            # field still real gets one token per real value,
+                            # kept in the run's free-text dictionary so the
+                            # dictionary file can reveal it.
+                            # The group and subscription take the tokens the
+                            # inventory rows of that group and subscription have,
+                            # when the run has one, so the row's fields match them.
+                            $RealRgValue = [string]$metric.ResourceGroup
+                            if (-not [string]::IsNullOrEmpty($RealRgValue) -and $null -ne $Global:ObfuscationResourceGroupTokens -and $Global:ObfuscationResourceGroupTokens.ContainsKey($RealRgValue))
+                            {
+                                $metric.ResourceGroup = $Global:ObfuscationResourceGroupTokens[$RealRgValue]
+                            }
+                            $RealSubValue = [string]$metric.Subscription
+                            $SubIdsOfName = @(@($Global:Subscriptions) | Where-Object { $null -ne $_ -and [string]$_.name -eq $RealSubValue -and -not [string]::IsNullOrEmpty([string]$_.id) } | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+                            if (-not [string]::IsNullOrEmpty($RealSubValue) -and $SubIdsOfName.Count -eq 1 -and $null -ne $Global:ObfuscationSubscriptionTokens -and $Global:ObfuscationSubscriptionTokens.ContainsKey($SubIdsOfName[0]))
+                            {
+                                $metric.Subscription = $Global:ObfuscationSubscriptionTokens[$SubIdsOfName[0]]
+                            }
                             foreach ($Field in 'Name', 'Subscription', 'ResourceGroup')
                             {
                                 $RealValue = [string]$metric.$Field
-                                if ([string]::IsNullOrEmpty($RealValue)) { continue }
+                                if ([string]::IsNullOrEmpty($RealValue) -or $RealValue -cmatch '^(prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { continue }
                                 if ($null -eq $Global:FreeTextDictionary) { $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' }
                                 if (-not $Global:FreeTextDictionary.ContainsKey($RealValue)) { $Global:FreeTextDictionary[$RealValue] = (Get-ObfuscationPrefix $RealValue) + [guid]::NewGuid().ToString() }
                                 $metric.$Field = $Global:FreeTextDictionary[$RealValue]

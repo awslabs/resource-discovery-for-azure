@@ -1214,7 +1214,14 @@ Function RunInventorySetup()
             }
             $ObfuscatedResourceGroup = $RgLookup[$RealRG]
 
-            if ($ResourceIdDictionary.ContainsKey($resourceItem.ID) -and (Test-ObfuscatedIdShape -RealId $resourceItem.ID -MaskedId $ResourceIdDictionary[$resourceItem.ID]))
+            # A seeded id is kept when it has the right shape, or when the real
+            # id is not an ARM path and the seed check kept its flat token.
+            $SeedKept = $false
+            if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
+            {
+                $SeedKept = (Test-ObfuscatedIdShape -RealId $resourceItem.ID -MaskedId $ResourceIdDictionary[$resourceItem.ID]) -or ([string]$resourceItem.ID -notmatch '(?i)^/subscriptions/[^/]' -and -not (Test-RdaTenantScopeIdMaskable -ResourceId $resourceItem.ID))
+            }
+            if ($SeedKept)
             {
                 # A seeded id (-ObfuscationDictionary): the seed gives its
                 # masked id but no subscription or resource group entry, so
@@ -1227,6 +1234,7 @@ Function RunInventorySetup()
                 if ($SeedParts.Count -ge 3 -and $SeedParts[1] -ieq 'subscriptions' -and -not [string]::IsNullOrEmpty($SeedParts[2])) { $ObfuscatedSubscription = $SeedParts[2] }
                 if ($SeedParts.Count -ge 5 -and $SeedParts[3] -ieq 'resourcegroups' -and -not [string]::IsNullOrEmpty($SeedParts[4])) { $ObfuscatedResourceGroup = $SeedParts[4] }
                 if ($SeedParts.Count -ge 2 -and -not [string]::IsNullOrEmpty($SeedParts[-1])) { $ObfuscatedName = $SeedParts[-1] }
+                elseif ($ResourceNameDictionary.ContainsKey($resourceItem.ID) -and -not [string]::IsNullOrEmpty($ResourceNameDictionary[$resourceItem.ID])) { $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID] }
             }
             else
             {

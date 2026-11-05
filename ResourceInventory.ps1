@@ -1233,7 +1233,11 @@ Function RunInventorySetup()
                 # Not seeded, or seeded with an id of another shape (see
                 # Test-ObfuscatedIdShape): masked below like a new id, which
                 # still reuses the seed's subscription, group and parent tokens.
+                # A name token the seed already gave this resource (its name map
+                # entry, or its slot as the parent of a kept seeded id) is kept,
+                # so the resource's own id and every id under it share one token.
                 $ObfuscatedID = $null
+                if ($ResourceNameDictionary.ContainsKey($resourceItem.ID) -and -not [string]::IsNullOrEmpty($ResourceNameDictionary[$resourceItem.ID])) { $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID] }
                 [void]$IdsToMask.Add($resourceItem.ID)
             }
 

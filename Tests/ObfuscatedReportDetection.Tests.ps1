@@ -40,14 +40,6 @@ BeforeAll {
         . ([scriptblock]::Create((Get-FunctionText $script:InventoryScript $Name)))
     }
 
-    # $RawUri masked by the Build-ObfuscatedResourceUri copy in $File.
-    function Get-MaskedUri
-    {
-        param([string]$File, [string]$RawUri, [string]$Prefix)
-        $Defs = @((Get-FunctionText $File 'Resolve-ObfuscationToken'), (Get-FunctionText $File 'Build-ObfuscatedResourceUri')) -join "`n"
-        & ([scriptblock]::Create($Defs + "`nBuild-ObfuscatedResourceUri -RawUri `$args[0] -Prefix `$args[1] -SubCache @{} -RgCache @{} -NameCache @{}")) $RawUri $Prefix
-    }
-
     # An obfuscated inventory record as -Obfuscate writes one: every name is the
     # token New-ObfuscatedNameToken gives it.
     $script:SubToken = (Get-ObfuscationPrefix 'Demo Subscription') + [guid]::NewGuid().ToString()
@@ -144,20 +136,22 @@ Describe 'Get-RdaObfuscationTokenPattern accepts each token -Obfuscate writes, a
         $Token | Should -Match $script:Whole
     }
 
-    It 'accepts every segment token of a metrics id masked by <File>' -ForEach @(
-        @{ File = 'ResourceInventory.ps1' }
-        @{ File = 'Extension/Metrics.ps1' }
-    ) {
-        $Path = Join-Path $script:Root $File
-        $Plain = (Get-MaskedUri -File $Path -RawUri "$script:Base/rg-demo/providers/microsoft.compute/virtualmachines/vm-demo" -Prefix 'prod_').Split('/')
-        $Aks = (Get-MaskedUri -File $Path -RawUri "$script:Base/mc_rg-demo_aks-demo_eastus/providers/microsoft.compute/disks/disk-demo" -Prefix 'nonprod_').Split('/')
-        $Plain[2] | Should -Match '^prod_sub_'
-        $Plain[4] | Should -Match '^prod_rg_[0-9a-f]{8}-'
-        $Aks[4] | Should -Match '^nonprod_rg_mc_'
-        foreach ($Segment in @($Plain[2], $Plain[4], $Plain[8], $Aks[2], $Aks[4], $Aks[8]))
+    It 'accepts the sub_, rg_ and rg_mc_ tokens an older build wrote in a metric id' {
+        # Older builds masked a metric id that the inventory did not hold with
+        # their own sub_/rg_ tokens; their reports still read as obfuscated.
+        $G = '12345678-1234-1234-1234-123456789012'
+        foreach ($Segment in @("prod_sub_$G", "prod_rg_$G", "nonprod_sub_$G", "nonprod_rg_mc_$G", "prod_$G"))
         {
             $Segment | Should -Match $script:Whole
         }
+    }
+
+    It 'has no private token builder left in <File>: every masked id comes from Get-ObfuscatedResourceId' -ForEach @(
+        @{ File = 'ResourceInventory.ps1' }
+        @{ File = 'Extension/Metrics.ps1' }
+    ) {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:Root $File), [ref]$null, [ref]$null)
+        @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -in 'Build-ObfuscatedResourceUri', 'Resolve-ObfuscationToken' }, $true)).Count | Should -Be 0
     }
 
     It 'accepts <Value>, a token written without a hint word' -ForEach @(

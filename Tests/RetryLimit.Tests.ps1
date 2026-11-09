@@ -121,7 +121,10 @@ $Global:ResourceCount = 1
         if ($Body[$i] -is [System.Management.Automation.Language.ForEachStatementAst] -and $Body[$i].Condition.Extent.Text -eq '$StreamSummaries' -and $Body[$i].Body.Extent.Text -match 'ResourceCounts') { $AggAt = $i; break }
     }
     if ($AggAt -lt 0) { throw 'Expected the stream-summary aggregation loop in the wrapper.' }
-    $ParLaunchPrelude = "`$StreamCount = [Math]::Min(`$ParallelStreams, `$Subscriptions.Count); `$AzContextSnapshot = Join-Path `$InventoryRoot 'ctx.json'; `$Jobs = @(); `$StreamSummaries = @()`n"
+    # The pending list as the parallel path builds it before it slices (lifted below).
+    $PendingAt = @($SeqIf[0].ElseClause.Statements | Where-Object { $_ -is [System.Management.Automation.Language.ForEachStatementAst] -and $_.Body.Extent.Text.Contains('$PendingSubscriptions += $Sub') })
+    if ($PendingAt.Count -ne 1) { throw 'Expected the pending-subscription list of the parallel path in the wrapper.' }
+    $ParLaunchPrelude = "`$PendingSubscriptions = @()`n" + $PendingAt[0].Extent.Text + "`n`$StreamCount = [Math]::Min(`$ParallelStreams, `$PendingSubscriptions.Count); `$AzContextSnapshot = Join-Path `$InventoryRoot 'ctx.json'; `$Jobs = @(); `$StreamSummaries = @()`n"
     $ParLaunchText = script:Set-TestPaths -Text (@($Body[0..($AggAt - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n")
 
     # The resume-state cleanup: every statement after the main-summary build up to
@@ -486,12 +489,24 @@ Describe 'Retry limit on the parallel path' {
         $null = script:Invoke-Run -Subs $Subs
         $null = script:Invoke-Run -Subs $Subs -Streams 2 -ResumeFailedOnly
         $Global:RdaRlFailIds = @('sub-x', 'sub-b')
-        $null = script:Invoke-Run -Subs $Subs -Streams 2 -Resume
+        # A run without -Resume, so it collects Sub B again (a -Resume skips it:
+        # an earlier run completed it) and Sub B fails.
+        $null = script:Invoke-Run -Subs $Subs -Streams 2
         [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 3
         $Run4 = script:Invoke-Run -Subs $Subs -Streams 2 -ResumeFailedOnly
 
         @($Run4.Calls) | Should -Be @('sub-b')
         @(script:Get-Lines -Run $Run4 -Like 'Not retried:*') | Should -Be @($script:NotRetriedX)
+    }
+
+    It 'a parallel -Resume after a merged run collects only what is left, not the completed subscriptions again' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:B, $script:X)
+        $null = script:Invoke-Run -Subs $Subs -Streams 2
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty -Because 'the merge removed the per-stream files'
+        $R = script:Invoke-Run -Subs $Subs -Streams 2 -Resume
+        @($R.Calls | Sort-Object -Unique) | Should -Be @('sub-x')
+        @(script:Get-Lines -Run $R -Like 'Skipping (already completed):*').Count | Should -Be 2
     }
 
     It 'counts a run whose streams failed it before the session ended once, not twice' {

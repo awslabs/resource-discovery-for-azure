@@ -130,19 +130,29 @@ try
 catch
 {
     Write-Stream ("FATAL: could not import Az context from {0}: {1}" -f $AzContextPath, $_.Exception.Message) 'Red'
+    $ImportError = $_.Exception.Message
+    # Under -Resume the stream would have skipped the subscriptions its own
+    # resume file lists as completed, so they are not failed this run and get
+    # no row. A file that cannot be read skips none (Read-StreamState), as in
+    # the loop below.
+    $PriorDone = @()
+    if ($Resume)
+    {
+        $PriorDone = @((Read-StreamState -Path (Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId))).Completed)
+    }
     # Write a minimum stream summary so the parent doesn't think the stream
     # disappeared silently.
     @{
         StreamId      = $StreamId
         Tenant        = $TenantID
         Status        = 'failed-to-start'
-        Reason        = $_.Exception.Message
+        Reason        = $ImportError
         Completed     = @()
         Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
                 $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
                 $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
                 [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
-            })
+            } | Where-Object { $PriorDone -notcontains $_.Id })
         ResourceCounts = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
     exit 1

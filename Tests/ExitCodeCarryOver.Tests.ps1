@@ -115,6 +115,9 @@ function Import-AzContext
     if ($null -ne $Worker)
     {
         $Bound = $Worker.InvocationInfo.BoundParameters
+        # ImportFailStream: that stream cannot import the context, so it
+        # does not start.
+        if ([string](Get-RdaStandInScenario).ImportFailStream -eq [string]$Bound['StreamId']) { throw 'stand-in: the context snapshot cannot be imported' }
         $SummaryPath = [string]$Bound['StreamSummaryPath']
         foreach ($Plant in @((Get-RdaStandInScenario).Plant | Where-Object { $null -ne $_ -and [string]$_.Stream -eq [string]$Bound['StreamId'] }))
         {
@@ -229,7 +232,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '')
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -286,7 +289,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
@@ -570,6 +573,28 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.RunSummary | Should -Match ([regex]::Escape('  Exit code 2: the summary of stream 0 could not be read; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.RunSummary
         $Run.MainSummary | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 1 subscription(s) are not confirmed')) -Because $Run.Console
         $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams with -Resume: a stream that cannot start names as failed only the subscriptions it would have run, not those its resume file lists as done' {
+        # Stream-0 holds Sub A then Sub C; its resume file says Sub A is done.
+        # Its context import fails, so it runs nothing.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -Resume -Stream0Completed @($script:SubA.Id) -ImportFailStream '0'
+        $Run.Console | Should -Match '\[stream-0\] FATAL: could not import Az context' -Because $Run.Console
+        $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
+        $Run.Console | Should -Match '(?m)^Subscriptions Failed:\s+1 \(Sub C \(stream-0: stream did not start: Az context import failed\)\)\s*$' -Because $Run.Console
+        $Run.Console | Should -Match '(?m)^Subscriptions Skipped:\s+1 \(already completed\)' -Because $Run.Console
+        $Run.Console | Should -Match '(?m)^Subscriptions Processed: 2\s*$' -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.RunSummary | Should -Match ('(?m)^  - {0} \({1}\)\s*$' -f [regex]::Escape($script:SubC.Name), [regex]::Escape($script:SubC.Id)) -Because $Run.RunSummary
+        $Run.RunSummary | Should -Not -Match ([regex]::Escape($script:SubA.Id)) -Because 'Sub A was done in an earlier run and was not run or failed this time'
+        $Run.MainSummary | Should -Not -Match ([regex]::Escape($script:SubA.Name)) -Because 'Sub A did not fail this run'
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams without -Resume: a stream that cannot start names every subscription of its slice as failed' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ImportFailStream '0'
+        $Run.Console | Should -Match '(?m)^Subscriptions Failed:\s+2 \(Sub A \(stream-0: .+\), Sub C \(stream-0: .+\)\)\s*$' -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 

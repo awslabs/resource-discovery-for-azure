@@ -1516,3 +1516,18 @@ Describe 'Extension/Summary.ps1 privacy wording in a re-rendered report' {
         $Said | Should -Not -BeLike '*(safe to share)*'
     }
 }
+
+Describe 'Extension/Summary.ps1 reads a consumption file in a folder with brackets' {
+    It 'runs the VM billing check on it' {
+        $Dir = Join-Path $script:TmpRoot 'con[1]'
+        [void][System.IO.Directory]::CreateDirectory($Dir)
+        $Json = Join-Path $Dir 'Inventory_vms.json'
+        $Vms = foreach ($N in 1..3) { '{{"Name":"vm{0}","Subscription":"S","PowerState":"vm running"}}' -f $N }
+        [System.IO.File]::WriteAllText($Json, ('{"Version":"3.2.3","VirtualMachines":[' + ($Vms -join ',') + ']}'))
+        $Csv = Join-Path $Dir 'Consumption_vms.csv'
+        [System.IO.File]::WriteAllLines($Csv, [string[]]@('MeterCategory,ResourceId', '"Virtual Machines","/x/vm1"'))
+        $Html = Join-Path $Dir 'r.html'
+        & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' -ConsumptionFile $Csv 6>$null | Out-Null
+        [System.IO.File]::ReadAllText($Html) | Should -Match 'VM billing-coverage check'
+    }
+}

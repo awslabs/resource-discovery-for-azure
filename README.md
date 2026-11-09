@@ -112,7 +112,7 @@ Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PS
 Install-Module -Name Az.Accounts -MinimumVersion 5.5.4 -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
 ```
 
-If an older `Az.Accounts` is already loaded in your PowerShell session, it cannot be replaced while the session runs: the run stops and asks you to open a new PowerShell session (use `pwsh -NoProfile` if your profile loads `Az.Accounts`).
+If an older `Az.Accounts` is already loaded in your PowerShell session, it cannot be replaced while the session runs: the run stops and asks you to open a new PowerShell session (use `pwsh -NoProfile` if your profile loads `Az.Accounts`). In that new session, sign in first (`Connect-AzAccount`, or `Connect-AzAccount -Identity` on an Azure VM), then run again.
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 

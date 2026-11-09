@@ -125,6 +125,22 @@ Describe 'Test-RdaAzAccountsVersion' {
         $Text | Should -Not -Match 'Install-Module' -Because 'a good version is already installed; only a new session is needed'
     }
 
+    It 'says to sign in again in the new session, since pwsh -NoProfile drops a profile''s sign-in' {
+        Mock Get-Module -ParameterFilter { $ListAvailable } -MockWith { New-FakeModule '5.5.4' }
+        Mock Get-Module -ParameterFilter { -not $ListAvailable } -MockWith { New-FakeModule '5.5.3' }
+
+        $Messages = @((Test-RdaAzAccountsVersion).Messages)
+
+        $NoProfile = [array]::FindIndex([string[]]$Messages, [Predicate[string]] { param($m) $m -match 'pwsh -NoProfile' })
+        $SignIn = [array]::FindIndex([string[]]$Messages, [Predicate[string]] { param($m) $m -match 'sign in first' })
+        $NoProfile | Should -BeGreaterOrEqual 0
+        $SignIn | Should -BeGreaterThan $NoProfile -Because 'the sign-in step follows the new-session advice'
+        $Messages[$SignIn] | Should -Match ([regex]::Escape('Connect-AzAccount'))
+        $Messages[$SignIn] | Should -Match ([regex]::Escape('Connect-AzAccount -Identity'))
+        $Messages[$SignIn] | Should -Match 'then run again'
+        (Get-RdaAzAccountsMinimumVersion) | Should -Be ([version]'5.5.4') -Because 'the supported version stays 5.5.4'
+    }
+
     It 'gives the install command and the new-session advice when the loaded and installed versions are both older' {
         Mock Get-Module -ParameterFilter { $ListAvailable } -MockWith { New-FakeModule '5.5.3' }
         Mock Get-Module -ParameterFilter { -not $ListAvailable } -MockWith { New-FakeModule '5.5.3' }

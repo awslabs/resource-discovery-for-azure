@@ -81,6 +81,8 @@ function Test-RdaAzAccountsVersion
         }
         $Messages += 'Then open a new PowerShell session and run again.'
         $Messages += 'If your PowerShell profile loads Az.Accounts, start the new session with: pwsh -NoProfile'
+        # -NoProfile also drops a sign-in the profile makes (Cloud Shell does).
+        $Messages += 'In that new session, sign in first (Connect-AzAccount, or Connect-AzAccount -Identity on an Azure VM), then run again.'
     }
     elseif (-not $Installed)
     {

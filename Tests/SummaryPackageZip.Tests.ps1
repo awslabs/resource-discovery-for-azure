@@ -349,3 +349,41 @@ Describe 'Build-MainSummaryFromZip with two extracted report folders of the same
         @($script:TwiceFolderLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
     }
 }
+
+Describe 'Build-MainSummaryFromZip report zips whose names differ only in case' {
+
+    BeforeAll {
+        $Root = Join-Path $script:TmpRoot 'case'
+        $Stage = Join-Path $Root 'outer'
+        $Stamp = '20260102030405041'
+        $Src = Join-Path $Root 'sub'
+        New-SubReportFiles -Dir $Src -Stamp $Stamp
+        New-Item -ItemType Directory -Path (Join-Path $Stage 'a'), (Join-Path $Stage 'b') -Force | Out-Null
+        Compress-Archive -Path (Join-Path $Src '*') -DestinationPath (Join-Path $Stage ('a/ResourcesReport_' + $Stamp + '.zip')) -Force
+        Compress-Archive -Path (Join-Path $Src '*') -DestinationPath (Join-Path $Stage ('b/resourcesreport_' + $Stamp + '.zip')) -Force
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-08.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $script:CaseLines = @(& $script:Script -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>&1 | ForEach-Object { [string]$_ })
+    }
+
+    It 'treats them as one folder, as Windows and macOS do, and rebuilds it once' {
+        @($script:CaseLines | Where-Object { $_ -like '*Skipped a second report zip named*' }).Count | Should -Be 1
+        @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
+    }
+}
+
+Describe 'Build-MainSummaryFromZip -PackageZip with -HtmlFile given through a PowerShell drive' {
+    It 'puts the summary in the bundle' {
+        $Out = Join-Path $script:TmpRoot 'drive_out'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        $null = New-PSDrive -Name RdaPkg -PSProvider FileSystem -Root $Out -Scope Global
+        try
+        {
+            . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+            New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory 'RdaPkg:\' -HtmlFile 'RdaPkg:\MainSummary.html' -PackageZip 6>$null | Out-Null
+        }
+        finally { Remove-PSDrive -Name RdaPkg -Scope Global -ErrorAction SilentlyContinue }
+        $Package = $Out.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
+        Get-ZipEntryNames -ZipPath $Package | Should -Contain 'MainSummary.html'
+    }
+}

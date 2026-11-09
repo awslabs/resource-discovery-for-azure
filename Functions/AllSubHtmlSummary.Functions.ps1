@@ -246,7 +246,7 @@ function New-RdaAllSubHtmlSummary
     $AllowedFiles = $null
     if ($null -ne $ReportFiles)
     {
-        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), [System.StringComparer]::Ordinal)
+        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), [System.StringComparer]::OrdinalIgnoreCase)
     }
     # Only the folders -ReportFolders names, when given.
     if ($null -ne $ReportFolders)
@@ -572,10 +572,13 @@ function New-RdaAllSubHtmlSummaryFromZip
         $Reconstructed = 0
         # Folders this call writes; -PackageZip bundles only these.
         $ReconstructedDirs = New-Object System.Collections.Generic.List[string]
+        # Case aside: on Windows and macOS two names that differ only in case
+        # are one folder.
+        $DestSeen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         # The files this call writes in each of those folders. A folder of the
         # same name may already hold other files (an earlier bundle's report, a
         # revealed copy); -PackageZip bundles only these files, never the rest.
-        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
@@ -584,7 +587,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             $Dest = Join-Path $OutputDirectory $FolderName
             # A second report zip of the same name (in another folder of the
             # input) would write over the first: the first one is kept.
-            if ($ReconstructedDirs.Contains($Dest))
+            if ($DestSeen.Contains($Dest))
             {
                 Write-Host ("  Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name) -ForegroundColor Yellow
                 continue
@@ -609,7 +612,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 }
             }
             finally { $Archive.Dispose() }
-            if (-not $ReconstructedDirs.Contains($Dest)) { $ReconstructedDirs.Add($Dest) }
+            if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) }
             $Reconstructed++
         }
 
@@ -625,7 +628,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 if ($Files.Count -eq 0) { continue }
                 $Dest = Join-Path $OutputDirectory $Ef.Name
                 # A second folder of the same name: the first one is kept, as for report zips.
-                if ($ReconstructedDirs.Contains($Dest))
+                if ($DestSeen.Contains($Dest))
                 {
                     Write-Host ("  Skipped a second report folder named {0} in the input zip; the first one is used." -f $Ef.Name) -ForegroundColor Yellow
                     continue
@@ -638,7 +641,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                     if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
                     if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
                 }
-                if (-not $ReconstructedDirs.Contains($Dest)) { $ReconstructedDirs.Add($Dest) }
+                if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) }
                 $Reconstructed++
             }
         }
@@ -723,7 +726,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         # this call wrote, so a file that was already in a folder of the same
         # name never travels with the bundle.
         $Entries = New-Object System.Collections.Generic.List[object]
-        $HtmlFullPath = (Resolve-Path -LiteralPath $HtmlFile).Path
+        $HtmlFullPath = (Resolve-Path -LiteralPath $HtmlFile).ProviderPath
         if ((Split-Path -Path $HtmlFullPath -Parent) -eq $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar))
         {
             $Entries.Add([pscustomobject]@{ Path = $HtmlFullPath; Name = (Split-Path -Path $HtmlFullPath -Leaf) })

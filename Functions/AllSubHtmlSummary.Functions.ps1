@@ -854,6 +854,9 @@ function New-RdaAllSubHtmlSummaryFromZip
         $PlanSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
         [long]$PlanBytes = 0
         $PlanCount = 1
+        # The re-render writes an html for a report that has none, but only
+        # when it runs (not with -KeepOriginalReports, nor without the renderer).
+        $WillRender = (-not $KeepOriginalReports) -and (Test-Path -Path (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1') -PathType Leaf)
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
@@ -891,7 +894,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             # The re-render writes an html for a report that has none, and the
             # summary is one file more: both count too.
             $PlanCount += $Picked.Count
-            if (@($Picked | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
+            if ($WillRender -and @($Picked | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
             foreach ($P in $Picked) { $PlanBytes += $P.Length }
             if ($PlanCount -gt 2000) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report zips in {0} would write more than 2000 files in all.' -f $ZipItem.Name) }
             if ($PlanBytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report zips in {0} would write more than 32 GB in all.' -f $ZipItem.Name) }
@@ -954,7 +957,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                     throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
                 }
                 $PlanCount += $Files.Count
-                if (@($Files | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
+                if ($WillRender -and @($Files | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
                 foreach ($F in $Files) { $PlanBytes += $F.Length }
                 if ($PlanCount -gt 2000) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report folders in {0} would write more than 2000 files in all.' -f $ZipItem.Name) }
                 if ($PlanBytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report folders in {0} would write more than 32 GB in all.' -f $ZipItem.Name) }
@@ -1075,6 +1078,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 # it worked, so a failed render keeps the original.
                 $RenderPartial = '{0}.rda-{1}.partial' -f $TargetHtml, [guid]::NewGuid().ToString('N')
                 $RenderBackup = $null
+                $RenderDone = $false
                 try
                 {
                     & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $RenderPartial -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
@@ -1083,18 +1087,8 @@ function New-RdaAllSubHtmlSummaryFromZip
                         $RenderBackup = '{0}.rda-{1}.bak' -f $TargetHtml, [guid]::NewGuid().ToString('N')
                         Move-RdaFile -Path $TargetHtml -Destination $RenderBackup
                     }
-                    try { Move-RdaFile -Path $RenderPartial -Destination $TargetHtml }
-                    catch
-                    {
-                        if ($RenderBackup)
-                        {
-                            # Put back; one that cannot be is kept and named, never removed.
-                            try { Move-RdaFile -Path $RenderBackup -Destination $TargetHtml -Overwrite }
-                            catch { Write-Warning ('{0} is the earlier html; it could not be put back as {1}: rename it.' -f $RenderBackup, $TargetHtml) }
-                            $RenderBackup = $null
-                        }
-                        throw
-                    }
+                    Move-RdaFile -Path $RenderPartial -Destination $TargetHtml
+                    $RenderDone = $true
                     # Listed only once it is written.
                     if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
                     $ReRendered++
@@ -1106,8 +1100,19 @@ function New-RdaAllSubHtmlSummaryFromZip
                 }
                 finally
                 {
+                    # The earlier html is removed only once the new one is in;
+                    # a failed or stopped move puts it back (or keeps and names
+                    # it when it cannot be), never removes it.
+                    if ($RenderBackup -and (Test-Path -LiteralPath $RenderBackup))
+                    {
+                        if ($RenderDone) { Clear-RdaLeftover -Path $RenderBackup }
+                        else
+                        {
+                            try { Move-RdaFile -Path $RenderBackup -Destination $TargetHtml -Overwrite }
+                            catch { Write-Warning ('{0} is the earlier html; it could not be put back as {1}: rename it.' -f $RenderBackup, $TargetHtml) }
+                        }
+                    }
                     Clear-RdaLeftover -Path $RenderPartial
-                    if ($RenderBackup) { Clear-RdaLeftover -Path $RenderBackup }
                 }
             }
             Write-Host ("Re-rendered {0} per-subscription report(s) with the current renderer." -f $ReRendered) -ForegroundColor Green

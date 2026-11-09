@@ -248,28 +248,42 @@ function Get-RdaOnDiskName
 }
 
 # The full path $Path stands for once every symbolic link or junction in it
-# is followed, part by part (a part that does not exist yet is kept as given),
-# so two paths that reach one file through a linked folder compare equal.
+# is followed, part by part (a part that does not exist yet, or whose link
+# cannot be read, is kept as given), so two paths that reach one file through
+# a linked folder compare equal. A link's target is followed the same way, so
+# links in its own parent folders count too. '..' is folded by text first,
+# as PowerShell and .NET fold it for every write this module makes.
 # shortcut: on PowerShell 7.0/7.1 (.NET before 6) links are not followed and
 # the path is only made full; upgrade when 7.2 is the floor.
 function Get-RdaPhysicalPath
 {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param([Parameter(Mandatory = $true)][string]$Path, [int]$Depth = 0)
     $Full = [System.IO.Path]::GetFullPath($Path)
-    if (-not ([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))) { return $Full }
+    if ($Depth -gt 40 -or -not ([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))) { return $Full }
     $Root = [System.IO.Path]::GetPathRoot($Full)
     $Current = $Root
     foreach ($Part in @($Full.Substring($Root.Length).Split([char[]]@([IO.Path]::DirectorySeparatorChar, '/'), [System.StringSplitOptions]::RemoveEmptyEntries)))
     {
-        $Current = Join-Path $Current $Part
-        $Info = if ([System.IO.Directory]::Exists($Current)) { [System.IO.DirectoryInfo]::new($Current) } elseif ([System.IO.File]::Exists($Current)) { [System.IO.FileInfo]::new($Current) } else { $null }
-        if ($null -ne $Info -and $null -ne $Info.LinkTarget)
+        $Current = [System.IO.Path]::Combine($Current, $Part)
+        try
         {
-            $Target = $Info.ResolveLinkTarget($true)
-            if ($null -ne $Target) { $Current = $Target.FullName }
+            $Info = if ([System.IO.Directory]::Exists($Current)) { [System.IO.DirectoryInfo]::new($Current) } elseif ([System.IO.File]::Exists($Current)) { [System.IO.FileInfo]::new($Current) } else { $null }
+            if ($null -ne $Info -and $null -ne $Info.LinkTarget)
+            {
+                $Target = $Info.ResolveLinkTarget($true)
+                if ($null -ne $Target) { $Current = Get-RdaPhysicalPath -Path $Target.FullName -Depth ($Depth + 1) }
+            }
         }
+        catch { Write-Verbose ('Get-RdaPhysicalPath: kept {0} as given: {1}' -f $Current, $_.Exception.Message) }
     }
     return $Current
+}
+
+# One file moved to a new name (a seam, so tests can make a move fail).
+function Move-RdaFile
+{
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Destination, [switch]$Overwrite)
+    [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
 }
 
 # Stops (throws) before anything is extracted from the zip $Path when it is
@@ -692,7 +706,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     $OutputDirectory = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory))
     # A drive or file system root is never the output folder: the reports
     # would sit at the root and the bundle would be named after no folder.
-    if ($OutputDirectory -eq [System.IO.Path]::GetPathRoot($OutputDirectory))
+    if ($OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, '/') -eq ([string][System.IO.Path]::GetPathRoot($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/'))
     {
         throw ("New-RdaAllSubHtmlSummaryFromZip: -OutputDirectory cannot be the root {0}. Choose a folder." -f $OutputDirectory)
     }
@@ -748,13 +762,22 @@ function New-RdaAllSubHtmlSummaryFromZip
     $SwapDone = $false
     $SwapUndone = $false
     # Puts every target back as it was before the swap, last swapped first
-    # (a target written twice is put back in turn).
+    # (a target written twice is put back in turn). One that cannot be put
+    # back does not stop the rest; the old files left under their private
+    # names are returned, so the error can name them.
     $UndoSwap = {
         for ($I = $StagedFiles.Count - 1; $I -ge 0; $I--)
         {
             $Staged = $StagedFiles[$I]
-            if ($Staged.Swapped -and -not $Staged.Backup) { Remove-Item -LiteralPath $Staged.Target -Force -ErrorAction SilentlyContinue }
-            if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup)) { [System.IO.File]::Move($Staged.Backup, $Staged.Target, $true) }
+            try
+            {
+                if ($Staged.Swapped -and -not $Staged.Backup -and (Test-Path -LiteralPath $Staged.Target)) { Remove-Item -LiteralPath $Staged.Target -Force }
+                if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup)) { Move-RdaFile -Path $Staged.Backup -Destination $Staged.Target -Overwrite }
+            }
+            catch
+            {
+                if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup)) { $Staged.Backup }
+            }
         }
     }
     try
@@ -841,8 +864,10 @@ function New-RdaAllSubHtmlSummaryFromZip
         # Then the writes, only the planned entries. Each file is written under
         # a private name beside its target first; only when every file is
         # written do they take their targets' places, each old file kept under
-        # a private name until all have, so a failure at any point puts the
-        # reports already in a reused folder back as they were.
+        # a private name until all have, so a failure before or while they
+        # take their places puts the reports already in a reused folder back
+        # as they were. (A failure later, in the summary or the bundle, keeps
+        # the new reports: the old MainSummary.html then stays as it was.)
         foreach ($Item in $Plan)
         {
             $Dest = $Item.Dest
@@ -920,10 +945,11 @@ function New-RdaAllSubHtmlSummaryFromZip
             if (Test-Path -LiteralPath $Staged.Target)
             {
                 $Staged.Backup = '{0}.rda-{1}.bak' -f $Staged.Target, [guid]::NewGuid().ToString('N')
-                [System.IO.File]::Move($Staged.Target, $Staged.Backup)
+                Move-RdaFile -Path $Staged.Target -Destination $Staged.Backup
             }
-            [System.IO.File]::Move($Staged.Partial, $Staged.Target)
+            # Marked first: a stop right after the move must still undo it.
             $Staged.Swapped = $true
+            Move-RdaFile -Path $Staged.Partial -Destination $Staged.Target
         }
         $SwapDone = $true
         foreach ($Staged in $StagedFiles)
@@ -938,11 +964,16 @@ function New-RdaAllSubHtmlSummaryFromZip
     {
         # A refused or failed rebuild leaves no empty folder it made: the
         # report folders, -OutputDirectory and its parents, deepest first.
-        if (-not $SwapDone) { $SwapUndone = $true; & $UndoSwap }
+        $Kept = @()
+        if (-not $SwapDone) { $SwapUndone = $true; $Kept = @(& $UndoSwap) }
         foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
         foreach ($Dir in @(@($MadeReportDirs) + @($MadeDirs)))
         {
             if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $Dir -Force -ErrorAction SilentlyContinue }
+        }
+        if ($Kept.Count -gt 0)
+        {
+            throw [System.Exception]::new(('{0} Some earlier files could not be put back; each is kept under this name (rename it to drop the .rda-<id>.bak end): {1}' -f $_.Exception.Message, ($Kept -join ', ')), $_.Exception)
         }
         throw
     }
@@ -951,7 +982,11 @@ function New-RdaAllSubHtmlSummaryFromZip
         # A stopped run (no catch) is put back too. Then the old files moved
         # aside, the private names left by a failed write, and the staging
         # folder (only the one this call made).
-        if (-not $SwapDone -and -not $SwapUndone) { & $UndoSwap }
+        if (-not $SwapDone -and -not $SwapUndone)
+        {
+            $Kept = @(& $UndoSwap)
+            if ($Kept.Count -gt 0) { Write-Warning ('New-RdaAllSubHtmlSummaryFromZip stopped; some earlier files could not be put back and are kept as: {0}' -f ($Kept -join ', ')) }
+        }
         if ($SwapDone) { foreach ($Staged in $StagedFiles) { if ($Staged.Backup) { Remove-Item -LiteralPath $Staged.Backup -Force -ErrorAction SilentlyContinue } } }
         foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
         if ($StagingMade) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }

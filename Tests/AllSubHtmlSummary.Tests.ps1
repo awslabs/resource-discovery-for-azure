@@ -638,4 +638,18 @@ Describe 'ResourceInventory.ps1 names the report folder when metrics are skipped
         $Global:MetricsFailedSubs[0].Id | Should -Be 'sub-b'
         $Global:MetricsFailedSubs[0].ReportFolder | Should -Be 'ResourcesReport202611020000000000000'
     }
+
+    It 'records ReportFolder on the (subscription) entry when no subscription matches' {
+        $Global:MetricsFailedSubs = @()
+        $Global:Subscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Alpha' })
+        $Sep = [IO.Path]::DirectorySeparatorChar
+        $Global:DefaultPath = (Join-Path $TestDrive 'ResourcesReport202611020000000000001') + $Sep
+        $script:SkipMetrics = [switch]$false
+        $script:SubscriptionID = 'sub-missing'
+        CreateMetricsJob
+        @($Global:MetricsFailedSubs).Count | Should -Be 1
+        $Global:MetricsFailedSubs[0].Name | Should -Be '(subscription)'
+        $Global:MetricsFailedSubs[0].Id | Should -Be 'sub-missing'
+        $Global:MetricsFailedSubs[0].ReportFolder | Should -Be 'ResourcesReport202611020000000000001'
+    }
 }

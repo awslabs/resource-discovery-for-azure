@@ -172,40 +172,50 @@ function New-BarChart
 # dot-sourced file), so it never has to dot-source or modify the per-subscription
 # report generator. See docs/design/main-html-summary.md.
 # =============================================================================
-# How file and folder names compare where $Path is: case aside when the file
-# system there ignores case, else exactly. Found by looking for $Path (or the
-# nearest part of it that is there) under its name with the letter case
-# flipped, which reads nothing and writes nothing. Without a path, or when no
-# part of it has a letter, the system's default: exact on Linux, case aside on
-# Windows and macOS.
+# How file and folder names compare inside the folder $Path (or, for a file,
+# beside it): case aside when the file system there ignores case, else
+# exactly. Found by looking for one name there with its letter case flipped:
+# where case is ignored the flipped name finds the same item, which the
+# folder lists once; where it is kept, it finds nothing, or a second item that
+# the listing shows. Reads names only and writes nothing. When nothing there
+# can be probed, or the listing cannot be read, the system's default: exact on
+# Linux, case aside on Windows and macOS.
 function Get-RdaPathComparer
 {
     param([string]$Path)
-    $Probe = $Path
-    while (-not [string]::IsNullOrEmpty($Probe))
+    $Default = if ($IsLinux) { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+    try
     {
-        if (Test-Path -LiteralPath $Probe)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return $Default }
+        $Probe = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        # The names compared are those inside a folder, so probe an item in it.
+        if (Test-Path -LiteralPath $Probe -PathType Container)
         {
-            $Leaf = Split-Path -Path $Probe -Leaf
+            $Inside = @([System.IO.Directory]::GetFileSystemEntries($Probe) | Where-Object { [System.IO.Path]::GetFileName($_) -cne ([System.IO.Path]::GetFileName($_)).ToUpperInvariant() -or [System.IO.Path]::GetFileName($_) -cne ([System.IO.Path]::GetFileName($_)).ToLowerInvariant() } | Select-Object -First 1)
+            if ($Inside.Count -gt 0) { $Probe = $Inside[0] }
+        }
+        while (-not [string]::IsNullOrEmpty($Probe))
+        {
+            $Parent = [System.IO.Path]::GetDirectoryName($Probe)
+            if ([string]::IsNullOrEmpty($Parent)) { break }
+            $Leaf = [System.IO.Path]::GetFileName($Probe)
             $Flipped = -join @($Leaf.ToCharArray() | ForEach-Object { if ([char]::IsUpper($_)) { [char]::ToLowerInvariant($_) } else { [char]::ToUpperInvariant($_) } })
-            if ($Flipped -cne $Leaf)
+            if ($Flipped -cne $Leaf -and (Test-Path -LiteralPath $Probe))
             {
-                $Parent = Split-Path -Path $Probe -Parent
-                $Twin = Join-Path $Parent $Flipped
-                # The flipped name finds an item where case is ignored. Where it
-                # is not, it finds one only if the folder holds a second item of
-                # exactly that name, which its listing shows.
-                $TwinListed = @([System.IO.Directory]::GetFileSystemEntries($Parent) | Where-Object { [System.IO.Path]::GetFileName($_) -ceq $Flipped }).Count -gt 0
-                $Same = (Test-Path -LiteralPath $Twin) -and -not $TwinListed
-                if ($Same) { return [System.StringComparer]::OrdinalIgnoreCase }
+                # Two entries whose names differ only in case are two items.
+                $Alike = @([System.IO.Directory]::GetFileSystemEntries($Parent) | Where-Object { [System.IO.Path]::GetFileName($_) -ieq $Leaf }).Count
+                if ($Alike -ge 2) { return [System.StringComparer]::Ordinal }
+                if (Test-Path -LiteralPath (Join-Path $Parent $Flipped)) { return [System.StringComparer]::OrdinalIgnoreCase }
                 return [System.StringComparer]::Ordinal
             }
+            $Probe = $Parent
         }
-        $Parent = Split-Path -Path $Probe -Parent
-        $Probe = if ($Parent -eq $Probe) { $null } else { $Parent }
     }
-    if ($IsLinux) { return [System.StringComparer]::Ordinal }
-    return [System.StringComparer]::OrdinalIgnoreCase
+    catch
+    {
+        Write-Verbose ("Get-RdaPathComparer: could not probe {0}: {1}" -f $Path, $_.Exception.Message)
+    }
+    return $Default
 }
 
 function New-RdaAllSubHtmlSummary
@@ -599,6 +609,13 @@ function New-RdaAllSubHtmlSummaryFromZip
     {
         $HtmlFile = Join-Path $OutputDirectory 'MainSummary.html'
     }
+    # The summary links the report folders by relative path, so it must sit in
+    # -OutputDirectory beside them (and only there can -PackageZip bundle it).
+    $HtmlParent = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HtmlFile)))
+    if (-not (Get-RdaPathComparer -Path $OutputDirectory).Equals($HtmlParent.TrimEnd([IO.Path]::DirectorySeparatorChar, '/'), $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, '/')))
+    {
+        throw ("New-RdaAllSubHtmlSummaryFromZip: -HtmlFile must be in -OutputDirectory ({0}), beside the report folders its links point to; it was {1}." -f $OutputDirectory, $HtmlFile)
+    }
 
     # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
     # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
@@ -752,7 +769,10 @@ function New-RdaAllSubHtmlSummaryFromZip
     # Build the summary against the reconstructed folder (links resolve on disk),
     # listing only the folders reconstructed from -InputZip: -OutputDirectory may
     # already hold other ResourcesReport* folders, which are not in this zip.
-    $ReconstructedNames = @($ReconstructedDirs | ForEach-Object { Split-Path -Path $_ -Leaf } | Sort-Object -Unique)
+    # Unique as the file system compares names (two folders whose names
+    # differ only in case are two where it keeps case apart).
+    $NameSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
+    $ReconstructedNames = @($ReconstructedDirs | ForEach-Object { Split-Path -Path $_ -Leaf } | Where-Object { $NameSeen.Add($_) })
     New-RdaAllSubHtmlSummary -RunOutputDirectory $OutputDirectory -HtmlFile $HtmlFile -Detailed:$Detailed `
         -ReportFolders $ReconstructedNames -ReportFiles @($WrittenFiles.Values | ForEach-Object { $_ }) -TenantId $TenantId -Version $Version -PlatOS $PlatOS
 

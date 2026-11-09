@@ -371,9 +371,10 @@ Describe 'Build-MainSummaryFromZip report zips whose names differ only in case' 
         @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
     }
 
-    It 'treats them as two folders on Linux, where they are two' -Skip:(-not $IsLinux) {
+    It 'treats them as two folders on Linux, where they are two, and lists both in the summary' -Skip:(-not $IsLinux) {
         @($script:CaseLines | Where-Object { $_ -like '*Skipped a second report zip named*' }) | Should -BeNullOrEmpty
         @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 2 per-subscription report(s) into:*' }).Count | Should -Be 1
+        @($script:CaseLines | Where-Object { $_ -like '  2 subscription(s), *' }).Count | Should -Be 1
     }
 }
 
@@ -449,5 +450,26 @@ Describe 'Get-RdaPathComparer: the case behaviour of the file system where a pat
         New-Item -ItemType Directory -Path $Dir, (Join-Path $TestDrive 'tWIN') -Force | Out-Null
         if (@(Get-ChildItem -LiteralPath $TestDrive -Directory | Where-Object { $_.Name -ieq 'twin' }).Count -lt 2) { Set-ItResult -Skipped -Because 'this file system ignores case' }
         (Get-RdaPathComparer -Path $Dir).Equals('A', 'a') | Should -BeFalse
+    }
+}
+
+Describe 'Get-RdaPathComparer with a path typed in another letter case' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'still finds a file system that ignores case when the path is typed as the flipped spelling of the name on disk' {
+        $Root = Join-Path $TestDrive 'typed'
+        New-Item -ItemType Directory -Path (Join-Path $Root 'OUTX') -Force | Out-Null
+        # What a case-insensitive file system answers: every spelling finds it
+        # (the path is probed as a name in its folder here).
+        Mock Test-Path { $PathType -ne 'Container' }
+        (Get-RdaPathComparer -Path (Join-Path $Root 'outx')).Equals('A', 'a') | Should -BeTrue
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip with -HtmlFile outside -OutputDirectory' {
+    It 'stops, since the summary''s links point at report folders beside it' {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        $Out = Join-Path $script:TmpRoot 'html_elsewhere'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -HtmlFile (Join-Path $script:TmpRoot 'elsewhere.html') -PackageZip 6>$null } | Should -Throw '*-HtmlFile must be in -OutputDirectory*'
     }
 }

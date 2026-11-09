@@ -327,10 +327,25 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '')
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
-            $CaseHome = Join-Path $CaseDir 'home'
+            # ReuseHome: the next run on the same machine, with the resume
+            # state the run before left.
+            $CaseHome = if ($ReuseHome) { $ReuseHome } else { Join-Path $CaseDir 'home' }
+            New-Item -ItemType Directory -Path $CaseDir -Force | Out-Null
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
+            if ($null -ne $SeedState)
+            {
+                # The unified resume state an earlier run left: Completed ids
+                # and FailedAttempts ids.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                [pscustomobject]@{
+                    TenantID                 = $script:Tenant
+                    CompletedSubscriptionIds = @($SeedState.Completed)
+                    FailedAttempts           = @(@($SeedState.Failed) | ForEach-Object { [pscustomobject]@{ Id = $_; Name = 'earlier'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier failure'; Attempts = 1 } })
+                    LastUpdated              = '2026-01-01T00:00:00Z'
+                } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}.json' -f $script:Tenant)) -Encoding utf8
+            }
             # What the streams' summary files hold once the wrapper has
             # started the streams (see Import-AzContext in the stand-in).
             $Plant = @()
@@ -398,6 +413,7 @@ function Get-UsageAggregates
             if (-not $ConsumptionPageFail) { $WrapperArgs += '-SkipConsumption' }
             $WrapperArgs += @('-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
+            if ($ResumeFailedOnly) { $WrapperArgs += '-ResumeFailedOnly' }
             # VerboseFail runs the wrapper with -Verbose.
             if ($VerboseFail) { $WrapperArgs += '-Verbose' }
             if ($PriorExitCode -ge 0)
@@ -485,6 +501,7 @@ function Get-UsageAggregates
                 MainSummary = $MainSummary
                 InnerZips  = $InnerZips
                 Root       = Join-Path $CaseHome 'InventoryReports'
+                Home       = $CaseHome
             }
         }
 
@@ -1028,6 +1045,26 @@ function Get-UsageAggregates
         $Run.Console | Should -Match 'ERROR processing subscription Sub A: Script exited with code 1'
         $Run.FailedIds | Should -Be @($script:SubA.Id)
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'one subscription with -ParallelStreams and -ResumeFailedOnly: a retry that works clears its failure, though an earlier run marked it complete, and the next run has nothing to retry' {
+        # An earlier run completed both; a later plain run failed Sub A and
+        # left it in both lists. -ResumeFailedOnly narrows to Sub A, so two
+        # streams run it inline.
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -SeedState ([pscustomobject]@{ Completed = @($script:SubA.Id, $script:SubB.Id); Failed = @($script:SubA.Id) })
+        $Retry.Console | Should -Match 'Only one'
+        $Retry.Console | Should -Not -Match 'ERROR processing subscription' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        $Retry.FailedIds.Count | Should -Be 0 -Because 'the retry worked, so nothing is left to retry'
+
+        # The next -ResumeFailedOnly run, and the one after, retry nothing.
+        foreach ($Next in 1..2)
+        {
+            $Again = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Retry.Home
+            $Again.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $Again.Console
+            $Again.Console | Should -Not -Match 'Processing subscription:' -Because $Again.Console
+            $Again.ExitCode | Should -Be 0
+        }
     }
 
     # With two streams the session runs no inventory itself, so only the

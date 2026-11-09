@@ -1136,10 +1136,20 @@ else
                     try { Write-Verbose ("Could not write the completion line: {0}" -f $NarrationError) }
                     catch { $null = $_ }
                 }
+                # As in the sequential branch: the failure entry goes on every
+                # success, also when an earlier run already marked the id
+                # complete, or -ResumeFailedOnly would retry it for ever.
+                $StateChanged = $false
                 if (-not ($CompletedIds -contains $Sub.Id))
                 {
                     $CompletedIds += $Sub.Id
-                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+                    $StateChanged = $true
+                }
+                $BeforeFailedCount = @($FailedAttempts).Count
+                $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
+                if (@($FailedAttempts).Count -ne $BeforeFailedCount) { $StateChanged = $true }
+                if ($StateChanged)
+                {
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
                 }
             }

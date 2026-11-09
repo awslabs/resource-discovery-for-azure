@@ -609,15 +609,6 @@ Describe 'Run-AllSubscriptions.ps1: the inventory folder gone at the end of the 
         $R.Lines | Should -Contain ('FAILED (report missing): the inventory folder {0} is gone, with the report zips and the resume state that were in it, so no consolidated zip was built. The next run collects every subscription again.' -f $Gone)
     }
 
-    It 'a folder whose path holds brackets is not called gone: the run says the zip could not be built, and why, and exits 2' {
-        $Root = Join-Path $TestDrive 'inv[1]'
-        [void][System.IO.Directory]::CreateDirectory($Root)
-        $R = Invoke-EndOfRun -Root $Root -RunCount 2
-        $R.Code | Should -Be 2
-        @($R.Lines | Where-Object { $_ -like 'FAILED (report missing)*' }) | Should -BeNullOrEmpty
-        [System.IO.Directory]::Exists($Root) | Should -BeTrue
-    }
-
     It 'a run that expected no report zip keeps its exit code' {
         $R = Invoke-EndOfRun -Root (Join-Path $TestDrive 'folder-gone-none') -RunCount 0
         $R.Code | Should -Be 0
@@ -655,5 +646,21 @@ Describe 'Move-RunOutputFile: moves a file to a free name, never over one that i
         Set-Content -LiteralPath $Src -Value 'mine' -NoNewline
         { Move-RunOutputFile -Source $Src -Directory $Dir -Stem 'z' -Extension '.zip' } | Should -Throw 'every name from z.zip to z-100.zip is taken'
         Test-Path -LiteralPath $Src | Should -BeTrue
+    }
+}
+
+Describe 'Run-AllSubscriptions.ps1: an inventory folder whose path holds brackets' {
+    It 'stops at the start with exit 1, naming the folder, before anything is written' {
+        $Block = [scriptblock]::Create((Find-WrapperIf -Condition "`$InventoryRoot.IndexOfAny([char[]]'[]') -ge 0" -Contains 'has [ or ] in its path').Extent.Text)
+        function Exit-Wrapper { param($Code) $script:StopCode = $Code }
+        $script:StopCode = $null
+        $InventoryRoot = Join-Path $TestDrive 'inv[1]/InventoryReports'
+        $Printed = @(. $Block 6>&1 | ConvertTo-Lines)
+        $script:StopCode | Should -Be 1
+        $Printed | Should -Contain ('ERROR: The inventory folder {0} has [ or ] in its path, which this script cannot use. Set HOME to a folder without them and run again.' -f $InventoryRoot)
+        $InventoryRoot = Join-Path $TestDrive 'plain/InventoryReports'
+        $script:StopCode = $null
+        @(. $Block 6>&1 | ConvertTo-Lines).Count | Should -Be 0
+        $script:StopCode | Should -BeNullOrEmpty
     }
 }

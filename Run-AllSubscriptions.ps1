@@ -488,6 +488,14 @@ $Global:CollectorFailures = @()
 # transcript). Computed up front so the transcript can be started before
 # anything else writes to the host.
 $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+# A folder whose path holds [ or ] cannot be used: PowerShell reads them as a
+# wildcard, and the zip step (Compress-Archive) fails on such a path. Stopped
+# here, before anything is written.
+if ($InventoryRoot.IndexOfAny([char[]]'[]') -ge 0)
+{
+    Write-Host ("ERROR: The inventory folder {0} has [ or ] in its path, which this script cannot use. Set HOME to a folder without them and run again." -f $InventoryRoot) -ForegroundColor Red
+    Exit-Wrapper -Code 1
+}
 if (-not (Test-Path -Path $InventoryRoot -PathType Container))
 {
     try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
@@ -1724,8 +1732,8 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
             # leading dot: Compress-Archive -Update does not find a hidden file.
             # shortcut: Compress-Archive reads -DestinationPath as a wildcard, and
             # -Update fails on a path with [ or ] even when escaped (pwsh 7.4), so an
-            # inventory folder whose path holds brackets cannot be zipped; build with
-            # System.IO.Compression when such a HOME must be supported.
+            # inventory folder whose path holds brackets is stopped at the start;
+            # build with System.IO.Compression when such a HOME must be supported.
             $PartialZip = Join-Path $InventoryRoot ('rda-build-{0}.partial' -f [guid]::NewGuid().ToString('N'))
             Compress-Archive -Path $SubZips.FullName -DestinationPath $PartialZip -ErrorAction Stop
             $ZipProblem = Get-ConsolidatedZipProblem -Path $PartialZip -SubZipNames $SubZips.Name
@@ -1762,17 +1770,7 @@ else
     # Every report zip the run expected went with the folder, so none of them
     # is in a consolidated zip: a FAILED line after the run summary, and exit
     # code 2 at the end, as for a consolidated zip that could not be built.
-    if ($ExpectedZipCount -gt 0)
-    {
-        # Test-Path reads [ and ] in the path as a wildcard, so a folder whose
-        # path holds them is "not found" though it is there: then its zips are
-        # all on disk, and the run says the zip could not be built, and why.
-        if ([System.IO.Directory]::Exists($InventoryRoot))
-        {
-            $BundleBuildError = ('Could not build the consolidated zip in {0}: its path holds [ or ], which the zip step cannot use. Set HOME to a folder without them and run again.' -f $InventoryRoot)
-        }
-        else { $InventoryFolderGone = $true }
-    }
+    if ($ExpectedZipCount -gt 0) { $InventoryFolderGone = $true }
 }
 
 # Aggregate "main" HTML summary across all per-subscription reports from

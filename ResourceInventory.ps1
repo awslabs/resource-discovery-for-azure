@@ -890,6 +890,15 @@ function ExecuteInventoryProcessing()
         return (& $TokenOk)
     }
 
+    # The name of the report folder this run writes to (the last part of
+    # $Global:DefaultPath), or $null before it is set. Failure entries carry
+    # it, so the wrapper's main summary marks the row of that report.
+    function Get-ReportFolderName
+    {
+        if ($Global:DefaultPath) { return (Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Leaf) }
+        return $null
+    }
+
     function CreateMetricsJob()
     {
         Write-Log -Message ('Checking if Metrics Job Should be Run.') -Severity 'Info'
@@ -908,7 +917,7 @@ function ExecuteInventoryProcessing()
                 $MetricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
                 # The report folder this run writes to, as the consumption phase records it,
                 # so the wrapper's main summary marks that report's row.
-                $MetricsReportFolder = if ($Global:DefaultPath) { Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Leaf } else { $null }
+                $MetricsReportFolder = Get-ReportFolderName
                 $AffectedSubs = @(
                     if (![string]::IsNullOrEmpty($SubscriptionID))
                     {
@@ -1224,7 +1233,7 @@ function ExecuteInventoryProcessing()
         # Name of the report folder this run writes to, recorded on a consumption
         # failure (and on the sign-in skip below) so the wrapper's main summary can
         # mark that report's row.
-        $ConsumptionReportFolder = if ($Global:DefaultPath) { Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Leaf } else { $null }
+        $ConsumptionReportFolder = Get-ReportFolderName
 
         if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
         {

@@ -172,6 +172,14 @@ function New-BarChart
 # dot-sourced file), so it never has to dot-source or modify the per-subscription
 # report generator. See docs/design/main-html-summary.md.
 # =============================================================================
+# How file and folder names compare on this file system: exactly on Linux,
+# case aside on Windows and macOS (their default file systems ignore case).
+function Get-RdaPathComparer
+{
+    if ($IsLinux) { return [System.StringComparer]::Ordinal }
+    return [System.StringComparer]::OrdinalIgnoreCase
+}
+
 function New-RdaAllSubHtmlSummary
 {
     param(
@@ -246,13 +254,13 @@ function New-RdaAllSubHtmlSummary
     $AllowedFiles = $null
     if ($null -ne $ReportFiles)
     {
-        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), [System.StringComparer]::OrdinalIgnoreCase)
+        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer))
     }
     # Only the folders -ReportFolders names, when given.
     if ($null -ne $ReportFolders)
     {
-        $Listed = @(@($ReportFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
-        $Folders = @($Folders | Where-Object { $Listed -contains $_.Name })
+        $Listed = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer))
+        $Folders = @($Folders | Where-Object { $Listed.Contains($_.Name) })
     }
     $SubReports = @()
     $ServiceAgg = [ordered]@{}
@@ -546,6 +554,16 @@ function New-RdaAllSubHtmlSummaryFromZip
         $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($ZipItem.Name)
         $OutputDirectory = Join-Path $ZipItem.DirectoryName ($BaseName + '_MainSummary')
     }
+    # -PackageZip writes <OutputDirectory>.zip, replacing a file of that name:
+    # never the input zip itself.
+    if ($PackageZip)
+    {
+        $PlannedPackage = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/') + '.zip'
+        if ((Get-RdaPathComparer).Equals($PlannedPackage, $ZipItem.FullName))
+        {
+            throw ("New-RdaAllSubHtmlSummaryFromZip: -PackageZip would write {0}, which is -InputZip. Choose another -OutputDirectory." -f $PlannedPackage)
+        }
+    }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
 
@@ -574,11 +592,11 @@ function New-RdaAllSubHtmlSummaryFromZip
         $ReconstructedDirs = New-Object System.Collections.Generic.List[string]
         # Case aside: on Windows and macOS two names that differ only in case
         # are one folder.
-        $DestSeen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $DestSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer))
         # The files this call writes in each of those folders. A folder of the
         # same name may already hold other files (an earlier bundle's report, a
         # revealed copy); -PackageZip bundles only these files, never the rest.
-        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer))
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
@@ -721,7 +739,6 @@ function New-RdaAllSubHtmlSummaryFromZip
     if ($PackageZip)
     {
         $PackageZipPath = $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
-        if (Test-Path -LiteralPath $PackageZipPath) { Remove-Item -LiteralPath $PackageZipPath -Force -ErrorAction SilentlyContinue }
         # Entries: the summary at the top, then <folder>/<file> for each file
         # this call wrote, so a file that was already in a folder of the same
         # name never travels with the bundle.
@@ -739,13 +756,24 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $Entries.Add([pscustomobject]@{ Path = $File; Name = ('{0}/{1}' -f $FolderName, (Split-Path -Path $File -Leaf)) })
             }
         }
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $Package = [System.IO.Compression.ZipFile]::Open($PackageZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        # Built under a name of its own beside it, then moved over the old
+        # bundle, so a write that fails part-way never leaves an incomplete
+        # bundle under the name.
+        $PartialPackage = '{0}.rda-{1}.partial' -f $PackageZipPath, [guid]::NewGuid().ToString('N')
         try
         {
-            foreach ($E in $Entries) { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Package, $E.Path, $E.Name) }
+            $Package = [System.IO.Compression.ZipFile]::Open($PartialPackage, [System.IO.Compression.ZipArchiveMode]::Create)
+            try
+            {
+                foreach ($E in $Entries) { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Package, $E.Path, $E.Name) }
+            }
+            finally { $Package.Dispose() }
+            [System.IO.File]::Move($PartialPackage, $PackageZipPath, $true)
         }
-        finally { $Package.Dispose() }
+        finally
+        {
+            if (Test-Path -LiteralPath $PartialPackage) { Remove-Item -LiteralPath $PartialPackage -Force -ErrorAction SilentlyContinue }
+        }
         Write-Host ("Portable summary bundle (links survive extraction): {0}" -f $PackageZipPath) -ForegroundColor Green
     }
 

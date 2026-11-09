@@ -366,9 +366,14 @@ Describe 'Build-MainSummaryFromZip report zips whose names differ only in case' 
         $script:CaseLines = @(& $script:Script -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>&1 | ForEach-Object { [string]$_ })
     }
 
-    It 'treats them as one folder, as Windows and macOS do, and rebuilds it once' {
+    It 'treats them as one folder on Windows and macOS, where the file system ignores case, and rebuilds it once' -Skip:($IsLinux) {
         @($script:CaseLines | Where-Object { $_ -like '*Skipped a second report zip named*' }).Count | Should -Be 1
         @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
+    }
+
+    It 'treats them as two folders on Linux, where they are two' -Skip:(-not $IsLinux) {
+        @($script:CaseLines | Where-Object { $_ -like '*Skipped a second report zip named*' }) | Should -BeNullOrEmpty
+        @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 2 per-subscription report(s) into:*' }).Count | Should -Be 1
     }
 }
 
@@ -385,5 +390,38 @@ Describe 'Build-MainSummaryFromZip -PackageZip with -HtmlFile given through a Po
         finally { Remove-PSDrive -Name RdaPkg -Scope Global -ErrorAction SilentlyContinue }
         $Package = $Out.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
         Get-ZipEntryNames -ZipPath $Package | Should -Contain 'MainSummary.html'
+    }
+}
+
+Describe 'Build-MainSummaryFromZip over a folder whose name differs from a rebuilt one only in case (Linux)' -Skip:(-not $IsLinux) {
+    It 'does not list the other folder: on Linux it is another folder' {
+        $Out = Join-Path $script:TmpRoot 'case_linux'
+        $Other = Join-Path $Out ('resourcesreport_' + $script:Stamps[0])
+        New-Item -ItemType Directory -Path $Other -Force | Out-Null
+        '{"Version":"3.2.3","PublicIP":[{"Name":"pip-old","Subscription":"Other Case Subscription"}]}' | Out-File -FilePath (Join-Path $Other ('Inventory_resourcesreport_' + $script:Stamps[0] + '.json')) -Encoding utf8
+        & $script:Script -InputZip $script:InputZip -OutputDirectory $Out 6>$null | Out-Null
+        Get-Content -LiteralPath (Join-Path $Out 'MainSummary.html') -Raw | Should -Not -Match 'Other Case Subscription'
+    }
+}
+
+Describe 'Build-MainSummaryFromZip -PackageZip whose bundle would be the input zip' {
+    It 'stops before it changes anything and leaves the input zip as it was' {
+        $Root = Join-Path $script:TmpRoot 'collide'
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $In = Join-Path $Root 'report.zip'
+        Copy-Item -LiteralPath $script:InputZip -Destination $In
+        $Hash = (Get-FileHash -LiteralPath $In).Hash
+        { & $script:Script -InputZip $In -OutputDirectory (Join-Path $Root 'report') -PackageZip 6>$null } | Should -Throw '*-PackageZip would write*which is -InputZip*'
+        (Get-FileHash -LiteralPath $In).Hash | Should -Be $Hash
+    }
+}
+
+Describe 'Build-MainSummaryFromZip -PackageZip when the bundle cannot be written' {
+    It 'leaves no part-written bundle beside the name' {
+        $Out = Join-Path $script:TmpRoot 'pkg_fail'
+        # A folder under the bundle's name: the move onto it fails.
+        New-Item -ItemType Directory -Path ($Out + '.zip') -Force | Out-Null
+        { & $script:Script -InputZip $script:InputZip -OutputDirectory $Out -PackageZip 6>$null } | Should -Throw
+        @(Get-ChildItem -LiteralPath $script:TmpRoot -File | Where-Object { $_.Name -like 'pkg_fail.zip.rda-*.partial' }) | Should -BeNullOrEmpty
     }
 }

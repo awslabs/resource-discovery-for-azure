@@ -208,7 +208,12 @@ function New-RdaAllSubHtmlSummary
         # (the wrapper) knows the true obfuscation mode and passes it; even without
         # it, a summary whose sampled per-sub names look obfuscated is treated the
         # same way (safe default).
-        [switch]$Obfuscated
+        [switch]$Obfuscated,
+
+        # Optional: the report folder names to list. When given, only these
+        # folders are listed and counted, so other ResourcesReport* folders in
+        # -RunOutputDirectory are not.
+        $ReportFolders = $null
     )
 
     $ErrorActionPreference = 'Stop'
@@ -233,6 +238,12 @@ function New-RdaAllSubHtmlSummary
 
     $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     $Samples = New-Object System.Collections.Generic.List[string]
+    # Only the folders -ReportFolders names, when given.
+    if ($null -ne $ReportFolders)
+    {
+        $Listed = @(@($ReportFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+        $Folders = @($Folders | Where-Object { $Listed -contains $_.Name })
+    }
     $SubReports = @()
     $ServiceAgg = [ordered]@{}
 
@@ -615,13 +626,15 @@ function New-RdaAllSubHtmlSummaryFromZip
     # cannot be re-rendered keeps its original html so its drill-down link still
     # resolves. $PSScriptRoot here is the Functions/ folder (where this function is
     # defined), so the sibling Extension/Summary.ps1 resolves from the repo root.
+    # Only the folders this call reconstructed: other ResourcesReport* folders in
+    # -OutputDirectory are left as they are.
     if (-not $KeepOriginalReports)
     {
         $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'
         if (Test-Path -Path $SummaryScript -PathType Leaf)
         {
             $ReRendered = 0
-            foreach ($SubDir in @(Get-ChildItem -LiteralPath $OutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue))
+            foreach ($SubDir in @($ReconstructedDirs | ForEach-Object { Get-Item -LiteralPath $_ }))
             {
                 $InvJson = Get-ChildItem -LiteralPath $SubDir.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($null -eq $InvJson) { continue }
@@ -648,9 +661,12 @@ function New-RdaAllSubHtmlSummaryFromZip
         }
     }
 
-    # Build the summary against the reconstructed folder (links resolve on disk).
+    # Build the summary against the reconstructed folder (links resolve on disk),
+    # listing only the folders reconstructed from -InputZip: -OutputDirectory may
+    # already hold other ResourcesReport* folders, which are not in this zip.
+    $ReconstructedNames = @($ReconstructedDirs | ForEach-Object { Split-Path -Path $_ -Leaf } | Sort-Object -Unique)
     New-RdaAllSubHtmlSummary -RunOutputDirectory $OutputDirectory -HtmlFile $HtmlFile -Detailed:$Detailed `
-        -TenantId $TenantId -Version $Version -PlatOS $PlatOS
+        -ReportFolders $ReconstructedNames -TenantId $TenantId -Version $Version -PlatOS $PlatOS
 
     Write-Host ("Reconstructed {0} per-subscription report(s) into: {1}" -f $Reconstructed, $OutputDirectory) -ForegroundColor Green
     Write-Host ("Open this summary (links resolve from here): {0}" -f $HtmlFile) -ForegroundColor Green

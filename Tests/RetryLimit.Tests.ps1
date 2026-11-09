@@ -94,8 +94,8 @@ $Global:ResourceCount = 1
     # -AllowPartialAccess the run then leaves them out, as the check does); then
     # the list of retry-limited subscriptions this run does not collect, as
     # written (built after the check), and the record of what it skipped.
-    $GateText = $Top[$ScopeAt].Extent.Text + "`n`$AccessDecision = [pscustomobject]@{ InaccessibleIds = @(@(`$Global:RdaRlUnreadableIds) | Where-Object { `$_ -and @(`$ScopeForProbe | ForEach-Object { [string]`$_.Id }) -contains `$_ }) }`n" +
-        "if (`$AllowPartialAccess) { `$Subscriptions = @(`$Subscriptions | Where-Object { `$AccessDecision.InaccessibleIds -notcontains `$_.Id }) }`n"
+    $GateText = $Top[$ScopeAt].Extent.Text + "`n`$AccessDecision = [pscustomobject]@{ InaccessibleIds = @(@(`$Global:RdaRlUnreadableIds) | Where-Object { `$_ -and @(`$ScopeForProbe | ForEach-Object { [string]`$_.Id }) -contains `$_ }) }`n"
+    $GateText += "if (`$AllowPartialAccess) { `$Subscriptions = @(`$Subscriptions | Where-Object { `$AccessDecision.InaccessibleIds -notcontains `$_.Id }) }`n"
     $OwedAt = script:Find-TopIndex -After $ScopeAt -What 'the retry-limited ids this run does not collect' -Match { param($s) $s.Extent.Text.StartsWith('$RetryLimitedNotInRunIds = ') }
     $GateText += (script:Join-Top -From ($OwedAt - 1) -To $OwedAt) + "`n"
     $RecordText = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ScopeForProbe.Count -gt 0' -and $_.Extent.Text.Contains('-NotReadable $NotReadableIds') } | ForEach-Object { $_.Extent.Text }) -join "`n"

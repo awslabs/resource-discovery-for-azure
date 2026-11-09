@@ -581,7 +581,7 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 |---|---|
 | `0` | Clean run — no failures of any kind. |
 | `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing), or a `-Resume` run could not carry the report of a subscription it skipped as already completed (see the "FAILED (earlier report not carried)" banner). Takes precedence over `3`–`5`. |
+| `2` | One or more subscriptions failed (they are listed under `Subscriptions Failed` and their reports are missing), a per-subscription output verification gap (a subscription reported success but its output zip is missing), or a `-Resume` run could not carry the report of a subscription it skipped as already completed (see the "FAILED (earlier report not carried)" banner). Takes precedence over `3`–`5`. |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |

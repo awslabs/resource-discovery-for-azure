@@ -1023,9 +1023,13 @@ function Get-WrapperExitCode
         # be carried into the consolidated zip, so that report is missing from it.
         # Same meaning as the verification gap (2) and takes precedence over 3-5:
         # a missing report is worse than an incomplete one.
-        [bool]$ReportsMissing = $false
+        [bool]$ReportsMissing = $false,
+        # A subscription failed this run (it is listed under Subscriptions
+        # Failed), so its report is missing from the consolidated zip: the same
+        # meaning as a missing report, so 2, and the run is never reported as clean.
+        [bool]$SubscriptionsFailed = $false
     )
-    if ($ReportsMissing) { return 2 }
+    if ($ReportsMissing -or $SubscriptionsFailed) { return 2 }
     if ($AuthSkipped -and $CollectorsFailed) { return 5 }
     if ($AuthSkipped) { return 3 }
     if ($CollectorsFailed) { return 4 }

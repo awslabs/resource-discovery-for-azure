@@ -741,11 +741,16 @@ $IdsWithoutReports = if (Test-ResumeStateWithoutReports -Path $ResumeStateFile -
 # Cloud Shell timeout), the failures live ONLY in the per-stream files while the
 # unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
 # sees no failures, and wrongly reports "Nothing to retry" - silently dropping
-# the retry set. Read (do NOT delete) the per-stream files here so BOTH -Resume
-# (skip-completed) and -ResumeFailedOnly (retry list) see the full picture; the
-# end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
-# cleanly-finished parallel run deletes its per-stream files, so this finds none.
-# Runs at startup before any stream is launched, so it cannot race live streams.
+# the retry set. Read the per-stream files here so BOTH -Resume (skip-completed)
+# and -ResumeFailedOnly (retry list) see the full picture, write what they hold
+# into the unified file, and then remove them: a run that does not reach the
+# streams merge (sequential, one subscription, or nothing left) would otherwise
+# leave them, and every later -Resume would fold the same old records in again.
+# A run without -Resume or -ResumeFailedOnly collects every subscription and
+# writes its own state, so the files of an earlier interrupted run are stale and
+# are removed too. Safe on non-interrupted runs: a cleanly-finished parallel run
+# deletes its per-stream files, so this finds none. Runs at startup before any
+# stream is launched, so it cannot race live streams.
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -754,6 +759,8 @@ if ($Resume -or $ResumeFailedOnly)
         $StrandedCompleted = @()
         $StrandedFailed = @()
         $StrandedReports = @()
+        # The files read: only these are removed once their records are saved.
+        $FoldedStreamFiles = @()
         foreach ($StreamFile in $StrandedStreamFiles)
         {
             try
@@ -762,6 +769,7 @@ if ($Resume -or $ResumeFailedOnly)
                 if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
                 if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
+                $FoldedStreamFiles += $StreamFile
             }
             catch
             {
@@ -781,10 +789,37 @@ if ($Resume -or $ResumeFailedOnly)
         {
             Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
             # Heal the unified file immediately so even a re-interrupted run keeps
-            # the recovered picture. Per-stream files are intentionally left for
-            # the end-of-run merge to reconcile and clean up.
+            # the recovered picture.
             Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
         }
+        # The files read are removed only when the unified file on disk holds
+        # every record they gave (read back: a completed id, and a failure that
+        # is on the retry list or was completed since); otherwise they are kept
+        # and named, and the next run folds them in again.
+        $SavedCompleted = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        $SavedFailed = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+        $NotSaved = @(@($StrandedCompleted | Where-Object { $_ -and $SavedCompleted -notcontains [string]$_ }) + @($StrandedFailed | Where-Object { $null -ne $_ -and $SavedFailed -notcontains [string]$_.Id -and $SavedCompleted -notcontains [string]$_.Id }))
+        if ($NotSaved.Count -eq 0)
+        {
+            foreach ($StreamFile in $FoldedStreamFiles)
+            {
+                try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
+                catch { Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+            }
+        }
+        else
+        {
+            Write-Host ("WARNING: The resume state file {0} does not hold every record of the per-stream files of the interrupted run, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($FoldedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
+        }
+    }
+}
+else
+{
+    # Stale: see above. A file that cannot be removed is named.
+    foreach ($StreamFile in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID))
+    {
+        try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
+        catch { Write-Host ("WARNING: Could not remove the per-stream resume state file {0} of an earlier run: {1}" -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Yellow }
     }
 }
 
@@ -1271,7 +1306,7 @@ else
     $StreamCount = [Math]::Min($ParallelStreams, $PendingSubscriptions.Count)
     Write-Host ""
     Write-Host ("Parallel-streams mode: {0} streams across {1} subscription(s) to process" -f $StreamCount, $PendingSubscriptions.Count) -ForegroundColor Cyan
-    if ($ParallelStreams -gt $PendingSubscriptions.Count)
+    if ($ParallelStreams -gt $PendingSubscriptions.Count -and $PendingSubscriptions.Count -gt 0)
     {
         Write-Host ("Note: -ParallelStreams {0} clamped to {1} (one stream per subscription is the practical limit)." -f $ParallelStreams, $StreamCount) -ForegroundColor DarkGray
     }
@@ -1280,10 +1315,11 @@ else
 
     if ($StreamCount -le 1)
     {
-        # User asked for parallel but only one (or zero) sub is eligible.
+        # User asked for parallel but only one (or zero) sub is left to process.
         # Process it inline using the same per-sub logic the sequential
         # branch uses, instead of bailing and asking the user to re-run.
-        Write-Host "Only one eligible subscription; running sequentially." -ForegroundColor Yellow
+        if ($PendingSubscriptions.Count -eq 0) { Write-Host "No subscription left to process." -ForegroundColor Yellow }
+        else { Write-Host "Only one subscription left to process; running sequentially." -ForegroundColor Yellow }
         if ($PendingSubscriptions.Count -gt 0)
         {
             $Sub = $PendingSubscriptions[0]
@@ -1461,6 +1497,8 @@ else
                     SummaryPath  = $SummaryPath
                     FailuresPath = $FailuresPath
                     SubCount     = $SliceList.Count
+                    # The slice, for a stream that ends without a summary.
+                    Subs         = @($SliceList | ForEach-Object { [pscustomobject]@{ Id = [string]$_.Id; Name = [string]$_.Name } })
                 }
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
@@ -1545,12 +1583,16 @@ else
             $StreamIncompleteIds = @()
             # The subs of a stream that did not start, for the retry list below.
             $StreamNotStarted = @()
+            # The subs of a stream that ended without a summary (it crashed, or
+            # its summary cannot be read), for the retry list below.
+            $StreamUnfinished = @()
             foreach ($S in $StreamSummaries)
             {
                 if (-not (Test-Path -Path $S.SummaryPath -PathType Leaf))
                 {
                     Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
                     $FailedSubscriptions += ("stream-{0} (no summary)" -f $S.StreamId)
+                    if ($S.PSObject.Properties['Subs']) { $StreamUnfinished += @($S.Subs | Where-Object { $null -ne $_ }) }
                     continue
                 }
                 try
@@ -1561,6 +1603,7 @@ else
                 {
                     Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
+                    if ($S.PSObject.Properties['Subs']) { $StreamUnfinished += @($S.Subs | Where-Object { $null -ne $_ }) }
                     continue
                 }
 
@@ -1754,7 +1797,11 @@ else
             # completed sub): a later -Resume collects it instead of carrying an
             # old report.
             $NotStartedIds = @($StreamNotStarted | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
-            $NotCompletedThisRun = @(@($FailedThisRun) + @($StreamNoReportIds | Where-Object { $_ }) + @($StreamIncompleteIds | Where-Object { $_ }) + @($NotStartedIds))
+            # A sub of a stream that ended without a summary, which its own state
+            # file does not list as completed this run, was not collected either.
+            $StreamFileCompletedIds = @($AllCompletedFromStreams | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            $Unfinished = @($StreamUnfinished | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) -and $StreamFileCompletedIds -notcontains [string]$_.Id })
+            $NotCompletedThisRun = @(@($FailedThisRun) + @($StreamNoReportIds | Where-Object { $_ }) + @($StreamIncompleteIds | Where-Object { $_ }) + @($NotStartedIds) + @($Unfinished | ForEach-Object { [string]$_.Id }))
             if ($NotCompletedThisRun.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds | Where-Object { $NotCompletedThisRun -notcontains $_ })
@@ -1781,6 +1828,14 @@ else
                     $Kept = if ($Before.PSObject.Properties['Attempts'] -and $Before.Attempts) { [int]$Before.Attempts } else { 1 }
                     foreach ($Entry in @($FailedAttempts | Where-Object { $null -ne $_ -and [string]$_.Id -eq $NotStartedId })) { $Entry.Attempts = $Kept }
                 }
+            }
+            # Each sub of a stream that ended without a summary goes on the retry
+            # list as one more failed run, unless its stream's own file already
+            # recorded this run's failure of it (merged above).
+            $StreamFileFailedIds = @($AllFailedFromStreams | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+            foreach ($Lost in @($Unfinished | Where-Object { $StreamFileFailedIds -notcontains [string]$_.Id }))
+            {
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$Lost.Id) -Name ([string]$Lost.Name) -Reason 'its stream ended without a summary (see the stream lines above)'
             }
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $NotCompletedThisRun.Count -gt 0)
             {
@@ -2062,16 +2117,8 @@ if ($Excluded.Count -gt 0)
     Write-Host ("Subscriptions Excluded:  {0} (non-Enabled; use -IncludeDisabled to inventory them)" -f $Excluded.Count) -ForegroundColor Green
 }
 Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundColor Green
-# In parallel mode, $SkippedCount is not populated by the foreach loop above
-# (each worker skips independently). Derive it from the difference between
-# the number of eligible subs and the number of subs that actually ran in
-# this invocation (the union of $SubResourceCounts entries plus failures).
-if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0)
-{
-    $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
-    $DerivedSkip = $Subscriptions.Count - $ActuallyProcessed
-    if ($DerivedSkip -gt 0) { $SkippedCount = $DerivedSkip }
-}
+# In parallel mode the parent counts $SkippedCount as it builds the list it
+# slices (the completed subscriptions it leaves out on -Resume).
 if ($Resume)
 {
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
@@ -2479,7 +2526,7 @@ if ($WrapperTranscriptStarted)
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (@($UncarriedSkipped).Count -gt 0)
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (@($UncarriedSkipped).Count -gt 0) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

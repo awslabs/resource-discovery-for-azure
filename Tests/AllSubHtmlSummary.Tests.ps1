@@ -162,6 +162,43 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         $Html | Should -Match 'privacy-banner identifiable'
     }
 
+    It 'shows the obfuscated banner under -Obfuscated when the reports hold no records to sample' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{} -Obfuscated | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match 'privacy-banner obfuscated'
+        $Html | Should -Not -Match 'privacy-banner identifiable'
+    }
+
+    It 'says safe to share only under -Obfuscated, not when names only look masked in a sample' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ PublicIP = 3 } -Obfuscated | Out-Null
+        $Sampled = Join-Path $Run 'sampled.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Sampled | Out-Null
+        $Html = Get-Content -Path $Sampled -Raw
+        $Html | Should -Match 'privacy-banner obfuscated'
+        $Html | Should -Not -Match 'Safe to share|no real identifiers are present'
+        $Html | Should -Match 'Only a sample was checked'
+
+        $Told = Join-Path $Run 'told.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Told -Obfuscated | Out-Null
+        Get-Content -Path $Told -Raw | Should -Match 'Safe to share'
+    }
+
+    It 'shows the identifiable banner without -Obfuscated when the reports hold no records to sample' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{} -SubName 'sub-a' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match 'privacy-banner identifiable'
+        $Html | Should -Not -Match 'privacy-banner obfuscated'
+    }
+
     It 'renders run-wide charts only when -Detailed is passed' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1; AppServices = 1 } -SubName 'Sub A' | Out-Null

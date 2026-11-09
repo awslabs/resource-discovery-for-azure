@@ -252,7 +252,7 @@ function Get-RdaOnDiskName
 # entries, an entry over 16 GB, over 32 GB in all, an entry or the whole
 # packed more than 100 to 1, or an entry path that is rooted or holds '..'.
 # Reads only the zip's directory.
-function Assert-RdaZipWithinLimits
+function Assert-RdaZipWithinLimit
 {
     param([Parameter(Mandatory = $true)][string]$Path)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -676,10 +676,8 @@ function New-RdaAllSubHtmlSummaryFromZip
     }
     # Checked before anything is created or extracted, as downstream checks a
     # report zip.
-    Assert-RdaZipWithinLimits -Path $ZipItem.FullName
-    $OutputMade = -not (Test-Path -LiteralPath $OutputDirectory)
-    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-    $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
+    Assert-RdaZipWithinLimit -Path $ZipItem.FullName
+    $OutputDirectory = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/')
 
     if ([string]::IsNullOrWhiteSpace($HtmlFile))
     {
@@ -687,11 +685,21 @@ function New-RdaAllSubHtmlSummaryFromZip
     }
     # The summary links the report folders by relative path, so it must sit in
     # -OutputDirectory beside them (and only there can -PackageZip bundle it).
+    # Checked before -OutputDirectory is made.
     $HtmlParent = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HtmlFile)))
-    if (-not (Get-RdaPathComparer -Path $OutputDirectory).Equals($HtmlParent.TrimEnd([IO.Path]::DirectorySeparatorChar, '/'), $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, '/')))
+    if (-not (Get-RdaPathComparer -Path $OutputDirectory).Equals($HtmlParent.TrimEnd([IO.Path]::DirectorySeparatorChar, '/'), $OutputDirectory))
     {
         throw ("New-RdaAllSubHtmlSummaryFromZip: -HtmlFile must be in -OutputDirectory ({0}), beside the report folders its links point to; it was {1}." -f $OutputDirectory, $HtmlFile)
     }
+
+    # The folders New-Item -Force makes (-OutputDirectory and any missing
+    # parent), deepest first, so a refused or failed rebuild can remove the
+    # empty ones again.
+    $MadeDirs = New-Object System.Collections.Generic.List[string]
+    $Walk = $OutputDirectory
+    while ($Walk -and -not (Test-Path -LiteralPath $Walk)) { $MadeDirs.Add($Walk); $Walk = [System.IO.Path]::GetDirectoryName($Walk) }
+    New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
 
     # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
     # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
@@ -699,6 +707,11 @@ function New-RdaAllSubHtmlSummaryFromZip
     # readable by this user only on Linux and macOS: it holds customer reports.
     $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N'))
     $StagingMade = $false
+    # Files written under a private name until all are written, the report
+    # folders planned, and those of them this call made.
+    $StagedFiles = New-Object System.Collections.Generic.List[object]
+    $DirsPlanned = New-Object System.Collections.Generic.List[string]
+    $MadeReportDirs = New-Object System.Collections.Generic.List[string]
     try
     {
         New-Item -ItemType Directory -Path $Staging -ErrorAction Stop | Out-Null
@@ -753,7 +766,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 Write-Host ("  Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name) -ForegroundColor Yellow
                 continue
             }
-            Assert-RdaZipWithinLimits -Path $InnerZip.FullName
+            Assert-RdaZipWithinLimit -Path $InnerZip.FullName
             $Archive = [System.IO.Compression.ZipFile]::OpenRead($InnerZip.FullName)
             try
             {
@@ -780,10 +793,14 @@ function New-RdaAllSubHtmlSummaryFromZip
             $Plan.Add([pscustomobject]@{ Zip = $InnerZip; Dest = $Dest; Entries = @($Picked | ForEach-Object { $_.FullName }) })
         }
 
-        # Then the writes, only the planned entries.
+        # Then the writes, only the planned entries. Each file is written under
+        # a private name beside its target first; only when every file is
+        # written are they moved over their targets, so a read or write that
+        # fails part-way leaves a report already in a reused folder whole.
         foreach ($Item in $Plan)
         {
             $Dest = $Item.Dest
+            if (-not (Test-Path -LiteralPath $Dest)) { $MadeReportDirs.Add($Dest) }
             New-Item -ItemType Directory -Path $Dest -Force | Out-Null
             $Archive = [System.IO.Compression.ZipFile]::OpenRead($Item.Zip.FullName)
             try
@@ -791,19 +808,18 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($Entry in @($Archive.Entries | Where-Object { $Item.Entries -ccontains $_.FullName }))
                 {
                     $Target = Join-Path $Dest $Entry.Name
-                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
-                    if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
-                    if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
+                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')) }
+                    $StagedFiles.Add($Staged)
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Staged.Partial, $false)
                 }
             }
             finally { $Archive.Dispose() }
-            if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) }
-            $Reconstructed++
+            $DirsPlanned.Add($Dest)
         }
 
         # Fallback for an archive that already holds extracted ResourcesReport*/
         # folders instead of inner zips: copy their html + Inventory json across.
-        if ($Reconstructed -eq 0)
+        if ($DirsPlanned.Count -eq 0)
         {
             $ExtractedFolders = @(Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -notlike '*_revealed*' })
@@ -829,37 +845,55 @@ function New-RdaAllSubHtmlSummaryFromZip
                 [void]$PlanSeen.Add($Dest)
                 $FolderPlan.Add([pscustomobject]@{ Dest = $Dest; Files = $Files })
             }
+            # Written under private names first too, as for report zips.
             foreach ($Item in $FolderPlan)
             {
                 $Dest = $Item.Dest
+                if (-not (Test-Path -LiteralPath $Dest)) { $MadeReportDirs.Add($Dest) }
                 New-Item -ItemType Directory -Path $Dest -Force | Out-Null
                 foreach ($F in $Item.Files)
                 {
                     $Target = Join-Path $Dest $F.Name
-                    Copy-Item -LiteralPath $F.FullName -Destination $Target -Force
-                    if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
-                    if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
+                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')) }
+                    $StagedFiles.Add($Staged)
+                    Copy-Item -LiteralPath $F.FullName -Destination $Staged.Partial
                 }
-                if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) }
-                $Reconstructed++
+                $DirsPlanned.Add($Dest)
             }
         }
+
+        if ($DirsPlanned.Count -eq 0)
+        {
+            throw "New-RdaAllSubHtmlSummaryFromZip: no per-subscription reports found inside '$InputZip'. Is this a consolidated AllSubscriptions_ResourcesReport_*.zip?"
+        }
+
+        # Every file is written: each now takes its target's place.
+        foreach ($Staged in $StagedFiles)
+        {
+            [System.IO.File]::Move($Staged.Partial, $Staged.Target, $true)
+            if (-not $WrittenFiles.ContainsKey($Staged.Dest)) { $WrittenFiles[$Staged.Dest] = New-Object System.Collections.Generic.List[string] }
+            if (-not $WrittenFiles[$Staged.Dest].Contains($Staged.Target)) { $WrittenFiles[$Staged.Dest].Add($Staged.Target) }
+        }
+        foreach ($Dest in $DirsPlanned) { if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) } }
+        $Reconstructed = $DirsPlanned.Count
     }
     catch
     {
-        # A refused or failed rebuild leaves no empty -OutputDirectory it made.
-        if ($OutputMade -and @(Get-ChildItem -LiteralPath $OutputDirectory -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $OutputDirectory -Force -ErrorAction SilentlyContinue }
+        # A refused or failed rebuild leaves no empty folder it made: the
+        # report folders, -OutputDirectory and its parents, deepest first.
+        foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
+        foreach ($Dir in @(@($MadeReportDirs) + @($MadeDirs)))
+        {
+            if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $Dir -Force -ErrorAction SilentlyContinue }
+        }
         throw
     }
     finally
     {
-        # Only the folder this call made.
+        # Private names left by a failed write, then the staging folder (only
+        # the one this call made).
+        foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
         if ($StagingMade) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }
-    }
-
-    if ($Reconstructed -eq 0)
-    {
-        throw "New-RdaAllSubHtmlSummaryFromZip: no per-subscription reports found inside '$InputZip'. Is this a consolidated AllSubscriptions_ResourcesReport_*.zip?"
     }
 
     # Re-render each per-subscription report from its Inventory_*.json with the
@@ -972,7 +1006,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             # Checked as written, with the limits a report zip is held to (the
             # re-rendered html can be larger than what was extracted, and
             # recompressing can pack it tighter), before it takes its name.
-            Assert-RdaZipWithinLimits -Path $PartialPackage
+            Assert-RdaZipWithinLimit -Path $PartialPackage
             [System.IO.File]::Move($PartialPackage, $PackageZipPath, $true)
         }
         finally

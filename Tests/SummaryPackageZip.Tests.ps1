@@ -516,6 +516,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip checks a zip before it extracts it' {
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-09.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>$null } | Should -Throw '*no per-subscription reports found*'
+        Test-Path -LiteralPath (Join-Path $Root 'out') | Should -BeFalse -Because 'a refused rebuild leaves no folder it made'
     }
 }
 
@@ -678,5 +679,101 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip budget for extracted folders, the bund
         { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Html 6>$null } | Should -Throw '*disk full*'
         Get-Content -LiteralPath $Html -Raw | Should -Be 'an earlier summary'
         @(Get-ChildItem -LiteralPath $Run -Filter '*.partial') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip over a reused folder when a write fails part-way, and the folders a refusal leaves' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        $script:EarlierInv = '{"Version":"3.2.3","PublicIP":[{"Name":"earlier","Subscription":"Sub"}]}'
+        function script:New-EarlierReport
+        {
+            param([string]$Out, [string]$Stamp)
+            $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')) -Value $script:EarlierInv -NoNewline
+            Set-Content -LiteralPath (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Value '<html>earlier</html>' -NoNewline
+            $Dir
+        }
+    }
+
+    It 'keeps an earlier report whole when a report zip entry cannot be read' {
+        $Root = Join-Path $script:TmpRoot 'reuse-zip-fail'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        $Stamp = '20260102030405101'
+        $InnerPath = Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')
+        $Inner = [System.IO.Compression.ZipFile]::Open($InnerPath, 'Create')
+        try
+        {
+            $E = $Inner.CreateEntry('ResourcesReport_' + $Stamp + '.html'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('<html>new</html>') } finally { $W.Dispose() }
+            $E = $Inner.CreateEntry('Inventory_ResourcesReport_' + $Stamp + '.json', 'Optimal'); $W = [System.IO.StreamWriter]::new($E.Open())
+            try { $R = [Random]::new(1); foreach ($N in 1..20000) { $W.Write([char](65 + $R.Next(26))) } } finally { $W.Dispose() }
+        }
+        finally { $Inner.Dispose() }
+        # Spoil the inventory's packed data, so reading it fails part-way.
+        $Bytes = [System.IO.File]::ReadAllBytes($InnerPath)
+        $Start = [System.Text.Encoding]::ASCII.GetString($Bytes).IndexOf('Inventory_ResourcesReport_' + $Stamp + '.json') + 60
+        foreach ($K in $Start..($Start + 300)) { $Bytes[$K] = 255 }
+        [System.IO.File]::WriteAllBytes($InnerPath, $Bytes)
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-20.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $Out = Join-Path $Root 'out'
+        $Dir = New-EarlierReport -Out $Out -Stamp $Stamp
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw
+        Get-Content -LiteralPath (Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')) -Raw | Should -Be $script:EarlierInv
+        Get-Content -LiteralPath (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Raw | Should -Be '<html>earlier</html>'
+        @(Get-ChildItem -LiteralPath $Out -Recurse -Filter '*.partial') | Should -BeNullOrEmpty
+    }
+
+    It 'keeps an earlier report whole when copying an extracted report folder fails part-way' {
+        $Root = Join-Path $script:TmpRoot 'reuse-copy-fail'
+        $Stamp = '20260102030405102'
+        $Stage = Join-Path $Root 'outer'
+        $Src = Join-Path $Stage ('ResourcesReport_' + $Stamp)
+        New-Item -ItemType Directory -Path $Src -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Src ('Inventory_ResourcesReport_' + $Stamp + '.json')) -Value '{"Version":"3.2.3"}'
+        Set-Content -LiteralPath (Join-Path $Src ('ResourcesReport_' + $Stamp + '.html')) -Value '<html>new</html>'
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-21.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Zip)
+        $Out = Join-Path $Root 'out'
+        $Dir = New-EarlierReport -Out $Out -Stamp $Stamp
+        Mock Copy-Item { Set-Content -LiteralPath $Destination -Value 'part'; throw 'disk full' }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*disk full*'
+        Get-Content -LiteralPath (Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')) -Raw | Should -Be $script:EarlierInv
+        Get-Content -LiteralPath (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Raw | Should -Be '<html>earlier</html>'
+        @(Get-ChildItem -LiteralPath $Out -Recurse -Filter '*.partial') | Should -BeNullOrEmpty
+    }
+
+    It 'leaves no folder it made when -HtmlFile is outside -OutputDirectory' {
+        $Out = Join-Path $script:TmpRoot 'html-elsewhere-clean'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -HtmlFile (Join-Path $script:TmpRoot 'elsewhere2.html') 6>$null } | Should -Throw '*-HtmlFile must be in -OutputDirectory*'
+        Test-Path -LiteralPath $Out | Should -BeFalse
+    }
+
+    It 'leaves no folder it made, parents included, when no report is found' {
+        $Root = Join-Path $script:TmpRoot 'no-report-clean'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Stage 'readme.txt') -Value 'not a report'
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-22.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Zip)
+        $Parent = Join-Path $Root 'new-parent'
+        $Out = Join-Path $Parent 'out'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*no per-subscription reports found*'
+        Test-Path -LiteralPath $Parent | Should -BeFalse
+    }
+
+    It 'keeps a folder that was already there, even when it is empty' {
+        $Root = Join-Path $script:TmpRoot 'no-report-kept'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Stage 'readme.txt') -Value 'not a report'
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-23.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Zip)
+        $Out = Join-Path $Root 'out'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*no per-subscription reports found*'
+        Test-Path -LiteralPath $Out -PathType Container | Should -BeTrue
     }
 }

@@ -1174,8 +1174,10 @@ else
             {
                 Write-Host ("ERROR: could not remove the old stream summary {0}: {1}" -f $OldSummaryPath, $_.Exception.Message) -ForegroundColor Red
                 Write-Host "This run could read it as its own stream's summary. Remove it by hand, then run again." -ForegroundColor Yellow
-                Write-Host "Exit code 2: an old stream summary could not be removed; no subscription was collected and no consolidated zip was made." -ForegroundColor Yellow
-                Exit-Wrapper -Code 2
+                # A setup stop before any stream starts: exit 1, as for the
+                # context snapshot and worker script stops below.
+                Write-Host "Exit code 1: an old stream summary could not be removed; no subscription was collected and no consolidated zip was made." -ForegroundColor Yellow
+                Exit-Wrapper -Code 1
             }
         }
 

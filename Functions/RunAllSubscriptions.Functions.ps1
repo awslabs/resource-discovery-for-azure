@@ -682,10 +682,12 @@ function Merge-FailedAttempts
 #     wrapper also asks this function with -SubscriptionsFailed for it, but
 #     names it to Get-WrapperExitCodeSummary as -UnreadableStreams, so its
 #     subscriptions are named as not confirmed and are not counted as
-#     failed; the zip is made and may hold their reports;
+#     failed; a zip, if one is made, may hold their reports;
 #   - a per-subscription output verification gap (a subscription reported
 #     success but its zip is missing): the wrapper stops with 2 before
 #     consolidation, so no zip is made.
+# An old stream summary that cannot be removed is a setup stop before any
+# stream starts: exit 1, not 2.
 # 2 takes precedence over 3-5. What each case prints:
 #   - failed subscription or unreadable stream summary: the Summary block
 #     (Subscriptions Failed / Stream Summary Unreadable), the FAILED (auth)

@@ -678,7 +678,7 @@ function global:Import-AzContext { param($Path) Add-Content -LiteralPath $Global
 $Root = Join-Path $Tree 'out'
 New-Item -ItemType Directory -Path $Root -Force | Out-Null
 $global:LASTEXITCODE = 0
-& (Join-Path $Tree 'Run-AllSubscriptions.Stream.ps1') -TenantID '00000000-0000-0000-0000-000000000001' -StreamId '0' -InventoryRoot $Root -ScriptRoot $Tree -AzContextPath (Join-Path $Root 'ctx.json') -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.json') -SubscriptionIds @('12345678-1234-1234-1234-123456789012') -SubscriptionNames @('Sub demo') -SkipMetrics -SkipConsumption
+& (Join-Path $Tree 'Run-AllSubscriptions.Stream.ps1') -TenantID '00000000-0000-0000-0000-000000000001' -RunId '11111111-2222-3333-4444-555555555555' -StreamId '0' -InventoryRoot $Root -ScriptRoot $Tree -AzContextPath (Join-Path $Root 'ctx.json') -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.json') -SubscriptionIds @('12345678-1234-1234-1234-123456789012') -SubscriptionNames @('Sub demo') -SkipMetrics -SkipConsumption
 exit $LASTEXITCODE
 '@ | Set-Content -Path $script:StreamHarness -Encoding utf8
     }

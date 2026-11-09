@@ -837,6 +837,8 @@ function Write-StreamState
 # for the wrapper's aggregation. The summary is taken as this run's summary of
 # the stream only when every field the aggregation reads has the shape the
 # worker writes:
+#   RunId                  this run's (-RunId): a summary another run wrote
+#                          in the same inventory root is not this run's
 #   StreamId               this stream's
 #   ResourceCounts         absent, or a list of rows: Id text, Name text or
 #                          empty, Count a whole number of 0 or more, Zip
@@ -855,7 +857,12 @@ function Write-StreamState
 # names). A bad value never throws here.
 function Resolve-StreamSummary
 {
-    param($Summary, [string]$StreamId, [string[]]$ExpectedIds = @())
+    param(
+        $Summary,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [string]$StreamId,
+        [string[]]$ExpectedIds = @()
+    )
 
     $NotConfirmed = { param([string]$Reason) [pscustomobject]@{ Accepted = $false; Reason = $Reason } }
     $IsObject = { param($Value) $Value -is [System.Management.Automation.PSCustomObject] }
@@ -869,6 +876,8 @@ function Resolve-StreamSummary
     $ListRows = { param($Object, [string]$Name) $List = & $Field $Object $Name; if ($null -ne $List -and $List.Value -is [array]) { , $List.Value } else { , @() } }
 
     if (-not (& $IsObject $Summary)) { return (& $NotConfirmed 'it is not a JSON object') }
+    $RunField = & $Field $Summary 'RunId'
+    if ($null -eq $RunField -or -not (& $IsText $RunField.Value) -or $RunField.Value -ne $RunId) { return (& $NotConfirmed 'it is not from this run') }
     $StreamField = & $Field $Summary 'StreamId'
     if ($null -eq $StreamField -or [string]$StreamField.Value -ne [string]$StreamId)
     {

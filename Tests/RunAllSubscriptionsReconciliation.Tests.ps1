@@ -254,10 +254,14 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
     # the values have the types ConvertFrom-Json gives them.
     BeforeAll {
         $script:GoodRow = '{"Id":"sub-a","Name":"Sub A","Count":3,"Zip":"/reports/a/ResourcesReport_a.zip"}'
+        $script:RunId = '11111111-2222-3333-4444-555555555555'
+        # The summary names this run (as the worker writes it) unless the
+        # case names its own RunId.
         function script:Read-Case
         {
             param([string]$Json, [string[]]$Expected = @('sub-a'))
-            Resolve-StreamSummary -Summary ($Json | ConvertFrom-Json) -StreamId '0' -ExpectedIds $Expected
+            if ($Json -like '{*' -and $Json -notlike '*"RunId"*') { $Json = '{"RunId":"' + $script:RunId + '",' + $Json.Substring(1) }
+            Resolve-StreamSummary -Summary ($Json | ConvertFrom-Json) -RunId $script:RunId -StreamId '0' -ExpectedIds $Expected
         }
     }
 
@@ -315,10 +319,19 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
         @{ Case = 'StreamId is missing'; Json = '{"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
         @{ Case = 'rows miss a subscription the stream ran'; Json = '{"StreamId":"0","ResourceCounts":[],"Failed":[]}'; Reason = 'no row for 1 of the 1' }
         @{ Case = 'text is a list'; Json = '[]'; Reason = 'not a JSON object' }
+        @{ Case = 'RunId names another run'; Json = '{"RunId":"99999999-2222-3333-4444-555555555555","StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
+        @{ Case = 'RunId is missing'; Json = '{"RunId":null,"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
+        @{ Case = 'RunId is a number'; Json = '{"RunId":5,"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
     ) {
         $Read = Read-Case -Json $Json
         $Read.Accepted | Should -BeFalse
         $Read.Reason | Should -Match ([regex]::Escape($Reason))
+    }
+
+    It 'does not confirm a summary with no RunId, as an older worker or another tool writes it' {
+        $Read = Resolve-StreamSummary -Summary ('{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}' | ConvertFrom-Json) -RunId $script:RunId -StreamId '0' -ExpectedIds @('sub-a')
+        $Read.Accepted | Should -BeFalse
+        $Read.Reason | Should -Be 'it is not from this run'
     }
 
     It 'never throws on a bad value' {

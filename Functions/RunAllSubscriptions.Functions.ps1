@@ -513,9 +513,12 @@ function Get-FailedAttempts
     }
 }
 
+# -PassThru returns $true when the file was written and $false when it was
+# not (the warning is printed either way), for a caller that must keep other
+# state until this file holds it.
 function Save-CompletedSubscriptionIds
 {
-    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @())
+    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @(), [switch]$PassThru)
 
     $State = [pscustomobject]@{
         TenantID                  = $Tenant
@@ -544,6 +547,7 @@ function Save-CompletedSubscriptionIds
         # move below never puts it over the good state.
         $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8 -ErrorAction Stop
         [System.IO.File]::Move($TmpPath, $Path, $true)
+        if ($PassThru) { return $true }
     }
     catch
     {
@@ -553,6 +557,7 @@ function Save-CompletedSubscriptionIds
         try { Write-Host ('WARNING: Failed to persist resume state to {0}: {1}' -f $Path, $StateError) -ForegroundColor Yellow }
         catch { $null = $_ }
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
+        if ($PassThru) { return $false }
     }
 }
 

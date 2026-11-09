@@ -327,13 +327,27 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
             $CaseHome = if ($ReuseHome) { $ReuseHome } else { Join-Path $CaseDir 'home' }
             New-Item -ItemType Directory -Path $CaseDir -Force | Out-Null
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
+            # UnifiedStateBlocked: an empty folder where the resume state's
+            # temp file goes, so the run's first write of the resume state
+            # fails (as on a full disk); that write's clean-up removes the
+            # folder, so a later write in the same run works. Without it, a
+            # folder an earlier run had is removed, as when the disk is fixed.
+            $UnifiedTmp = Join-Path $CaseHome ('InventoryReports/.resume-state-{0}.json.tmp' -f $script:Tenant)
+            if ($UnifiedStateBlocked)
+            {
+                New-Item -ItemType Directory -Path $UnifiedTmp -Force | Out-Null
+            }
+            elseif (Test-Path -LiteralPath $UnifiedTmp -PathType Container)
+            {
+                Remove-Item -LiteralPath $UnifiedTmp -Recurse -Force
+            }
             if ($StreamStateBlocked)
             {
                 # A folder where stream 0's resume state file goes, so the
@@ -1093,6 +1107,50 @@ function Get-UsageAggregates
 
         # The run after that has nothing to retry.
         $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
+    It 'two streams: when the resume state cannot be written, the old one is left as it was and every stream state file is kept; once it can be written, -ResumeFailedOnly retries the new failure only, and the run after has nothing to retry' {
+        # An earlier run left Sub B failed. This run: Sub A fails, Sub B
+        # works, and the resume state cannot be written.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -FailSub $script:SubA.Id -SeedState ([pscustomobject]@{ Completed = @(); Failed = @($script:SubB.Id) }) -UnifiedStateBlocked
+        $Run.Console | Should -Match 'WARNING: Failed to persist resume state to ' -Because $Run.Console
+        $Run.Console | Should -Match 'WARNING: kept 2 stream resume state file\(s\) in ' -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        Get-Content -LiteralPath (Join-Path $Run.Root ('.resume-state-{0}.json' -f $script:Tenant)) -Raw | Should -Match '"LastUpdated":\s*"2026-01-01T00:00:00Z"' -Because 'the old resume state is left as it was'
+        $Run.FailedIds | Should -Be @($script:SubB.Id)
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Name | Sort-Object | Should -Be @(
+            ('.resume-state-{0}-stream-0.json' -f $script:Tenant), ('.resume-state-{0}-stream-1.json' -f $script:Tenant))
+
+        # The next run, with the disk fixed: Sub A only (Sub B worked).
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Match 'Processing subscription: Sub A' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match 'Processing subscription: Sub B' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        $Retry.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'a clean run clears the stream resume state files too'
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
+    It 'two streams: when the resume state cannot be written, and again at the start of the next -ResumeFailedOnly, that run retries the new failure from the kept stream state files, and the run after has nothing to retry' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -FailSub $script:SubA.Id -SeedState ([pscustomobject]@{ Completed = @(); Failed = @($script:SubB.Id) }) -UnifiedStateBlocked
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home -UnifiedStateBlocked
+        $Retry.Console | Should -Match 'Recovered per-stream state from an interrupted parallel run' -Because $Retry.Console
+        $Retry.Console | Should -Match 'WARNING: Failed to persist resume state to ' -Because $Retry.Console
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Match 'Processing subscription: Sub A' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match 'Processing subscription: Sub B' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home -UnifiedStateBlocked
         $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
         $After.ExitCode | Should -Be 0
     }

@@ -480,3 +480,56 @@ Describe 'Run-AllSubscriptions.ps1: the transcript and the main summary of the s
         @(Get-ChildItem -LiteralPath $Root -Filter 'MainSummary_*.html' -File) | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Run-AllSubscriptions.ps1: the inventory folder gone at the end of the run' {
+    BeforeAll {
+        $Expected = @($script:WrapperAst.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$ExpectedZipCount' })
+        if ($Expected.Count -ne 1) { throw ('expected exactly one top-level $ExpectedZipCount assignment in Run-AllSubscriptions.ps1, found {0}' -f $Expected.Count) }
+        # From the expected report zip count through the report zip check and the
+        # bundling block, as the wrapper has them, then exit 0 if nothing exited.
+        $script:EndOfRunText = @(
+            $Expected[0].Extent.Text
+            (Find-WrapperIf -Condition '$ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container)' -Contains 'Per-subscription output verification').Extent.Text
+            '$OuterZipFile = $null'
+            '$BundleBuildError = $null'
+            (Find-WrapperIf -Condition 'Test-Path -Path $InventoryRoot -PathType Container' -Contains 'AllSubscriptions_ResourcesReport_').Extent.Text
+            'exit 0'
+        ) -join "`n"
+        $script:Pwsh = (Get-Process -Id $PID).Path
+
+        # Runs that end of a run in a child pwsh (Exit-Wrapper ends with 'exit')
+        # for a run that completed $RunCount subscriptions, with its inventory
+        # folder at $Root. Returns the exit code and the lines printed.
+        function script:Invoke-EndOfRun
+        {
+            param([string]$Root, [int]$RunCount)
+            $Script = Join-Path $TestDrive ('end-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+            @(
+                ('. ''{0}''' -f $script:FunctionsPath.Replace("'", "''"))
+                '$WrapperTranscriptStarted = $false'
+                ('$InventoryRoot = ''{0}''' -f $Root.Replace("'", "''"))
+                ('$ResumeStateFile = Join-Path $InventoryRoot ''.resume-state-t.json''')
+                '$RunStartTime = (Get-Date).AddMinutes(-5)'
+                # -First: 1..0 counts down to 0, so it is not an empty range.
+                ('$SubResourceCounts = @(1..{0} | Select-Object -First {0} | ForEach-Object {{ [pscustomobject]@{{ Name = ''sub-'' + $_; Id = ''sub-'' + $_; Count = 1 }} }})' -f $RunCount)
+                $script:EndOfRunText
+            ) -join "`n" | Set-Content -LiteralPath $Script
+            $Lines = @(& $script:Pwsh -NoProfile -NonInteractive -File $Script 6>&1 2>&1 | ForEach-Object { [string]$_ })
+            [pscustomobject]@{ Code = $LASTEXITCODE; Lines = $Lines }
+        }
+    }
+
+    It 'a run that expected report zips: one line says the folder, its reports and the resume state are gone, and the run exits 2' {
+        $Gone = Join-Path $TestDrive 'folder-gone'
+        $R = Invoke-EndOfRun -Root $Gone -RunCount 2
+        $R.Code | Should -Be 2
+        $R.Lines | Should -Contain ('Inventory root not found at {0}. Nothing to consolidate.' -f $Gone)
+        $R.Lines | Should -Contain ('FAILED (report missing): the inventory folder {0} is gone, with the report zips and the resume state that were in it, so no consolidated zip was built. The next run collects every subscription again.' -f $Gone)
+    }
+
+    It 'a run that expected no report zip keeps its exit code' {
+        $R = Invoke-EndOfRun -Root (Join-Path $TestDrive 'folder-gone-none') -RunCount 0
+        $R.Code | Should -Be 0
+        @($R.Lines | Where-Object { $_ -like 'FAILED*' }) | Should -BeNullOrEmpty
+    }
+}

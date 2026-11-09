@@ -1591,9 +1591,10 @@ else
             # Reconcile failed attempts from all streams against the unified list.
             # See Merge-FailedAttempts for the recency/completion rules.
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
+            $UnifiedStateSaved = $true
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
             {
-                Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                $UnifiedStateSaved = Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -PassThru
             }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
@@ -1601,10 +1602,21 @@ else
             # as the merge loop above, so every file that was just merged is also
             # the one that gets cleaned up here - regardless of this run's
             # -ParallelStreams value.
-            foreach ($StreamFile in $AllStreamFiles)
+            # When the unified file could not be written, they are this run's
+            # only record of its completions and failures: they are kept, and
+            # the next -Resume or -ResumeFailedOnly run reads them at its start.
+            if ($UnifiedStateSaved)
             {
-                $PerStreamFile = $StreamFile.FullName
-                try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                foreach ($StreamFile in $AllStreamFiles)
+                {
+                    $PerStreamFile = $StreamFile.FullName
+                    try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                }
+            }
+            elseif ($AllStreamFiles.Count -gt 0)
+            {
+                try { Write-Host ("WARNING: kept {0} stream resume state file(s) in {1}, as the resume state could not be written; the next -Resume or -ResumeFailedOnly run reads them." -f $AllStreamFiles.Count, $InventoryRoot) -ForegroundColor Yellow }
+                catch { $null = $_ }
             }
         }
         finally
@@ -1857,16 +1869,28 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0 -and $FailedAttempts.Count -eq 0)
 {
-    try
+    if (Test-Path -Path $ResumeStateFile -PathType Leaf)
     {
-        Remove-Item -Path $ResumeStateFile -Force
-        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        try
+        {
+            Remove-Item -Path $ResumeStateFile -Force
+            Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        }
+        catch
+        {
+            Write-Host ('WARNING: Could not remove resume state file {0}: {1}' -f $ResumeStateFile, $_) -ForegroundColor Yellow
+        }
     }
-    catch
+    # Stream resume state files still here (kept when the resume state could
+    # not be written, or left by a stopped run and read at this run's start)
+    # are cleared too: the next run's start would read their old failures
+    # back, and -ResumeFailedOnly would retry them for ever.
+    foreach ($StreamFile in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID))
     {
-        Write-Host ('WARNING: Could not remove resume state file {0}: {1}' -f $ResumeStateFile, $_) -ForegroundColor Yellow
+        try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
+        catch { Write-Host ('WARNING: Could not remove stream resume state file {0}: {1}' -f $StreamFile.FullName, $_) -ForegroundColor Yellow }
     }
 }
 

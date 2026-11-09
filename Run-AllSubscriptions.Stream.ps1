@@ -272,13 +272,25 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # verification looks for.
         $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount; Zip = $Global:ZipOutputFile }
 
-        if ($ResCount -eq 0)
+        # Narration only, as in the wrapper: a failed write must not turn the
+        # success into a failure (the subscription would be listed as both).
+        try
         {
-            Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $SubName) 'Yellow'
+            if ($ResCount -eq 0)
+            {
+                Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $SubName) 'Yellow'
+            }
+            else
+            {
+                Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
+            }
         }
-        else
+        catch
         {
-            Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
+            # Its own guard, as in the wrapper.
+            $NarrationError = $_.Exception.Message
+            try { Write-Verbose ("Could not write the completion line: {0}" -f $NarrationError) }
+            catch { $null = $_ }
         }
 
         if (-not ($Completed -contains $SubId))

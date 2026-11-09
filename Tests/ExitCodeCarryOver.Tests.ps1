@@ -168,6 +168,23 @@ if ((Get-RdaStandInScenario).SummaryFolderAtStart -and -not $Global:RdaStandInSu
         if ($Path -like '*.rda-stream-0-*') { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
     }
 }
+# With UnifiedStateOnce, the folder at the resume state's temp path makes only
+# the first write of the resume state fail (as on a disk that is then fixed):
+# once that write has failed, the folder is removed, so later writes work.
+if ((Get-RdaStandInScenario).UnifiedStateOnce -and -not $Global:RdaStandInStateBreakpoint)
+{
+    $Global:RdaStandInStateBreakpoint = $true
+    $null = Set-PSBreakpoint -Variable StateError -Mode Write -Action {
+        # The action runs in this module's scope, so the path is read from
+        # the call that failed.
+        $Saver = @(Get-PSCallStack | Where-Object { $_.FunctionName -eq 'Save-CompletedSubscriptionIds' }) | Select-Object -First 1
+        $StatePath = if ($null -ne $Saver) { [string]$Saver.InvocationInfo.BoundParameters['Path'] } else { '' }
+        if ($StatePath -like '*.resume-state-*' -and $StatePath -notlike '*-stream-*' -and (Test-Path -LiteralPath "$StatePath.tmp" -PathType Container))
+        {
+            Remove-Item -LiteralPath "$StatePath.tmp" -Recurse -Force
+        }
+    }
+}
 function Start-Transcript
 {
     if ((Get-RdaStandInScenario).RemoveRoot -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the transcript cannot start' }
@@ -336,9 +353,11 @@ function Get-UsageAggregates
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
             # UnifiedStateBlocked: an empty folder where the resume state's
             # temp file goes, so the run's first write of the resume state
-            # fails (as on a full disk); that write's clean-up removes the
-            # folder, so a later write in the same run works. Without it, a
-            # folder an earlier run had is removed, as when the disk is fixed.
+            # fails (as on a full disk). The wrapper's clean-up leaves the
+            # folder, so the stand-in removes it once that write has failed
+            # (see UnifiedStateOnce), and a later write in the same run works.
+            # Without it, a folder an earlier run had is removed, as when the
+            # disk is fixed.
             $UnifiedTmp = Join-Path $CaseHome ('InventoryReports/.resume-state-{0}.json.tmp' -f $script:Tenant)
             if ($UnifiedStateBlocked)
             {
@@ -432,7 +451,7 @@ function Get-UsageAggregates
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             # ConsumptionPageFail runs the consumption phase (see
             # Get-UsageAggregates in the stand-in), MetricsTokenFail the
@@ -1162,13 +1181,16 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
-    It 'two streams: when the resume state cannot be written, and again at the start of the next -ResumeFailedOnly, that run retries the new failure from the kept stream state files, and the run after has nothing to retry' {
+    It 'two streams: when the resume state cannot be written, and again at the start of the next -ResumeFailedOnly but not at its end, that run retries the new failure from the kept stream state files, and the run after has nothing to retry' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -FailSub $script:SubA.Id -SeedState ([pscustomobject]@{ Completed = @(); Failed = @($script:SubB.Id) }) -UnifiedStateBlocked
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
 
         $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home -UnifiedStateBlocked
         $Retry.Console | Should -Match 'Recovered per-stream state from an interrupted parallel run' -Because $Retry.Console
-        $Retry.Console | Should -Match 'WARNING: Failed to persist resume state to ' -Because $Retry.Console
+        # Only the start-up write fails; the end-of-run write works, so the
+        # stream state files are not kept for a failed write.
+        @([regex]::Matches($Retry.Console, 'WARNING: Failed to persist resume state to ')).Count | Should -Be 1 -Because $Retry.Console
+        $Retry.Console | Should -Not -Match 'WARNING: kept \d+ stream resume state file' -Because $Retry.Console
         $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
         $Retry.Console | Should -Match 'Processing subscription: Sub A' -Because $Retry.Console
         $Retry.Console | Should -Not -Match 'Processing subscription: Sub B' -Because $Retry.Console

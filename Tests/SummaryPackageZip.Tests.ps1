@@ -363,15 +363,19 @@ Describe 'Build-MainSummaryFromZip report zips whose names differ only in case' 
         Compress-Archive -Path (Join-Path $Src '*') -DestinationPath (Join-Path $Stage ('b/resourcesreport_' + $Stamp + '.zip')) -Force
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-08.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
-        $script:CaseLines = @(& $script:Script -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>&1 | ForEach-Object { [string]$_ })
+        $script:CaseOut = Join-Path $Root 'out'
+        $script:CaseLines = @(& $script:Script -InputZip $Zip -OutputDirectory $script:CaseOut 6>&1 | ForEach-Object { [string]$_ })
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
     }
 
-    It 'treats them as one folder on Windows and macOS, where the file system ignores case, and rebuilds it once' -Skip:($IsLinux) {
+    It 'treats them as one folder where the file system ignores case, and rebuilds it once' {
+        if (-not (Get-RdaPathComparer -Path $script:CaseOut).Equals('A', 'a')) { Set-ItResult -Skipped -Because 'this file system keeps case apart' }
         @($script:CaseLines | Where-Object { $_ -like '*Skipped a second report zip named*' }).Count | Should -Be 1
         @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
     }
 
-    It 'treats them as two folders on Linux, where they are two, and lists both in the summary' -Skip:(-not $IsLinux) {
+    It 'treats them as two folders where the file system keeps case apart, and lists both in the summary' {
+        if ((Get-RdaPathComparer -Path $script:CaseOut).Equals('A', 'a')) { Set-ItResult -Skipped -Because 'this file system ignores case' }
         @($script:CaseLines | Where-Object { $_ -like '*Skipped a second report zip named*' }) | Should -BeNullOrEmpty
         @($script:CaseLines | Where-Object { $_ -like 'Reconstructed 2 per-subscription report(s) into:*' }).Count | Should -Be 1
         @($script:CaseLines | Where-Object { $_ -like '  2 subscription(s), *' }).Count | Should -Be 1
@@ -494,13 +498,14 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip checks a zip before it extracts it' {
         $Path = New-RawZip -Path (Join-Path $script:TmpRoot ('limits-' + $Case + '.zip')) -Fill $Fill
         $Out = Join-Path $script:TmpRoot ('limits-out-' + $Case)
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Path -OutputDirectory $Out 6>$null } | Should -Throw $Like
-        @(Get-ChildItem -LiteralPath $Out -Recurse -File -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $Out | Should -BeFalse -Because 'a refused zip creates nothing'
     }
 
     It 'extracts into a new staging folder of its own, readable by this user only on Linux and macOS' -Skip:($IsWindows) {
-        Mock Expand-Archive { $script:StagingMode = [System.IO.File]::GetUnixFileMode($DestinationPath); throw 'stop here' }
+        # stat reads the mode on every .NET (GetUnixFileMode needs .NET 7).
+        Mock Expand-Archive { $script:StagingMode = (& stat -c '%a' $DestinationPath 2>$null); if (-not $script:StagingMode) { $script:StagingMode = (& stat -f '%Lp' $DestinationPath) }; throw 'stop here' }
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory (Join-Path $script:TmpRoot 'staging-mode') 6>$null } | Should -Throw '*stop here*'
-        $script:StagingMode | Should -Be ([System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+        $script:StagingMode | Should -Be '700'
     }
 
     It 'does not count a report zip that holds no inventory, and says no report was found when that is all there is' {
@@ -599,5 +604,24 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip writes within one budget, and only rea
         Get-Content -LiteralPath (Join-Path $Out 'ResourcesReport_20260102030405081/ResourcesReport_20260102030405081.html') -Raw | Should -Be '<html>original</html>'
         @(Get-ChildItem -LiteralPath (Join-Path $Out 'ResourcesReport_20260102030405081') -Filter '*.partial') | Should -BeNullOrEmpty
         . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip counts the files it renders in its budget' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'stops when report zips with only an inventory, their rendered html and the summary come to more than 2000 files' {
+        $Root = Join-Path $script:TmpRoot 'render-budget'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        foreach ($N in 1..1000)
+        {
+            $Stamp = '2026010203{0:D7}' -f $N
+            $Zip = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+            try { $E = $Zip.CreateEntry('Inventory_ResourcesReport_' + $Stamp + '.json'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('{"Version":"3.2.3"}') } finally { $W.Dispose() } } finally { $Zip.Dispose() }
+        }
+        $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-13.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Outer)
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory (Join-Path $Root 'out') 6>$null } | Should -Throw '*more than 2000 files in all*'
     }
 }

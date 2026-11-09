@@ -663,6 +663,9 @@ function New-RdaAllSubHtmlSummaryFromZip
             throw ("New-RdaAllSubHtmlSummaryFromZip: -PackageZip would write {0}, which is -InputZip. Choose another -OutputDirectory." -f $PlannedPackage)
         }
     }
+    # Checked before anything is created or extracted, as downstream checks a
+    # report zip.
+    Assert-RdaZipWithinLimits -Path $ZipItem.FullName
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
 
@@ -680,20 +683,24 @@ function New-RdaAllSubHtmlSummaryFromZip
 
     # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
     # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
-    # Checked before anything is extracted, as downstream checks a report zip.
-    Assert-RdaZipWithinLimits -Path $ZipItem.FullName
     # A new folder of its own (an existing one is an error, never reused),
     # readable by this user only on Linux and macOS: it holds customer reports.
     $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $Staging -ErrorAction Stop | Out-Null
-    if (-not $IsWindows)
-    {
-        # File.SetUnixFileMode needs .NET 7 (PowerShell 7.3); chmod otherwise.
-        if ('System.IO.UnixFileMode' -as [type]) { [System.IO.File]::SetUnixFileMode($Staging, ('System.IO.UnixFileMode' -as [type])::UserRead -bor ('System.IO.UnixFileMode' -as [type])::UserWrite -bor ('System.IO.UnixFileMode' -as [type])::UserExecute) }
-        else { & chmod 700 $Staging }
-    }
+    $StagingMade = $false
     try
     {
+        New-Item -ItemType Directory -Path $Staging -ErrorAction Stop | Out-Null
+        $StagingMade = $true
+        if (-not $IsWindows)
+        {
+            # File.SetUnixFileMode needs .NET 7 (PowerShell 7.3); chmod otherwise.
+            if ('System.IO.UnixFileMode' -as [type]) { [System.IO.File]::SetUnixFileMode($Staging, ('System.IO.UnixFileMode' -as [type])::UserRead -bor ('System.IO.UnixFileMode' -as [type])::UserWrite -bor ('System.IO.UnixFileMode' -as [type])::UserExecute) }
+            else
+            {
+                & chmod 700 $Staging
+                if ($LASTEXITCODE -ne 0) { throw ('New-RdaAllSubHtmlSummaryFromZip: could not make the staging folder {0} private (chmod 700 failed).' -f $Staging) }
+            }
+        }
         Expand-Archive -LiteralPath $InputZip -DestinationPath $Staging -Force
         # Exclude any leftover *_revealed.zip (de-obfuscated single-report archive
         # from a prior Reveal run) at SELECTION time: the reveal engine renames only
@@ -722,7 +729,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         $Plan = New-Object System.Collections.Generic.List[object]
         $PlanSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
         [long]$PlanBytes = 0
-        $PlanCount = 0
+        $PlanCount = 1
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
@@ -750,7 +757,10 @@ function New-RdaAllSubHtmlSummaryFromZip
                 Write-Host ("  Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name) -ForegroundColor Yellow
                 continue
             }
+            # The re-render writes an html for a report that has none, and the
+            # summary is one file more: both count too.
             $PlanCount += $Picked.Count
+            if (@($Picked | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
             foreach ($P in $Picked) { $PlanBytes += $P.Length }
             if ($PlanCount -gt 2000) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report zips in {0} would write more than 2000 files in all.' -f $ZipItem.Name) }
             if ($PlanBytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report zips in {0} would write more than 32 GB in all.' -f $ZipItem.Name) }
@@ -812,7 +822,8 @@ function New-RdaAllSubHtmlSummaryFromZip
     }
     finally
     {
-        Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
+        # Only the folder this call made.
+        if ($StagingMade) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
     if ($Reconstructed -eq 0)
@@ -927,6 +938,17 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($E in $Entries) { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Package, $E.Path, $E.Name) }
             }
             finally { $Package.Dispose() }
+            # Checked as written (the re-rendered html can be larger than what
+            # was extracted) before it takes its name.
+            $Check = [System.IO.Compression.ZipFile]::OpenRead($PartialPackage)
+            try
+            {
+                $Count = @($Check.Entries).Count
+                [long]$Bytes = 0
+                foreach ($E in $Check.Entries) { $Bytes += $E.Length }
+            }
+            finally { $Check.Dispose() }
+            if ($Count -gt 2000 -or $Bytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the bundle would hold {0} files and {1:N0} bytes, more than 2000 files or 32 GB.' -f $Count, $Bytes) }
             [System.IO.File]::Move($PartialPackage, $PackageZipPath, $true)
         }
         finally

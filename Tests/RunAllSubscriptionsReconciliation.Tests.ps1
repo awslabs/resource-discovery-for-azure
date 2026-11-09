@@ -393,6 +393,19 @@ Describe 'A resume state warning that cannot be written' {
         Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: failed to persist stream state to *' }
         Test-Path -LiteralPath $Path | Should -BeFalse
     }
+
+    It 'Read-StreamState starts fresh and does not throw when its warning cannot be written' {
+        # It runs at stream start; a warning that cannot be written must not
+        # end the stream before its loop.
+        Set-Variable -Name Tag -Value '[stream-0]'
+        Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
+        $Path = Join-Path $script:TestRoot 'bad-stream-state.json'
+        Set-Content -LiteralPath $Path -Value '{"Completed": [' -Encoding utf8
+        { $script:StreamRead = Read-StreamState -Path $Path } | Should -Not -Throw
+        @($script:StreamRead.Completed).Count | Should -Be 0
+        @($script:StreamRead.Failed).Count | Should -Be 0
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: could not read stream state at *' }
+    }
 }
 
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {

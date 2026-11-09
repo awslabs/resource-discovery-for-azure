@@ -2182,6 +2182,10 @@ if ($null -ne $OuterZipFile)
     {
         $BundleBuildError = "{0} was lost while the run summary was added to it: {1}" -f $OuterZipFile, $ZipProblem
         Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
+        # This run's own name (New-RunOutputFile): a zip that failed the check
+        # is not left under it, as after the check before the fold.
+        Remove-Item -LiteralPath $OuterZipFile -Force -ErrorAction SilentlyContinue
+        $OuterZipFile = $null
     }
     else
     {

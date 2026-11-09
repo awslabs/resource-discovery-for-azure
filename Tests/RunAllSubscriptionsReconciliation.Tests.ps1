@@ -266,7 +266,7 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
     }
 
     It 'accepts a good summary and gives back its values with their types' {
-        $Json = '{"StreamId":"0","Status":"partial-failure","ResourceCounts":[' + $script:GoodRow + '],"Failed":[{"Id":"sub-b","Name":"Sub B","Reason":"it failed"}],"ConsumptionRecords":7,"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m"}],"MetricsFailedSubs":[{"Id":"sub-a","Name":"Sub A","Message":"m"}],"CollectorFailures":[{"Id":"sub-a","Module":"VM","Message":"m"}]}'
+        $Json = '{"StreamId":"0","Status":"partial-failure","ResourceCounts":[' + $script:GoodRow + '],"Failed":[{"Id":"sub-b","Name":"Sub B","Reason":"it failed"}],"ConsumptionRecords":7,"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":"sub-a"},{"Id":"sub-b","Name":"Sub B","Message":"m","SubscriptionId":""}],"MetricsFailedSubs":[{"Id":"sub-a","Name":"Sub A","Message":"m"}],"CollectorFailures":[{"Id":"sub-a","Module":"VM","Message":"m"}]}'
         $Read = Read-Case -Json $Json -Expected @('sub-a', 'sub-b')
         $Read.Accepted | Should -BeTrue -Because $Read.Reason
         $Read.Status | Should -Be 'partial-failure'
@@ -277,7 +277,8 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
         $Read.Failed[0].Reason | Should -Be 'it failed'
         $Read.ConsumptionRecords | Should -BeOfType [int]
         $Read.ConsumptionRecords | Should -Be 7
-        @($Read.ConsumptionFailedSubs).Count | Should -Be 1
+        @($Read.ConsumptionFailedSubs).Count | Should -Be 2
+        $Read.ConsumptionFailedSubs[0].SubscriptionId | Should -Be 'sub-a'
         @($Read.MetricsFailedSubs).Count | Should -Be 1
         @($Read.CollectorFailures).Count | Should -Be 1
     }
@@ -314,6 +315,15 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
         @{ Case = 'CollectorFailures row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":[{"Module":"VM","Message":"m"}]}'; Reason = 'CollectorFailures row' }
         @{ Case = 'MetricsFailedSubs row Message is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":[{"Id":"sub-a","Message":["m"]}]}'; Reason = 'MetricsFailedSubs row' }
         @{ Case = 'ConsumptionFailedSubs row is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":["sub-a"]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row has no SubscriptionId'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m"}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is empty'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":""}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is null'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":null}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":5}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":["a","b"]}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is an object'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":{"a":1}}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'other ConsumptionFailedSubs row SubscriptionId is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"sub-a","Name":"Sub A","Message":"m","SubscriptionId":["a"]}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'MetricsFailedSubs row SubscriptionId is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":[{"Id":"sub-a","Message":"m","SubscriptionId":5}]}'; Reason = 'MetricsFailedSubs row' }
+        @{ Case = 'CollectorFailures row SubscriptionId is an object'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":[{"Id":"sub-a","Module":"VM","Message":"m","SubscriptionId":{"a":1}}]}'; Reason = 'CollectorFailures row' }
         @{ Case = 'Status is a number'; Json = '{"StreamId":"0","Status":1,"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'Status is not text' }
         @{ Case = 'StreamId names another stream'; Json = '{"StreamId":"1","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
         @{ Case = 'StreamId is missing'; Json = '{"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }

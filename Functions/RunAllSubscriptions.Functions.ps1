@@ -874,7 +874,9 @@ function Write-StreamState
 #   ConsumptionRecords     absent, or a whole number of 0 or more
 #   ConsumptionFailedSubs, MetricsFailedSubs, CollectorFailures
 #                          absent, or lists of rows: Id text; Name, Message
-#                          and Module text or empty when present
+#                          and Module text or empty when present;
+#                          SubscriptionId text, not empty, on a sign-in
+#                          ('(auth)') row, else text or empty when present
 #   Status, Reason         absent, or text
 # and it holds a row (ResourceCounts or Failed) for every subscription the
 # stream ran this time (-ExpectedIds). Returns Accepted $true with the checked
@@ -984,7 +986,10 @@ function Resolve-StreamSummary
         $ConsumptionRecords = [int]$RecordsField.Value
     }
 
-    # The health lists: the wrapper reads Id, Name, Message and Module.
+    # The health lists: the wrapper reads Id, Name, Message, Module and
+    # SubscriptionId (the sign-in skips are counted once per SubscriptionId of
+    # the '(auth)' rows, so a stream's '(auth)' row, made for one
+    # subscription, must name it).
     $Health = @{}
     foreach ($Name in @('ConsumptionFailedSubs', 'MetricsFailedSubs', 'CollectorFailures'))
     {
@@ -999,9 +1004,15 @@ function Resolve-StreamSummary
                     $Value = & $Field $Row $Text
                     if ($null -ne $Value -and -not (& $IsTextOrEmpty $Value.Value)) { return $true }
                 }
+                $SubscriptionId = & $Field $Row 'SubscriptionId'
+                if ($Id.Value -eq '(auth)')
+                {
+                    if ($null -eq $SubscriptionId -or -not (& $IsText $SubscriptionId.Value) -or $SubscriptionId.Value -eq '') { return $true }
+                }
+                elseif ($null -ne $SubscriptionId -and -not (& $IsTextOrEmpty $SubscriptionId.Value)) { return $true }
                 $false
             }).Count
-        if ($BadRows -gt 0) { return (& $NotConfirmed ('{0} of its {1} row(s) have no Id, or a Name, Message or Module that is not text' -f $BadRows, $Name)) }
+        if ($BadRows -gt 0) { return (& $NotConfirmed ('{0} of its {1} row(s) have no Id, a Name, Message, Module or SubscriptionId that is not text, or are a sign-in row with no SubscriptionId' -f $BadRows, $Name)) }
         $Health[$Name] = $Rows
     }
 

@@ -1195,11 +1195,28 @@ else
                 $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
                 $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
 
+                # The subscriptions this stream will run: under -Resume the
+                # worker skips those in its own resume file's Completed list
+                # (read here before it starts, as the worker reads it; a file
+                # it cannot read skips none). This is the count named as not
+                # confirmed when the stream's summary is missing or unreadable.
+                $PriorDone = @()
+                $StreamStatePath = Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $S)
+                if ($Resume -and (Test-Path -Path $StreamStatePath -PathType Leaf))
+                {
+                    try
+                    {
+                        $StreamState = Get-Content -Path $StreamStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                        if ($null -ne $StreamState.Completed) { $PriorDone = @($StreamState.Completed) }
+                    }
+                    catch { Write-Verbose ("Could not read stream resume file {0}: {1}" -f $StreamStatePath, $_.Exception.Message) }
+                }
+
                 $StreamSummaries += [pscustomobject]@{
                     StreamId     = $S
                     SummaryPath  = $SummaryPath
                     FailuresPath = $FailuresPath
-                    SubCount     = $SliceList.Count
+                    SubCount     = @($SliceIds | Where-Object { $PriorDone -notcontains $_ }).Count
                 }
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan

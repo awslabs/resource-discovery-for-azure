@@ -162,6 +162,7 @@ function Test-RdaAzAccountsVersion
 function Get-RdaAzAccountsPin
 {
     [CmdletBinding()]
+    [OutputType([string])]
     param($Module, [version]$Minimum)
 
     if ($null -eq $Module -or [string]::IsNullOrEmpty([string]$Module.ModuleBase)) { return $null }
@@ -191,6 +192,7 @@ function Get-RdaAzAccountsPin
 function Get-RdaModuleCopyToLoad
 {
     [CmdletBinding()]
+    [OutputType([object[]])]
     param([string]$Name)
 
     $Loaded = @(Get-Module -Name $Name -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version })
@@ -212,7 +214,7 @@ function Get-RdaModuleCopyToLoad
 function Get-RdaAzAccountsPinMessage
 {
     [CmdletBinding()]
-    [OutputType([string])]
+    [OutputType([object[]])]
     param(
         [object[]]$Pinning = @(),
         # What the pin does, after the module and the version it asks for.

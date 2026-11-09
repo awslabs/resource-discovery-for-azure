@@ -59,9 +59,12 @@ function global:Get-StandInPools
 }
 function global:Get-StandInHosts
 {
-    foreach ($P in @(@{ Sub = $SubA; Pool = 'hp-a'; Host = 'sh-a.demo.local' }, @{ Sub = $SubB; Pool = 'hp-b'; Host = 'sh-b.demo.local' }))
+    # In a -ResourceGroup run the run's session host keeps the portal casing of
+    # its group, as tables other than resources may: the run must still read it.
+    $RunGroup = if ($Global:StandInScope -eq 'ResourceGroupA') { 'RG-Avd' } else { 'rg-avd' }
+    foreach ($P in @(@{ Sub = $SubA; Pool = 'hp-a'; Host = 'sh-a.demo.local'; Group = $RunGroup }, @{ Sub = $SubB; Pool = 'hp-b'; Host = 'sh-b.demo.local'; Group = 'rg-avd' }))
     {
-        @{ id = ('{0}/sessionhosts/{1}' -f (Get-StandInPoolId $P.Sub $P.Pool), $P.Host); name = ('{0}/{1}' -f $P.Pool, $P.Host); type = 'microsoft.desktopvirtualization/hostpools/sessionhosts'; location = 'eastus'; subscriptionId = $P.Sub; resourceGroup = 'rg-avd'; properties = @{ agentVersion = '1.0.0'; allowNewSession = $true; status = 'Available'; updateState = 'Succeeded' } }
+        @{ id = ('{0}/sessionhosts/{1}' -f (Get-StandInPoolId $P.Sub $P.Pool), $P.Host); name = ('{0}/{1}' -f $P.Pool, $P.Host); type = 'microsoft.desktopvirtualization/hostpools/sessionhosts'; location = 'eastus'; subscriptionId = $P.Sub; resourceGroup = $P.Group; properties = @{ agentVersion = '1.0.0'; allowNewSession = $true; status = 'Available'; updateState = 'Succeeded' } }
     }
     # A -ResourceGroup run's subscription also holds a session host in another
     # resource group, which that run must not read.
@@ -86,12 +89,14 @@ function global:Invoke-StandInGraph
     Add-Content -LiteralPath $Global:HCallLog -Value ('{0} subs={1}' -f $Table, (($Named | Sort-Object) -join ','))
     $Rows = @(if ($Table -eq 'avd') { Get-StandInHosts } else { Get-StandInPools })
     $Rows = @($Rows | Where-Object { $Named -contains $_.subscriptionId })
-    # A resource group filter in the query, as Resource Graph applies it.
-    if ($Joined -match "where resourceGroup == '([^']+)'")
+    # A resource group filter in the query, as Resource Graph applies it:
+    # == matches case-sensitively, =~ without regard to case.
+    if ($Joined -match "where resourceGroup (==|=~) '([^']+)'")
     {
-        $Group = $Matches[1]
+        $Operator = $Matches[1]
+        $Group = $Matches[2]
         if ($Table -eq 'avd') { Add-Content -LiteralPath $Global:HCallLog -Value ('avdgroup {0}' -f $Group) }
-        $Rows = @($Rows | Where-Object { $_.resourceGroup -ceq $Group })
+        $Rows = @(if ($Operator -eq '=~') { $Rows | Where-Object { $_.resourceGroup -ieq $Group } } else { $Rows | Where-Object { $_.resourceGroup -ceq $Group } })
     }
     if ($Joined -match 'summarize count\(\)') { return ('{{"data":[{{"count_":{0}}}],"count":1}}' -f $Rows.Count) }
     return (@{ data = $Rows; count = $Rows.Count } | ConvertTo-Json -Depth 8 -Compress)

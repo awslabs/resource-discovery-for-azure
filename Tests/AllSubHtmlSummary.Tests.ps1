@@ -574,6 +574,10 @@ Describe 'ResourceInventory.ps1 names the report folder when metrics are skipped
         $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'CreateMetricsJob' }, $true))
         if ($Fn.Count -ne 1) { throw 'CreateMetricsJob was not found in ResourceInventory.ps1.' }
         . ([scriptblock]::Create($Fn[0].Extent.Text))
+        # Get-ReportFolderName, which the lifted function calls for the folder name.
+        $Helper = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Get-ReportFolderName' }, $true))
+        if ($Helper.Count -ne 1) { throw 'Get-ReportFolderName was not found in ResourceInventory.ps1.' }
+        . ([scriptblock]::Create($Helper[0].Extent.Text))
         # Write-Log, which the lifted function calls.
         . (Join-Path (Split-Path $PSScriptRoot -Parent) 'Functions/Common.Functions.ps1')
         function Test-DataPlaneAuthReady { param($Phase) $false }

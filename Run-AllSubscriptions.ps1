@@ -401,8 +401,12 @@ Disable-ConsoleQuickEdit
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 # The same failures for RunSummary.log: { Name; Id } for a subscription, the
-# $FailedSubscriptions text for a stream with no readable summary.
+# $FailedSubscriptions text for a stream with no summary file.
 $FailedSubscriptionDetail = @()
+# Streams whose summary file is there but could not be read: { StreamId;
+# SubCount }. Their subscriptions are not confirmed (exit 2), but they are not
+# counted or named as failed subscriptions.
+$UnreadableStreamSummaries = @()
 
 # Per-subscription metrics-phase auth health, aggregated across the whole run.
 # This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
@@ -1292,8 +1296,7 @@ else
                 catch
                 {
                     Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
-                    $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
-                    $FailedSubscriptionDetail += $FailedSubscriptions[-1]
+                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount }
                     continue
                 }
 
@@ -1640,7 +1643,7 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {
@@ -1669,7 +1672,7 @@ Write-Host ("Subscriptions Eligible:  {0}" -f $Subscriptions.Count) -ForegroundC
 # this invocation (the union of $SubResourceCounts entries plus failures).
 if ($ParallelStreams -gt 1 -and $Resume -and $SkippedCount -eq 0)
 {
-    $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count
+    $ActuallyProcessed = ($SubResourceCounts | Measure-Object).Count + $FailedSubscriptions.Count + [int](@($UnreadableStreamSummaries | ForEach-Object { $_.SubCount }) | Measure-Object -Sum).Sum
     $DerivedSkip = $Subscriptions.Count - $ActuallyProcessed
     if ($DerivedSkip -gt 0) { $SkippedCount = $DerivedSkip }
 }
@@ -1891,6 +1894,17 @@ elseif ($FailedAttempts.Count -gt 0)
     Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
+if ($UnreadableStreamSummaries.Count -gt 0)
+{
+    # Not failed subscriptions: the stream's reports may well be in the
+    # consolidated zip, but the run cannot confirm them.
+    foreach ($U in $UnreadableStreamSummaries)
+    {
+        Write-Host ("Stream Summary Unreadable: stream-{0} ({1} subscription(s) not confirmed; check the consolidated zip)" -f $U.StreamId, $U.SubCount) -ForegroundColor Red
+    }
+    Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
+    Write-Host "Re-run with -Resume to collect any subscription of that stream that did not complete." -ForegroundColor Yellow
+}
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)
 {
@@ -1912,9 +1926,11 @@ $ConsumptionAuthSkipped = @(
 if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
-$SubscriptionsFailed = $WrapperExitCode -eq 2
-$ExitCodeLines = @(Get-WrapperExitCodeSummary -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $SubscriptionsFailed -ReportMade ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile)))
+$SubscriptionsFailed = @($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0
+# An unreadable stream summary also gives 2 (its subscriptions are not
+# confirmed), but it is named as such, not as a failed subscription.
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed ($SubscriptionsFailed -or $UnreadableStreamSummaries.Count -gt 0)
+$ExitCodeLines = @(Get-WrapperExitCodeSummary -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $SubscriptionsFailed -UnreadableStreams $UnreadableStreamSummaries -ReportMade ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile)))
 
 # --- Fold run-level extras into the consolidated bundle --------------
 # Make the single AllSubscriptions zip the customer receives self-contained.

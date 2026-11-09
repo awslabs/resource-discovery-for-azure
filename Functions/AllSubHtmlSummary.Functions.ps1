@@ -256,7 +256,7 @@ function Get-RdaOnDiskName
 # as PowerShell and .NET fold it for every write this module makes.
 # PowerShell 7.0/7.1 (.NET before 6) cannot read a link's target: there a
 # path with a link in it stops (throws) instead, since it cannot be compared.
-# shortcut: on 7.0/7.1 on macOS that refuses -PackageZip under /tmp and /var
+# shortcut: on 7.0/7.1 on macOS that refuses a rebuild under /tmp and /var
 # (links to /private/...); fine while 7.0/7.1 are out of support.
 $script:RdaCanResolveLinks = [bool]([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))
 function Get-RdaPhysicalPath
@@ -775,10 +775,10 @@ function New-RdaAllSubHtmlSummaryFromZip
     $OutputDirectory = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory))
     # A drive or file system root is never the output folder: the reports
     # would sit at the root and the bundle would be named after no folder.
-    # Also not through a link or junction to a root (the path as followed).
-    # shortcut: on PowerShell 7.0/7.1 links cannot be followed, so only the
-    # path as written is checked there; fine while 7.0/7.1 are out of support.
-    $OutputPhysical = try { Get-RdaPhysicalPath -Path $OutputDirectory } catch { $OutputDirectory }
+    # Also not through a link or junction to a root (the path as followed). On
+    # PowerShell 7.0/7.1, which cannot follow a link, a path with a link in it
+    # stops here (Get-RdaPhysicalPath throws), as it does for -PackageZip.
+    $OutputPhysical = Get-RdaPhysicalPath -Path $OutputDirectory
     $IsRoot = { param($P) $P.TrimEnd([IO.Path]::DirectorySeparatorChar, '/') -eq ([string][System.IO.Path]::GetPathRoot($P)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/') }
     if ((& $IsRoot $OutputDirectory) -or (& $IsRoot $OutputPhysical))
     {

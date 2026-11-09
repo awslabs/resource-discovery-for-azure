@@ -878,11 +878,16 @@ if ($ResumeFailedOnly)
 {
     if ($FailedAttempts.Count -eq 0)
     {
-        Write-Host "ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry." -ForegroundColor Green
-        Write-Host ("If you expected failures here, verify {0} has a non-empty FailedAttempts array." -f $ResumeStateFile) -ForegroundColor DarkGray
         # A per-stream state file that could not be read may hold failures
         # (named above): the run is not clean while it is there.
-        Exit-Wrapper -Code $(if ($UnreadableStreamFiles.Count -gt 0) { 2 } else { 0 })
+        if ($UnreadableStreamFiles.Count -gt 0)
+        {
+            Write-Host "ResumeFailedOnly: no failed subscriptions in the resume state, but a per-stream resume state file could not be read (named above), so the retry list may be incomplete." -ForegroundColor Yellow
+            Exit-Wrapper -Code 2
+        }
+        Write-Host "ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry." -ForegroundColor Green
+        Write-Host ("If you expected failures here, verify {0} has a non-empty FailedAttempts array." -f $ResumeStateFile) -ForegroundColor DarkGray
+        Exit-Wrapper -Code 0
     }
     $FailedIds = @($FailedAttempts | ForEach-Object { $_.Id })
     $BeforeCount = $Subscriptions.Count
@@ -2122,12 +2127,21 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $UnreadableStreamFiles.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {
-        Remove-Item -Path $ResumeStateFile -Force
-        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        # A per-stream state file that could not be read may hold records
+        # (named above): the state is kept while it is there.
+        if ($UnreadableStreamFiles.Count -gt 0)
+        {
+            Write-Host "Resume state kept: a per-stream resume state file could not be read (named above)." -ForegroundColor Yellow
+        }
+        else
+        {
+            Remove-Item -Path $ResumeStateFile -Force
+            Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        }
     }
     catch
     {

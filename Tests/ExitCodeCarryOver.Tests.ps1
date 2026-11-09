@@ -228,6 +228,9 @@ function Get-AzAccessToken
     # With ConsumptionTokenFail, the token check before the consumption phase
     # gets no token, so that phase is skipped for sign-in (the '(auth)' row).
     if ((Get-RdaStandInScenario).ConsumptionTokenFail -and @(Get-PSCallStack | Where-Object { $_.FunctionName -eq 'Test-DataPlaneAuthReady' }).Count -gt 0) { throw 'stand-in: no token for the consumption phase' }
+    # With MetricsTokenFail, the token check before the metrics phase gets no
+    # token, so that phase is skipped for sign-in (a row per subscription).
+    if ((Get-RdaStandInScenario).MetricsTokenFail -and @(Get-PSCallStack | Where-Object { $_.FunctionName -eq 'Test-DataPlaneAuthReady' -and $null -ne $_.InvocationInfo.BoundParameters -and [string]$_.InvocationInfo.BoundParameters['Phase'] -eq 'Metrics' }).Count -gt 0) { throw 'stand-in: no token for the metrics phase' }
     $Claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"oid":"stand-in-caller"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     $Tenant = if ($TenantId) { [string]$TenantId } else { (Get-RdaStandInScenario).Tenant }
     [pscustomobject]@{ Token = ('e30.{0}.c2ln' -f $Claims); Type = 'Bearer'; ExpiresOn = (Get-Date).AddHours(1); TenantId = $Tenant }
@@ -300,7 +303,16 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $script:Modules = Join-Path $script:WorkDir 'modules'
         # Az.Billing answers the wrapper's up-front consumption access check
         # (runs without -SkipConsumption only): access is confirmed.
-        $Billing = 'function Get-UsageAggregates { [CmdletBinding()] param($ReportedStartTime, $ReportedEndTime, $AggregationGranularity, $ShowDetails, $ContinuationToken) }'
+        # With ConsumptionPageFail, every consumption page a subscription's
+        # run asks for fails, so its consumption is INCOMPLETE (one row per
+        # subscription in the consumption failure list).
+        $Billing = @'
+function Get-UsageAggregates
+{
+    [CmdletBinding()] param($ReportedStartTime, $ReportedEndTime, $AggregationGranularity, $ShowDetails, $ContinuationToken)
+    if ((Get-Content -LiteralPath $env:RDA_STANDIN_AZURE -Raw | ConvertFrom-Json).ConsumptionPageFail -and @(Get-PSCallStack | Where-Object { $_.ScriptName -like '*ResourceInventory.ps1' }).Count -gt 0) { throw 'stand-in: the consumption page cannot be read' }
+}
+'@
         foreach ($Module in @(@{ Name = 'Az.Accounts'; Body = $Accounts }, @{ Name = 'Az.Compute'; Body = $Compute }, @{ Name = 'Az.Monitor'; Body = '' }, @{ Name = 'Az.Billing'; Body = $Billing }))
         {
             $Dir = Join-Path $script:Modules (Join-Path $Module.Name '99.0.0')
@@ -315,7 +327,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -376,9 +388,15 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
-            $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
+            # ConsumptionPageFail runs the consumption phase (see
+            # Get-UsageAggregates in the stand-in), MetricsTokenFail the
+            # metrics phase (see Get-AzAccessToken).
+            $WrapperArgs = @('-TenantID', $script:Tenant)
+            if (-not $MetricsTokenFail) { $WrapperArgs += '-SkipMetrics' }
+            if (-not $ConsumptionPageFail) { $WrapperArgs += '-SkipConsumption' }
+            $WrapperArgs += @('-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
             # VerboseFail runs the wrapper with -Verbose.
             if ($VerboseFail) { $WrapperArgs += '-Verbose' }
@@ -1039,6 +1057,40 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Session.Console | Should -Match 'Required Az submodule\(s\) not found'
         $Session.After | Should -Be @('after1: 1', 'after2: 0') -Because $Session.Console
         $Session.Open | Should -BeTrue
+    }
+
+    It 'two streams: every subscription whose consumption is incomplete in one stream is named, on the console and in RunSummary.log' {
+        # Stream 0 runs Sub A then Sub C, stream 1 runs Sub B; every
+        # consumption page fails, so each subscription has its own row.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ConsumptionPageFail
+        $Run.Console | Should -Match 'Consumption Failures:\s+3 subscription\(s\)' -Because $Run.Console
+        foreach ($Sub in @($script:SubA, $script:SubB, $script:SubC))
+        {
+            $Run.Console | Should -Match ('(?m)^\s*- {0} \({1}\)' -f [regex]::Escape($Sub.Name), [regex]::Escape($Sub.Id)) -Because $Run.Console
+            $Run.RunSummary | Should -Match ([regex]::Escape($Sub.Id)) -Because $Run.RunSummary
+        }
+    }
+
+    It 'sequential: two subscriptions with the same name whose consumption is incomplete are both named' {
+        # Azure lets two subscriptions share a display name; the id tells
+        # them apart.
+        $Twin = [pscustomobject]@{ Id = [guid]::new(('0' * 31) + 'd').ToString(); Name = $script:SubA.Name }
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $Twin) -ConsumptionPageFail
+        $Run.Console | Should -Match 'Consumption Failures:\s+2 subscription\(s\)' -Because $Run.Console
+        foreach ($Sub in @($script:SubA, $Twin))
+        {
+            $Run.Console | Should -Match ('(?m)^\s*- {0} \({1}\)' -f [regex]::Escape($Sub.Name), [regex]::Escape($Sub.Id)) -Because $Run.Console
+        }
+    }
+
+    It 'sequential: two subscriptions with the same name whose metrics were skipped for sign-in are both named' {
+        $Twin = [pscustomobject]@{ Id = [guid]::new(('0' * 31) + 'd').ToString(); Name = $script:SubA.Name }
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $Twin) -MetricsTokenFail
+        $Run.Console | Should -Match 'Metrics Auth Failures:\s+2 subscription\(s\)' -Because $Run.Console
+        foreach ($Sub in @($script:SubA, $Twin))
+        {
+            $Run.Console | Should -Match ('(?m)^\s*- {0} \({1}\)' -f [regex]::Escape($Sub.Name), [regex]::Escape($Sub.Id)) -Because $Run.Console
+        }
     }
 
     It 'inside a PowerShell session: after a run whose consumption was skipped for sign-in, the next clean run reads 0 and names no consumption failure or count' {

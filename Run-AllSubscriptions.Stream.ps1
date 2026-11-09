@@ -368,6 +368,10 @@ $ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
 $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+# One row per Id, Name and Message, first seen kept, in order: the rows are
+# objects, and Select-Object -Unique sees two of them as one.
+$SeenConsumptionFailure = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$ConsumptionFailedSubs = @($ConsumptionFailedSubs | Where-Object { $SeenConsumptionFailure.Add(('{0}|{1}|{2}' -f $_.Id, $_.Name, $_.Message)) })
 
 $Summary = [pscustomobject]@{
     RunId                  = $RunId
@@ -379,7 +383,7 @@ $Summary = [pscustomobject]@{
     Failed                 = $FailedSubs
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
-    ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
+    ConsumptionFailedSubs  = @($ConsumptionFailedSubs)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     CollectorFailures      = @($CollectorFailures)
 }

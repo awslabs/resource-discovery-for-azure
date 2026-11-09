@@ -18,6 +18,16 @@
 #   -Obfuscate       pass -Obfuscate.
 #   -NoResources     the subscriptions hold no resources and have no usage.
 #   -DebugOutput     pass -Debug.
+#   -Runs            how many runs, one after another, in this one session
+#                    (default 1). With more than one, run <n> writes to
+#                    <Out>/run<n>/ and the exit code is the last run's.
+#   -FailFirstRunConsumption  the usage query fails in run 1 only, so run 1
+#                    records a consumption failure.
+#   -RunAllSubs      pass -RunAllSubs, as the wrapper does, with one wrapper
+#                    entry already in each health list before the first run.
+#   -ListsOut        after run <n>, write the health lists ($Global:
+#                    CollectorFailures, MetricsFailedSubs, ConsumptionFailedSubs
+#                    and ConsumptionRecordCount) as JSON to <ListsOut>-<n>.json.
 #
 # Every subscription holds one disk in resource group RG-INFRA, and its usage
 # page has one row for that disk with a consumption meter in additionalInfo.
@@ -34,7 +44,11 @@ param(
     [switch]$SignInFirst,
     [switch]$Obfuscate,
     [switch]$NoResources,
-    [switch]$DebugOutput
+    [switch]$DebugOutput,
+    [int]$Runs = 1,
+    [switch]$FailFirstRunConsumption,
+    [switch]$RunAllSubs,
+    [string]$ListsOut = ''
 )
 $PSStyle.OutputRendering = 'PlainText'
 [System.Globalization.CultureInfo]::CurrentCulture = $Culture
@@ -48,6 +62,8 @@ $Global:StandInSubs = @(for ($i = 0; $i -lt $Ids.Count; $i++) { [pscustomobject]
 $Global:StandInSignedIn = -not $SignInFirst
 $Global:StandInContextSub = $Ids[0]
 $Global:StandInNoResources = [bool]$NoResources
+$Global:StandInRun = 0
+$Global:StandInFailConsumptionRun = if ($FailFirstRunConsumption) { 1 } else { 0 }
 
 # The disk each subscription holds, with ids as Azure spells them.
 function global:Get-StandInDiskId([string]$Sub) { '/subscriptions/{0}/resourceGroups/RG-INFRA/providers/Microsoft.Compute/disks/DISK-INFRA' -f $Sub }
@@ -110,6 +126,7 @@ function global:Get-AzMetric { [CmdletBinding()] param($ResourceId, $MetricName,
 function global:Get-AzUsageAggregate
 {
     [CmdletBinding()] param($ReportedStartTime, $ReportedEndTime, $AggregationGranularity, $ShowDetails, $ContinuationToken)
+    if ($Global:StandInFailConsumptionRun -gt 0 -and $Global:StandInRun -eq $Global:StandInFailConsumptionRun) { throw 'stand-in: the usage query failed' }
     if ($Global:StandInNoResources) { return [pscustomobject]@{ UsageAggregations = @(); ContinuationToken = $null } }
     $Instance = @{ 'Microsoft.Resources' = @{ resourceUri = (Get-StandInDiskId $Global:StandInContextSub); location = 'eastus'; additionalInfo = @{ ConsumptionMeter = 'meter-1'; ImageType = 'Standard' } } } | ConvertTo-Json -Depth 5 -Compress
     $Row = [pscustomobject]@{ InstanceData = $Instance; MeterCategory = 'Storage'; MeterId = 'meter-1'; MeterName = 'P4 Disks'; MeterRegion = 'US East'; MeterSubCategory = 'Premium SSD Managed Disks'; Quantity = 1; Unit = '1/Month'; UsageStartTime = (Get-Date).AddDays(-2).Date; UsageEndTime = (Get-Date).AddDays(-1).Date }
@@ -148,6 +165,38 @@ if ($Out) { $Params.OutputDirectory = $Out }
 if ($ResourceGroup) { $Params.ResourceGroup = $ResourceGroup }
 if ($Obfuscate) { $Params.Obfuscate = $true }
 if ($DebugOutput) { $Params.Debug = $true }
+if ($RunAllSubs)
+{
+    $Params.RunAllSubs = $true
+    # What the wrapper has gathered from earlier subscriptions before it
+    # starts this one.
+    $Global:CollectorFailures = @([pscustomobject]@{ Id = 'wrapper-entry'; Module = 'WrapperEntry'; Message = 'kept by the wrapper' })
+    $Global:MetricsFailedSubs = @([pscustomobject]@{ Name = 'wrapper-entry'; Id = 'wrapper-entry'; Message = 'kept by the wrapper' })
+    $Global:ConsumptionFailedSubs = @([pscustomobject]@{ Name = 'wrapper-entry'; Id = 'wrapper-entry'; Message = 'kept by the wrapper' })
+    $Global:ConsumptionRecordCount = 7
+}
 Set-Location -LiteralPath $Tree
-& (Join-Path $Tree 'ResourceInventory.ps1') @Params
-exit $LASTEXITCODE
+$RunExit = 0
+for ($Run = 1; $Run -le [math]::Max(1, $Runs); $Run++)
+{
+    $Global:StandInRun = $Run
+    if ($Runs -gt 1 -and $Out)
+    {
+        $Params.OutputDirectory = Join-Path $Out ('run{0}/' -f $Run)
+        $null = New-Item -ItemType Directory -Path $Params.OutputDirectory -Force
+    }
+    $global:LASTEXITCODE = 0
+    & (Join-Path $Tree 'ResourceInventory.ps1') @Params
+    $RunExit = $LASTEXITCODE
+    Set-Location -LiteralPath $Tree
+    if ($ListsOut)
+    {
+        [pscustomobject]@{
+            CollectorFailures      = @(@($Global:CollectorFailures) | Where-Object { $null -ne $_ })
+            MetricsFailedSubs      = @(@($Global:MetricsFailedSubs) | Where-Object { $null -ne $_ })
+            ConsumptionFailedSubs  = @(@($Global:ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
+            ConsumptionRecordCount = $Global:ConsumptionRecordCount
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ('{0}-{1}.json' -f $ListsOut, $Run) -Encoding utf8
+    }
+}
+exit $RunExit

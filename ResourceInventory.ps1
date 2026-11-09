@@ -1893,6 +1893,18 @@ if (-not $RunAllSubs.IsPresent)
     Write-Host ""
 }
 
+# A direct run owns the health lists, so it starts them empty: a second run in
+# the same session must not report the first run's failures. Under -RunAllSubs
+# the wrapper (or its stream worker) empties them once at its own start and
+# gathers every subscription's entries in them, so they are left alone here.
+if (-not $RunAllSubs.IsPresent)
+{
+    $Global:CollectorFailures = @()
+    $Global:MetricsFailedSubs = @()
+    $Global:ConsumptionFailedSubs = @()
+    $Global:ConsumptionRecordCount = 0
+}
+
 $Global:Runtime = Measure-Command -Expression {
     Variables
     RunInventorySetup

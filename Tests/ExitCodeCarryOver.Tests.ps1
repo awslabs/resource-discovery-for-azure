@@ -78,6 +78,28 @@ function Get-RdaStandInContext
     }
 }
 $script:ContextSub = $null
+# With RemoveRoot, the wrapper's own transcript cannot start (a running one
+# would make the folder again on its next line), and the inventory root is
+# removed when the wrapper reads the zip a subscription's inner script named,
+# right after that script returned with success: as when storage is evicted
+# or a mount drops at that point.
+if ((Get-RdaStandInScenario).RemoveRoot -and -not $Global:RdaStandInRootBreakpoint)
+{
+    $Global:RdaStandInRootBreakpoint = $true
+    $null = Set-PSBreakpoint -Variable ZipOutputFile -Mode Read -Action {
+        $Reader = @(Get-PSCallStack)[1]
+        $Root = Join-Path $HOME 'InventoryReports'
+        if ($Reader.ScriptName -like '*Run-AllSubscriptions.ps1' -and (Test-Path -LiteralPath $Root))
+        {
+            Remove-Item -LiteralPath $Root -Recurse -Force
+        }
+    }
+}
+function Start-Transcript
+{
+    if ((Get-RdaStandInScenario).RemoveRoot -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the transcript cannot start' }
+    Microsoft.PowerShell.Host\Start-Transcript @args
+}
 function Get-AzContext { [CmdletBinding()] param([switch]$ListAvailable) Get-RdaStandInContext }
 function Set-AzContext { [CmdletBinding()] param($Subscription, $Tenant, $Context, $Scope) if ($Subscription) { $script:ContextSub = [string]$Subscription }; Get-RdaStandInContext }
 function Import-AzContext { [CmdletBinding()] param($Path) Get-RdaStandInContext }
@@ -172,7 +194,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @())
+            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -220,7 +242,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub; CollectorFailSub = $CollectorFailSub } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub; CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
@@ -534,6 +556,26 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.Console | Should -Match ('(?m)^\s*- Sub X \({0}\) \[1 resources\]' -f [regex]::Escape($SubX.Id)) -Because $Run.Console
         $Run.Console | Should -Match ([regex]::Escape('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.'))
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'sequential: an inventory folder that is gone after a subscription worked is a verification gap, not a clean run' {
+        # Sub A's inner script writes its report and returns with success;
+        # then the whole inventory root, with that report, is gone. The
+        # wrapper runs without its transcript, which would make the folder
+        # again.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA) -RemoveRoot
+        $Run.Console | Should -Match 'WARNING: Could not start wrapper transcript' -Because $Run.Console
+        $Run.Console | Should -Match 'Completed subscription: Sub A' -Because $Run.Console
+        $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
+        $Run.Console | Should -Match 'The inventory folder .+ is gone, so every report under it is lost, with its resume state: the next run collects every subscription again\.' -Because $Run.Console
+        $Run.Console | Should -Match ('(?m)^\s*- Sub A \({0}\) \[1 resources\]' -f [regex]::Escape($script:SubA.Id)) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.'))
+        $Run.Console | Should -Not -Match 'Exit code 0' -Because $Run.Console
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        # The resume state was in the folder too, so the next -Resume run
+        # starts over and collects Sub A again.
+        $Run.StateKept | Should -BeFalse -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 

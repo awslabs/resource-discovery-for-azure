@@ -1565,9 +1565,13 @@ $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 # missing one. Failed subs (in $FailedSubscriptions) are intentionally NOT
 # checked - their zip-or-no-zip state is unreliable and the wrapper already
 # surfaces them via the failure summary.
+#
+# An inventory root that is gone (evicted, or a mount that dropped) holds no
+# zip, so it is checked too: every expected zip is then missing.
 $ExpectedZipCount = @($SubResourceCounts).Count
-if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
+if ($ExpectedZipCount -gt 0)
 {
+    $InventoryRootGone = -not (Test-Path -Path $InventoryRoot -PathType Container)
     $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     $ActualZipCount = $ActualSubZips.Count
     $PathComparer = if ($PSVersionTable.Platform -eq 'Unix') { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
@@ -1582,6 +1586,10 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $ExpectedZipCount) -ForegroundColor Red
         Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $ActualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
         Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
+        if ($InventoryRootGone)
+        {
+            Write-Host ("  The inventory folder {0} is gone, so every report under it is lost, with its resume state: the next run collects every subscription again." -f $InventoryRoot) -ForegroundColor Red
+        }
         Write-Host ""
         Write-Host "Subscriptions whose inner script reported success this run but whose zip was not found:" -ForegroundColor Yellow
         foreach ($S in $MissingZipSubs)

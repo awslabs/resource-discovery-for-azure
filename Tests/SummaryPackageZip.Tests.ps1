@@ -331,3 +331,21 @@ Describe 'Build-MainSummaryFromZip with two report zips of the same name in the 
         @($script:TwiceLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
     }
 }
+
+Describe 'Build-MainSummaryFromZip with two extracted report folders of the same name in the input' {
+
+    BeforeAll {
+        $Root = Join-Path $script:TmpRoot 'twice_folders'
+        $Stage = Join-Path $Root 'outer'
+        $Stamp = '20260102030405031'
+        foreach ($Sub in 'a', 'b') { New-SubReportFiles -Dir (Join-Path $Stage ('{0}/ResourcesReport_{1}' -f $Sub, $Stamp)) -Stamp $Stamp -SubName ('Sub ' + $Sub) }
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-07.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $script:TwiceFolderLines = @(& $script:Script -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>&1 | ForEach-Object { [string]$_ })
+    }
+
+    It 'rebuilds the folder once, says so, and counts it once' {
+        @($script:TwiceFolderLines | Where-Object { $_ -like '*Skipped a second report folder named ResourcesReport_20260102030405031 in the input zip*' }).Count | Should -Be 1
+        @($script:TwiceFolderLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
+    }
+}

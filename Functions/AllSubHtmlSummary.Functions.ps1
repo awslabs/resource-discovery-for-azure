@@ -547,7 +547,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         $OutputDirectory = Join-Path $ZipItem.DirectoryName ($BaseName + '_MainSummary')
     }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-    $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
+    $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
 
     if ([string]::IsNullOrWhiteSpace($HtmlFile))
     {
@@ -624,6 +624,12 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $Files = @(Get-ChildItem -LiteralPath $Ef.FullName -File -ErrorAction SilentlyContinue | Where-Object { ($_.Name -like 'Inventory_*.json') -or (($_.Name -like '*.html') -and ($_.Name -notlike '*_revealed*')) })
                 if ($Files.Count -eq 0) { continue }
                 $Dest = Join-Path $OutputDirectory $Ef.Name
+                # A second folder of the same name: the first one is kept, as for report zips.
+                if ($ReconstructedDirs.Contains($Dest))
+                {
+                    Write-Host ("  Skipped a second report folder named {0} in the input zip; the first one is used." -f $Ef.Name) -ForegroundColor Yellow
+                    continue
+                }
                 New-Item -ItemType Directory -Path $Dest -Force | Out-Null
                 foreach ($F in $Files)
                 {

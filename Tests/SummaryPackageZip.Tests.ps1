@@ -1407,13 +1407,18 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip under strict mode, and the real script
     BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
 
     It 'rebuilds into a new folder under Set-StrictMode -Version Latest (<Case>)' -ForEach @(@{ Case = 'links followed' }, @{ Case = 'links not followable' }) {
-        $Out = Join-Path $script:TmpRoot ('strict-' + ($Case -replace ' ', '-'))
+        # The temp folder as followed (it can sit under a link, such as /var on
+        # macOS), so a PowerShell that cannot follow links finds none in it.
+        $Base = Get-RdaPhysicalPath -Path $script:TmpRoot
+        $InZip = Join-Path $Base ('strict-in-' + ($Case -replace ' ', '-') + '.zip')
+        Copy-Item -LiteralPath $script:InputZip -Destination $InZip
+        $Out = Join-Path $Base ('strict-' + ($Case -replace ' ', '-'))
         $Saved = $script:RdaCanResolveLinks
         if ($Case -eq 'links not followable') { $script:RdaCanResolveLinks = $false }
         try
         {
             Set-StrictMode -Version Latest
-            $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -PackageZip 6>&1 | Out-String
+            $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $InZip -OutputDirectory $Out -PackageZip 6>&1 | Out-String
         }
         finally { Set-StrictMode -Off; $script:RdaCanResolveLinks = $Saved }
         Test-Path -LiteralPath ($Out + '.zip') -PathType Leaf | Should -BeTrue

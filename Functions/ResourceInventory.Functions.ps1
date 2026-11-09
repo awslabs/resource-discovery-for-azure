@@ -470,11 +470,12 @@ function Invoke-AzGraphQuerySafe
 
 # The total of a count probe (`... | summarize count()`) across every row of an
 # Invoke-AzGraphQuerySafe result: one row per subscription batch. 0 for none.
-# A count_ that is present but not a whole number of 0 or more ends the function
-# with an error, as a failure in Invoke-AzGraphQuerySafe does, instead of being
-# read as 0, rounded or added as a negative number. 'Stop' here for the same
-# reason as there: the inventory's SilentlyContinue would otherwise let the
-# function go on past the throw.
+# A row whose count_ is missing, null or not a whole number of 0 or more ends
+# the function with an error, as a failure in Invoke-AzGraphQuerySafe does,
+# instead of being read as 0, rounded or added as a negative number. An answer
+# with no rows at all is still 0. 'Stop' here for the same reason as there: the
+# inventory's SilentlyContinue would otherwise let the function go on past the
+# throw.
 function Get-AzGraphCount
 {
     param([Parameter(Mandatory = $true)]$Result)
@@ -482,11 +483,14 @@ function Get-AzGraphCount
     $Total = [long]0
     foreach ($Row in @($Result.data))
     {
-        if ($null -eq $Row -or $null -eq $Row.count_) { continue }
+        if ($null -eq $Row) { continue }
+        $HasCount = if ($Row -is [System.Collections.IDictionary]) { $Row.Contains('count_') } else { $null -ne $Row.PSObject.Properties['count_'] }
         $Value = [long]0
-        if (-not [long]::TryParse([string]$Row.count_, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$Value) -or $Value -lt 0)
+        if (-not $HasCount -or $null -eq $Row.count_ -or -not [long]::TryParse([string]$Row.count_, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$Value) -or $Value -lt 0)
         {
-            throw ("Resource Graph returned a count (count_, a {0}) that is not a whole number of 0 or more." -f $Row.count_.GetType().Name)
+            # Only the kind of value goes in the message, never the value.
+            $Kind = if (-not $HasCount) { 'missing' } elseif ($null -eq $Row.count_) { 'null' } else { 'a {0}' -f $Row.count_.GetType().Name }
+            throw ("Resource Graph returned a count (count_, {0}) that is not a whole number of 0 or more." -f $Kind)
         }
         $Total += $Value
     }

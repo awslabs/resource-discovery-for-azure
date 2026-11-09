@@ -46,11 +46,12 @@ function Get-RdaAzAccountsInstallCommand
 # for LoadedTooOld, starting a new session) makes the next check pass, so a
 # stop on this check never repeats by itself.
 #
-# -SubModule names the other Az modules the caller loads. When one of them
-# that is loaded asks for an Az.Accounts older than the minimum, a new session
-# alone loads the same pair again, so the messages name that module and the
-# command that updates it, and how to remove an old copy that is still found
-# first.
+# -SubModule names the other Az modules the caller loads. A module pins an
+# older Az.Accounts only when its manifest asks for an exact one
+# (RequiredVersion) or caps it (MaximumVersion) below the minimum; a minimum
+# (ModuleVersion) never pins. For a pinning module, a new session alone loads
+# the same pair again, so the messages name that module and the command that
+# updates it, and how to remove an old copy that is still found first.
 function Test-RdaAzAccountsVersion
 {
     [CmdletBinding()]
@@ -85,30 +86,17 @@ function Test-RdaAzAccountsVersion
             $Messages += 'Install a supported version first:'
             $Messages += ('  ' + $InstallCommand)
         }
-        # The loaded submodules whose manifest asks for an older Az.Accounts:
+        # The loaded submodules whose manifest pins an older Az.Accounts:
         # PowerShell loads that copy for them in every new session.
         $Pinning = @(foreach ($Name in @($SubModule | Where-Object { $_ -and $_ -ne 'Az.Accounts' }))
             {
                 foreach ($Copy in @(Get-Module -Name $Name -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version }))
                 {
-                    $Old = @($Copy.RequiredModules | Where-Object { $_ -and $_.Name -eq 'Az.Accounts' -and $_.Version -and [version]$_.Version -lt $Required }) | Select-Object -First 1
-                    if ($Old) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = [version]$Old.Version } }
+                    $Pin = Get-RdaAzAccountsPin -Module $Copy -Minimum $Required
+                    if ($Pin) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = $Pin } }
                 }
             })
-        if ($Pinning.Count -gt 0)
-        {
-            foreach ($P in $Pinning)
-            {
-                $Messages += ('{0} {1} asks for Az.Accounts {2}, so PowerShell loads that older copy for it in every new session.' -f $P.Name, $P.Version, $P.Accounts)
-            }
-            $PinnedNames = @($Pinning | ForEach-Object { $_.Name } | Select-Object -Unique)
-            $Messages += 'Update it first:'
-            $Messages += ('  Install-Module -Name {0} -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck' -f ($PinnedNames -join ','))
-            foreach ($P in $Pinning)
-            {
-                $Messages += ('If this stops again with the same {0} {1}, that old copy is still found first: see where each copy is with Get-Module -Name {0} -ListAvailable, and remove the old one with Uninstall-Module -Name {0} -RequiredVersion {1} (or delete its folder).' -f $P.Name, $P.Version)
-            }
-        }
+        $Messages += @(Get-RdaAzAccountsPinMessage -Pinning $Pinning)
         $Messages += 'Then open a new PowerShell session and run again.'
         $Messages += 'If your PowerShell profile loads Az.Accounts, start the new session with: pwsh -NoProfile'
         # -NoProfile also drops a sign-in the profile makes (Cloud Shell does).
@@ -136,6 +124,68 @@ function Test-RdaAzAccountsVersion
         Loaded    = $Loaded
         Messages  = $Messages
     }
+}
+
+# The Az.Accounts version a module's manifest pins below -Minimum, as text:
+# its RequiredModules entry for Az.Accounts with a RequiredVersion, or a
+# MaximumVersion, older than the minimum. $null when it asks only for a
+# minimum (ModuleVersion), names Az.Accounts with no version, or its manifest
+# cannot be read. It reads the .psd1 in the module's folder: the
+# RequiredModules of a loaded module holds the Az.Accounts copy that was
+# bound, which can be an older copy loaded first, not what the module asks for.
+function Get-RdaAzAccountsPin
+{
+    [CmdletBinding()]
+    param($Module, [version]$Minimum)
+
+    if ($null -eq $Module -or [string]::IsNullOrEmpty([string]$Module.ModuleBase)) { return $null }
+    $Manifest = Join-Path ([string]$Module.ModuleBase) ('{0}.psd1' -f $Module.Name)
+    if (-not (Test-Path -LiteralPath $Manifest -PathType Leaf)) { return $null }
+    try { $Data = Import-PowerShellDataFile -LiteralPath $Manifest -ErrorAction Stop }
+    catch { return $null }
+    foreach ($Entry in @($Data.RequiredModules))
+    {
+        if ($Entry -isnot [hashtable] -or [string]$Entry['ModuleName'] -ne 'Az.Accounts') { continue }
+        foreach ($Key in @('RequiredVersion', 'MaximumVersion'))
+        {
+            $Text = [string]$Entry[$Key]
+            if (-not $Text) { continue }
+            # A MaximumVersion such as 5.3.* allows every 5.3 version.
+            $Version = $null
+            if ([version]::TryParse(($Text -replace '\*', [string][int]::MaxValue), [ref]$Version) -and $Version -lt $Minimum) { return $Text }
+        }
+    }
+    return $null
+}
+
+# The lines that name each module that pins an older Az.Accounts, the command
+# that updates it, and how to remove an old copy that is still found first.
+# None when nothing pins.
+function Get-RdaAzAccountsPinMessage
+{
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [object[]]$Pinning = @(),
+        # What the pin does, after the module and the version it asks for.
+        [string]$Effect = 'so PowerShell loads that older copy for it in every new session'
+    )
+
+    $Pinning = @($Pinning | Where-Object { $null -ne $_ })
+    if ($Pinning.Count -eq 0) { return @() }
+    $Lines = @()
+    foreach ($P in $Pinning)
+    {
+        $Lines += ('{0} {1} asks for Az.Accounts {2}, {3}.' -f $P.Name, $P.Version, $P.Accounts, $Effect)
+    }
+    $PinnedNames = @($Pinning | ForEach-Object { $_.Name } | Select-Object -Unique)
+    $Lines += 'Update it first:'
+    $Lines += ('  Install-Module -Name {0} -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck' -f ($PinnedNames -join ','))
+    foreach ($P in $Pinning)
+    {
+        $Lines += ('If this stops again with the same {0} {1}, that old copy is still found first: see where each copy is with Get-Module -Name {0} -ListAvailable, and remove the old one with Uninstall-Module -Name {0} -RequiredVersion {1} (or delete its folder).' -f $P.Name, $P.Version)
+    }
+    return $Lines
 }
 
 # Installs the named Az submodules into the user's scope. Az.Accounts is

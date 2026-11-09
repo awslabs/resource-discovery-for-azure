@@ -188,6 +188,20 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         Get-Content -Path $Told -Raw | Should -Match 'Safe to share'
     }
 
+    It 'says Privacy: <Expected> on the console line when the reports hold no records to sample (-Obfuscated: <Obf>)' -ForEach @(
+        @{ Obf = $true; Expected = 'obfuscated' }
+        @{ Obf = $false; Expected = 'identifiable' }
+    ) {
+        $Run = New-Run
+        if ($Obf) { New-SubFolder -Root $Run -Services @{} -Obfuscated | Out-Null } else { New-SubFolder -Root $Run -Services @{} -SubName 'sub-a' | Out-Null }
+        $Out = Join-Path $Run 'main.html'
+
+        $Printed = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated:$Obf 6>&1 | ForEach-Object { [string]$_ })
+        $Line = @($Printed | Where-Object { $_ -like '*Privacy:*' })
+        $Line.Count | Should -Be 1
+        $Line[0] | Should -BeLike ('* failed. Privacy: {0}.' -f $Expected)
+    }
+
     It 'shows the identifiable banner without -Obfuscated when the reports hold no records to sample' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{} -SubName 'sub-a' | Out-Null

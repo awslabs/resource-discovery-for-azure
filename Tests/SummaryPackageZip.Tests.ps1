@@ -675,7 +675,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip budget for extracted folders, the bund
         '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}' | Set-Content -LiteralPath (Join-Path $Dir 'Inventory_ResourcesReport_20260102030405095.json')
         $Html = Join-Path $Run 'MainSummary.html'
         Set-Content -LiteralPath $Html -Value 'an earlier summary' -NoNewline
-        Mock Out-File { Set-Content -LiteralPath $FilePath -Value '<html>part'; throw 'disk full' } -RemoveParameterType Encoding
+        Mock Out-File { Set-Content -LiteralPath $LiteralPath -Value '<html>part'; throw 'disk full' } -RemoveParameterType Encoding
         { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Html 6>$null } | Should -Throw '*disk full*'
         Get-Content -LiteralPath $Html -Raw | Should -Be 'an earlier summary'
         @(Get-ChildItem -LiteralPath $Run -Filter '*.partial') | Should -BeNullOrEmpty
@@ -1321,5 +1321,46 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with case-variant names, a renderer pa
         $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -WarningAction SilentlyContinue 6>&1 | Out-String
         $Said | Should -BeLike '*Re-render skipped for ResourcesReport_*(the earlier html is not in place; see the warning)*'
         $Said | Should -Not -BeLike '*kept original*'
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip with a report folder that compares case apart from its parent, and an output folder with brackets' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'names both earlier files when a report folder keeps case apart under an output folder that ignores it' {
+        $Root = Join-Path $script:TmpRoot 'child-case'
+        $Stamp = '20260102030405171'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        $InvName = 'Inventory_ResourcesReport_' + $Stamp + '.json'
+        $Zip = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+        try { foreach ($Pair in @(@('A.html', '<html>new A</html>'), @('a.html', '<html>new a</html>'), @($InvName, '{"Version":"3.2.3"}'))) { $E = $Zip.CreateEntry($Pair[0]); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Pair[1]) } finally { $W.Dispose() } } }
+        finally { $Zip.Dispose() }
+        $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-90.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Outer)
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Dir 'A.html') -Value 'earlier A' -NoNewline
+        Set-Content -LiteralPath (Join-Path $Dir 'a.html') -Value 'earlier a' -NoNewline
+        # A folder where the inventory goes, so the swap fails after both html.
+        New-Item -ItemType Directory -Path (Join-Path $Dir $InvName) -Force | Out-Null
+        # -OutputDirectory ignores case; the report folder keeps it apart.
+        Mock Get-RdaPathComparer { [System.StringComparer]::Ordinal }
+        Mock Get-RdaPathComparer { [System.StringComparer]::OrdinalIgnoreCase } -ParameterFilter { $Path.TrimEnd('/', '\') -eq $Out }
+        Mock Move-RdaFile { if ($Path -like '*.bak') { throw 'locked' }; [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite) }
+        $Err = $null
+        try { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $Out -KeepOriginalReports 6>$null } catch { $Err = $_.Exception.Message }
+        ([regex]::Matches([string]$Err, 'is the earlier file')).Count | Should -Be 2
+        $Kept = @(Get-ChildItem -LiteralPath $Dir -Filter '*.bak' | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw } | Sort-Object)
+        $Kept | Should -Be @('earlier A', 'earlier a' | Sort-Object)
+    }
+
+    It 'writes the main summary and re-renders when -OutputDirectory sits under a folder with brackets' {
+        $Out = Join-Path (Join-Path $script:TmpRoot 'out[1]') 'rebuilt'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out 6>$null | Out-Null
+        Test-Path -LiteralPath (Join-Path $Out 'MainSummary.html') -PathType Leaf | Should -BeTrue
+        $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out 6>&1 | Out-String
+        $Said | Should -Not -BeLike '*Re-render skipped*'
     }
 }

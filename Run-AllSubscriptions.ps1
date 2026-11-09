@@ -2252,7 +2252,15 @@ if ($null -ne $BundleBuildError)
     Write-Host ""
     Write-Host "================ FAILED (consolidated zip) ================" -ForegroundColor Red
     Write-Host $BundleBuildError -ForegroundColor Red
-    Write-Host ("The per-subscription report zips of this run are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red
+    # Read now: the folder can go while the zip is built, summarised or checked.
+    if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
+    {
+        Write-Host ("The per-subscription report zips of this run are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host ("The inventory folder {0} is gone, with the report zips and the resume state that were in it. The next run collects every subscription again." -f $InventoryRoot) -ForegroundColor Red
+    }
     if ($null -ne $ZipKeptAs)
     {
         Write-Host ("The zip itself is complete: rename {0} to a .zip name (for example after removing old AllSubscriptions_ResourcesReport_*.zip files of that second) instead of running again." -f $ZipKeptAs) -ForegroundColor Red

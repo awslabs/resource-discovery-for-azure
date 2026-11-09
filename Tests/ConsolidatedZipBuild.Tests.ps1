@@ -436,12 +436,22 @@ Describe 'Run-AllSubscriptions.ps1: the end of a run without a consolidated zip'
 
     It 'the banner names the zip, the cause and where the reports are' {
         $InventoryRoot = Join-Path $TestDrive 'inv'
+        New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null
         $BundleBuildError = 'Could not build /x/AllSubscriptions_ResourcesReport_1.zip: No space left on device'
         $Printed = @(. $script:BannerBlock 6>&1 | ConvertTo-Lines)
 
         $Printed | Should -Contain '================ FAILED (consolidated zip) ================'
         $Printed | Should -Contain $BundleBuildError
         $Printed | Should -Contain ('The per-subscription report zips of this run are still on disk under {0}.' -f $InventoryRoot)
+    }
+
+    It 'the banner says the reports went with the folder when the inventory folder is gone by then' {
+        # Set-Variable: these are read only by the lifted block.
+        Set-Variable -Name InventoryRoot -Value (Join-Path $TestDrive 'inv-gone')
+        Set-Variable -Name BundleBuildError -Value 'The consolidated zip was lost while the run summary was added to it: the zip is not on disk.'
+        $Printed = @(. $script:BannerBlock 6>&1 | ConvertTo-Lines)
+        $Printed | Should -Not -Contain ('The per-subscription report zips of this run are still on disk under {0}.' -f $InventoryRoot)
+        $Printed | Should -Contain ('The inventory folder {0} is gone, with the report zips and the resume state that were in it. The next run collects every subscription again.' -f $InventoryRoot)
     }
 
     It 'the banner says to rename a kept zip, not to run again, when the zip could not take its name' {

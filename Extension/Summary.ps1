@@ -124,7 +124,7 @@ foreach ($prop in $Inventory.PSObject.Properties)
         Count   = $Count
     }
 }
-$ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
+$ServiceSummary = @($ServiceSummary | Sort-Object -Property Count -Descending)
 $TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
 
 # Detect obfuscation so the header can carry a privacy-posture banner. Sample
@@ -146,7 +146,7 @@ foreach ($svc in $ServiceSummary | Select-Object -First 5)
 }
 if ($Samples.Count -gt 0)
 {
-    $ObfHits = ($Samples | Where-Object { $_ -match $ObfPattern }).Count
+    $ObfHits = @($Samples | Where-Object { $_ -match $ObfPattern }).Count
     if ($ObfHits -gt ($Samples.Count * 0.7))
     {
         $ObfuscationStatus = 'obfuscated'

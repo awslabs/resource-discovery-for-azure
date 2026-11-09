@@ -125,7 +125,8 @@ foreach ($prop in $Inventory.PSObject.Properties)
     }
 }
 $ServiceSummary = @($ServiceSummary | Sort-Object -Property Count -Descending)
-$TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
+# A plain sum: 0 for a report with no resources, also under strict mode.
+$TotalResources = 0; foreach ($SvcRow in $ServiceSummary) { $TotalResources += [int]$SvcRow.Count }
 
 # Detect obfuscation so the header can carry a privacy-posture banner. Sample
 # resource Names and Subscription values across the first few populated

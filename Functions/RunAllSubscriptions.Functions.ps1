@@ -556,7 +556,14 @@ function Save-CompletedSubscriptionIds
         $StateError = $_
         try { Write-Host ('WARNING: Failed to persist resume state to {0}: {1}' -f $Path, $StateError) -ForegroundColor Yellow }
         catch { $null = $_ }
-        Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
+        # Only a temp FILE is removed. A folder in the way is left as it is:
+        # Remove-Item on a folder with files asks to confirm, which throws in
+        # a run with no console.
+        if (Test-Path -LiteralPath "$Path.tmp" -PathType Leaf)
+        {
+            try { Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction Stop }
+            catch { $null = $_ }
+        }
         if ($PassThru) { return $false }
     }
 }

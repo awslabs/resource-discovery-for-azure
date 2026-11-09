@@ -253,6 +253,18 @@ Describe 'Consumption phase (GetResorceConsumption in ResourceInventory.ps1)' {
         Remove-Variable -Name SubscriptionID, ResourceGroup, ConsumptionWindow -Scope Script -ErrorAction SilentlyContinue
     }
 
+
+    It 'writes a usage row without additionalInfo when the caller runs under Set-StrictMode -Version Latest' {
+        $script:ConsumptionWindow = Get-ConsumptionWindow -Now ([datetime]'2026-10-27T10:00:00')
+        Mock Get-UsageAggregates { [pscustomobject]@{ UsageAggregations = @(New-UsageRow -ResourceUri '/subscriptions/sub-a/resourceGroups/rg-one/providers/Microsoft.Network/networkSecurityGroups/nsg-1'); ContinuationToken = $null } }
+        Set-StrictMode -Version Latest
+        try { GetResorceConsumption }
+        finally { Set-StrictMode -Off }
+        @($Global:ConsumptionFailedSubs | Where-Object { $null -ne $_ }).Count | Should -Be 0
+        $Rows = @(Import-Csv -Path $Global:ConsumptionFileCsv)
+        $Rows.Count | Should -Be 1
+        ($Rows[0].InstanceData | ConvertFrom-Json).'Microsoft.Resources'.additionalInfo.vCores | Should -Be 0
+    }
     It 'collects the window the check queried at 23:59 when it runs after midnight' {
         $script:ConsumptionWindow = Get-ConsumptionWindow -Now ([datetime]'2026-10-27T23:59:00')
         Mock Get-Date { [datetime]'2026-10-28T00:01:00' }

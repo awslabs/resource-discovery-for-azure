@@ -1319,6 +1319,12 @@ function ExecuteInventoryProcessing()
     function GetResorceConsumption()
     {
         $DebugPreference = "SilentlyContinue"
+        # A usage row leaves out the InstanceData parts Azure has no value for
+        # (additionalInfo, or some of its keys), and the row loop reads them as
+        # properties that may be absent. Strict mode is off for this phase only, so
+        # a run started from a shell with Set-StrictMode -Version Latest writes such
+        # a row with its empty defaults instead of stopping the subscription's pull.
+        Set-StrictMode -Off
 
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
         [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";

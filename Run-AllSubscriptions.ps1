@@ -864,6 +864,9 @@ if ($ParallelStreams -le 1)
             # `exit 1`, or a native command run in this session before the
             # wrapper started, would mark this subscription failed.
             $global:LASTEXITCODE = 0
+            # Cleared too, so a run that ends before naming its zip cannot
+            # leave the previous subscription's zip as its own.
+            $Global:ZipOutputFile = $null
             & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
             # Only treat as failure if the inner script set a non-zero exit code.
             # Some completion paths leave $LASTEXITCODE unset ($null), and
@@ -877,10 +880,13 @@ if ($ParallelStreams -le 1)
             # to @() at the start of every invocation, so the count after return
             # accurately reflects the subscription that just finished.
             $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+            # Zip: the report zip this run wrote, which the output
+            # verification looks for.
             $SubResourceCounts += [pscustomobject]@{
                 Name  = $Sub.Name
                 Id    = $Sub.Id
                 Count = $ResCount
+                Zip   = $Global:ZipOutputFile
             }
 
             if ($ResCount -eq 0)
@@ -1069,11 +1075,12 @@ else
             {
                 # Cleared first, as in the sequential branch above.
                 $global:LASTEXITCODE = 0
+                $Global:ZipOutputFile = $null
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
                 # Same null-guard as the sequential branch above.
                 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
                 $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-                $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount }
+                $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount; Zip = $Global:ZipOutputFile }
                 if ($ResCount -eq 0)
                 {
                     Write-Host ("WARNING: '{0}' returned 0 resources." -f $Sub.Name) -ForegroundColor Yellow
@@ -1337,6 +1344,7 @@ else
                             Name  = $rc.Name
                             Id    = $rc.Id
                             Count = [int]$rc.Count
+                            Zip   = [string]$rc.Zip
                         }
                     }
                 }
@@ -1532,9 +1540,9 @@ $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 
 # === Per-subscription output verification (hard-stop) ========================
 #
-# Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if the
-# number of per-subscription zip files written by this invocation is lower
-# than the number of subscriptions that ran to completion this invocation.
+# Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if a
+# subscription that ran to completion this invocation has no zip among the
+# per-subscription zips the consolidation step below will pick up.
 #
 # Why this matters. The consolidation step below globs `*.zip` under
 # $InventoryRoot. If a per-sub zip is missing for any reason - antivirus
@@ -1547,29 +1555,35 @@ $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 #
 # Invariant. ResourceInventory.ps1 always writes a per-sub zip on a
 # successful return, even when the sub holds zero resources (it still emits
-# the empty-shape report). So:
-#   expected zip count = number of subs in $SubResourceCounts
-# (which is appended to ONLY on the inner script's successful return path,
-# both in the sequential branch and after streaming aggregation).
-# Failed subs (in $FailedSubscriptions) are intentionally NOT counted -
-# their zip-or-no-zip state is unreliable and the wrapper already surfaces
-# them via the failure summary.
+# the empty-shape report). So every sub in $SubResourceCounts (appended to
+# ONLY on the inner script's successful return path, both in the sequential
+# branch and after streaming aggregation) must have its own zip: the one the
+# inner script named ($Global:ZipOutputFile, carried as Zip). The check is
+# by that path, not by count, so zips written by a failed subscription or by
+# a stream whose summary is missing or unreadable cannot stand in for a
+# missing one. Failed subs (in $FailedSubscriptions) are intentionally NOT
+# checked - their zip-or-no-zip state is unreliable and the wrapper already
+# surfaces them via the failure summary.
 $ExpectedZipCount = @($SubResourceCounts).Count
 if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
 {
     $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     $ActualZipCount = $ActualSubZips.Count
-    if ($ActualZipCount -lt $ExpectedZipCount)
+    $PathComparer = if ($PSVersionTable.Platform -eq 'Unix') { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+    $FoundZipPaths = [System.Collections.Generic.HashSet[string]]::new($PathComparer)
+    foreach ($Z in $ActualSubZips) { [void]$FoundZipPaths.Add([System.IO.Path]::GetFullPath($Z.FullName)) }
+    $MissingZipSubs = @($SubResourceCounts | Where-Object { [string]::IsNullOrEmpty($_.Zip) -or -not $FoundZipPaths.Contains([System.IO.Path]::GetFullPath([string]$_.Zip)) })
+    if ($MissingZipSubs.Count -gt 0)
     {
-        $MissingCount = $ExpectedZipCount - $ActualZipCount
+        $MissingCount = $MissingZipSubs.Count
         Write-Host ""
         Write-Host "ERROR: Per-subscription output verification failed." -ForegroundColor Red
         Write-Host ("  Expected zips: {0} (one per subscription that ran to completion this run)" -f $ExpectedZipCount) -ForegroundColor Red
         Write-Host ("  Found zips:    {0} (filter: under {1}, LastWriteTime >= {2:o})" -f $ActualZipCount, $InventoryRoot, $RunStartTime) -ForegroundColor Red
         Write-Host ("  Gap:           {0} missing per-subscription zip(s)." -f $MissingCount) -ForegroundColor Red
         Write-Host ""
-        Write-Host "Subscriptions whose inner script reported success this run:" -ForegroundColor Yellow
-        foreach ($S in $SubResourceCounts)
+        Write-Host "Subscriptions whose inner script reported success this run but whose zip was not found:" -ForegroundColor Yellow
+        foreach ($S in $MissingZipSubs)
         {
             Write-Host ("  - {0} ({1}) [{2:N0} resources]" -f $S.Name, $S.Id, $S.Count) -ForegroundColor Yellow
         }
@@ -1607,7 +1621,7 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         }
         Exit-Wrapper -Code 2
     }
-    Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
+    Write-Host ("Per-subscription output verification: OK (each of the {0} successful sub(s) has its zip; {1} zip(s) found)" -f $ExpectedZipCount, $ActualZipCount) -ForegroundColor Green
 }
 
 # Consolidate per-subscription ZIPs into a single outer ZIP

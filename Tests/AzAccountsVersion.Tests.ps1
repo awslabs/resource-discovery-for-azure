@@ -332,6 +332,24 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         $Check.Status | Should -Be 'Ok' -Because $Check.Text
     }
 
+    It 'before anything is loaded: a relative first module folder (with .. and a trailing separator) is matched as PowerShell finds it' {
+        # PowerShell finds 'first' from the current location and loads its
+        # pinning Az.Compute 1.0.0, not the newer copy in the later folder.
+        $Root = Join-Path $script:PinDir 'unloaded-relative'
+        $First = Join-Path $Root 'first'
+        $Later = Join-Path $Root 'later'
+        New-Item -ItemType Directory -Path (Join-Path $Root 'other') -Force | Out-Null
+        New-PinModule -Root $First -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $First -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+        New-PinModule -Root $Later -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        $Relative = 'other' + [System.IO.Path]::DirectorySeparatorChar + '..' + [System.IO.Path]::DirectorySeparatorChar + 'first' + [System.IO.Path]::DirectorySeparatorChar
+        Push-Location -LiteralPath $Root
+        try { $Stop = Invoke-PinSession -ModulePath @($Relative, $Later) -CheckOnly }
+        finally { Pop-Location }
+        $Stop.Status | Should -Be 'SubModulePinned' -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))
+    }
+
     It 'names a submodule whose manifest caps Az.Accounts below the minimum (MaximumVersion)' {
         $Root = Join-Path $script:PinDir 'maximum'
         New-PinModule -Root $Root -Name 'Az.Accounts' -Version '5.5.3'

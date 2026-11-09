@@ -1841,7 +1841,7 @@ if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0
     }
     catch
     {
-        Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+        Write-Host ('WARNING: Could not remove resume state file {0}: {1}' -f $ResumeStateFile, $_) -ForegroundColor Yellow
     }
 }
 

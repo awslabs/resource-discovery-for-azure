@@ -125,6 +125,17 @@ if ((Get-RdaStandInScenario).NarrationFail)
         }
     }
 }
+# With ResumeRemoveFail, the wrapper cannot remove the resume state file at
+# the end of a clean run, with an error whose text holds braces.
+if ((Get-RdaStandInScenario).ResumeRemoveFail)
+{
+    function Remove-Item
+    {
+        [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force, [switch]$Recurse)
+        if (([string]$Path) -like '*.resume-state-*' -and ([string]$Path) -notlike '*-stream-*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the file is in use by {another process}' }
+        Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+    }
+}
 # With StreamNarrationFail, a stream worker's "done:" line cannot be written
 # (as when its output cannot be written), after its subscription worked.
 if ((Get-RdaStandInScenario).StreamNarrationFail)
@@ -304,7 +315,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -365,7 +376,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
@@ -968,6 +979,13 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
         $Run.StateKept | Should -BeFalse -Because 'nothing was collected, so no resume state was written'
         $Run.ExitCode | Should -Be 1 -Because $Run.Console
+    }
+
+    It 'sequential: a resume state file that cannot be removed after a clean run gets its warning, though the error holds braces' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA) -ResumeRemoveFail
+        $Run.Console | Should -Match ('WARNING: Could not remove resume state file .+: ' + [regex]::Escape('stand-in: the file is in use by {another process}')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Error formatting a string' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {

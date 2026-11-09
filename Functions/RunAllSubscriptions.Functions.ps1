@@ -484,7 +484,7 @@ function Get-CompletedSubscriptionIds
     }
     catch
     {
-        Write-Host ("Could not read resume state file ({0}); starting fresh. $_" -f $Path) -ForegroundColor Yellow
+        Write-Host ('Could not read resume state file ({0}); starting fresh. {1}' -f $Path, $_) -ForegroundColor Yellow
         return @()
     }
 }
@@ -545,7 +545,7 @@ function Save-CompletedSubscriptionIds
     }
     catch
     {
-        Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
+        Write-Host ('WARNING: Failed to persist resume state to {0}: {1}' -f $Path, $_) -ForegroundColor Yellow
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
     }
 }

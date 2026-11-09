@@ -294,7 +294,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -384,7 +384,16 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
             $Info.RedirectStandardError = $true
             $Info.WorkingDirectory = $script:Tool
             $Info.Environment['HOME'] = $CaseHome
-            $Info.Environment['PSModulePath'] = $script:Modules
+            $ModulePath = $script:Modules
+            if ($PinnedCompute)
+            {
+                # The stand-in modules, with an Az.Compute whose manifest asks
+                # for exactly Az.Accounts 5.5.3, older than the tool supports.
+                $ModulePath = Join-Path $CaseDir 'modules'
+                Copy-Item -LiteralPath $script:Modules -Destination $ModulePath -Recurse -Force
+                Set-Content -LiteralPath (Join-Path $ModulePath 'Az.Compute/99.0.0/Az.Compute.psd1') -Value "@{ ModuleVersion = '99.0.0'; RootModule = 'Az.Compute.psm1'; FunctionsToExport = '*'; RequiredModules = @(@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }) }" -Encoding utf8
+            }
+            $Info.Environment['PSModulePath'] = $ModulePath
             $Info.Environment['RDA_STANDIN_AZURE'] = $Scenario
             $Info.Environment['NO_COLOR'] = '1'
             $Info.Environment['POWERSHELL_TELEMETRY_OPTOUT'] = '1'
@@ -924,6 +933,20 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.Console | Should -Not -Match 'queued:' -Because 'no stream may start while its old summary is still there'
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
         # A setup stop before anything is collected: exit 1, not 2.
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+    }
+
+    It '<Case>: a submodule that pins an older Az.Accounts stops the run once with exit 1, before any subscription' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams $Streams -PinnedCompute
+        $Run.Console | Should -Match ([regex]::Escape('Az.Compute 99.0.0 asks for Az.Accounts 5.5.3')) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Processing subscription|queued:' -Because 'no subscription may start'
+        $Run.Console | Should -Not -Match 'ERROR processing' -Because $Run.Console
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Run.StateKept | Should -BeFalse -Because 'nothing was collected, so no resume state was written'
         $Run.ExitCode | Should -Be 1 -Because $Run.Console
     }
 

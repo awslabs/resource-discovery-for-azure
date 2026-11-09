@@ -200,9 +200,17 @@ Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -Err
 Import-Module Az.Compute -ErrorAction Stop | Out-Null
 Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
 '@ | Set-Content -LiteralPath $script:PinSession -Encoding utf8
+        # The check alone, before any Az module is loaded, as the wrapper and
+        # ResourceInventory.ps1 run it first.
+        $script:CheckSession = Join-Path $script:PinDir 'check.ps1'
+        @'
+param([string]$Functions, [string]$Preload = '')
+. $Functions
+Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
+'@ | Set-Content -LiteralPath $script:CheckSession -Encoding utf8
         function script:Invoke-PinSession
         {
-            param([string[]]$ModulePath, [string]$Preload = '')
+            param([string[]]$ModulePath, [string]$Preload = '', [switch]$CheckOnly)
             $Old = $env:PSModulePath
             $OldHome = $env:HOME
             $OldData = $env:XDG_DATA_HOME
@@ -214,7 +222,7 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
                 # home keeps the host's real Az modules out.
                 $env:HOME = Join-Path $script:PinDir 'home'
                 $env:XDG_DATA_HOME = Join-Path $env:HOME '.local/share'
-                $Json = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $script:PinSession -Functions $script:AzModulesFile -Preload $Preload | Out-String
+                $Json = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $(if ($CheckOnly) { $script:CheckSession } else { $script:PinSession }) -Functions $script:AzModulesFile -Preload $Preload | Out-String
             }
             finally
             {
@@ -273,6 +281,55 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
 
         # The advice followed: a new session that does not load the old copy.
         (Invoke-PinSession -ModulePath @($Root)).Status | Should -Be 'Ok'
+    }
+
+    It 'before anything is loaded: stops on the submodule copy that would load when it pins an older Az.Accounts, and passes once it is updated' {
+        $Root = Join-Path $script:PinDir 'unloaded'
+        $UserFolder = Join-Path $Root 'user'
+        $SystemFolder = Join-Path $Root 'system'
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $SystemFolder -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
+        $Stop.Status | Should -Be 'SubModulePinned' -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))
+        $Stop.Text | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force'))
+        $Stop.Text | Should -Not -Match 'Install-Module -Name Az\.Accounts' -Because 'a supported Az.Accounts is installed'
+
+        # The printed command installs a newer Az.Compute into the user's
+        # folder, first on the module path: the next run passes.
+        New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        $Next = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
+        $Next.Status | Should -Be 'Ok' -Because $Next.Text
+    }
+
+    It 'before anything is loaded: an old pinning copy found first stops again with how to remove it, and the run after its removal passes' {
+        $Root = Join-Path $script:PinDir 'unloaded-order'
+        $OldFirst = Join-Path $Root 'old'
+        $NewLater = Join-Path $Root 'new'
+        New-PinModule -Root $NewLater -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $NewLater -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        New-PinModule -Root $OldFirst -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($OldFirst, $NewLater) -CheckOnly
+        $Stop.Status | Should -Be 'SubModulePinned' -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Uninstall-Module -Name Az.Compute -RequiredVersion 1.0.0'))
+
+        Remove-Item -LiteralPath (Join-Path $OldFirst 'Az.Compute') -Recurse -Force
+        (Invoke-PinSession -ModulePath @($OldFirst, $NewLater) -CheckOnly).Status | Should -Be 'Ok'
+    }
+
+    It 'before anything is loaded: passes for a submodule that asks only for a minimum Az.Accounts, or one older than the copy that loads' {
+        $Root = Join-Path $script:PinDir 'unloaded-minimum'
+        $First = Join-Path $Root 'first'
+        $Later = Join-Path $Root 'later'
+        New-PinModule -Root $First -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $First -Name 'Az.Compute' -Version '3.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.0.0' }"
+        # A pinning copy in a later folder is never loaded while the first
+        # folder holds one.
+        New-PinModule -Root $Later -Name 'Az.Compute' -Version '9.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+        $Check = Invoke-PinSession -ModulePath @($First, $Later) -CheckOnly
+        $Check.Status | Should -Be 'Ok' -Because $Check.Text
     }
 
     It 'names a submodule whose manifest caps Az.Accounts below the minimum (MaximumVersion)' {

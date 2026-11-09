@@ -255,7 +255,9 @@ Function RunInventorySetup()
         # The printed command is the way out: once it has run, the next run
         # passes this check.
         # -SubModule: Az modules an earlier run in this session loaded can
-        # hold an older Az.Accounts there; the check names the one to update.
+        # hold an older Az.Accounts there, and the copy of a submodule that
+        # would load can pin one in its manifest; the check names the one to
+        # update, before anything is loaded.
         $AzAccountsCheck = Test-RdaAzAccountsVersion -SubModule $RequiredAzSubModules
         if ($AzAccountsCheck.Status -ne 'Ok')
         {

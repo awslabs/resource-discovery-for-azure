@@ -254,8 +254,13 @@ if (-not (Test-Path -Path $AzModulesFunctionsFile -PathType Leaf))
 . $AzModulesFunctionsFile
 
 $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
-$AzAccountsCheck = Test-RdaAzAccountsVersion
-if ($AzAccountsCheck.Status -eq 'LoadedTooOld')
+# -SubModule: the wrapper loads only Az.Accounts, but each subscription's run
+# loads the others. A submodule whose manifest pins an older Az.Accounts would
+# stop every one of those runs, so it stops the run here, once, before any
+# subscription (SubModulePinned), and an older Az.Accounts loaded with one
+# names it (LoadedTooOld).
+$AzAccountsCheck = Test-RdaAzAccountsVersion -SubModule $RequiredAzSubModules
+if ($AzAccountsCheck.Status -in @('LoadedTooOld', 'SubModulePinned'))
 {
     foreach ($AzAccountsLine in $AzAccountsCheck.Messages)
     {
@@ -319,8 +324,9 @@ if ($MissingAzSubModules.Count -gt 0)
     }
 
     # Check once more after the install: no second install, no loop. If the
-    # install did not give a supported Az.Accounts, stop with the command.
-    $AzAccountsCheck = Test-RdaAzAccountsVersion
+    # install did not give a supported Az.Accounts, or a submodule it put
+    # first pins an older one, stop with the command.
+    $AzAccountsCheck = Test-RdaAzAccountsVersion -SubModule $RequiredAzSubModules
     if ($AzAccountsCheck.Status -ne 'Ok')
     {
         foreach ($AzAccountsLine in $AzAccountsCheck.Messages)
@@ -357,8 +363,10 @@ catch
 # -MinimumVersion loads 5.5.4 or newer or throws into the catch. It guards a
 # session where Import-Module is a function that drops -MinimumVersion (one
 # a profile defines, for example), which Tests/AzAccountsVersion.Tests.ps1
-# covers. The printed advice is the way out; nothing retries.
-$AzAccountsCheck = Test-RdaAzAccountsVersion
+# covers. The printed advice is the way out; nothing retries. -SubModule, as
+# above: a submodule that pins an older Az.Accounts stops the run here, once,
+# not in every subscription's run.
+$AzAccountsCheck = Test-RdaAzAccountsVersion -SubModule $RequiredAzSubModules
 if ($AzAccountsCheck.Status -ne 'Ok')
 {
     foreach ($AzAccountsLine in $AzAccountsCheck.Messages)

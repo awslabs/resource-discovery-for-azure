@@ -1560,7 +1560,8 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
             Test-Path -LiteralPath (Join-Path $Out ('{0}/{0}.html' -f $Base)) | Should -BeTrue
             Test-Path -LiteralPath (Join-Path $Out ('{0}/Inventory_{0}.json' -f $Base)) | Should -BeTrue
         }
-        @(Get-ChildItem -LiteralPath $Out -Recurse -Force | Where-Object { $_.Name -like '*.rda-*' }) | Should -BeNullOrEmpty
+        # No private file is left (the lock file is not one: it stays).
+        @(Get-ChildItem -LiteralPath $Out -Recurse -Force | Where-Object { $_.Name -like '*.rda-*' -and $_.Name -ne '.rda-rebuild.lock' }) | Should -BeNullOrEmpty
     }
 
     It 'is refused while another caller holds the lock file in the folder itself, whatever its user or temp folder' {
@@ -1577,10 +1578,30 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Not -Throw
     }
 
-    It 'leaves no lock file in the folder after a rebuild' {
-        $Out = Join-Path $script:TmpRoot 'no-lock-left'
-        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null
-        Test-Path -LiteralPath (Join-Path $Out '.rda-rebuild.lock') | Should -BeFalse
+    It 'keeps the lock file in the folder after a rebuild, unlocked and out of the bundle, so a caller that opened it is never given a removed file' {
+        $Out = Join-Path $script:TmpRoot 'lock-kept'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports -PackageZip 6>$null | Out-Null
+        $Lock = Join-Path $Out '.rda-rebuild.lock'
+        Test-Path -LiteralPath $Lock | Should -BeTrue
+        $Open = [System.IO.File]::Open($Lock, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $Open.Dispose()
+        @(Get-ZipEntryNames -ZipPath ($Out + '.zip') | Where-Object { $_ -like '*rda-rebuild*' }) | Should -BeNullOrEmpty
+    }
+
+    It 'removes a folder it made, lock file included, when the rebuild fails' {
+        $Out = Join-Path $script:TmpRoot 'made-then-failed'
+        Mock Move-RdaFile { throw 'disk full' }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*disk full*'
+        Test-Path -LiteralPath $Out | Should -BeFalse
+    }
+
+    It 'removes the folders it made when the lock cannot be taken for another reason' -Skip:($IsWindows -or [Environment]::UserName -eq 'root') {
+        $Parent = Join-Path $script:TmpRoot 'lock-fails-in-made'
+        New-Item -ItemType Directory -Path $Parent -Force | Out-Null
+        $Out = Join-Path $Parent 'new'
+        Mock Lock-RdaOutputDirectory { throw 'New-RdaAllSubHtmlSummaryFromZip: could not take the rebuild lock x: stand-in' }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*could not take the rebuild lock*'
+        Test-Path -LiteralPath $Out | Should -BeFalse
     }
 
     It 'names the real cause, not another rebuild, when the lock cannot be taken for another reason' -Skip:($IsWindows -or [Environment]::UserName -eq 'root') {

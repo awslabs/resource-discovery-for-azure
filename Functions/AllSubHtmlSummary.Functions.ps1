@@ -304,21 +304,19 @@ function Move-RdaFile
 # $Path, and returns it; disposing it lets the next one in. The lock is the file
 # .rda-rebuild.lock in the folder itself, held open with no sharing (an
 # operating-system lock on Windows, flock on Linux and macOS), so every writer
-# of the folder finds it, whatever its user or temp folder, and the folder is
-# never shared by two rebuilds. The file goes when the lock is let go
-# (DeleteOnClose), and the operating system lets go of it when the process
+# of the folder finds it, whatever its user or temp folder. The file stays in
+# the folder after the rebuild: removing it would let a caller that opened it
+# just before the removal lock the removed file while another locks a new one.
+# (It is removed only with a folder this call made and removes again after a
+# failed rebuild.) The operating system lets go of the lock when the process
 # ends, so a stopped run never leaves the folder locked. Only a lock held by
 # another caller is reported as another rebuild; any other failure (a folder
 # that cannot be written, a full disk) is passed on with its own message.
-# shortcut: on Linux and macOS a caller that opened the file just before the
-# holder removed it can lock the removed file while a third creates a new
-# one; upgrade to a lock file that is never removed if rebuilds into one
-# folder are started that close together.
 function Lock-RdaOutputDirectory
 {
     param([Parameter(Mandatory = $true)][string]$Path)
     $LockFile = Join-Path $Path '.rda-rebuild.lock'
-    try { return [System.IO.FileStream]::new($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, 1, [System.IO.FileOptions]::DeleteOnClose) }
+    try { return [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
     catch
     {
         $Inner = $_.Exception
@@ -869,11 +867,34 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
     while ($Walk -and -not (Test-Path -LiteralPath $Walk)) { $MadeDirs.Add($Walk); $Walk = [System.IO.Path]::GetDirectoryName($Walk) }
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
+    # Lets go of the lock and removes the empty folders this call made
+    # (-OutputDirectory and its parents, deepest first), with the lock file when
+    # this call made -OutputDirectory: on a failed or refused rebuild.
+    $RemoveMadeDirs = {
+        # The walk above starts at -OutputDirectory, so any entry means this
+        # call made it.
+        if ($MadeDirs.Count -gt 0)
+        {
+            foreach ($Held in $HeldLocks) { $Held.Dispose() }
+            $HeldLocks.Clear()
+            Clear-RdaLeftover -Path (Join-Path $OutputDirectory '.rda-rebuild.lock')
+        }
+        foreach ($Dir in @($MadeDirs))
+        {
+            if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Clear-RdaLeftover -Path $Dir }
+        }
+    }
     # One rebuild at a time into this folder, from here on: every check below
     # of what is already there, and every file this call moves, replaces or
-    # puts back, is then its own. A refused rebuild has changed nothing (a
-    # folder it made is left to the rebuild that holds the lock).
-    $HeldLocks.Add((Lock-RdaOutputDirectory -Path $OutputDirectory))
+    # puts back, is then its own. A rebuild that cannot take the lock removes
+    # only the empty folders it made: when another rebuild holds it, that one
+    # has made or is using the folder, so nothing is removed.
+    try { $HeldLocks.Add((Lock-RdaOutputDirectory -Path $OutputDirectory)) }
+    catch
+    {
+        if ($_.Exception.Message -notlike '*another rebuild is writing into*') { & $RemoveMadeDirs }
+        throw
+    }
 
     # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
     # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
@@ -1128,13 +1149,14 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
         if (-not $SwapDone) { $SwapUndone = $true; $Kept = @(& $UndoSwap) }
         foreach ($Staged in $StagedFiles) { Clear-RdaLeftover -Path $Staged.Partial }
         $PartialsCleared = $true
-        # The lock file goes with the lock, so a folder this call made is
-        # empty again and is removed below.
-        foreach ($Held in $HeldLocks) { $Held.Dispose() }
-        foreach ($Dir in @(@($MadeReportDirs) + @($MadeDirs)))
+        # The report folders this call made go first, while the lock is held.
+        foreach ($Dir in @($MadeReportDirs))
         {
             if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Clear-RdaLeftover -Path $Dir }
         }
+        # A -OutputDirectory this call made goes too, with its lock file, so the
+        # lock is let go and its file removed first.
+        & $RemoveMadeDirs
         if ($Kept.Count -gt 0)
         {
             throw [System.Exception]::new(('{0} Not every file could be put back as it was: {1}.' -f $_.Exception.Message, ($Kept -join '; ')), $_.Exception)

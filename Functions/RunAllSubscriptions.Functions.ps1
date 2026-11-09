@@ -678,6 +678,10 @@ function Merge-FailedAttempts
 #   - a failed subscription (listed under Subscriptions Failed): this function
 #     returns 2, after consolidation, so the zip holds the reports of the
 #     subscriptions that worked, or no zip is made when none worked;
+#   - a stream summary that could not be read (parallel streams): the
+#     wrapper passes it as -UnreadableStreams, not as a failed subscription,
+#     so its subscriptions are named as not confirmed and are not counted as
+#     failed; the zip is made and may hold their reports;
 #   - a per-subscription output verification gap (a subscription reported
 #     success but its zip is missing): the wrapper stops with 2 before
 #     consolidation, so no zip is made.
@@ -721,20 +725,33 @@ function Get-WrapperExitCodeSummary
         [bool]$AuthSkipped,
         [bool]$CollectorsFailed,
         [bool]$SubscriptionsFailed = $false,
+        # Streams whose summary file could not be read: { StreamId; SubCount }.
+        # Their subscriptions are not confirmed, so the code is 2, but they are
+        # not failed subscriptions.
+        [object[]]$UnreadableStreams = @(),
         # A consolidated zip was made this run.
         [bool]$ReportMade = $true
     )
     $AuthText = 'Metrics and/or Consumption were skipped for a sign-in problem'
     $CollectorText = 'one or more collectors failed'
-    $Code = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $SubscriptionsFailed
+    $Unreadable = @(@($UnreadableStreams) | Where-Object { $null -ne $_ })
+    $Code = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed ($SubscriptionsFailed -or $Unreadable.Count -gt 0)
     $Lines = [System.Collections.Generic.List[string]]::new()
     switch ($Code)
     {
         0 { $Lines.Add('Exit code 0: clean run, no failures of any kind.') }
         2
         {
-            $ZipText = if ($ReportMade) { 'the consolidated zip holds the reports of the subscriptions that worked' } else { 'no consolidated zip was made' }
-            $Lines.Add(('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); {0}.' -f $ZipText))
+            if ($SubscriptionsFailed)
+            {
+                $ZipText = if ($ReportMade) { 'the consolidated zip holds the reports of the subscriptions that worked' } else { 'no consolidated zip was made' }
+                $Lines.Add(('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); {0}.' -f $ZipText))
+            }
+            foreach ($U in $Unreadable)
+            {
+                $ZipText = if ($ReportMade) { 'check the consolidated zip for their reports' } else { 'no consolidated zip was made' }
+                $Lines.Add(('Exit code 2: the summary of stream {0} could not be read; its {1} subscription(s) are not confirmed; {2}.' -f $U.StreamId, $U.SubCount, $ZipText))
+            }
         }
         3 { $Lines.Add(('Exit code 3: {0} (see FAILED (auth)); the rest of the report was made.' -f $AuthText)) }
         4 { $Lines.Add(('Exit code 4: {0} (see FAILED (collectors)); the rest of the report was made.' -f $CollectorText)) }

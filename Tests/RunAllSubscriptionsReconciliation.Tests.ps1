@@ -203,6 +203,22 @@ Describe 'Get-WrapperExitCode' {
         if ($null -eq $Also) { $Lines.Count | Should -Be 1 } else { $Lines.Count | Should -Be 2; $Lines[1] | Should -BeExactly $Also }
     }
 
+    It 'Get-WrapperExitCodeSummary names a stream summary that could not be read, not as failed subscriptions (zip <Zip>)' -ForEach @(
+        @{ Zip = $true; Tail = 'check the consolidated zip for their reports' }
+        @{ Zip = $false; Tail = 'no consolidated zip was made' }
+    ) {
+        $Streams = @([pscustomobject]@{ StreamId = 1; SubCount = 3 })
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $true -UnreadableStreams $Streams -ReportMade $Zip)
+        $Lines | Should -Be @(
+            ('Exit code 2: the summary of stream 1 could not be read; its 3 subscription(s) are not confirmed; {0}.' -f $Tail)
+            'Exit code 2 takes priority over exit code 4, which this run also has: one or more collectors failed.'
+        )
+        $Both = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $false -SubscriptionsFailed $true -UnreadableStreams $Streams -ReportMade $Zip)
+        $Both.Count | Should -Be 2
+        $Both[0] | Should -Match '^Exit code 2: one or more subscriptions failed \(see Subscriptions Failed\)'
+        $Both[1] | Should -Match '^Exit code 2: the summary of stream 1 could not be read'
+    }
+
     # That the wrapper passes its failed subscriptions in is tested by running
     # it, in Tests/ExitCodeCarryOver.Tests.ps1: sequential, one subscription
     # with -ParallelStreams, a failed subscription in a stream, and a stream

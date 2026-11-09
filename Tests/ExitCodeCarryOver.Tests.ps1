@@ -251,6 +251,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 ExitCode   = $Proc.ExitCode
                 Console    = ($Out.Result + $Err.Result)
                 FailedIds  = @(if ($null -ne $State) { @($State.FailedAttempts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } })
+                StateKept  = $null -ne $State
                 ZipCount   = $OuterZip.Count
                 RunSummary = $RunSummary
             }
@@ -352,11 +353,21 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.Console | Should -Match ([regex]::Escape('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'))
     }
 
-    It 'two streams: a stream summary the wrapper cannot read lists the stream as failed and exits 2' {
+    It 'two streams: a stream summary the wrapper cannot read is not counted as a failed subscription, and exit 2 names it' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -CorruptStreamSummary
         $Run.Console | Should -Match '\[stream-0\] ERROR: could not parse summary file' -Because $Run.Console
-        $Run.Console | Should -Match 'Subscriptions Failed:\s+1 \(stream-0 \(corrupt summary\)\)'
         $Run.Console | Should -Not -Match 'ERROR processing' -Because 'no inventory run failed; only the stream summary is lost'
+        # Both reports are in the consolidated zip, so no subscription is
+        # counted or named as failed.
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'subscriptions failed' -Because $Run.Console
+        $Run.Console | Should -Match '2 subscription\(s\), 2 total resource\(s\), 0 empty, 0 failed' -Because $Run.Console
+        $Run.Console | Should -Match 'Stream Summary Unreadable:\s+stream-0 \(1 subscription\(s\) not confirmed; check the consolidated zip\)' -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.'))
+        # The run cannot show that stream's results, so it is not called clean
+        # and its resume state is kept.
+        $Run.StateKept | Should -BeTrue -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
@@ -374,10 +385,13 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.RunSummary | Should -Not -Match '(?m)^  -  \(\)' -Because $Run.RunSummary
     }
 
-    It 'two streams: RunSummary.log lists a stream whose summary could not be read as the wrapper names it' {
+    It 'two streams: RunSummary.log names a stream whose summary could not be read under Exit code, not as a failed subscription' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -CorruptStreamSummary
         $Run.ZipCount | Should -Be 1 -Because $Run.Console
-        $Run.RunSummary | Should -Match '(?m)^  - stream-0 \(corrupt summary\)\s*$' -Because $Run.RunSummary
+        $Run.RunSummary | Should -Match '(?m)^  Failed subscriptions\s+: 0\s*$' -Because $Run.RunSummary
+        $Run.RunSummary | Should -Not -Match 'corrupt summary' -Because $Run.RunSummary
+        $Run.RunSummary | Should -Not -Match 'subscriptions failed' -Because $Run.RunSummary
+        $Run.RunSummary | Should -Match ([regex]::Escape('  Exit code 2: the summary of stream 0 could not be read; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.RunSummary
         $Run.RunSummary | Should -Not -Match '(?m)^  -  \(\)' -Because $Run.RunSummary
     }
 

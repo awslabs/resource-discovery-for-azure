@@ -186,6 +186,23 @@ Describe 'Get-WrapperExitCode' {
         Get-WrapperExitCode -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $true | Should -Be 2
     }
 
+    It 'Get-WrapperExitCodeSummary says what exit <Code> means (auth <Auth>, collectors <Collectors>, failed <Failed>, zip <Zip>)' -ForEach @(
+        @{ Auth = $false; Collectors = $false; Failed = $false; Zip = $true; Code = 0; First = 'Exit code 0: clean run, no failures of any kind.'; Also = $null }
+        @{ Auth = $true; Collectors = $false; Failed = $false; Zip = $true; Code = 3; First = 'Exit code 3: Metrics and/or Consumption were skipped for a sign-in problem (see FAILED (auth)); the rest of the report was made.'; Also = $null }
+        @{ Auth = $false; Collectors = $true; Failed = $false; Zip = $true; Code = 4; First = 'Exit code 4: one or more collectors failed (see FAILED (collectors)); the rest of the report was made.'; Also = $null }
+        @{ Auth = $true; Collectors = $true; Failed = $false; Zip = $true; Code = 5; First = 'Exit code 5: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed (see FAILED (auth) and FAILED (collectors)); the rest of the report was made.'; Also = $null }
+        @{ Auth = $false; Collectors = $false; Failed = $true; Zip = $true; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'; Also = $null }
+        @{ Auth = $false; Collectors = $false; Failed = $true; Zip = $false; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'; Also = $null }
+        @{ Auth = $true; Collectors = $false; Failed = $true; Zip = $true; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'; Also = 'Exit code 2 takes priority over exit code 3, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem.' }
+        @{ Auth = $false; Collectors = $true; Failed = $true; Zip = $true; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'; Also = 'Exit code 2 takes priority over exit code 4, which this run also has: one or more collectors failed.' }
+        @{ Auth = $true; Collectors = $true; Failed = $true; Zip = $false; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'; Also = 'Exit code 2 takes priority over exit code 5, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed.' }
+    ) {
+        Get-WrapperExitCode -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $Failed | Should -Be $Code
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $Failed -ReportMade $Zip)
+        $Lines[0] | Should -BeExactly $First
+        if ($null -eq $Also) { $Lines.Count | Should -Be 1 } else { $Lines.Count | Should -Be 2; $Lines[1] | Should -BeExactly $Also }
+    }
+
     It 'Is 2 when the wrapper lists a failed subscription' {
         $Text = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
         $Text | Should -Match '\$WrapperExitCode = Get-WrapperExitCode [^\r\n]*-SubscriptionsFailed \(@\(\$FailedSubscriptions'
@@ -500,6 +517,18 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
     It 'omits the host / parallelism section entirely when no host values are supplied' {
         $Text = (Get-RunSummaryLogContent -Visible 1 -Eligible 1 -Processed 1) -join "`n"
         $Text | Should -Not -Match 'Host / parallelism:'
+    }
+
+    It 'names the exit code and what exit code 2 hides, in both modes' {
+        $ExitLines = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $true -SubscriptionsFailed $true -ReportMade $true)
+        foreach ($Obf in @($true, $false))
+        {
+            $Lines = @(Get-RunSummaryLogContent -Obfuscated:$Obf -Visible 2 -Eligible 2 -Processed 2 -ExitCodeLines $ExitLines)
+            $At = [array]::IndexOf($Lines, 'Exit code:')
+            $At | Should -BeGreaterThan -1
+            $Lines[$At + 1] | Should -BeExactly ('  ' + $ExitLines[0])
+            $Lines[$At + 2] | Should -BeExactly ('  ' + $ExitLines[1])
+        }
     }
 
     It 'handles null/empty health collections without throwing (standalone-run safety)' {

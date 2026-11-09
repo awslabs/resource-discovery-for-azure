@@ -145,6 +145,18 @@ if ($FailSub)
     }
 }
 '@
+        # A collector, in the copy only, that fails for the scenario's
+        # CollectorFailSub, so that subscription's run records a collector
+        # failure and still writes its report.
+        @'
+param($Sub, $Resources, $Task, $ResourceIdDictionary)
+$CollectorFailSub = (Get-Content -LiteralPath $env:RDA_STANDIN_AZURE -Raw | ConvertFrom-Json).CollectorFailSub
+if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Object { $_.subscriptionId -eq $CollectorFailSub }).Count -gt 0)
+{
+    throw 'stand-in: this collector failed'
+}
+'@ | Set-Content -LiteralPath (Join-Path $script:Tool 'Services/Networking/StandInCollector.ps1') -Encoding utf8
+
         $script:Modules = Join-Path $script:WorkDir 'modules'
         foreach ($Module in @(@{ Name = 'Az.Accounts'; Body = $Accounts }, @{ Name = 'Az.Compute'; Body = $Compute }, @{ Name = 'Az.Monitor'; Body = '' }, @{ Name = 'Az.Billing'; Body = '' }))
         {
@@ -160,12 +172,12 @@ if ($FailSub)
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1)
+            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '')
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub; CollectorFailSub = $CollectorFailSub } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($PriorExitCode -ge 0)
@@ -207,10 +219,30 @@ if ($FailSub)
             $Proc.WaitForExit()
             $StateFile = Join-Path $CaseHome ('InventoryReports/.resume-state-{0}.json' -f $script:Tenant)
             $State = if (Test-Path -LiteralPath $StateFile) { Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json } else { $null }
+            # RunSummary.log from the consolidated zip, when one was made.
+            $OuterZip = @(Get-ChildItem -Path (Join-Path $CaseHome 'InventoryReports') -Filter 'AllSubscriptions_ResourcesReport_*.zip' -File -ErrorAction SilentlyContinue)
+            $RunSummary = $null
+            if ($OuterZip.Count -eq 1)
+            {
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                $Zip = [System.IO.Compression.ZipFile]::OpenRead($OuterZip[0].FullName)
+                try
+                {
+                    $Entry = $Zip.GetEntry('RunSummary.log')
+                    if ($null -ne $Entry)
+                    {
+                        $Reader = [System.IO.StreamReader]::new($Entry.Open())
+                        try { $RunSummary = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+                    }
+                }
+                finally { $Zip.Dispose() }
+            }
             return [pscustomobject]@{
-                ExitCode  = $Proc.ExitCode
-                Console   = ($Out.Result + $Err.Result)
-                FailedIds = @(if ($null -ne $State) { @($State.FailedAttempts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } })
+                ExitCode   = $Proc.ExitCode
+                Console    = ($Out.Result + $Err.Result)
+                FailedIds  = @(if ($null -ne $State) { @($State.FailedAttempts) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id } })
+                ZipCount   = $OuterZip.Count
+                RunSummary = $RunSummary
             }
         }
 
@@ -288,6 +320,26 @@ if ($FailSub)
         $Run.Console | Should -Match '\[stream-1\] done: Sub B'
         $Run.FailedIds | Should -Be @($script:SubA.Id)
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'sequential: exit 2 for a failed subscription still names the collector failure it hides, on the console and in RunSummary.log' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -FailSub $script:SubA.Id -CollectorFailSub $script:SubB.Id
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        $Run.Console | Should -Match 'FAILED \(collectors\)'
+        $Run.ZipCount | Should -Be 1 -Because 'Sub B''s report is still consolidated'
+        $Made = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'
+        $Hidden = 'Exit code 2 takes priority over exit code 4, which this run also has: one or more collectors failed.'
+        $Run.Console | Should -Match ([regex]::Escape($Made))
+        $Run.Console | Should -Match ([regex]::Escape($Hidden))
+        $Run.RunSummary | Should -Match ([regex]::Escape($Made))
+        $Run.RunSummary | Should -Match ([regex]::Escape($Hidden))
+    }
+
+    It 'sequential: exit 2 when every subscription failed says no consolidated zip was made' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA) -FailSub $script:SubA.Id
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        $Run.ZipCount | Should -Be 0
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'))
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {

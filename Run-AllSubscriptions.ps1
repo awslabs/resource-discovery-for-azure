@@ -1894,6 +1894,20 @@ if ($WrapperTranscriptStarted)
 }
 Write-Host "=========================================" -ForegroundColor Green
 
+# The phases skipped for sign-in and the exit code, worked out here so
+# RunSummary.log below and the end of the console say the same thing.
+$AuthSkippedPhases = @()
+if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
+$ConsumptionAuthSkipped = @(
+    if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
+) | Where-Object { $_.Id -eq '(auth)' }
+if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
+$AuthSkipped = $AuthSkippedPhases.Count -gt 0
+$CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
+$SubscriptionsFailed = $WrapperExitCode -eq 2
+$ExitCodeLines = @(Get-WrapperExitCodeSummary -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $SubscriptionsFailed -ReportMade ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile)))
+
 # --- Fold run-level extras into the consolidated bundle --------------
 # Make the single AllSubscriptions zip the customer receives self-contained.
 # It already holds the per-subscription inner zips (the ingestion payload,
@@ -1941,6 +1955,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             -HostVCpu $AutoTune.VCpu -HostRamGB $AutoTune.RamGB `
             -Streams $ParallelStreams -StreamsSource $StreamsSrc `
             -Concurrency $ConcurrencyLimit -ConcurrencySource $ConcurrencySrc `
+            -ExitCodeLines $ExitCodeLines `
             -Obfuscated:$Obfuscate
         $RunSummaryLines | Out-File -FilePath (Join-Path $BundleStage 'RunSummary.log') -Encoding utf8
 
@@ -2001,13 +2016,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 # (no -SkipConsumption) auth skips. The Excel sheets are intentionally NOT
 # annotated (server-side ingestion expects fixed columns); this banner is the
 # human-facing signal, and the non-zero exit below is the machine-facing one.
-$AuthSkippedPhases = @()
-if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
-$ConsumptionAuthSkipped = @(
-    if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
-) | Where-Object { $_.Id -eq '(auth)' }
-if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
-
+# $AuthSkippedPhases is worked out above the bundle fold.
 if ($AuthSkippedPhases.Count -gt 0)
 {
     Write-Host ""
@@ -2039,6 +2048,15 @@ if (@($Global:CollectorFailures).Count -gt 0)
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
+# The last lines: what the exit code means, and for 2 whether a consolidated
+# zip was made and which 3-5 condition it hides (worked out above the bundle
+# fold, the same lines as in RunSummary.log).
+Write-Host ""
+foreach ($ExitLine in $ExitCodeLines)
+{
+    Write-Host $ExitLine -ForegroundColor $(if ($WrapperExitCode -eq 0) { 'Green' } else { 'Yellow' })
+}
+
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted)
@@ -2047,10 +2065,6 @@ if ($WrapperTranscriptStarted)
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
 
-
-$AuthSkipped = $AuthSkippedPhases.Count -gt 0
-$CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

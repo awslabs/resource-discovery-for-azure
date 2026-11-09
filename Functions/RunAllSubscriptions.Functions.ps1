@@ -671,8 +671,20 @@ function Merge-FailedAttempts
 # independently, but the exit code itself must not lose information either -
 # same "do not sweep failures under the rug" requirement as everywhere else in
 # this fix). Distinct from the existing codes (1 = hard pre-flight / auth /
-# setup failure, 2 = a subscription failed or a per-subscription output
-# verification gap, 0 = clean).
+# setup failure, 2 = a subscription's report is missing from the consolidated
+# zip, 0 = clean).
+#
+# Exit code 2 comes with or without a consolidated zip:
+#   - a failed subscription (listed under Subscriptions Failed): this function
+#     returns 2, after consolidation, so the zip holds the reports of the
+#     subscriptions that worked, or no zip is made when none worked;
+#   - a per-subscription output verification gap (a subscription reported
+#     success but its zip is missing): the wrapper stops with 2 before
+#     consolidation, so no zip is made.
+# The console and RunSummary.log say which (Get-WrapperExitCodeSummary). 2
+# takes precedence over 3-5, so those lines also name the sign-in skip and
+# collector failures that 2 hides; the FAILED (auth) and FAILED (collectors)
+# banners still print as well.
 # Nothing inside this repo consumes the WRAPPER's exit code (it is the
 # top-level entrypoint); the inner ResourceInventory.ps1 exit code is left
 # UNCHANGED because the wrapper treats inner non-zero as "this whole
@@ -696,6 +708,45 @@ function Get-WrapperExitCode
     if ($AuthSkipped) { return 3 }
     if ($CollectorsFailed) { return 4 }
     return 0
+}
+
+# Plain lines that say what the wrapper's exit code means for this run, for the
+# end of the console output and RunSummary.log. The first line names the code
+# and, for 2, whether a consolidated zip was made. When 2 wins over a 3, 4 or 5
+# condition, a second line names that condition, so no signal is lost. Counts
+# and fixed text only, so the lines are safe in an obfuscated bundle.
+function Get-WrapperExitCodeSummary
+{
+    param(
+        [bool]$AuthSkipped,
+        [bool]$CollectorsFailed,
+        [bool]$SubscriptionsFailed = $false,
+        # A consolidated zip was made this run.
+        [bool]$ReportMade = $true
+    )
+    $AuthText = 'Metrics and/or Consumption were skipped for a sign-in problem'
+    $CollectorText = 'one or more collectors failed'
+    $Code = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $SubscriptionsFailed
+    $Lines = [System.Collections.Generic.List[string]]::new()
+    switch ($Code)
+    {
+        0 { $Lines.Add('Exit code 0: clean run, no failures of any kind.') }
+        2
+        {
+            $ZipText = if ($ReportMade) { 'the consolidated zip holds the reports of the subscriptions that worked' } else { 'no consolidated zip was made' }
+            $Lines.Add(('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); {0}.' -f $ZipText))
+        }
+        3 { $Lines.Add(('Exit code 3: {0} (see FAILED (auth)); the rest of the report was made.' -f $AuthText)) }
+        4 { $Lines.Add(('Exit code 4: {0} (see FAILED (collectors)); the rest of the report was made.' -f $CollectorText)) }
+        5 { $Lines.Add(('Exit code 5: {0} and {1} (see FAILED (auth) and FAILED (collectors)); the rest of the report was made.' -f $AuthText, $CollectorText)) }
+    }
+    if ($Code -eq 2)
+    {
+        $Hidden = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+        $HiddenText = switch ($Hidden) { 3 { $AuthText } 4 { $CollectorText } 5 { '{0} and {1}' -f $AuthText, $CollectorText } default { $null } }
+        if ($null -ne $HiddenText) { $Lines.Add(('Exit code 2 takes priority over exit code {0}, which this run also has: {1}.' -f $Hidden, $HiddenText)) }
+    }
+    return $Lines.ToArray()
 }
 
 # ---- Stream worker output + per-stream state --------------------------------
@@ -872,6 +923,9 @@ function Get-RunSummaryLogContent
         [string]$StreamsSource,
         [int]$Concurrency = 0,
         [string]$ConcurrencySource,
+        # Get-WrapperExitCodeSummary's lines (fixed text, no identifiers), so
+        # emitted in both modes. None given: the section is omitted.
+        [string[]]$ExitCodeLines = @(),
         # When set, emit counts only (no names / ids / raw messages).
         [switch]$Obfuscated
     )
@@ -1012,6 +1066,15 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  Collector failures            : {0}' -f $Collector.Count))
     $Lines.Add(('  Metrics auth-skipped subs     : {0}' -f $Metrics.Count))
     $Lines.Add(('  Consumption failed subs       : {0}' -f $Consumption.Count))
+
+    # --- Exit code -----------------------------------------------------------
+    $ExitText = @(@($ExitCodeLines) | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    if ($ExitText.Count -gt 0)
+    {
+        $Lines.Add('')
+        $Lines.Add('Exit code:')
+        foreach ($ExitLine in $ExitText) { $Lines.Add(('  {0}' -f $ExitLine)) }
+    }
 
     # Per-subscription detail is emitted ONLY for a non-obfuscated bundle, where
     # real names already appear throughout the report. An obfuscated bundle stops

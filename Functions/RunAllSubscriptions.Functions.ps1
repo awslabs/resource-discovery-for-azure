@@ -814,7 +814,11 @@ function Read-StreamState
     }
     catch
     {
-        Write-Stream ("WARNING: could not read stream state at {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
+        # Its own guard, as in Write-StreamState: this runs at stream start,
+        # and a warning that cannot be written must not end the stream.
+        $StateError = $_.Exception.Message
+        try { Write-Stream ("WARNING: could not read stream state at {0}: {1}" -f $Path, $StateError) 'Yellow' }
+        catch { $null = $_ }
         return @{ Completed = @(); Failed = @() }
     }
 }

@@ -219,7 +219,7 @@ function Get-RdaPathComparer
                 # Two entries whose names differ only in case are two items.
                 $Alike = @([System.IO.Directory]::GetFileSystemEntries($Parent) | Where-Object { [System.IO.Path]::GetFileName($_) -ieq $Leaf }).Count
                 $Result = if ($Alike -ge 2) { [System.StringComparer]::Ordinal } elseif (Test-Path -LiteralPath (Join-Path $Parent $Flipped)) { [System.StringComparer]::OrdinalIgnoreCase } else { [System.StringComparer]::Ordinal }
-                if ($null -ne $ProbeFile) { Remove-Item -LiteralPath $ProbeFile -Force -ErrorAction SilentlyContinue }
+                if ($null -ne $ProbeFile) { Clear-RdaLeftover -Path $ProbeFile }
                 return $Result
             }
             $Probe = $Parent
@@ -229,7 +229,7 @@ function Get-RdaPathComparer
     {
         Write-Verbose ("Get-RdaPathComparer: could not probe {0}: {1}" -f $Path, $_.Exception.Message)
     }
-    if ($null -ne $ProbeFile) { Remove-Item -LiteralPath $ProbeFile -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $ProbeFile) { Clear-RdaLeftover -Path $ProbeFile }
     return $Default
 }
 
@@ -253,18 +253,27 @@ function Get-RdaOnDiskName
 # a linked folder compare equal. A link's target is followed the same way, so
 # links in its own parent folders count too. '..' is folded by text first,
 # as PowerShell and .NET fold it for every write this module makes.
-# shortcut: on PowerShell 7.0/7.1 (.NET before 6) links are not followed and
-# the path is only made full; upgrade when 7.2 is the floor.
+# PowerShell 7.0/7.1 (.NET before 6) cannot read a link's target: there a
+# path with a link in it stops (throws) instead, since it cannot be compared.
+$script:RdaCanResolveLinks = [bool]([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))
 function Get-RdaPhysicalPath
 {
     param([Parameter(Mandatory = $true)][string]$Path, [int]$Depth = 0)
     $Full = [System.IO.Path]::GetFullPath($Path)
-    if ($Depth -gt 40 -or -not ([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))) { return $Full }
+    if ($Depth -gt 40) { return $Full }
     $Root = [System.IO.Path]::GetPathRoot($Full)
     $Current = $Root
     foreach ($Part in @($Full.Substring($Root.Length).Split([char[]]@([IO.Path]::DirectorySeparatorChar, '/'), [System.StringSplitOptions]::RemoveEmptyEntries)))
     {
         $Current = [System.IO.Path]::Combine($Current, $Part)
+        if (-not $script:RdaCanResolveLinks)
+        {
+            if ((Test-Path -LiteralPath $Current) -and ((Get-Item -LiteralPath $Current -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+            {
+                throw ('{0} is a link, which this PowerShell cannot follow (7.2 or later can). Use PowerShell 7.2 or later, or give a path without links.' -f $Current)
+            }
+            continue
+        }
         try
         {
             $Info = if ([System.IO.Directory]::Exists($Current)) { [System.IO.DirectoryInfo]::new($Current) } elseif ([System.IO.File]::Exists($Current)) { [System.IO.FileInfo]::new($Current) } else { $null }
@@ -284,6 +293,16 @@ function Move-RdaFile
 {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Destination, [switch]$Overwrite)
     [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+}
+
+# Removes a private file or folder this module left; one that cannot be
+# removed is named in a warning, never passed over in silence.
+function Clear-RdaLeftover
+{
+    param([Parameter(Mandatory = $true)][string]$Path, [switch]$Recurse)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try { Remove-Item -LiteralPath $Path -Force -Recurse:$Recurse -ErrorAction Stop }
+    catch { Write-Warning ('Could not remove {0}: {1} Delete it by hand.' -f $Path, $_.Exception.Message) }
 }
 
 # Stops (throws) before anything is extracted from the zip $Path when it is
@@ -306,7 +325,8 @@ function Assert-RdaZipWithinLimit
         foreach ($E in $Entries)
         {
             $Parts = @($E.FullName -split '[\\/]')
-            if ([System.IO.Path]::IsPathRooted($E.FullName) -or $E.FullName -match '^[A-Za-z]:' -or $Parts -contains '..') { throw ('{0} holds an entry with a rooted or .. path: {1}' -f $Name, $E.FullName) }
+            # Rooted on any system: a leading / or \ (also \\server and \\?\ forms) or a drive letter.
+            if ([System.IO.Path]::IsPathRooted($E.FullName) -or $E.FullName -match '^([\\/]|[A-Za-z]:)' -or $Parts -contains '..') { throw ('{0} holds an entry with a rooted or .. path: {1}' -f $Name, $E.FullName) }
             if ($E.Length -gt 16GB) { throw ('{0} holds an entry over 16 GB: {1}' -f $Name, $E.FullName) }
             if ($E.CompressedLength -gt 0 -and ($E.Length / $E.CompressedLength) -gt 100) { throw ('{0} holds an entry packed more than 100 to 1: {1}' -f $Name, $E.FullName) }
             $Total += $E.Length
@@ -624,7 +644,7 @@ $ChartsHtml
     }
     finally
     {
-        if (Test-Path -LiteralPath $HtmlPartial) { Remove-Item -LiteralPath $HtmlPartial -Force -ErrorAction SilentlyContinue }
+        Clear-RdaLeftover -Path $HtmlPartial
     }
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
@@ -761,22 +781,30 @@ function New-RdaAllSubHtmlSummaryFromZip
     $MadeReportDirs = New-Object System.Collections.Generic.List[string]
     $SwapDone = $false
     $SwapUndone = $false
+    $SwapSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
     # Puts every target back as it was before the swap, last swapped first
     # (a target written twice is put back in turn). One that cannot be put
-    # back does not stop the rest; the old files left under their private
-    # names are returned, so the error can name them.
+    # back does not stop the rest; each file left out of place is returned as
+    # a line saying what it is, so the error or warning can name it.
     $UndoSwap = {
         for ($I = $StagedFiles.Count - 1; $I -ge 0; $I--)
         {
             $Staged = $StagedFiles[$I]
             try
             {
-                if ($Staged.Swapped -and -not $Staged.Backup -and (Test-Path -LiteralPath $Staged.Target)) { Remove-Item -LiteralPath $Staged.Target -Force }
+                if ($Staged.Swapped -and -not $Staged.Backup -and (Test-Path -LiteralPath $Staged.Target)) { Remove-Item -LiteralPath $Staged.Target -Force -ErrorAction Stop }
                 if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup)) { Move-RdaFile -Path $Staged.Backup -Destination $Staged.Target -Overwrite }
             }
             catch
             {
-                if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup)) { $Staged.Backup }
+                if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup))
+                {
+                    # A target written twice: the second one's old file is
+                    # from this run, and the first one's restore follows.
+                    if ($Staged.Earlier) { '{0} is the earlier file; {1} now holds the new one: replace it with the earlier file' -f $Staged.Backup, $Staged.Target }
+                    else { Clear-RdaLeftover -Path $Staged.Backup }
+                }
+                elseif (Test-Path -LiteralPath $Staged.Target) { '{0} is a new file that could not be removed: delete it' -f $Staged.Target }
             }
         }
     }
@@ -850,6 +878,12 @@ function New-RdaAllSubHtmlSummaryFromZip
                 Write-Host ("  Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name) -ForegroundColor Yellow
                 continue
             }
+            # A report folder already there that is a link or junction would take
+            # the writes outside -OutputDirectory: stop before anything is written.
+            if ((Test-Path -LiteralPath $Dest) -and ((Get-Item -LiteralPath $Dest -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+            {
+                throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
+            }
             # The re-render writes an html for a report that has none, and the
             # summary is one file more: both count too.
             $PlanCount += $Picked.Count
@@ -879,7 +913,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($Entry in @($Archive.Entries | Where-Object { $Item.Entries -ccontains $_.FullName }))
                 {
                     $Target = Join-Path $Dest $Entry.Name
-                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')); Backup = $null; Swapped = $false }
+                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')); Backup = $null; Swapped = $false; Earlier = $false }
                     $StagedFiles.Add($Staged)
                     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Staged.Partial, $false)
                 }
@@ -908,6 +942,12 @@ function New-RdaAllSubHtmlSummaryFromZip
                     Write-Host ("  Skipped a second report folder named {0} in the input zip; the first one is used." -f $Ef.Name) -ForegroundColor Yellow
                     continue
                 }
+                # A report folder already there that is a link or junction would take
+                # the writes outside -OutputDirectory: stop before anything is written.
+                if ((Test-Path -LiteralPath $Dest) -and ((Get-Item -LiteralPath $Dest -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+                {
+                    throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
+                }
                 $PlanCount += $Files.Count
                 if (@($Files | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
                 foreach ($F in $Files) { $PlanBytes += $F.Length }
@@ -925,7 +965,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($F in $Item.Files)
                 {
                     $Target = Join-Path $Dest $F.Name
-                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')); Backup = $null; Swapped = $false }
+                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')); Backup = $null; Swapped = $false; Earlier = $false }
                     $StagedFiles.Add($Staged)
                     Copy-Item -LiteralPath $F.FullName -Destination $Staged.Partial
                 }
@@ -942,6 +982,8 @@ function New-RdaAllSubHtmlSummaryFromZip
         # file moved aside first (put back if any later step fails).
         foreach ($Staged in $StagedFiles)
         {
+            # The first write of a target moves the user's earlier file aside.
+            $Staged.Earlier = $SwapSeen.Add($Staged.Target)
             if (Test-Path -LiteralPath $Staged.Target)
             {
                 $Staged.Backup = '{0}.rda-{1}.bak' -f $Staged.Target, [guid]::NewGuid().ToString('N')
@@ -966,14 +1008,14 @@ function New-RdaAllSubHtmlSummaryFromZip
         # report folders, -OutputDirectory and its parents, deepest first.
         $Kept = @()
         if (-not $SwapDone) { $SwapUndone = $true; $Kept = @(& $UndoSwap) }
-        foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
+        foreach ($Staged in $StagedFiles) { Clear-RdaLeftover -Path $Staged.Partial }
         foreach ($Dir in @(@($MadeReportDirs) + @($MadeDirs)))
         {
-            if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $Dir -Force -ErrorAction SilentlyContinue }
+            if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Clear-RdaLeftover -Path $Dir }
         }
         if ($Kept.Count -gt 0)
         {
-            throw [System.Exception]::new(('{0} Some earlier files could not be put back; each is kept under this name (rename it to drop the .rda-<id>.bak end): {1}' -f $_.Exception.Message, ($Kept -join ', ')), $_.Exception)
+            throw [System.Exception]::new(('{0} Not every file could be put back as it was: {1}.' -f $_.Exception.Message, ($Kept -join '; ')), $_.Exception)
         }
         throw
     }
@@ -985,11 +1027,11 @@ function New-RdaAllSubHtmlSummaryFromZip
         if (-not $SwapDone -and -not $SwapUndone)
         {
             $Kept = @(& $UndoSwap)
-            if ($Kept.Count -gt 0) { Write-Warning ('New-RdaAllSubHtmlSummaryFromZip stopped; some earlier files could not be put back and are kept as: {0}' -f ($Kept -join ', ')) }
+            if ($Kept.Count -gt 0) { Write-Warning ('New-RdaAllSubHtmlSummaryFromZip stopped; not every file could be put back as it was: {0}.' -f ($Kept -join '; ')) }
         }
-        if ($SwapDone) { foreach ($Staged in $StagedFiles) { if ($Staged.Backup) { Remove-Item -LiteralPath $Staged.Backup -Force -ErrorAction SilentlyContinue } } }
-        foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
-        if ($StagingMade) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($SwapDone) { foreach ($Staged in $StagedFiles) { if ($Staged.Backup) { Clear-RdaLeftover -Path $Staged.Backup } } }
+        foreach ($Staged in $StagedFiles) { Clear-RdaLeftover -Path $Staged.Partial }
+        if ($StagingMade) { Clear-RdaLeftover -Path $Staging -Recurse }
     }
 
     # Re-render each per-subscription report from its Inventory_*.json with the
@@ -1036,7 +1078,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 }
                 finally
                 {
-                    if (Test-Path -LiteralPath $RenderPartial) { Remove-Item -LiteralPath $RenderPartial -Force -ErrorAction SilentlyContinue }
+                    Clear-RdaLeftover -Path $RenderPartial
                 }
             }
             Write-Host ("Re-rendered {0} per-subscription report(s) with the current renderer." -f $ReRendered) -ForegroundColor Green
@@ -1107,7 +1149,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         }
         finally
         {
-            if (Test-Path -LiteralPath $PartialPackage) { Remove-Item -LiteralPath $PartialPackage -Force -ErrorAction SilentlyContinue }
+            Clear-RdaLeftover -Path $PartialPackage
         }
         Write-Host ("Portable summary bundle (links survive extraction): {0}" -f $PackageZipPath) -ForegroundColor Green
     }

@@ -19,10 +19,13 @@
 
     Each rebuilt file is written under a private name (<file>.rda-<id>.partial)
     and the file it replaces is moved aside (<file>.rda-<id>.bak) until every
-    file is in place; a failed or stopped run puts the earlier files back. Only
-    a run killed outright (power loss, a killed process) can leave such files.
-    Nothing reads them: delete a .partial file, and rename a .bak file back
-    (drop the .rda-<id>.bak end) when its report file is missing.
+    file is in place; a failed or stopped run puts the earlier files back. A
+    file that cannot be put back or removed is named in the error (or in a
+    warning), with what to do: an earlier file kept as .rda-<id>.bak replaces
+    the new file of its name. A run killed outright (power loss, a killed
+    process) can leave such files with no message. Nothing reads them: delete a
+    .partial file, and use a .bak file in place of the file of its name
+    without the .rda-<id>.bak end.
 
 .PARAMETER InputZip
     Path to the consolidated AllSubscriptions_ResourcesReport_*.zip.

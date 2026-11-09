@@ -767,14 +767,15 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
-    It 'two streams: an old stream summary the wrapper cannot remove stops the run before any stream starts' {
+    It 'two streams: an old stream summary the wrapper cannot remove stops the run with exit 1 before any stream starts' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamSummaryFolderBeforeRun
         $Run.Console | Should -Match 'ERROR: could not remove the old stream summary .+\.rda-stream-0-summary\.json' -Because $Run.Console
         $Run.Console | Should -Match 'Remove it by hand, then run again\.' -Because $Run.Console
-        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: an old stream summary could not be removed; no subscription was collected and no consolidated zip was made.')) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 1: an old stream summary could not be removed; no subscription was collected and no consolidated zip was made.')) -Because $Run.Console
         $Run.Console | Should -Not -Match 'queued:' -Because 'no stream may start while its old summary is still there'
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
-        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        # A setup stop before anything is collected: exit 1, not 2.
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {

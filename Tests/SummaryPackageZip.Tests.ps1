@@ -1180,3 +1180,81 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with reparse folders that are not link
         Get-ChildItem -LiteralPath $Dir -Filter '*.partial' | ForEach-Object { [System.IO.File]::Delete($_.FullName) }
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip render swap on a stop, and the budget with -KeepOriginalReports' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'puts the earlier html back when the run is stopped while the rendered one takes its place' {
+        $Tree = Join-Path $script:TmpRoot 'render-stop-tree'
+        New-Item -ItemType Directory -Path (Join-Path $Tree 'Functions'), (Join-Path $Tree 'Extension') -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') -Destination (Join-Path $Tree 'Functions')
+        Set-Content -LiteralPath (Join-Path $Tree 'Extension/Summary.ps1') -Value 'param($JsonFile, $HtmlFile, $Title, $Version, $PlatOS) Set-Content -LiteralPath $HtmlFile -Value "<html>rendered</html>" -NoNewline'
+        $Root = Join-Path $script:TmpRoot 'render-stop'
+        $Stamp = '20260102030405151'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        $Zip = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+        try { $E = $Zip.CreateEntry('Inventory_ResourcesReport_' + $Stamp + '.json'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('{"Version":"3.2.3"}') } finally { $W.Dispose() } } finally { $Zip.Dispose() }
+        $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-70.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Outer -Force
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        $Html = Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Set-Content -LiteralPath $Html -Value '<html>stale</html>' -NoNewline
+        $Flag = Join-Path $script:TmpRoot 'render-stop.flag'
+        $Ps = [powershell]::Create()
+        try
+        {
+            $null = $Ps.AddScript({
+                    param($Functions, $Zip, $Out, $Flag)
+                    . $Functions
+                    $script:HoldFlag = $Flag
+                    # Holds the render's move in, after the earlier html is moved aside.
+                    function Move-RdaFile
+                    {
+                        param($Path, $Destination, [switch]$Overwrite)
+                        if ($Path -like '*.html.rda-*.partial') { New-Item -ItemType File -Path $script:HoldFlag | Out-Null; Start-Sleep -Seconds 60 }
+                        [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+                    }
+                    New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null
+                }).AddArgument((Join-Path $Tree 'Functions/AllSubHtmlSummary.Functions.ps1')).AddArgument($Outer).AddArgument($Out).AddArgument($Flag)
+            $Handle = $Ps.BeginInvoke()
+            $Until = [datetime]::UtcNow.AddSeconds(30)
+            while (-not (Test-Path -LiteralPath $Flag) -and [datetime]::UtcNow -lt $Until -and -not $Handle.IsCompleted) { Start-Sleep -Milliseconds 100 }
+            Test-Path -LiteralPath $Flag | Should -BeTrue -Because 'the render reached its move in'
+            $Ps.Stop()
+        }
+        finally { $Ps.Dispose() }
+        Get-Content -LiteralPath $Html -Raw | Should -Be '<html>stale</html>'
+        @(Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -like '*.partial' -or $_.Name -like '*.bak' }) | Should -BeNullOrEmpty
+    }
+
+    It 'does not count an html it will not render with -KeepOriginalReports (<Kind>)' -ForEach @(@{ Kind = 'report zips' }, @{ Kind = 'extracted folders' }) {
+        $Root = Join-Path $script:TmpRoot ('keep-budget-' + ($Kind -replace ' ', '-'))
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        # 1000 inventory-only reports and the summary: 1001 files to write.
+        foreach ($N in 1..1000)
+        {
+            $Stamp = '2026010205{0:D7}' -f $N
+            $Name = 'Inventory_ResourcesReport_' + $Stamp + '.json'
+            if ($Kind -eq 'report zips')
+            {
+                $Zip = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+                try { $E = $Zip.CreateEntry($Name); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('{"Version":"3.2.3"}') } finally { $W.Dispose() } } finally { $Zip.Dispose() }
+            }
+            else
+            {
+                $Dir = Join-Path $Stage ('ResourcesReport_' + $Stamp)
+                New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $Dir $Name) -Value '{"Version":"3.2.3"}'
+            }
+        }
+        $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-71.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Outer)
+        $Out = Join-Path $Root 'out'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Not -Throw
+        @(Get-ChildItem -LiteralPath $Out -Recurse -File).Count | Should -Be 1001
+    }
+}

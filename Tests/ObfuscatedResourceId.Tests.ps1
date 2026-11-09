@@ -25,7 +25,9 @@ BeforeAll {
 
     $script:Sub = '12345678-1234-1234-1234-123456789012'   # Azure docs placeholder
     $script:Base = "/subscriptions/$script:Sub/resourcegroups/rg-demo/providers"
-    $script:Token = '(?:prod|nonprod)_(?:databricks_|aks_|vmss_|mc_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    # A token the product writes: lower case (matched letter for letter even
+    # under case-blind -match), with at most the hint of a name token.
+    $script:Token = '(?-i:(?:prod|nonprod)_(?:databricks_|aks_|vmss_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
 
     # A masked id with each prod_/nonprod_ token taken out, so a leak check on
     # a short real name ('aa-a') is not set off by a token's random GUID. Only
@@ -36,17 +38,16 @@ BeforeAll {
     function Get-TextOutsideTokenGuid
     {
         param([string]$Text)
-        $ProductToken = '(?:prod|nonprod)_(?:databricks_|aks_|vmss_|mc_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        return ($Text -replace ('(?<=^|/)' + $ProductToken + '(?=/|$)'), '')
+        return ($Text -replace ('(?<=^|/)' + $script:Token + '(?=/|$)'), '')
     }
 
     function Reset-ObfuscationState
     {
         $Global:Subscriptions = @([pscustomobject]@{ id = $script:Sub; name = 'Demo Subscription' })
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:ObfuscationSubscriptionTokens = @{}
         $Global:ObfuscationResourceGroupTokens = @{}
     }

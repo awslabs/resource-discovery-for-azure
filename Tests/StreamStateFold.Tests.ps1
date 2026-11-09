@@ -101,3 +101,18 @@ Describe 'The per-stream resume state files at the start of a run' {
         $R.Completed | Should -BeNullOrEmpty
     }
 }
+
+Describe '-ResumeFailedOnly with an empty retry list and a per-stream file it could not read' {
+    It 'ends with exit 2, not a clean exit 0' {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $Block = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeFailedOnly' -and $_.Extent.Text.Contains('Nothing to retry') })
+        $Block.Count | Should -Be 1
+        function Exit-Wrapper { param([int]$Code) throw ('Exit-Wrapper ' + $Code) }
+        $ResumeFailedOnly = $true
+        $FailedAttempts = @()
+        $UnreadableStreamFiles = @('/x/.resume-state-t-stream-0.json')
+        $ResumeStateFile = '/x/.resume-state-t.json'
+        $null = $ResumeFailedOnly, $FailedAttempts, $UnreadableStreamFiles, $ResumeStateFile
+        { . ([scriptblock]::Create($Block[0].Extent.Text)) 6>$null } | Should -Throw 'Exit-Wrapper 2'
+    }
+}

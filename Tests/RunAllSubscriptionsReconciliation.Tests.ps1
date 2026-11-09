@@ -373,7 +373,8 @@ Describe 'A resume state warning that cannot be written' {
     }
 
     It 'Write-StreamState does not throw when its warning cannot be written' {
-        $Tag = '[stream-0]'
+        # The worker's line prefix, which Write-Stream reads from its caller.
+        Set-Variable -Name Tag -Value '[stream-0]'
         Mock Set-Content -MockWith { throw 'stand-in: the folder is gone' }
         Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
         $Path = Join-Path $script:TestRoot 'gone-stream/state.json'

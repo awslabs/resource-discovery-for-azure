@@ -174,15 +174,18 @@ Describe 'Direct run without -SubscriptionID: <Name>' -Skip:$IsWindows -ForEach 
         ExtraSubs = @(
             @{ id = '12345678-1234-1234-1234-123456789014'; name = 'Demo Subscription 3'; tenantId = '12345678-1234-1234-1234-123456789012'; state = 'Disabled' }
             @{ id = '12345678-1234-1234-1234-123456789015'; name = 'Demo Subscription 4'; tenantId = '12345678-1234-1234-1234-123456789012'; state = 'Warned' }
-        ) }
+        )
+    }
     @{ Name = 'one Enabled subscription plus a Disabled one'; SubIds = '12345678-1234-1234-1234-123456789012'; TenantId = ''; Header = 'Demo Subscription 1'; Disks = 1
         ExtraSubs = @(
             @{ id = '12345678-1234-1234-1234-123456789014'; name = 'Demo Subscription 3'; tenantId = '12345678-1234-1234-1234-123456789012'; state = 'Disabled' }
-        ) }
+        )
+    }
     @{ Name = '-TenantID, two subscriptions of that tenant plus one of another tenant'; SubIds = '12345678-1234-1234-1234-123456789012,12345678-1234-1234-1234-123456789013'; TenantId = '12345678-1234-1234-1234-123456789012'; Header = '2 subscriptions (consolidated)'; Disks = 2
         ExtraSubs = @(
             @{ id = '12345678-1234-1234-1234-123456789016'; name = 'Demo Subscription 5'; tenantId = '87654321-4321-4321-4321-210987654321'; state = 'Enabled' }
-        ) }
+        )
+    }
 ) {
     BeforeAll {
         $script:Run = Invoke-ExtraSubsRun -SubIds $SubIds -ExtraSubs $ExtraSubs -TenantId $TenantId

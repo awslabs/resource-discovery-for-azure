@@ -92,12 +92,14 @@ BeforeAll {
         @($Names | Sort-Object)
     }
 
-    # The report links a summary html holds, sorted.
+    # The report links a summary html holds, with '/' separators, sorted. The
+    # summary joins each link with Join-Path, so on Windows it holds '\'; a
+    # '/' path resolves on every platform.
     function Get-SummaryLinks
     {
         param([Parameter(Mandatory)][string]$HtmlPath)
         $Html = Get-Content -LiteralPath $HtmlPath -Raw
-        @([regex]::Matches($Html, 'href="([^"]+\.html)"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+        @([regex]::Matches($Html, 'href="([^"]+\.html)"') | ForEach-Object { $_.Groups[1].Value.Replace('\', '/') } | Sort-Object)
     }
 
     # The links a summary of these stamps holds, one per reconstructed folder.

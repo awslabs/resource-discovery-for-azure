@@ -239,7 +239,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         (Get-Item -LiteralPath $Left).LastWriteTime = (Get-Date).AddHours(-1)
         $R = Invoke-BundleBlock -Root $Root
 
-        @($R.Printed | Where-Object { $_ -eq ('WARNING: {0} is a consolidated zip left by a run that was stopped; it holds copies of that run''s reports. Delete it, or rename it to a .zip name to use it.' -f $Left) }).Count | Should -Be 1
+        @($R.Printed | Where-Object { $_ -eq ('WARNING: {0} is a consolidated zip an earlier run did not finish. It may be incomplete or unchecked, and it holds copies of that run''s reports (with real names unless that run used -Obfuscate). Delete it; do not share it. Only if that run said it kept this file after its checks, rename it to a .zip name to use it.' -f $Left) }).Count | Should -Be 1
         Test-Path -LiteralPath $Left | Should -BeTrue
         $R.BundleBuildError | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'WARNING: *rda-build-*' }).Count | Should -Be 1 -Because 'this run''s own private zip is not named'

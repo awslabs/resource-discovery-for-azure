@@ -1716,13 +1716,16 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
     $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     if ($SubZips.Count -gt 0)
     {
-        # A run stopped (Ctrl+C, a killed process) after its consolidated zip was
-        # built leaves it under its private name, with a copy of every report of
-        # that run. Each one from before this run is named, so it is not left
-        # unseen; it is not removed, as it can be the zip of a run still going.
+        # A run stopped (Ctrl+C, a killed process) while or after its
+        # consolidated zip was built leaves it under its private name: it may be
+        # cut short or never have passed its checks, and it holds copies of that
+        # run's reports. Each one from before this run is named, so it is not
+        # left unseen; it is not removed, as it can be the zip of a run still
+        # going. (A zip a run kept there after its checks is named by that run,
+        # with what to do.)
         foreach ($LeftZip in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter 'rda-build-*.partial' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $RunStartTime }))
         {
-            Write-Host ("WARNING: {0} is a consolidated zip left by a run that was stopped; it holds copies of that run's reports. Delete it, or rename it to a .zip name to use it." -f $LeftZip.FullName) -ForegroundColor Yellow
+            Write-Host ("WARNING: {0} is a consolidated zip an earlier run did not finish. It may be incomplete or unchecked, and it holds copies of that run's reports (with real names unless that run used -Obfuscate). Delete it; do not share it. Only if that run said it kept this file after its checks, rename it to a .zip name to use it." -f $LeftZip.FullName) -ForegroundColor Yellow
         }
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
         # The name it ships under: today's, or the next free one (-2, -3, ...)

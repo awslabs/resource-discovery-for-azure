@@ -479,6 +479,17 @@ Describe 'Run-AllSubscriptions.ps1: the transcript and the main summary of the s
         Get-Content -LiteralPath (Join-Path $Root 'RunAllSubscriptions_transcript_2026-11-02_15-04-05.txt') -Raw | Should -Be 'another run'
     }
 
+    It 'a transcript that cannot start leaves no file under the name it took' {
+        $Try = @($script:WrapperAst.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.TryStatementAst] -and $_.Body.Extent.Text.Contains('Start-Transcript -Path $WrapperTranscriptFile') })
+        $Before = @($script:WrapperAst.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and @('$WrapperTranscriptStem', '$WrapperTranscriptFile', '$WrapperTranscriptReserved') -contains $_.Left.Extent.Text } | Where-Object { $_.Extent.EndOffset -lt $Try[0].Extent.StartOffset })
+        $Root = Join-Path $TestDrive 'transcript-failed'
+        $null = New-Item -ItemType Directory -Path $Root
+        Mock Start-Transcript { throw 'Transcription has already been started' }
+        Set-Variable -Name InventoryRoot -Value $Root
+        $null = @(. ([scriptblock]::Create(((@($Before | ForEach-Object { $_.Extent.Text }) + $Try[0].Extent.Text) -join "`n"))) 6>&1)
+        @(Get-ChildItem -LiteralPath $Root -File) | Should -BeNullOrEmpty
+    }
+
     It 'a main summary that cannot be built leaves no file under the name it took, empty or partial, and is not added to the zip' {
         $SummaryIf = Find-WrapperIf -Condition '$null -ne $OuterZipFile' -Contains 'New-RdaAllSubHtmlSummary'
         # The block loads the summary functions from the wrapper's folder; here a

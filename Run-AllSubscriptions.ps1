@@ -515,10 +515,12 @@ if (-not (Test-Path -Path $InventoryRoot -PathType Container))
 $WrapperTranscriptStarted = $false
 $WrapperTranscriptStem = "RunAllSubscriptions_transcript_{0}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')
 $WrapperTranscriptFile = Join-Path $InventoryRoot ($WrapperTranscriptStem + '.txt')
+$WrapperTranscriptReserved = $false
 try
 {
     # Never another run's transcript of the same second (New-RunOutputFile).
     $WrapperTranscriptFile = New-RunOutputFile -Directory $InventoryRoot -Stem $WrapperTranscriptStem -Extension '.txt'
+    $WrapperTranscriptReserved = $true
     Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
     $WrapperTranscriptStarted = $true
     Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
@@ -529,6 +531,8 @@ catch
     # an already-running transcript on this host), the run continues without
     # one rather than aborting.
     Write-Host ("WARNING: Could not start wrapper transcript at {0}: {1}" -f $WrapperTranscriptFile, $_.Exception.Message) -ForegroundColor Yellow
+    # The name this run reserved holds no transcript: nothing is left under it.
+    if ($WrapperTranscriptReserved) { Remove-Item -LiteralPath $WrapperTranscriptFile -Force -ErrorAction SilentlyContinue }
 }
 
 

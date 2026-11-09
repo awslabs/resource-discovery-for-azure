@@ -780,7 +780,7 @@ $PlatBlock = if ([string]::IsNullOrWhiteSpace($PlatSafe)) { '' } else { "<div><b
 # content carries real subscription / resource names.
 if ($ObfuscationStatus -eq 'obfuscated')
 {
-    $PrivacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names have been replaced with deterministic pseudonyms (prod_/nonprod_ prefixes). Real identifiers are not present. Suitable for sharing.</div></div>'
+    $PrivacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names in a sample of this report are deterministic pseudonyms (prod_/nonprod_ prefixes). Only a sample was checked: review the report before sharing it.</div></div>'
 }
 else
 {
@@ -876,7 +876,7 @@ $FileSize = (Get-Item -LiteralPath $HtmlFile).Length
 Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $FileSize, ($FileSize / 1KB)) -ForegroundColor Green
 if ($ObfuscationStatus -eq 'obfuscated')
 {
-    Write-Host "  Privacy posture: obfuscated (safe to share)" -ForegroundColor Green
+    Write-Host "  Privacy posture: obfuscated (names in a sample look masked; review before sharing)" -ForegroundColor Green
 }
 else
 {

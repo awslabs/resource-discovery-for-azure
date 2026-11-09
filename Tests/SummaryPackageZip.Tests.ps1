@@ -1487,3 +1487,19 @@ Describe 'Totals of 0 under strict mode' {
         [System.IO.File]::ReadAllText($Html) | Should -BeLike '*No per-subscription reports*'
     }
 }
+
+Describe 'Extension/Summary.ps1 privacy wording in a re-rendered report' {
+    It 'never says a report is suitable for sharing from a sample of masked names' {
+        $Dir = Join-Path $script:TmpRoot 'privacy-sample'
+        [void][System.IO.Directory]::CreateDirectory($Dir)
+        $Json = Join-Path $Dir 'Inventory_masked.json'
+        $Rows = foreach ($N in 1..4) { '{{"Name":"prod_{0}","Subscription":"prod_{1}"}}' -f [guid]::NewGuid(), [guid]::NewGuid() }
+        [System.IO.File]::WriteAllText($Json, ('{"Version":"3.2.3","PublicIP":[' + ($Rows -join ',') + ']}'))
+        $Html = Join-Path $Dir 'r.html'
+        $Said = & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' 6>&1 | Out-String
+        $Text = [System.IO.File]::ReadAllText($Html)
+        $Text | Should -Not -BeLike '*Suitable for sharing*'
+        $Text | Should -BeLike '*review the report before sharing it*'
+        $Said | Should -Not -BeLike '*(safe to share)*'
+    }
+}

@@ -102,8 +102,27 @@ if ((Get-RdaStandInScenario).NarrationFail)
 {
     function Write-Host
     {
-        if (([string]$args[0]) -like 'Resources collected:*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the transcript cannot be written' }
+        if (([string]$args[0]) -like 'Resources collected:*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1')
+        {
+            $script:NarrationBroken = $true
+            throw 'stand-in: the transcript cannot be written'
+        }
         Microsoft.PowerShell.Utility\Write-Host @args
+    }
+    # With VerboseFail as well (a run with -Verbose), the wrapper's next
+    # verbose line after that failed write cannot be written either.
+    if ((Get-RdaStandInScenario).VerboseFail)
+    {
+        function Write-Verbose
+        {
+            [CmdletBinding()] param([Parameter(Position = 0, ValueFromPipeline = $true)][string]$Message)
+            if ($script:NarrationBroken -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1')
+            {
+                $script:NarrationBroken = $false
+                throw 'stand-in: the transcript cannot be written (verbose)'
+            }
+            Microsoft.PowerShell.Utility\Write-Verbose -Message $Message
+        }
     }
 }
 function Start-Transcript
@@ -243,7 +262,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -300,10 +319,12 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
+            # VerboseFail runs the wrapper with -Verbose.
+            if ($VerboseFail) { $WrapperArgs += '-Verbose' }
             if ($PriorExitCode -ge 0)
             {
                 $Launcher = Join-Path $CaseDir 'launcher.ps1'
@@ -671,6 +692,21 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         @{ Case = 'one subscription with -ParallelStreams'; Streams = 2 }
     ) {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA) -Streams $Streams -NarrationFail
+        $Run.Console | Should -Not -Match 'ERROR processing subscription' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
+        $Run.Console | Should -Match 'Per-subscription output verification: OK' -Because $Run.Console
+        $Run.FailedIds.Count | Should -Be 0 -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+    }
+
+    It '<Case> with -Verbose: the note about that failed line cannot make the subscription failed either' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'one subscription with -ParallelStreams'; Streams = 2 }
+    ) {
+        # The verbose note the guard writes about the failed line cannot be
+        # written either (the same broken transcript).
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA) -Streams $Streams -NarrationFail -VerboseFail
         $Run.Console | Should -Not -Match 'ERROR processing subscription' -Because $Run.Console
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
         $Run.Console | Should -Match 'Per-subscription output verification: OK' -Because $Run.Console

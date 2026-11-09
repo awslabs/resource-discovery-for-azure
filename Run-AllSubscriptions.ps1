@@ -920,7 +920,14 @@ if ($ParallelStreams -le 1)
 
                 Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
             }
-            catch { Write-Verbose ("Could not write the completion lines: {0}" -f $_.Exception.Message) }
+            catch
+            {
+                # The note goes to the same broken output under -Verbose, so
+                # it gets its own guard.
+                $NarrationError = $_.Exception.Message
+                try { Write-Verbose ("Could not write the completion lines: {0}" -f $NarrationError) }
+                catch { $null = $_ }
+            }
 
             # Mark complete and persist immediately so a mid-run sign-out is recoverable.
             # If the sub was previously in FailedAttempts (i.e. this is a retry that
@@ -1110,7 +1117,13 @@ else
                         Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
                     }
                 }
-                catch { Write-Verbose ("Could not write the completion line: {0}" -f $_.Exception.Message) }
+                catch
+                {
+                    # Its own guard, as in the sequential branch.
+                    $NarrationError = $_.Exception.Message
+                    try { Write-Verbose ("Could not write the completion line: {0}" -f $NarrationError) }
+                    catch { $null = $_ }
+                }
                 if (-not ($CompletedIds -contains $Sub.Id))
                 {
                     $CompletedIds += $Sub.Id

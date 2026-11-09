@@ -494,6 +494,8 @@ $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryRepo
 if ($InventoryRoot.IndexOfAny([char[]]'[]') -ge 0)
 {
     Write-Host ("ERROR: The inventory folder {0} has [ or ] in its path, which this script cannot use. Set HOME to a folder without them and run again." -f $InventoryRoot) -ForegroundColor Red
+    # Exit-Wrapper reads it; no transcript has started yet.
+    $WrapperTranscriptStarted = $false
     Exit-Wrapper -Code 1
 }
 if (-not (Test-Path -Path $InventoryRoot -PathType Container))
@@ -2197,6 +2199,17 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     catch
     {
         Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+    finally
+    {
+        # The staging folder holds copies of the reports: removed on every path,
+        # and named when it cannot be.
+        $StageLeft = Get-Variable -Name BundleStage -ValueOnly -ErrorAction SilentlyContinue
+        if ($StageLeft -and [System.IO.Directory]::Exists($StageLeft))
+        {
+            try { Remove-Item -LiteralPath $StageLeft -Recurse -Force -ErrorAction Stop }
+            catch { Write-Host ("WARNING: Could not remove the staging folder {0}: {1} Delete it by hand." -f $StageLeft, $_.Exception.Message) -ForegroundColor Yellow }
+        }
     }
 }
 

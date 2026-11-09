@@ -286,6 +286,13 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         }
     }
 
+    It 'a fold that fails leaves no staging folder behind' {
+        Mock Compress-Archive -ParameterFilter { $Update } { throw [System.IO.IOException]::new('No space left on device') }
+        $Root = Join-Path $TestDrive 'fold-stage'
+        $null = Invoke-FoldBlock -Root $Root
+        @(Get-ChildItem -LiteralPath $Root -Directory -Force -Filter '.rda-bundle-*') | Should -BeNullOrEmpty
+    }
+
     It 'a fold that removes the zip (what a full disk does) makes the run report the zip as lost' {
         # What the real cmdlet does when -Update hits a full disk: it removes the zip and fails.
         Mock Compress-Archive -ParameterFilter { $Update } {
@@ -652,6 +659,19 @@ Describe 'Move-RunOutputFile: moves a file to a free name, never over one that i
 Describe 'Run-AllSubscriptions.ps1: an inventory folder whose path holds brackets' {
     It 'stops at the start with exit 1, naming the folder, before anything is written' {
         $Block = [scriptblock]::Create((Find-WrapperIf -Condition "`$InventoryRoot.IndexOfAny([char[]]'[]') -ge 0" -Contains 'has [ or ] in its path').Extent.Text)
+        # The real Exit-Wrapper, under strict mode, in a pwsh of its own: exit 1.
+        $Script = Join-Path $TestDrive 'bracket-stop.ps1'
+        @(
+            ('. ''{0}''' -f $script:FunctionsPath.Replace("'", "''"))
+            'Set-StrictMode -Version Latest'
+            ('$InventoryRoot = ''{0}''' -f (Join-Path $TestDrive 'strict[1]/InventoryReports').Replace("'", "''"))
+            $Block.ToString()
+            'exit 0'
+        ) -join "`n" | Set-Content -LiteralPath $Script
+        $Out = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $Script *>&1 | ForEach-Object { [string]$_ })
+        $LASTEXITCODE | Should -Be 1
+        # A strict-mode error also ends a script with 1: the stop must be the reason.
+        @($Out | Where-Object { $_ -like '*cannot be retrieved*' -or $_ -like '*has not been set*' }) | Should -BeNullOrEmpty
         function Exit-Wrapper { param($Code) $script:StopCode = $Code }
         $script:StopCode = $null
         $InventoryRoot = Join-Path $TestDrive 'inv[1]/InventoryReports'

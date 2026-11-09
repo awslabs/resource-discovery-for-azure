@@ -1158,10 +1158,10 @@ function Get-ConsolidatedZipProblem
 
 # A new, empty file <Stem><Extension> in Directory, or, when that name is taken,
 # <Stem>-2<Extension> to <Stem>-100<Extension>. It is created here, only if
-# absent, so a run that starts or ends in the same second (another tenant, same
-# inventory folder) never writes over it, and this run never writes over
-# another's. Returns its path; throws when every name is taken or the file
-# cannot be created.
+# absent, so this run never writes over a file that is there (one of an earlier
+# run, or of another run in the same second; two runs must still not share an
+# inventory folder at the same time, see the README). Returns its path; throws
+# when every name is taken or the file cannot be created.
 function New-RunOutputFile
 {
     param(

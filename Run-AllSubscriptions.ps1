@@ -2191,12 +2191,22 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 if ($null -ne $OuterZipFile)
 {
     $ZipProblem = Get-ConsolidatedZipProblem -Path $OuterZipFile -SubZipNames $SubZips.Name
+    $NameProblem = $null
     if (-not $ZipProblem)
     {
         try { $OuterZipFile = Move-RunOutputFile -Source $OuterZipFile -Directory $InventoryRoot -Stem $OuterZipStem -Extension '.zip' }
-        catch { $ZipProblem = 'it could not take its name: {0}' -f $_.Exception.Message }
+        catch { $NameProblem = $_.Exception.Message }
     }
-    if ($ZipProblem)
+    if ($NameProblem)
+    {
+        # The zip passed its check but could not take its name: it is kept
+        # under its private name, which the error gives, and is not printed as
+        # the run's zip.
+        $BundleBuildError = "The consolidated zip passed its check but could not take its name ({0}). It is kept as {1}: rename it to a .zip name to use it." -f $NameProblem, $OuterZipFile
+        Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
+        $OuterZipFile = $null
+    }
+    elseif ($ZipProblem)
     {
         $BundleBuildError = "The consolidated zip was lost while the run summary was added to it: {0}" -f $ZipProblem
         # Still under its private name: it is not left in the folder. When it

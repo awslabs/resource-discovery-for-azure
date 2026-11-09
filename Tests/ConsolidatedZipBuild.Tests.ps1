@@ -341,6 +341,20 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
     }
 
+    It 'a zip that passed its last check but finds every name taken is kept under its private name, which the error gives' {
+        $Root = Join-Path $TestDrive 'names-taken'
+        $null = New-Item -ItemType Directory -Path $Root -Force
+        $Stem = 'AllSubscriptions_ResourcesReport_2026-01-01_00-00-00'
+        $null = New-Item -ItemType File -Path (Join-Path $Root ($Stem + '.zip'))
+        foreach ($N in 2..100) { $null = New-Item -ItemType File -Path (Join-Path $Root ('{0}-{1}.zip' -f $Stem, $N)) }
+        $R = Invoke-FoldBlock -Root $Root
+        $Kept = Join-Path $Root 'rda-build-fold.partial'
+        $R.BundleBuildError | Should -Be ('The consolidated zip passed its check but could not take its name (every name from {0}.zip to {0}-100.zip is taken). It is kept as {1}: rename it to a .zip name to use it.' -f $Stem, $Kept)
+        Test-Path -LiteralPath $Kept | Should -BeTrue
+        $R.OuterZipFile | Should -BeNullOrEmpty
+        @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
+    }
+
     It 'a fold that fails but leaves every report in the zip is only a warning' {
         Mock Compress-Archive -ParameterFilter { $Update } { throw [System.IO.IOException]::new('No space left on device') }
         $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'fold-kept')

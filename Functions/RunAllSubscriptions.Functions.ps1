@@ -840,8 +840,10 @@ function Write-StreamState
     catch
     {
         # A failed write (the folder is gone) must stop here, or it is a silent
-        # non-terminating error and this warning never runs. The next -Resume
-        # then runs the subscription again, as its id is not on file.
+        # non-terminating error and this warning never runs. A subscription
+        # that worked is then not on file, so the next -Resume runs it again;
+        # one that failed is still in the stream summary's Failed rows, which
+        # the wrapper adds to the resume state for -ResumeFailedOnly.
         # Its own guard, as in Save-CompletedSubscriptionIds.
         $StateError = $_.Exception.Message
         try { Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $StateError) 'Yellow' }

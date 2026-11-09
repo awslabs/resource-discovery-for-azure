@@ -29,14 +29,15 @@ BeforeAll {
 
     # A masked id with each prod_/nonprod_ token taken out, so a leak check on
     # a short real name ('aa-a') is not set off by a token's random GUID. Only
-    # whole path segments that are a token go (the same form as
-    # $script:Token): a real subscription GUID, or a real name that holds a
-    # token-like part, is still seen, and nothing is put in their place that a
-    # real name could match.
+    # whole path segments that are a token of a form the product writes go
+    # (only its own hints): a real subscription GUID, a real name that holds a
+    # token-like part, or a real word put in as a hint is still seen, and
+    # nothing is put in their place that a real name could match.
     function Get-TextOutsideTokenGuid
     {
         param([string]$Text)
-        return ($Text -replace ('(?<=^|/)' + $script:Token + '(?=/|$)'), '')
+        $ProductToken = '(?:prod|nonprod)_(?:databricks_|aks_|vmss_|mc_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        return ($Text -replace ('(?<=^|/)' + $ProductToken + '(?=/|$)'), '')
     }
 
     function Reset-ObfuscationState
@@ -88,6 +89,7 @@ Describe 'Get-ObfuscatedResourceId' {
         Get-TextOutsideTokenGuid ($Masked + '/runbooks/aa-a') | Should -Match ([regex]::Escape('aa-a')) -Because 'a real name outside a token is still caught'
         Get-TextOutsideTokenGuid "/subscriptions/$script:Sub/resourcegroups/prod_11111111-1111-4111-8111-111111111111" | Should -Match ([regex]::Escape($script:Sub)) -Because 'a real subscription GUID is not a token, so it is still caught'
         Get-TextOutsideTokenGuid $Masked | Should -Not -Match 'token' -Because 'nothing a real name such as token could match is left where a token was'
+        Get-TextOutsideTokenGuid ($Masked + '/runbooks/prod_vm1_11111111-1111-4111-8111-111111111111') | Should -Match 'vm1' -Because 'a real word in place of a hint is not a token the product writes'
         Get-TextOutsideTokenGuid ($Masked + '/runbooks/rb-prod_11111111-1111-4111-8111-111111111111') | Should -Match ([regex]::Escape('rb-prod_11111111-1111-4111-8111-111111111111')) -Because 'a real segment that only holds a token-like part is not taken out'
     }
 

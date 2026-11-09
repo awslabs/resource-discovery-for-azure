@@ -1060,3 +1060,105 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip and links, rooted entries, and files i
         if ($Kept -and (Test-Path -LiteralPath $Kept)) { [System.IO.Directory]::Delete($Kept, $true) }
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip with reparse folders that are not links, a rendered html name, and one warning a leftover' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        function script:New-InvOnlyZip
+        {
+            param([string]$Root, [string]$Stamp, [switch]$WithHtml)
+            $Stage = Join-Path $Root 'outer'
+            New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+            $Zip = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+            try
+            {
+                $Pairs = @(, @(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}'))
+                if ($WithHtml) { $Pairs += , @(('ResourcesReport_' + $Stamp + '.html'), '<html>new</html>') }
+                foreach ($Pair in $Pairs) { $E = $Zip.CreateEntry($Pair[0]); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Pair[1]) } finally { $W.Dispose() } }
+            }
+            finally { $Zip.Dispose() }
+            $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-60.zip'
+            Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Outer -Force
+            $Outer
+        }
+        # A copy of the functions beside a stand-in renderer.
+        function script:Use-StandInRenderer
+        {
+            param([string]$Tree, [string]$Body)
+            New-Item -ItemType Directory -Path (Join-Path $Tree 'Functions'), (Join-Path $Tree 'Extension') -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') -Destination (Join-Path $Tree 'Functions')
+            Set-Content -LiteralPath (Join-Path $Tree 'Extension/Summary.ps1') -Value ('param($JsonFile, $HtmlFile, $Title, $Version, $PlatOS) ' + $Body)
+            Join-Path $Tree 'Functions/AllSubHtmlSummary.Functions.ps1'
+        }
+    }
+    AfterAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'rebuilds into a report folder that is a reparse point but not a link (a OneDrive folder)' {
+        $Root = Join-Path $script:TmpRoot 'onedrive-like'
+        $Stamp = '20260102030405141'
+        $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp -WithHtml
+        $Out = Join-Path $Root 'out'
+        $Dest = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+        Mock Get-Item { [pscustomobject]@{ Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'; LinkType = $null } } -ParameterFilter { $LiteralPath -eq $Dest -and $Force }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Not -Throw
+        Test-Path -LiteralPath (Join-Path $Dest ('Inventory_ResourcesReport_' + $Stamp + '.json')) | Should -BeTrue
+    }
+
+    It 'stops on a report folder that is a dangling link' -Skip:($IsWindows) {
+        $Root = Join-Path $script:TmpRoot 'dangling'
+        $Stamp = '20260102030405142'
+        $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp -WithHtml
+        $Out = Join-Path $Root 'out'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $Out ('ResourcesReport_' + $Stamp)) -Target (Join-Path $Root 'gone') | Out-Null
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*is a link or junction*'
+    }
+
+    It 'never links or bundles an html already in the folder when the render of a report without one fails' {
+        . (Use-StandInRenderer -Tree (Join-Path $script:TmpRoot 'render-fail-tree') -Body 'throw "renderer failed"')
+        $Root = Join-Path $script:TmpRoot 'stale-html-fail'
+        $Stamp = '20260102030405143'
+        $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp
+        $Out = Join-Path $Root 'out'
+        $Stale = Join-Path $Out ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
+        New-Item -ItemType Directory -Path (Split-Path $Stale -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $Stale -Value '<html>stale</html>' -NoNewline
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip 6>$null | Out-Null
+        Get-Content -LiteralPath $Stale -Raw | Should -Be '<html>stale</html>'
+        Get-ZipEntryNames -ZipPath ($Out + '.zip') | Should -Not -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
+        Get-Content -LiteralPath (Join-Path $Out 'MainSummary.html') -Raw | Should -Not -BeLike ('*ResourcesReport_' + $Stamp + '.html*')
+    }
+
+    It 'renders a report without an html under a free name, leaving an html already in the folder as it was' {
+        . (Use-StandInRenderer -Tree (Join-Path $script:TmpRoot 'render-ok-tree') -Body 'Set-Content -LiteralPath $HtmlFile -Value "<html>rendered</html>"')
+        $Root = Join-Path $script:TmpRoot 'stale-html-ok'
+        $Stamp = '20260102030405144'
+        $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp
+        $Out = Join-Path $Root 'out'
+        $Stale = Join-Path $Out ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
+        New-Item -ItemType Directory -Path (Split-Path $Stale -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $Stale -Value '<html>stale</html>' -NoNewline
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip 6>$null | Out-Null
+        Get-Content -LiteralPath $Stale -Raw | Should -Be '<html>stale</html>'
+        $Names = Get-ZipEntryNames -ZipPath ($Out + '.zip')
+        $Names | Should -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '-1.html')
+        $Names | Should -Not -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
+    }
+
+    It 'warns once about a private file it cannot remove after a failed swap' {
+        $Root = Join-Path $script:TmpRoot 'partial-warn-once'
+        $Stamp = '20260102030405145'
+        $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp -WithHtml
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        New-Item -ItemType Directory -Path (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Force | Out-Null
+        Mock Remove-Item { throw 'busy' } -ParameterFilter { $LiteralPath -like '*.partial' }
+        $Threw = $false
+        try { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -WarningVariable Warn -WarningAction SilentlyContinue 6>$null } catch { $Threw = $true }
+        $Threw | Should -BeTrue
+        $Lines = @($Warn | Where-Object { "$_" -like 'Could not remove*.partial*' })
+        $Lines.Count | Should -Be 1
+        Get-ChildItem -LiteralPath $Dir -Filter '*.partial' | ForEach-Object { [System.IO.File]::Delete($_.FullName) }
+    }
+}

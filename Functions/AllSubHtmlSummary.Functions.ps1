@@ -268,7 +268,7 @@ function Get-RdaPhysicalPath
         $Current = [System.IO.Path]::Combine($Current, $Part)
         if (-not $script:RdaCanResolveLinks)
         {
-            if ((Test-Path -LiteralPath $Current) -and ((Get-Item -LiteralPath $Current -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+            if ((Get-Item -LiteralPath $Current -Force -ErrorAction SilentlyContinue).LinkType -in 'SymbolicLink', 'Junction')
             {
                 throw ('{0} is a link, which this PowerShell cannot follow (7.2 or later can). Use PowerShell 7.2 or later, or give a path without links.' -f $Current)
             }
@@ -781,6 +781,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     $MadeReportDirs = New-Object System.Collections.Generic.List[string]
     $SwapDone = $false
     $SwapUndone = $false
+    $PartialsCleared = $false
     $SwapSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
     # Puts every target back as it was before the swap, last swapped first
     # (a target written twice is put back in turn). One that cannot be put
@@ -880,7 +881,8 @@ function New-RdaAllSubHtmlSummaryFromZip
             }
             # A report folder already there that is a link or junction would take
             # the writes outside -OutputDirectory: stop before anything is written.
-            if ((Test-Path -LiteralPath $Dest) -and ((Get-Item -LiteralPath $Dest -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+            # (Only a real link: a OneDrive or dedup folder is a reparse point too.)
+            if ((Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue).LinkType -in 'SymbolicLink', 'Junction')
             {
                 throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
             }
@@ -944,7 +946,8 @@ function New-RdaAllSubHtmlSummaryFromZip
                 }
                 # A report folder already there that is a link or junction would take
                 # the writes outside -OutputDirectory: stop before anything is written.
-                if ((Test-Path -LiteralPath $Dest) -and ((Get-Item -LiteralPath $Dest -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+                # (Only a real link: a OneDrive or dedup folder is a reparse point too.)
+                if ((Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue).LinkType -in 'SymbolicLink', 'Junction')
                 {
                     throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
                 }
@@ -1009,6 +1012,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         $Kept = @()
         if (-not $SwapDone) { $SwapUndone = $true; $Kept = @(& $UndoSwap) }
         foreach ($Staged in $StagedFiles) { Clear-RdaLeftover -Path $Staged.Partial }
+        $PartialsCleared = $true
         foreach ($Dir in @(@($MadeReportDirs) + @($MadeDirs)))
         {
             if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Clear-RdaLeftover -Path $Dir }
@@ -1030,7 +1034,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             if ($Kept.Count -gt 0) { Write-Warning ('New-RdaAllSubHtmlSummaryFromZip stopped; not every file could be put back as it was: {0}.' -f ($Kept -join '; ')) }
         }
         if ($SwapDone) { foreach ($Staged in $StagedFiles) { if ($Staged.Backup) { Clear-RdaLeftover -Path $Staged.Backup } } }
-        foreach ($Staged in $StagedFiles) { Clear-RdaLeftover -Path $Staged.Partial }
+        if (-not $PartialsCleared) { foreach ($Staged in $StagedFiles) { Clear-RdaLeftover -Path $Staged.Partial } }
         if ($StagingMade) { Clear-RdaLeftover -Path $Staging -Recurse }
     }
 
@@ -1058,11 +1062,17 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $Mine = @($WrittenFiles[$SubDir.FullName] | Where-Object { $_ } | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
                 $InvJson = $Mine | Where-Object { $_.Name -like 'Inventory_*.json' } | Select-Object -First 1
                 if ($null -eq $InvJson) { continue }
-                # Overwrite the folder's html in place (single html per folder
-                # keeps the summary's link stable); derive a name if none.
+                # Overwrite the html this call wrote in place (single html per
+                # folder keeps the summary's link stable). With none, a new
+                # name: one free in the folder, so a file already there (not
+                # from -InputZip) is never overwritten, linked or bundled.
                 $ExistingHtml = $Mine | Where-Object { $_.Name -like '*.html' -and $_.Name -notlike '*_revealed*' } | Select-Object -First 1
-                $TargetHtml = if ($null -ne $ExistingHtml) { $ExistingHtml.FullName } else { Join-Path $SubDir.FullName ($SubDir.Name + '.html') }
-                if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
+                if ($null -ne $ExistingHtml) { $TargetHtml = $ExistingHtml.FullName }
+                else
+                {
+                    $TargetHtml = Join-Path $SubDir.FullName ($SubDir.Name + '.html')
+                    for ($N = 1; Test-Path -LiteralPath $TargetHtml; $N++) { $TargetHtml = Join-Path $SubDir.FullName ('{0}-{1}.html' -f $SubDir.Name, $N) }
+                }
                 # Rendered to a private name beside it and moved over the html
                 # only when it worked, so a failed render keeps the original.
                 $RenderPartial = '{0}.rda-{1}.partial' -f $TargetHtml, [guid]::NewGuid().ToString('N')
@@ -1070,6 +1080,8 @@ function New-RdaAllSubHtmlSummaryFromZip
                 {
                     & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $RenderPartial -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
                     [System.IO.File]::Move($RenderPartial, $TargetHtml, $true)
+                    # Listed only once it is written.
+                    if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
                     $ReRendered++
                 }
                 catch

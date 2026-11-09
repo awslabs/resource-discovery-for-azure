@@ -1511,8 +1511,13 @@ function FinalizeOutputs
         # first record's subscription would label the whole report with one.
         # Otherwise, under -Obfuscate, Summary.ps1 keeps taking it from the
         # first record (the masked name).
+        # The count is of the subscriptions such a run inventories: the list
+        # 'az account list' gives, which LoginSession has already narrowed to
+        # -TenantID when one is given, with the same filter az applies by
+        # default (state exactly 'Enabled'), so a Disabled or Warned entry is
+        # never counted as covered.
         $ReportSubscriptionName = $null
-        $RunSubscriptionCount = @(@($Global:Subscriptions) | Where-Object { $null -ne $_ }).Count
+        $RunSubscriptionCount = @(@($Global:Subscriptions) | Where-Object { $null -ne $_ -and [string]$_.state -ceq 'Enabled' }).Count
         if ([string]::IsNullOrEmpty($SubscriptionID) -and $RunSubscriptionCount -gt 1)
         {
             $ReportSubscriptionName = '{0} subscriptions (consolidated)' -f $RunSubscriptionCount

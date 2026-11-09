@@ -991,7 +991,7 @@ if ($Task -eq 'Processing')
 
     if (($TimeoutCount + $ThrottledCount + $ErrorCount) -gt 0)
     {
-        Write-MetricsDiag ("Non-success calls (where it got stuck):")
+        Write-MetricsDiag ("Non-success metric definitions (where it got stuck):")
         foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -ne 'Success' } | Sort-Object ElapsedSec -Descending))
         {
             Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error)
@@ -1001,7 +1001,7 @@ if ($Task -eq 'Processing')
     if ($DiagRecords.Count -gt 0)
     {
         $Slowest = $DiagRecords | Sort-Object ElapsedSec -Descending | Select-Object -First 5
-        Write-MetricsDiag ("Slowest 5 calls:")
+        Write-MetricsDiag ("Slowest 5 metric definitions:")
         foreach ($rec in $Slowest)
         {
             Write-MetricsDiag ("  {0}s idx={1} {2}/{3}/{4} interval={5} ({6})" -f $rec.ElapsedSec, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Outcome)

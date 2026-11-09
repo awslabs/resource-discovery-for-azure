@@ -550,6 +550,10 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
         @($script:Clean.DebugLines | Where-Object { $_ -match '\[Metrics\] Metric definitions: 4 \| Success: 4 \| Timeout: 0 \| Throttled: 0 \| Error: 0 \| Elapsed: ' }).Count | Should -Be 1
         @($script:Rejected.DebugLines | Where-Object { $_ -match '\[Metrics\] Metric definitions: 4 \| Success: 3 \| Timeout: 0 \| Throttled: 0 \| Error: 1 \| Elapsed: ' }).Count | Should -Be 1
         @($script:Clean.DebugLines + $script:Rejected.DebugLines | Where-Object { $_ -match 'Total calls:' }).Count | Should -Be 0
+        # The lists under the outcome line are per metric definition too.
+        @($script:Rejected.DebugLines | Where-Object { $_ -match '\[Metrics\] Non-success metric definitions \(where it got stuck\):$' }).Count | Should -Be 1
+        @($script:Clean.DebugLines | Where-Object { $_ -match '\[Metrics\] Slowest 5 metric definitions:$' }).Count | Should -Be 1
+        @($script:Clean.DebugLines + $script:Rejected.DebugLines | Where-Object { $_ -match 'Non-success calls|Slowest 5 calls' }).Count | Should -Be 0
     }
 
     It 'reports the number of Azure Monitor requests in the diagnostics summary' {
@@ -577,7 +581,7 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
         $Omitted = 'Composite Disk Write Operations/sec'
         $Run = Invoke-MetricsRun -Resources @($script:Disk) -RunName 'elapsed-omitted' -Omit $Omitted -SingleDelayMs 1500
 
-        # 'Slowest 5 calls' lists every record of this four-metric run with its time.
+        # 'Slowest 5 metric definitions' lists every record of this four-metric run with its time.
         $Elapsed = @{}
         foreach ($Name in $script:DiskMetricNames)
         {

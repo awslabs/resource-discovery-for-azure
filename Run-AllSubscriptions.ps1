@@ -399,6 +399,10 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 Disable-ConsoleQuickEdit
 
 $RunStartTime = Get-Date
+# This run's id. It is in each stream summary's file name and in the summary
+# the stream writes, so when two runs share one inventory root, each removes,
+# reads and accepts only its own stream summaries.
+$RunId = [guid]::NewGuid().ToString()
 $FailedSubscriptions = @()
 # The same failures for RunSummary.log: { Name; Id } for each subscription.
 $FailedSubscriptionDetail = @()
@@ -1170,14 +1174,16 @@ else
     if ($StreamCount -ge 2)
     {
 
-        # A stream's summary file has a fixed path, so one left by an earlier
-        # run (interrupted, or its stream died before writing) would be read
-        # as this run's when this run's stream writes none. Each is removed
-        # before any stream starts; one that cannot be removed stops the run
-        # here, before anything is collected or any state changes.
+        # A stream's summary file name holds the stream number and this run's
+        # id, so another run's summaries are never at these paths. Anything
+        # that is there all the same would be read as this run's when this
+        # run's stream writes none, so each is removed before any stream
+        # starts; one that cannot be removed stops the run here, before
+        # anything is collected or any state changes. Only this run's names
+        # are touched.
         for ($S = 0; $S -lt $StreamCount; $S++)
         {
-            $OldSummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+            $OldSummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-{1}-summary.json" -f $S, $RunId)
             try
             {
                 if (Test-Path -LiteralPath $OldSummaryPath -PathType Leaf) { Remove-Item -LiteralPath $OldSummaryPath -Force -ErrorAction Stop }
@@ -1258,7 +1264,7 @@ else
                 $SliceIds = @($SliceList | ForEach-Object { $_.Id })
                 $SliceNames = @($SliceList | ForEach-Object { $_.Name })
 
-                $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+                $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-{1}-summary.json" -f $S, $RunId)
                 $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
 
                 # The subscriptions this stream will run: under -Resume the
@@ -1299,6 +1305,7 @@ else
                 # hashtable when present with value $true.
                 $WorkerArgs = @{
                     TenantID           = $TenantID
+                    RunId              = $RunId
                     StreamId           = [string]$S
                     InventoryRoot      = $InventoryRoot
                     ScriptRoot         = $PSScriptRoot
@@ -1397,14 +1404,15 @@ else
                     }
                     # Read, but taken as this run's summary of the stream only
                     # when Resolve-StreamSummary accepts it: a JSON object that
-                    # names this stream, has a row for every subscription the
-                    # stream ran this time, and holds in every field the
-                    # aggregation reads the shape the worker writes. Anything
-                    # else ('{}', 'null', a list, another stream's, too few
-                    # rows, a bad value) is treated as a summary that cannot
+                    # names this run and this stream, has a row for every
+                    # subscription the stream ran this time, and holds in
+                    # every field the aggregation reads the shape the worker
+                    # writes. Anything else ('{}', 'null', a list, another
+                    # run's or stream's, too few rows, a bad value) is
+                    # treated as a summary that cannot
                     # be read: not confirmed. Only its checked values are used
                     # below.
-                    $Read = Resolve-StreamSummary -Summary $StreamSummary -StreamId $S.StreamId -ExpectedIds $S.ExpectedIds
+                    $Read = Resolve-StreamSummary -Summary $StreamSummary -RunId $RunId -StreamId $S.StreamId -ExpectedIds $S.ExpectedIds
                     if (-not $Read.Accepted)
                     {
                         $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount; Reason = 'Unreadable' }
@@ -1730,6 +1738,19 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
 {
     # Filter ZIPs by current run timestamp only
     $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    # Then only the zips this run's subscriptions named (the Zip of each
+    # success row, which the output verification above found), so a zip
+    # another run writes under the same inventory root in the same time is
+    # left out. When a stream's summary is missing or could not be read, its
+    # subscriptions' zips cannot be named, so the time filter alone is kept
+    # and the Exit code lines say to check the consolidated zip for them.
+    if ($UnreadableStreamSummaries.Count -eq 0)
+    {
+        $ZipPathComparer = if ($PSVersionTable.Platform -eq 'Unix') { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+        $RunZipPaths = [System.Collections.Generic.HashSet[string]]::new($ZipPathComparer)
+        foreach ($Row in @($SubResourceCounts | Where-Object { -not [string]::IsNullOrEmpty($_.Zip) })) { [void]$RunZipPaths.Add([System.IO.Path]::GetFullPath([string]$Row.Zip)) }
+        $SubZips = @($SubZips | Where-Object { $RunZipPaths.Contains([System.IO.Path]::GetFullPath($_.FullName)) })
+    }
     if ($SubZips.Count -gt 0)
     {
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"

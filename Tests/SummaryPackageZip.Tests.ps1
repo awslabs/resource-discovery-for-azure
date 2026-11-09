@@ -1124,26 +1124,44 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with reparse folders that are not link
         $Stale = Join-Path $Out ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
         New-Item -ItemType Directory -Path (Split-Path $Stale -Parent) -Force | Out-Null
         Set-Content -LiteralPath $Stale -Value '<html>stale</html>' -NoNewline
-        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip 6>$null | Out-Null
+        $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip 6>&1 | Out-String
+        $Said | Should -BeLike '*Re-render skipped for ResourcesReport_*(no html for this report)*'
         Get-Content -LiteralPath $Stale -Raw | Should -Be '<html>stale</html>'
         Get-ZipEntryNames -ZipPath ($Out + '.zip') | Should -Not -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
         Get-Content -LiteralPath (Join-Path $Out 'MainSummary.html') -Raw | Should -Not -BeLike ('*ResourcesReport_' + $Stamp + '.html*')
     }
 
-    It 'renders a report without an html under a free name, leaving an html already in the folder as it was' {
-        . (Use-StandInRenderer -Tree (Join-Path $script:TmpRoot 'render-ok-tree') -Body 'Set-Content -LiteralPath $HtmlFile -Value "<html>rendered</html>"')
+    It 'renders a report without an html under its folder name, replacing one already there, and keeps one html when run again' {
+        . (Use-StandInRenderer -Tree (Join-Path $script:TmpRoot 'render-ok-tree') -Body 'Set-Content -LiteralPath $HtmlFile -Value "<html>rendered</html>" -NoNewline')
         $Root = Join-Path $script:TmpRoot 'stale-html-ok'
         $Stamp = '20260102030405144'
         $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp
         $Out = Join-Path $Root 'out'
-        $Stale = Join-Path $Out ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
-        New-Item -ItemType Directory -Path (Split-Path $Stale -Parent) -Force | Out-Null
-        Set-Content -LiteralPath $Stale -Value '<html>stale</html>' -NoNewline
-        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip 6>$null | Out-Null
-        Get-Content -LiteralPath $Stale -Raw | Should -Be '<html>stale</html>'
-        $Names = Get-ZipEntryNames -ZipPath ($Out + '.zip')
-        $Names | Should -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '-1.html')
-        $Names | Should -Not -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        $Html = Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Set-Content -LiteralPath $Html -Value '<html>stale</html>' -NoNewline
+        foreach ($Run in 1..2) { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip 6>$null | Out-Null }
+        Get-Content -LiteralPath $Html -Raw | Should -Be '<html>rendered</html>'
+        @(Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -like '*.html*' }).Name | Should -Be @('ResourcesReport_' + $Stamp + '.html')
+        Get-ZipEntryNames -ZipPath ($Out + '.zip') | Should -Contain ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html')
+    }
+
+    It 'puts the earlier html back when the rendered one cannot take its place' {
+        . (Use-StandInRenderer -Tree (Join-Path $script:TmpRoot 'render-move-tree') -Body 'Set-Content -LiteralPath $HtmlFile -Value "<html>rendered</html>" -NoNewline')
+        $Root = Join-Path $script:TmpRoot 'stale-html-move'
+        $Stamp = '20260102030405146'
+        $Zip = New-InvOnlyZip -Root $Root -Stamp $Stamp
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        $Html = Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Set-Content -LiteralPath $Html -Value '<html>stale</html>' -NoNewline
+        Mock Move-RdaFile { if ($Path -like '*.html.rda-*.partial') { throw 'locked' }; [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite) }
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null | Out-Null
+        Get-Content -LiteralPath $Html -Raw | Should -Be '<html>stale</html>'
+        @(Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -like '*.bak' -or $_.Name -like '*.partial' }) | Should -BeNullOrEmpty
+        Get-Content -LiteralPath (Join-Path $Out 'MainSummary.html') -Raw | Should -Not -BeLike ('*ResourcesReport_' + $Stamp + '.html*')
     }
 
     It 'warns once about a private file it cannot remove after a failed swap' {

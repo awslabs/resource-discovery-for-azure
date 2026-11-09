@@ -90,7 +90,7 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
 # branch) rather than loaded into every entry point. This script sits in
 # Extension/, so resolve the sibling Functions/ folder from the repo root.
 $RenderFunctionsFile = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
-if (-not (Test-Path -Path $RenderFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $RenderFunctionsFile -PathType Leaf))
 {
     throw "Summary.ps1: shared render helpers not found at '$RenderFunctionsFile'."
 }

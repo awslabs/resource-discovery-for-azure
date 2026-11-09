@@ -2019,11 +2019,13 @@ elseif ($FailedAttempts.Count -gt 0)
 if ($UnreadableStreamSummaries.Count -gt 0)
 {
     # Not failed subscriptions: the stream's reports may well be in the
-    # consolidated zip, but the run cannot confirm them.
+    # consolidated zip, but the run cannot confirm them. With no zip made,
+    # it says so, as the Exit code lines do.
+    $UnreadableZipText = if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile)) { 'check the consolidated zip' } else { 'no consolidated zip was made' }
     foreach ($U in $UnreadableStreamSummaries)
     {
         $Heading = if ($U.Reason -eq 'Missing') { 'Stream Summary Missing:   ' } else { 'Stream Summary Unreadable:' }
-        Write-Host ("{0} stream-{1} ({2} subscription(s) not confirmed; check the consolidated zip)" -f $Heading, $U.StreamId, $U.SubCount) -ForegroundColor Red
+        Write-Host ("{0} stream-{1} ({2} subscription(s) not confirmed; {3})" -f $Heading, $U.StreamId, $U.SubCount, $UnreadableZipText) -ForegroundColor Red
     }
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
     Write-Host "Re-run with -Resume to collect any subscription of that stream that did not complete." -ForegroundColor Yellow

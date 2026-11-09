@@ -561,6 +561,8 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $script:FallbackBlock = [scriptblock]::Create(
             "param(`$FakeScriptRoot, `$Subscriptions, `$CompletedIds, `$FailedAttempts, `$CompletedReports, `$InventoryRoot, `$ResumeStateFile, `$TenantID)`n" +
             "`$StreamCount = 1; `$Obfuscate = `$false; `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$InventoryPassthrough = @{ ConcurrencyLimit = 6 }`n" +
+            # The parallel path builds the list it slices before this block; these runs are not -Resume runs, so it is every subscription.
+            "`$PendingSubscriptions = @(`$Subscriptions)`n" +
             ($OneIf[0].Extent.Text -replace '\$PSScriptRoot', '$FakeScriptRoot'))
 
         function script:Invoke-FailWorker

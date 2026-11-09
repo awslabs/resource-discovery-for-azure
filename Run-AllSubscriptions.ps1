@@ -1248,10 +1248,30 @@ else
     # `[stream-N]`). The final summary is consolidated from the per-stream
     # summary JSON files.
 
-    $StreamCount = [Math]::Min($ParallelStreams, $Subscriptions.Count)
+    # On -Resume, leave out what an earlier run completed before the streams
+    # are counted and sliced, as the sequential loop does. A stream worker
+    # knows only its own per-stream state file, which the end-of-run merge
+    # folds in and deletes, and the one-subscription path below has no resume
+    # check of its own, so left to them every subscription is collected again.
+    $PendingSubscriptions = @()
+    foreach ($Sub in $Subscriptions)
+    {
+        if ($Resume -and ($CompletedIds -contains $Sub.Id))
+        {
+            Write-Host ("Skipping (already completed): {0} ({1})" -f $Sub.Name, $Sub.Id) -ForegroundColor DarkGray
+            $SkippedCount++
+            # Recorded as the sequential loop does, so the end of the run carries
+            # its earlier report into the consolidated zip (the streams never see it).
+            $SkippedSubscriptions += [pscustomobject]@{ Id = $Sub.Id; Name = $Sub.Name }
+            continue
+        }
+        $PendingSubscriptions += $Sub
+    }
+
+    $StreamCount = [Math]::Min($ParallelStreams, $PendingSubscriptions.Count)
     Write-Host ""
-    Write-Host ("Parallel-streams mode: {0} streams across {1} eligible subscription(s)" -f $StreamCount, $Subscriptions.Count) -ForegroundColor Cyan
-    if ($ParallelStreams -gt $Subscriptions.Count)
+    Write-Host ("Parallel-streams mode: {0} streams across {1} subscription(s) to process" -f $StreamCount, $PendingSubscriptions.Count) -ForegroundColor Cyan
+    if ($ParallelStreams -gt $PendingSubscriptions.Count)
     {
         Write-Host ("Note: -ParallelStreams {0} clamped to {1} (one stream per subscription is the practical limit)." -f $ParallelStreams, $StreamCount) -ForegroundColor DarkGray
     }
@@ -1264,9 +1284,9 @@ else
         # Process it inline using the same per-sub logic the sequential
         # branch uses, instead of bailing and asking the user to re-run.
         Write-Host "Only one eligible subscription; running sequentially." -ForegroundColor Yellow
-        if ($Subscriptions.Count -gt 0)
+        if ($PendingSubscriptions.Count -gt 0)
         {
-            $Sub = $Subscriptions[0]
+            $Sub = $PendingSubscriptions[0]
             Write-Host "Processing subscription: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Cyan
             try
             {
@@ -1421,9 +1441,9 @@ else
             {
                 $Slices += , (New-Object 'System.Collections.Generic.List[object]')
             }
-            for ($i = 0; $i -lt $Subscriptions.Count; $i++)
+            for ($i = 0; $i -lt $PendingSubscriptions.Count; $i++)
             {
-                $Slices[$i % $StreamCount].Add($Subscriptions[$i])
+                $Slices[$i % $StreamCount].Add($PendingSubscriptions[$i])
             }
 
             # Build per-stream output paths up front so we know where to look later.

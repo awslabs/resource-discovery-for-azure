@@ -855,9 +855,10 @@ Function RunInventorySetup()
         # dictionary, each run with its own tokens, and counted them as the
         # run's own resources.
         $RunSubscriptionIds = if (![string]::IsNullOrEmpty($SubscriptionID)) { @([string]$SubscriptionID) } else { @($Global:Subscriptions | ForEach-Object { [string]$_.id }) }
-        # A -ResourceGroup run reads that group only, in lower case as
-        # ResourceInventoryLoop does, for the same reason.
-        $AVDGroupFilter = if (![string]::IsNullOrEmpty($ResourceGroup)) { " | where resourceGroup == '{0}'" -f $ResourceGroup.ToLower() } else { '' }
+        # A -ResourceGroup run reads that group only, for the same reason. =~
+        # matches without regard to case: only the resources table is known to
+        # keep resourceGroup in lower case, other tables may keep the portal's.
+        $AVDGroupFilter = if (![string]::IsNullOrEmpty($ResourceGroup)) { " | where resourceGroup =~ '{0}'" -f $ResourceGroup.ToLower() } else { '' }
         $AVDSize = Invoke-AzGraphQuerySafe -Query ("desktopvirtualizationresources{0} | summarize count()" -f $AVDGroupFilter) -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
         $AVDSizeCount = Get-AzGraphCount -Result $AVDSize
 

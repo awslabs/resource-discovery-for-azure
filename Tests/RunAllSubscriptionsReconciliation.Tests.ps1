@@ -462,6 +462,23 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Match 'no usable token'
     }
 
+    It 'non-obfuscated run prints a failed subscription given as text as given, and one given as an object by name and id' {
+        # The wrapper passes text for a stream it could not read and objects
+        # with Name and Id for a subscription that failed.
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 3 -Excluded 0 -Eligible 3 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions @([pscustomobject]@{ Name = 'Contoso-Prod-Sub'; Id = '11111111-1111-1111-1111-111111111111' }, 'stream-0 (corrupt summary)')
+        $Detail = @($Lines | Where-Object { $_ -like '  - *' })
+        $Detail | Should -Be @('  - Contoso-Prod-Sub (11111111-1111-1111-1111-111111111111)', '  - stream-0 (corrupt summary)')
+    }
+
+    It 'obfuscated run prints no failed subscription given as text' {
+        $Text = (Get-RunSummaryLogContent -Obfuscated -Visible 1 -Excluded 0 -Eligible 1 -Processed 1 -Skipped 0 `
+                -FailedSubscriptions @('Contoso-Prod-Sub (stream-0: boom)')) -join "`n"
+        $Text | Should -Not -Match 'Contoso'
+        $Text | Should -Match 'Failed subscriptions\s+:\s+1'
+    }
+
     It 'drops TenantID / SubscriptionID / InventoryRoot from the parameter list' {
         $Params = @{
             TenantID        = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'

@@ -194,9 +194,11 @@ function New-RdaAllSubHtmlSummary
         $MetricsFailedSubs = @(),
         $CollectorFailures = @(),
 
-        # Streams whose summary file could not be read: { StreamId; SubCount }.
-        # Their subscriptions are not confirmed, but they are not failed
-        # subscriptions, so they get their own banner and not the Failed count.
+        # Streams whose summary file is missing or could not be read:
+        # { StreamId; SubCount; Reason }, Reason 'Missing' or 'Unreadable'
+        # (no Reason reads as 'Unreadable'). Their subscriptions are not
+        # confirmed, but they are not failed subscriptions, so they get their
+        # own banner and not the Failed count.
         $UnreadableStreams = @(),
 
         # Display-only header fields.
@@ -343,7 +345,8 @@ function New-RdaAllSubHtmlSummary
     # under -Obfuscated.
     foreach ($Stream in @(@($UnreadableStreams) | Where-Object { $null -ne $_ }))
     {
-        [void]$Banners.AppendFormat('<div class="banner err"><b>The summary of stream {0} could not be read.</b> Its {1} subscription(s) are not confirmed; check the consolidated zip for their reports.</div>', [int]$Stream.StreamId, [int]$Stream.SubCount)
+        $StateText = if ($Stream.Reason -eq 'Missing') { 'is missing' } else { 'could not be read' }
+        [void]$Banners.AppendFormat('<div class="banner err"><b>The summary of stream {0} {1}.</b> Its {2} subscription(s) are not confirmed; check the consolidated zip for their reports.</div>', [int]$Stream.StreamId, $StateText, [int]$Stream.SubCount)
     }
     if ($EmptyCount -gt 0)
     {

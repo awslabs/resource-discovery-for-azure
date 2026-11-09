@@ -219,6 +219,21 @@ Describe 'Get-WrapperExitCode' {
         $Both[1] | Should -Match '^Exit code 2: the summary of stream 1 could not be read'
     }
 
+    It 'Get-WrapperExitCodeSummary says a stream summary that is missing is missing, not that it could not be read (zip <Zip>)' -ForEach @(
+        @{ Zip = $true; Tail = 'check the consolidated zip for their reports' }
+        @{ Zip = $false; Tail = 'no consolidated zip was made' }
+    ) {
+        $Streams = @(
+            [pscustomobject]@{ StreamId = 0; SubCount = 2; Reason = 'Missing' }
+            [pscustomobject]@{ StreamId = 1; SubCount = 3; Reason = 'Unreadable' }
+        )
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $false -UnreadableStreams $Streams -ReportMade $Zip)
+        $Lines | Should -Be @(
+            ('Exit code 2: the summary of stream 0 is missing; its 2 subscription(s) are not confirmed; {0}.' -f $Tail)
+            ('Exit code 2: the summary of stream 1 could not be read; its 3 subscription(s) are not confirmed; {0}.' -f $Tail)
+        )
+    }
+
     It 'Get-WrapperExitCodeSummary describes the verification-gap stop (auth <Auth>, collectors <Collectors>, failed <Failed>)' -ForEach @(
         @{ Auth = $false; Collectors = $false; Failed = $false; Also = @() }
         @{ Auth = $true; Collectors = $false; Failed = $false; Also = @('Exit code 2 takes priority over exit code 3, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem.') }

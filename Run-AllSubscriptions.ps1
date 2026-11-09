@@ -403,8 +403,9 @@ $FailedSubscriptions = @()
 # The same failures for RunSummary.log: { Name; Id } for each subscription.
 $FailedSubscriptionDetail = @()
 # Streams whose summary file is missing or could not be read: { StreamId;
-# SubCount }. Their subscriptions are not confirmed (exit 2), but they are not
-# counted or named as failed subscriptions.
+# SubCount; Reason = 'Missing' or 'Unreadable' }. Their subscriptions are not
+# confirmed (exit 2), but they are not counted or named as failed
+# subscriptions.
 $UnreadableStreamSummaries = @()
 
 # Per-subscription metrics-phase auth health, aggregated across the whole run.
@@ -1310,7 +1311,7 @@ else
                     Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
                     # As for a summary that cannot be read: the stream's
                     # subscriptions are not confirmed, not failed.
-                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount }
+                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount; Reason = 'Missing' }
                     continue
                 }
                 try
@@ -1320,7 +1321,7 @@ else
                 catch
                 {
                     Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
-                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount }
+                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount; Reason = 'Unreadable' }
                     continue
                 }
 
@@ -1961,7 +1962,8 @@ if ($UnreadableStreamSummaries.Count -gt 0)
     # consolidated zip, but the run cannot confirm them.
     foreach ($U in $UnreadableStreamSummaries)
     {
-        Write-Host ("Stream Summary Unreadable: stream-{0} ({1} subscription(s) not confirmed; check the consolidated zip)" -f $U.StreamId, $U.SubCount) -ForegroundColor Red
+        $Heading = if ($U.Reason -eq 'Missing') { 'Stream Summary Missing:   ' } else { 'Stream Summary Unreadable:' }
+        Write-Host ("{0} stream-{1} ({2} subscription(s) not confirmed; check the consolidated zip)" -f $Heading, $U.StreamId, $U.SubCount) -ForegroundColor Red
     }
     Write-Host ("Resume State:            {0}" -f $ResumeStateFile) -ForegroundColor Yellow
     Write-Host "Re-run with -Resume to collect any subscription of that stream that did not complete." -ForegroundColor Yellow

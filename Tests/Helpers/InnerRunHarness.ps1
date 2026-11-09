@@ -88,7 +88,8 @@ function global:Invoke-StandInGraph
         $Rows = @(foreach ($Sub in $Subs)
             {
                 @{ id = (Get-StandInDiskId $Sub); name = 'DISK-INFRA'; type = 'microsoft.compute/disks'; location = 'eastus'; subscriptionId = $Sub; resourceGroup = 'rg-infra'
-                    sku = @{ name = 'Premium_LRS' }; properties = @{ diskSizeGB = 32; diskState = 'Unattached'; timeCreated = '2024-03-15T09:41:27Z' } }
+                    sku = @{ name = 'Premium_LRS' }; properties = @{ diskSizeGB = 32; diskState = 'Unattached'; timeCreated = '2024-03-15T09:41:27Z' }
+                }
             })
         if ($Joined -match "resourceGroup == '([^']*)'") { $Want = $Matches[1]; $Rows = @($Rows | Where-Object { $_.resourceGroup -ceq $Want }) }
         if ($Joined -match 'desktopvirtualizationresources') { return '{"data":[{"count_":0}],"count":1}' }
